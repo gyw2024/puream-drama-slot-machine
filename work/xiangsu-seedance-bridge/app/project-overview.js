@@ -1,0 +1,120 @@
+"use strict";
+
+function latestCandidate(project, entityType, entityId, stage) {
+  const activeRevision = project.productionRevision || "";
+  const matches = (project.candidates || [])
+    .filter(item => item.entityType === entityType && item.entityId === entityId && item.stage === stage)
+    .filter(item => (item.productionRevision || "") === activeRevision)
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  return matches.find(item => item.selected) || matches[0] || null;
+}
+
+function hasFile(candidate) {
+  return Boolean(candidate?.filePath) && candidate.qualityAudit?.ok !== false;
+}
+
+function stageCounts(project = {}) {
+  const shots = Array.isArray(project.shots) ? project.shots : [];
+  const characters = Array.isArray(project.characters) ? project.characters : [];
+  const scenes = Array.isArray(project.scenes) ? project.scenes : [];
+  const wardrobes = Array.isArray(project.assetLibraries?.wardrobes) ? project.assetLibraries.wardrobes : [];
+  const props = Array.isArray(project.assetLibraries?.props) ? project.assetLibraries.props : [];
+  const videoReady = shots.filter(shot => hasFile(latestCandidate(project, "shot", shot.id, "shot_video"))).length;
+  const mode = project.generation?.mode === "keyframe" ? "keyframe" : "continuation";
+  const storyboardReady = shots.filter(shot => {
+    const stages = mode === "continuation" && Number(shot.number) > 1
+      ? ["storyboard_end"]
+      : ["storyboard_start", "storyboard_end"];
+    return stages.every(stage => hasFile(latestCandidate(project, "shot", shot.id, stage)));
+  }).length;
+  const characterReady = characters.filter(character => hasFile(latestCandidate(project, "character", character.id, "character_three_view"))).length;
+  const sceneReady = scenes.filter(scene => hasFile(latestCandidate(project, "scene", scene.id, "scene_asset"))).length;
+  const wardrobeReady = wardrobes.filter(item => hasFile(latestCandidate(project, "library", item.id, "wardrobe_asset"))).length;
+  const propReady = props.filter(item => hasFile(latestCandidate(project, "library", item.id, "prop_asset"))).length;
+  return {
+    characters: { ready: characterReady, total: characters.length },
+    scenes: { ready: sceneReady, total: scenes.length },
+    wardrobes: { ready: wardrobeReady, total: wardrobes.length },
+    props: { ready: propReady, total: props.length },
+    storyboards: { ready: storyboardReady, total: shots.length },
+    videos: { ready: videoReady, total: shots.length },
+    shots: shots.length,
+    hasScript: Boolean(String(project.script?.raw || "").trim()),
+    hasFinal: Boolean(project.finalVideoPath),
+    costKnown: Number(project.costLedger?.summary?.totalKnownYuan || 0),
+    costEstimated: Number(project.costLedger?.summary?.totalEstimatedYuan || 0)
+  };
+}
+
+function inferNextStage(project = {}, counts = stageCounts(project)) {
+  if (!counts.hasScript || !counts.shots) return "script";
+  if (counts.characters.ready < counts.characters.total || counts.scenes.ready < counts.scenes.total || counts.wardrobes.ready < counts.wardrobes.total || counts.props.ready < counts.props.total) return "assets";
+  if (counts.storyboards.ready < counts.storyboards.total) return "shots";
+  if (counts.videos.ready < counts.videos.total) return "videos";
+  return "final";
+}
+
+function automationLabel(project = {}) {
+  const status = project.automation?.status || "";
+  return ({
+    running: "运行中",
+    pausing: "暂停中",
+    stopping: "停止中",
+    paused_user: "已暂停",
+    paused_account: "等切号",
+    completed: "空闲",
+    failed: "失败",
+    cancelled: "已取消"
+  })[status] || (status || "空闲");
+}
+
+function summarizeProjectOverview(project = {}) {
+  const counts = stageCounts(project);
+  const nextStage = inferNextStage(project, counts);
+  const jobs = Array.isArray(project.jobs) ? project.jobs : [];
+  const activeJobs = jobs.filter(job => ["queued", "running", "submitted", "processing"].includes(String(job.status || ""))).length;
+  return {
+    id: project.id,
+    title: project.title || "未命名项目",
+    status: project.status || "draft",
+    currentStage: project.currentStage || "script",
+    nextStage,
+    updatedAt: project.updatedAt || project.createdAt || null,
+    automation: {
+      status: project.automation?.status || "",
+      label: automationLabel(project),
+      operation: project.automation?.operation || "",
+      stage: project.automation?.stage || "",
+      message: project.automation?.message || "",
+      active: ["running", "pausing", "stopping"].includes(project.automation?.status)
+    },
+    counts,
+    activeJobs,
+    progressPercent: (() => {
+      const assetTotal = counts.characters.total + counts.scenes.total + counts.wardrobes.total + counts.props.total;
+      const assetReady = counts.characters.ready + counts.scenes.ready + counts.wardrobes.ready + counts.props.ready;
+      if (!counts.hasScript) return 0;
+      if (!counts.shots) return 10;
+      const scriptPart = 8;
+      const assetPart = assetTotal ? Math.round((assetReady / assetTotal) * 22) : 12;
+      const boardPart = counts.shots ? Math.round((counts.storyboards.ready / counts.shots) * 20) : 0;
+      const videoPart = counts.shots ? Math.round((counts.videos.ready / counts.shots) * 30) : 0;
+      const finalPart = counts.hasFinal ? 20 : 0;
+      return Math.min(100, scriptPart + assetPart + boardPart + videoPart + finalPart);
+    })()
+  };
+}
+
+function listProjectsOverview(projects = []) {
+  return (Array.isArray(projects) ? projects : [])
+    .map(summarizeProjectOverview)
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+}
+
+module.exports = {
+  automationLabel,
+  inferNextStage,
+  listProjectsOverview,
+  stageCounts,
+  summarizeProjectOverview
+};

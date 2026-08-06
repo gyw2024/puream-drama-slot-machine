@@ -1,7 +1,7 @@
-{
+﻿{
   "name": "xiangsu-seedance-bridge",
-  "version": "0.1.0",
-  "description": "使用本机像塑登录态调用 Seedance 2.0 Mini 的桌面应用",
+  "version": "0.12.0",
+  "description": "纯梦短剧老虎机：PUREAM 中转、专业写实短剧工作流、Seedance 2.0 / 海螺 H3 / 纯梦 Grok 人物视频、项目成本账本与资产四波并行",
   "main": "app/main.js",
   "author": "Local user",
   "license": "UNLICENSED",
@@ -16,26 +16,35 @@
     "electron-builder": "26.15.3"
   },
   "build": {
-    "appId": "cn.local.xiangsu.seedance.mini",
-    "productName": "Seedance Mini 生成器",
+    "appId": "cn.puream.drama.slotmachine",
+    "productName": "纯梦短剧老虎机",
     "asar": true,
+    "asarUnpack": [
+      "app/assets/xiangsu-window-hider.exe",
+      "app/assets/face-grid-processor.exe"
+    ],
     "files": [
       "app/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "plugin",
+        "to": "xiangsu-plugin"
+      }
     ],
     "directories": {
       "output": "dist"
     },
     "win": {
+      "icon": "app/assets/app.ico",
       "target": [
         {
           "target": "portable",
-          "arch": [
-            "x64"
-          ]
+          "arch": ["x64"]
         }
       ],
-      "artifactName": "Seedance-Mini-Generator-${version}-${arch}.${ext}"
+      "artifactName": "纯梦短剧老虎机-${version}.${ext}"
     }
   }
 }

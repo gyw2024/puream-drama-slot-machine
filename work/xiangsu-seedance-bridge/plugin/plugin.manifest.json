@@ -1,6 +1,6 @@
 {
   "name": "SeedanceBridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-only Seedance bridge using the signed-in Xiangsu runtime",
   "requirements": {
     "orionSDK": "9.0.0-alpha.49",
