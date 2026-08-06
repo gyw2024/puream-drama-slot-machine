@@ -1,0 +1,25 @@
+.codex_backups/
+.codex_tests/
+.codex_work/
+.trae/
+downloads/
+outputs/
+
+# Local browser inspection evidence; source lives beside this folder.
+work/video-request-monitor/
+**/node_modules/
+**/.next/
+**/dist/
+**/build/
+**/__pycache__/
+**/.pytest_cache/
+**/.wrangler/
+**/gpu_cache/
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.tmp

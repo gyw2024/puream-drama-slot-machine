@@ -1,0 +1,16 @@
+{
+  "name": "@local/seedance-bridge",
+  "version": "0.1.0",
+  "license": "UNLICENSED",
+  "main": "lib/plugin/index.js",
+  "ORPluginConfig": {
+    "pluginName": "SeedanceBridge",
+    "profiles": {
+      "DYEH": {}
+    },
+    "apiDependencies": {
+      "effectSdk": "17.0.0",
+      "@byted-ic/orion-sdk": "9.0.0"
+    }
+  }
+}

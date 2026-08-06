@@ -1,0 +1,41 @@
+{
+  "name": "xiangsu-seedance-bridge",
+  "version": "0.1.0",
+  "description": "使用本机像塑登录态调用 Seedance 2.0 Mini 的桌面应用",
+  "main": "app/main.js",
+  "author": "Local user",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "pack": "electron-builder --win portable --x64"
+  },
+  "devDependencies": {
+    "electron": "43.2.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "cn.local.xiangsu.seedance.mini",
+    "productName": "Seedance Mini 生成器",
+    "asar": true,
+    "files": [
+      "app/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Seedance-Mini-Generator-${version}-${arch}.${ext}"
+    }
+  }
+}

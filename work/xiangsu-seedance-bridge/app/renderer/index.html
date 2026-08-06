@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Seedance Mini 生成器</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">XIANGSU LOCAL SESSION</p>
+        <h1>Seedance Mini 生成器</h1>
+        <p class="subtitle">复用本机像塑登录态，无需 API Key</p>
+      </div>
+      <div id="bridgeBadge" class="badge badge-offline"><span></span><b>桥接检测中</b></div>
+    </header>
+
+    <section class="notice">
+      <div class="notice-icon">本机</div>
+      <div>
+        <strong>登录凭证不会离开像塑</strong>
+        <p>本应用只向 127.0.0.1 的像塑桥发送任务参数；Cookie、Token 和动态签名不会显示或导出。</p>
+      </div>
+      <button id="startBridge" class="button secondary">启动后台桥</button>
+    </section>
+
+    <section class="grid">
+      <div class="panel creator">
+        <div class="section-title">
+          <div><span>01</span><h2>创作参数</h2></div>
+          <button id="diagnostics" class="link-button">检测能力</button>
+        </div>
+
+        <label class="field">
+          <span>提示词</span>
+          <textarea id="prompt" maxlength="2000" placeholder="描述画面内容、人物动作、镜头语言和声音……"></textarea>
+          <small><b id="promptCount">0</b> / 2000</small>
+        </label>
+
+        <div class="field-row">
+          <label class="field">
+            <span>画面比例</span>
+            <select id="aspectRatio">
+              <option value="9:16">9:16 竖屏</option>
+              <option value="16:9">16:9 横屏</option>
+              <option value="1:1">1:1 方形</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>时长</span>
+            <select id="duration">
+              <option value="5">5 秒（最短）</option>
+              <option value="10">10 秒</option>
+            </select>
+          </label>
+        </div>
+
+        <label class="field">
+          <span>参考图片（可选）</span>
+          <div class="file-line">
+            <input id="imagePath" type="text" readonly placeholder="未选择图片">
+            <button id="chooseImage" class="button secondary">选择图片</button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span>保存目录</span>
+          <div class="file-line">
+            <input id="outputDir" type="text" readonly placeholder="默认保存到“视频”目录">
+            <button id="chooseOutput" class="button secondary">选择目录</button>
+          </div>
+        </label>
+
+        <button id="submit" class="button primary" disabled>
+          <span class="button-model">SD 2.0 MINI</span>
+          <b>提交视频生成</b>
+        </button>
+      </div>
+
+      <aside class="panel status-panel">
+        <div class="section-title"><div><span>02</span><h2>任务状态</h2></div></div>
+        <div id="emptyState" class="empty-state">
+          <div class="pulse-ring"></div>
+          <h3>等待提交</h3>
+          <p>连接像塑后台桥后即可开始生成</p>
+        </div>
+        <div id="taskState" class="task-state hidden">
+          <div class="task-meta"><span>任务 ID</span><code id="taskId">—</code></div>
+          <div class="progress"><i id="progressBar"></i></div>
+          <h3 id="taskStatus">正在提交</h3>
+          <p id="taskMessage">请稍候……</p>
+          <video id="resultVideo" class="hidden" controls></video>
+          <button id="revealResult" class="button secondary hidden">在文件夹中显示</button>
+        </div>
+        <pre id="diagnosticOutput" class="diagnostic hidden"></pre>
+      </aside>
+    </section>
+  </main>
+  <script src="renderer.js"></script>
+</body>
+</html>
