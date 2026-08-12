@@ -11,7 +11,8 @@ const {
   containsCjkOutsideDialogue,
   promptFingerprint
 } = require("../app/hailuo-h3-prompt");
-const { assertHailuoPromptVoiceBindings } = require("../app/workbench-workflow");
+const { matrixRuntimeVideoPromptForProject } = require("../app/production-mode-matrix");
+const { assertHailuoPromptVoiceBindings, assertSystemPromptDialogueParity } = require("../app/workbench-workflow");
 
 const TEMPLATE = `subject_definitions:
 {{subjectDefinitions}}
@@ -52,7 +53,8 @@ function writeVoiceWav(filePath) {
 
 function fixture(audioPath) {
   const project = {
-    generation: { engine: "hailuo-h3", mode: "storyboard_sheet", aspectRatio: "9:16" },
+    generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "storyboard_sheet", aspectRatio: "9:16" },
+    script: { sourceDialogueLedger: [{ id: "D001", order: 1, speaker: "林青山", tone: "压着怒气，低声起句，在多久上加重音", text: "你到底瞒了我多久？" }] },
     characters: [
       { id: "C01", name: "林青山" },
       { id: "C02", name: "林宇义" }
@@ -75,6 +77,8 @@ function fixture(audioPath) {
       end: 8,
       visibleCharacterIds: ["C01", "C02"],
       dialogueTurns: [{
+        sourceDialogueId: "D001",
+        sourceTone: "压着怒气，低声起句，在多久上加重音",
         speakerId: "C01",
         listenerIds: ["C02"],
         spokenText: "你到底瞒了我多久？",
@@ -127,7 +131,8 @@ test("cloud video final prompt hard-binds speaker, listener, delivery, exact lin
     mode: "storyboard_sheet",
     references,
     spec,
-    template: TEMPLATE
+    template: TEMPLATE,
+    parityInstruction: matrixRuntimeVideoPromptForProject(project, null, "storyboard_sheet")
   });
   assert.match(prompt, /Speaker: <Subject 1> \(S1\)/);
   assert.match(prompt, /voice timbre referenced by <Audio 1>/);
@@ -135,8 +140,10 @@ test("cloud video final prompt hard-binds speaker, listener, delivery, exact lin
   assert.match(prompt, /addresses: <Subject 2> directly/);
   assert.match(prompt, /exact line, say once: <d>\[Chinese\] 你到底瞒了我多久？<\/d>/);
   assert.match(prompt, /listener reaction: <Subject 2> stays silent and/);
+  assert.match(prompt, /cloud\/storyboard-sheet/);
   assert.equal(containsCjkOutsideDialogue(prompt), false);
   assert.equal(assertHailuoPromptVoiceBindings(project, shot, references, prompt), true);
+  assert.equal(assertSystemPromptDialogueParity(project, shot, prompt, "hailuo-h3"), true);
 
   const broken = prompt.replace(/addresses: <Subject 2> directly, never the camera; /, "");
   assert.throws(
