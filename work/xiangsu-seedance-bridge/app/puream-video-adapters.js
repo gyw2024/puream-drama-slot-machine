@@ -46,9 +46,9 @@ function apiRoutes(kind, taskId = "") {
 }
 
 function providerDisplayName(kind) {
-  if (kind === "puream-hailuo-h3") return "纯梦海螺 H3";
-  if (kind === "puream-seedance") return "纯梦 Seedance 2.0";
-  return "本地像塑 Seedance 2.0 Mini";
+  if (kind === "puream-hailuo-h3") return "云端算力";
+  if (kind === "puream-seedance") return "回退版本";
+  return "本地像塑";
 }
 
 function validateProviderConfig(config, options = {}) {
@@ -56,8 +56,9 @@ function validateProviderConfig(config, options = {}) {
   if (!contract.remote) return contract;
   if (!String(config.apiKey || "").trim()) throw Object.assign(new Error("请填写纯梦授权码"), { code: "PUREAM_AUTH_REQUIRED" });
   const hasLocalMedia = options.hasLocalMedia === true;
+  const managedStorage = config.storageMode === "managed" && /^https:\/\/puream\.cn$/i.test(String(config.managedStorageBaseUrl || "https://puream.cn").replace(/\/$/, ""));
   const requiresOutputOss = config.kind === "puream-seedance";
-  if (hasLocalMedia || requiresOutputOss) {
+  if ((hasLocalMedia || requiresOutputOss) && !managedStorage) {
     if (!String(config.ossAccessKeyId || "").trim()) throw Object.assign(new Error("请填写 OSS AccessKey ID"), { code: "OSS_ACCESS_KEY_ID_REQUIRED" });
     if (!String(config.ossAccessKeySecret || "").trim()) throw Object.assign(new Error("请填写 OSS AccessKey Secret"), { code: "OSS_ACCESS_KEY_SECRET_REQUIRED" });
     normalizeOssBucket(config.ossBucket);
@@ -151,6 +152,18 @@ function dimensionsForAspectRatio(aspectRatio) {
   })[aspectRatio] || { width: 480, height: 864 };
 }
 
+function dimensionsForCloudVideo(aspectRatio, resolution = "480") {
+  if (String(resolution) !== "768") return dimensionsForAspectRatio(aspectRatio);
+  return ({
+    "9:16": { width: 768, height: 1344 },
+    "16:9": { width: 1344, height: 768 },
+    "1:1": { width: 768, height: 768 },
+    "4:3": { width: 1024, height: 768 },
+    "3:4": { width: 768, height: 1024 },
+    "21:9": { width: 1344, height: 576 }
+  })[aspectRatio] || { width: 768, height: 1344 };
+}
+
 function validateHailuoDimensions(width, height) {
   const normalizedWidth = Number(width);
   const normalizedHeight = Number(height);
@@ -171,6 +184,34 @@ function normalizeHailuoPrompt(prompt) {
     .replace(/音频\s*(\d+)/g, "<Audio $1>");
 }
 
+function resolvePureamMediaUploadConfig(settingsOrProvider = {}) {
+  // Image generation uses imageProvider.apiKey; reference upload historically used only
+  // videoProvider. That split silently fails managed uploads when video key is empty.
+  const nested = settingsOrProvider.videoProvider || settingsOrProvider.imageProvider
+    ? settingsOrProvider
+    : null;
+  const video = nested ? (nested.videoProvider || {}) : (settingsOrProvider || {});
+  const image = nested ? (nested.imageProvider || {}) : {};
+  const digital = nested ? (nested.digitalHumanProvider || {}) : {};
+  const textProfile = nested?.textProviderProfiles?.["puream-relay"] || {};
+  const text = nested?.textProvider?.kind === "puream-relay" ? (nested.textProvider || {}) : {};
+  const apiKey = String(
+    video.apiKey
+    || image.apiKey
+    || digital.apiKey
+    || textProfile.apiKey
+    || text.apiKey
+    || ""
+  ).trim();
+  return {
+    ...video,
+    kind: video.kind || "puream-hailuo-h3",
+    apiKey,
+    storageMode: video.storageMode || "managed",
+    managedStorageBaseUrl: video.managedStorageBaseUrl || "https://puream.cn"
+  };
+}
+
 function createOssAuthorization(config, method, objectKey, contentType, date) {
   const canonicalResource = `/${config.ossBucket}/${objectKey}`;
   const stringToSign = `${method}\n\n${contentType || ""}\n${date}\n${canonicalResource}`;
@@ -188,13 +229,14 @@ function createOssReadUrl(config, objectKey, ttlSeconds = 21600, nowSeconds = Ma
   return `https://${config.ossBucket}.${config.ossEndpoint}/${encodedPath}?${query.toString()}`;
 }
 
-async function resolveReferenceUrl(config, item, fetchImpl, requestId, mediaType, index, fsImpl) {
-  if (item?.url) return assertPublicReferenceUrl(item.url);
-  const filePath = String(item?.path || "");
-  if (!filePath || !path.isAbsolute(filePath) || !fsImpl.existsSync(filePath)) {
-    throw Object.assign(new Error("云端提交的参考素材不存在"), { code: "MEDIA_FILE_MISSING" });
-  }
-  validateProviderConfig(config, { hasLocalMedia: true });
+function hasDirectOssCredentials(config = {}) {
+  return Boolean(String(config.ossAccessKeyId || "").trim()
+    && String(config.ossAccessKeySecret || "").trim()
+    && String(config.ossBucket || "").trim()
+    && String(config.ossEndpoint || "").trim());
+}
+
+async function uploadReferenceToOss(config, filePath, requestId, mediaType, index, fetchImpl, fsImpl) {
   const extension = path.extname(filePath).toLowerCase();
   const contentType = MIME_BY_EXTENSION[extension] || "application/octet-stream";
   const objectKey = `puream-drama-references/${new Date().toISOString().slice(0, 10)}/${requestId}/${mediaType}-${String(index + 1).padStart(2, "0")}${extension || ".bin"}`;
@@ -216,6 +258,58 @@ async function resolveReferenceUrl(config, item, fetchImpl, requestId, mediaType
   return createOssReadUrl(config, objectKey, config.referenceUrlTtlSeconds);
 }
 
+async function uploadReferenceToManaged(config, filePath, requestId, mediaType, fetchImpl, fsImpl) {
+  const endpoint = `${String(config.managedStorageBaseUrl || "https://puream.cn").replace(/\/$/, "")}/api/desktop/media/upload`;
+  const apiKey = String(config.apiKey || "").trim().replace(/^puream-desktop:/i, "").trim();
+  const response = await fetchImpl(endpoint, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/octet-stream",
+      "x-puream-media-type": mediaType,
+      "x-puream-request-id": requestId,
+      "x-puream-file-name": path.basename(filePath)
+    },
+    body: fsImpl.readFileSync(filePath),
+    redirect: "error",
+    signal: AbortSignal.timeout(600_000)
+  });
+  const data = await response.json().catch(() => ({}));
+  const url = data.url || data.publicUrl || data.data?.url || data.data?.publicUrl || "";
+  if (!response.ok || !/^https?:\/\//i.test(String(url))) {
+    const detail = String(data.error || data.message || data.code || data.detail || "").trim();
+    throw Object.assign(
+      new Error(`纯梦云端存储上传失败：HTTP ${response.status}${detail ? ` · ${detail}` : ""}`),
+      {
+        code: "PUREAM_MANAGED_MEDIA_UPLOAD_FAILED",
+        status: response.status,
+        detail
+      }
+    );
+  }
+  return assertPublicReferenceUrl(url);
+}
+
+async function resolveReferenceUrl(config, item, fetchImpl, requestId, mediaType, index, fsImpl) {
+  if (item?.url) return assertPublicReferenceUrl(item.url);
+  const filePath = String(item?.path || "");
+  if (!filePath || !path.isAbsolute(filePath) || !fsImpl.existsSync(filePath)) {
+    throw Object.assign(new Error("云端提交的参考素材不存在"), { code: "MEDIA_FILE_MISSING" });
+  }
+  validateProviderConfig(config, { hasLocalMedia: true });
+  if (config.storageMode === "managed") {
+    try {
+      return await uploadReferenceToManaged(config, filePath, requestId, mediaType, fetchImpl, fsImpl);
+    } catch (error) {
+      if (hasDirectOssCredentials(config)) {
+        return uploadReferenceToOss(config, filePath, requestId, mediaType, index, fetchImpl, fsImpl);
+      }
+      throw error;
+    }
+  }
+  return uploadReferenceToOss(config, filePath, requestId, mediaType, index, fetchImpl, fsImpl);
+}
+
 async function buildCloudSubmit(config, payload, fetchImpl, fsImpl) {
   const effectivePayload = config.kind === "puream-hailuo-h3"
     ? { ...payload, hailuoApiMode: payload.hailuoApiMode || payload.mode || config.hailuoApiMode }
@@ -229,7 +323,10 @@ async function buildCloudSubmit(config, payload, fetchImpl, fsImpl) {
   ]);
   if (config.kind === "puream-hailuo-h3") {
     const mode = validateHailuoModeMedia(effectivePayload.hailuoApiMode, media);
-    const aspectDimensions = dimensionsForAspectRatio(payload.aspectRatio);
+    const aspectDimensions = dimensionsForCloudVideo(
+      payload.aspectRatio,
+      payload.cloudVideoResolution || config.cloudVideoResolution
+    );
     const dimensions = payload.width !== undefined || payload.height !== undefined
       ? validateHailuoDimensions(payload.width, payload.height)
       : validateHailuoDimensions(aspectDimensions.width, aspectDimensions.height);
@@ -253,7 +350,7 @@ async function buildCloudSubmit(config, payload, fetchImpl, fsImpl) {
     requestId,
     body: {
       prompt: String(payload.prompt || ""),
-      duration: 5,
+      duration: Number(payload.duration) || 5,
       images,
       videos,
       audios,
@@ -298,11 +395,43 @@ function mapSubmitResponse(payload, kind) {
   };
 }
 
+function normalizeSettlementStatus(value) {
+  const status = String(value || "").trim().toLowerCase();
+  if (["charged", "settled", "completed"].includes(status)) return "settled";
+  if (["not_charged", "refunded", "free", "failed"].includes(status)) return status === "failed" ? "not_charged" : status;
+  if (["reserved", "pending", "processing", "billing_pending"].includes(status)) return status === "billing_pending" ? "pending" : status;
+  return status;
+}
+
+/** Prefer upstream RMB amount; accept yuan / cents aliases on data, payload, or nested result. */
+function extractChargeFields(...sources) {
+  let chargeYuan = null;
+  let settlementStatus = "";
+  for (const src of sources) {
+    if (!src || typeof src !== "object") continue;
+    if (!settlementStatus) {
+      settlementStatus = normalizeSettlementStatus(
+        src.settlement_status ?? src.settlementStatus ?? src.billing_status ?? src.billingStatus ?? ""
+      );
+    }
+    if (chargeYuan !== null) continue;
+    const rawYuan = src.charge_yuan ?? src.chargeYuan;
+    const rawCents = src.charge_cents ?? src.chargeCents ?? src.total_charge_cents ?? src.totalChargeCents;
+    const yuan = rawYuan === null || rawYuan === undefined || rawYuan === "" ? NaN : Number(rawYuan);
+    const cents = rawCents === null || rawCents === undefined || rawCents === "" ? NaN : Number(rawCents);
+    if (Number.isFinite(yuan) && yuan >= 0) chargeYuan = yuan;
+    else if (Number.isFinite(cents) && cents >= 0) chargeYuan = Number((cents / 100).toFixed(2));
+  }
+  if (settlementStatus === "not_charged" && chargeYuan === null) chargeYuan = 0;
+  return { chargeYuan, settlementStatus };
+}
+
 function mapQueryResponse(payload, kind, taskId) {
   const data = unwrapPayload(payload);
   const status = normalizeTaskStatus(data.status || payload?.status);
   const progress = parseProgress(data.progress ?? payload?.progress);
   const result = data.result && typeof data.result === "object" ? data.result : {};
+  const charge = extractChargeFields(data, payload, result, data.usage, payload?.usage);
   return {
     ok: status !== "failed",
     taskId: String(data.task_id || data.taskId || taskId),
@@ -310,10 +439,13 @@ function mapQueryResponse(payload, kind, taskId) {
     progress,
     progressDeterminate: progress !== null,
     progressSource: progress !== null ? "puream-upstream" : "status-only",
+    retryable: typeof data.retryable === "boolean"
+      ? data.retryable
+      : (typeof payload?.retryable === "boolean" ? payload.retryable : null),
     message: data.message || data.progress || payload?.message || (status === "finished" ? `${providerDisplayName(kind)}生成完成` : `${providerDisplayName(kind)}正在生成`),
     videoUrl: result.video_url || data.video_url || data.output_url || "",
-    chargeYuan: data.charge_yuan ?? null,
-    settlementStatus: data.settlement_status || "",
+    chargeYuan: charge.chargeYuan,
+    settlementStatus: charge.settlementStatus,
     timing: data.timing || null,
     mode: kind === "puream-hailuo-h3" && (data.mode || payload?.mode) ? normalizeHailuoApiMode(data.mode || payload?.mode) : "",
     raw: payload
@@ -328,11 +460,16 @@ module.exports = {
   contractFor,
   createOssAuthorization,
   createOssReadUrl,
+  resolvePureamMediaUploadConfig,
+  resolveReferenceUrl,
   dimensionsForAspectRatio,
+  dimensionsForCloudVideo,
+  extractChargeFields,
   hailuoMediaCategories,
   mapQueryResponse,
   mapSubmitResponse,
   normalizeHailuoPrompt,
+  normalizeSettlementStatus,
   normalizeTaskStatus,
   providerDisplayName,
   providerEngine,

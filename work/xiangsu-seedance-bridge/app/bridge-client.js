@@ -9,6 +9,7 @@ const {
   LOCAL_XIANGSU_ORIGIN,
   assertPureamCloudRequestUrl,
   assertSafeVideoDownloadUrl,
+  normalizeProviderKind,
   normalizeVideoProvider
 } = require("./video-provider-policy");
 const {
@@ -386,14 +387,52 @@ class BridgeClient {
   }
 
   async submit(payload) {
-    if (!this.isRemote()) return this.request("/v1/videos", { method: "POST", body: payload, timeoutMs: 600_000 });
+    // Payload providerKind is the job contract. Never let a stale BridgeClient
+    // default (local-xiangsu) swallow a Hailuo H3 / Seedance cloud submission —
+    // local plugin only accepts ability SD_2.0_MINI and returns ABILITY_NOT_ALLOWED.
+    const requestedKind = normalizeProviderKind(payload?.providerKind || this.config.kind);
+    if (requestedKind !== this.config.kind) {
+      this.configure({
+        ...this.config,
+        kind: requestedKind,
+        baseUrl: requestedKind === "local-xiangsu"
+          ? LOCAL_XIANGSU_ORIGIN
+          : (this.config.baseUrl || "https://puream.cn")
+      });
+    }
+    if (!this.isRemote()) {
+      const ability = String(payload?.ability || "SD_2.0_MINI");
+      if (ability !== "SD_2.0_MINI") {
+        throw Object.assign(new Error(`本地像塑只允许 SD_2.0_MINI，不能提交 ${ability}；海螺 H3 项目请保持系统设置为云端算力`), {
+          code: "ABILITY_NOT_ALLOWED",
+          ability,
+          providerKind: this.config.kind
+        });
+      }
+      return this.request("/v1/videos", { method: "POST", body: payload, timeoutMs: 600_000 });
+    }
     const cloud = await buildCloudSubmit(this.config, payload, this.fetch, fs);
-    const raw = await this.request(apiRoutes(this.config.kind).submit, {
-      method: "POST",
-      body: cloud.body,
-      headers: { "idempotency-key": cloud.requestId },
-      timeoutMs: 600_000
-    });
+    let raw;
+    try {
+      raw = await this.request(apiRoutes(this.config.kind).submit, {
+        method: "POST",
+        body: cloud.body,
+        headers: { "idempotency-key": cloud.requestId },
+        timeoutMs: 600_000
+      });
+    } catch (error) {
+      const status = Number(error?.status) || 0;
+      const responseUnknown = error?.name === "AbortError"
+        || !status
+        || [502, 503, 504].includes(status);
+      if (responseUnknown) {
+        error.code = "VIDEO_SUBMISSION_RESPONSE_UNKNOWN";
+        error.remoteSubmissionUnknown = true;
+        error.clientRequestId = cloud.requestId;
+        error.idempotencyKey = cloud.requestId;
+      }
+      throw error;
+    }
     const result = mapSubmitResponse(raw, this.config.kind);
     this.saveRemoteTask(result.taskId, {
       outputDir: payload.outputDir,
@@ -457,8 +496,19 @@ class BridgeClient {
     const result = mapQueryResponse(raw, this.config.kind, taskId);
     if (this.config.kind === "puream-hailuo-h3") result.requestedMode = task?.requestedMode || "auto";
     if (result.status === "finished") {
-      result.localPath = await this.downloadRemoteVideo(taskId, result.videoUrl);
-      result.downloaded = true;
+      try {
+        result.localPath = await this.downloadRemoteVideo(taskId, result.videoUrl);
+        result.downloaded = true;
+      } catch (error) {
+        throw Object.assign(error, {
+          taskId: result.taskId || taskId,
+          remoteUrl: result.videoUrl || "",
+          remoteGenerationCompleted: true,
+          chargeYuan: result.chargeYuan,
+          settlementStatus: result.settlementStatus || "",
+          upstream: result.raw
+        });
+      }
     }
     return result;
   }
@@ -529,13 +579,36 @@ class BridgeClient {
   }
 
   locateXiangsu() {
+    if (this.xiangsuExecutable && fs.existsSync(this.xiangsuExecutable)) return this.xiangsuExecutable;
     const candidates = [
       process.env.XIANGSU_EXE,
-      "D:\\根目录\\Douyin AR\\Douyin AR.exe",
       path.join(process.env.LOCALAPPDATA || "", "Douyin AR", "Douyin AR.exe"),
-      path.join(process.env.ProgramFiles || "", "Douyin AR", "Douyin AR.exe")
+      path.join(process.env.ProgramFiles || "", "Douyin AR", "Douyin AR.exe"),
+      path.join(process.env["ProgramFiles(x86)"] || "", "Douyin AR", "Douyin AR.exe")
     ].filter(Boolean);
-    return candidates.find(candidate => fs.existsSync(candidate)) || null;
+    if (process.platform === "win32") {
+      try {
+        const registryScript = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+          + "$keys=@('Registry::HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Douyin AR',"
+          + "'Registry::HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Douyin AR',"
+          + "'Registry::HKEY_LOCAL_MACHINE\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Douyin AR');"
+          + "foreach($key in $keys){try{$item=Get-ItemProperty -LiteralPath $key -ErrorAction Stop;if($item.DisplayIcon){$item.DisplayIcon};if($item.UninstallString){$item.UninstallString}}catch{}}";
+        const query = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", registryScript], {
+          windowsHide: true,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 5_000
+        });
+        for (let executable of String(query.stdout || "").split(/\r?\n/).map(line => line.trim()).filter(Boolean)) {
+          executable = executable.replace(/^"|"$/g, "").replace(/,\s*\d+$/, "");
+          if (/Uninstall\.exe$/i.test(executable)) executable = path.join(path.dirname(executable), "Douyin AR.exe");
+          candidates.push(executable);
+        }
+      } catch {}
+    }
+    const found = candidates.find(candidate => fs.existsSync(candidate)) || null;
+    if (found) this.xiangsuExecutable = found;
+    return found;
   }
 
   launchXiangsuBridge() {

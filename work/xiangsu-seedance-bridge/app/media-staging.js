@@ -13,7 +13,7 @@ const RULES = {
 
 const PROVIDER_RULES = Object.freeze({
   "local-xiangsu": Object.freeze({ videoMax: 1, videoDurationMax: 10, audioTotalMax: 15, generationMin: 5, generationMax: 10 }),
-  "puream-seedance": Object.freeze({ videoMax: 3, audioTotalMax: null, referenceMax: 12, generationMin: 5, generationMax: 5, maxFileBytes: 300 * 1024 * 1024 }),
+  "puream-seedance": Object.freeze({ videoMax: 3, audioTotalMax: null, referenceMax: 12, generationMin: 5, generationMax: 15, maxFileBytes: 300 * 1024 * 1024 }),
   "puream-hailuo-h3": Object.freeze({ videoMax: 3, pairedAudioMax: 3, audioTotalMax: null, generationMin: 5, generationMax: 15, maxFileBytes: 300 * 1024 * 1024 })
 });
 

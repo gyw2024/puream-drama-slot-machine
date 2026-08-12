@@ -5,8 +5,20 @@ function latestCandidate(project, entityType, entityId, stage) {
   const matches = (project.candidates || [])
     .filter(item => item.entityType === entityType && item.entityId === entityId && item.stage === stage)
     .filter(item => (item.productionRevision || "") === activeRevision)
+    .filter(item => item.stale !== true)
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   return matches.find(item => item.selected) || matches[0] || null;
+}
+
+function latestCandidateIncludingStale(project, entityType, entityId, stage) {
+  return latestCandidate(project, entityType, entityId, stage) || (() => {
+    const activeRevision = project.productionRevision || "";
+    const matches = (project.candidates || [])
+      .filter(item => item.entityType === entityType && item.entityId === entityId && item.stage === stage)
+      .filter(item => (item.productionRevision || "") === activeRevision)
+      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    return matches.find(item => item.selected) || matches[0] || null;
+  })();
 }
 
 function hasFile(candidate) {
@@ -20,11 +32,16 @@ function stageCounts(project = {}) {
   const wardrobes = Array.isArray(project.assetLibraries?.wardrobes) ? project.assetLibraries.wardrobes : [];
   const props = Array.isArray(project.assetLibraries?.props) ? project.assetLibraries.props : [];
   const videoReady = shots.filter(shot => hasFile(latestCandidate(project, "shot", shot.id, "shot_video"))).length;
-  const mode = project.generation?.mode === "keyframe" ? "keyframe" : "continuation";
+  const mode = project.generation?.mode === "keyframe" ? "keyframe" : project.generation?.mode === "smart" ? "smart" : "continuation";
   const storyboardReady = shots.filter(shot => {
-    const stages = mode === "continuation" && Number(shot.number) > 1
-      ? ["storyboard_end"]
-      : ["storyboard_start", "storyboard_end"];
+    let stages = ["storyboard_start", "storyboard_end"];
+    if (mode === "continuation" && Number(shot.number) > 1) stages = ["storyboard_end"];
+    if (mode === "smart" && Number(shot.number) > 1) {
+      const previous = shots.find(item => Number(item.number) === Number(shot.number) - 1);
+      const prevKey = String(previous?.sceneId || "").trim() || (previous?.sceneName ? `name:${previous.sceneName}` : "");
+      const curKey = String(shot.sceneId || "").trim() || (shot.sceneName ? `name:${shot.sceneName}` : "");
+      if (previous && prevKey && curKey && prevKey === curKey) stages = ["storyboard_end"];
+    }
     return stages.every(stage => hasFile(latestCandidate(project, "shot", shot.id, stage)));
   }).length;
   const characterReady = characters.filter(character => hasFile(latestCandidate(project, "character", character.id, "character_three_view"))).length;
@@ -42,7 +59,9 @@ function stageCounts(project = {}) {
     hasScript: Boolean(String(project.script?.raw || "").trim()),
     hasFinal: Boolean(project.finalVideoPath),
     costKnown: Number(project.costLedger?.summary?.totalKnownYuan || 0),
-    costEstimated: Number(project.costLedger?.summary?.totalEstimatedYuan || 0)
+    costEstimated: Number(project.costLedger?.summary?.totalEstimatedYuan || 0),
+    costUnpriced: Number(project.costLedger?.summary?.unpricedCount || 0),
+    costPending: Number(project.costLedger?.summary?.pendingCount || 0)
   };
 }
 
@@ -62,10 +81,20 @@ function automationLabel(project = {}) {
     stopping: "停止中",
     paused_user: "已暂停",
     paused_account: "等切号",
+    interrupted: "已中断",
     completed: "空闲",
+    idle: "空闲",
     failed: "失败",
     cancelled: "已取消"
   })[status] || (status || "空闲");
+}
+
+function automationTone(status = "") {
+  const value = String(status || "");
+  if (["failed"].includes(value)) return "danger";
+  if (["interrupted", "paused_user", "paused_account", "pausing", "stopping", "cancelled"].includes(value)) return "warn";
+  if (["running"].includes(value)) return "active";
+  return "idle";
 }
 
 function summarizeProjectOverview(project = {}) {
@@ -83,6 +112,7 @@ function summarizeProjectOverview(project = {}) {
     automation: {
       status: project.automation?.status || "",
       label: automationLabel(project),
+      tone: automationTone(project.automation?.status || ""),
       operation: project.automation?.operation || "",
       stage: project.automation?.stage || "",
       message: project.automation?.message || "",
@@ -113,6 +143,7 @@ function listProjectsOverview(projects = []) {
 
 module.exports = {
   automationLabel,
+  automationTone,
   inferNextStage,
   listProjectsOverview,
   stageCounts,

@@ -1,0 +1,670 @@
+"use strict";
+
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { execSync } = require("node:child_process");
+const { app, safeStorage } = require("electron");
+
+/** Unified PUREAM website authorization service. */
+const DEFAULT_LICENSE_BASE_URL = "https://drama-slot.puream.cn";
+const LEGACY_LICENSE_BASE_URL = "https://drama.puream.cn";
+// Website-issued codes must use the short-drama authorization endpoint. It owns a
+// separate device slot and never reads or writes the AI Creation Platform slot.
+const PUREAM_WEBSITE_DESKTOP_LOGIN_URL = "https://puream.cn/api/drama/auth/login";
+const WEBSITE_SESSION_AUTHORITY = "puream-website";
+const APP_ID = "puream-drama-slot-stats";
+const OFFLINE_GRACE_MS = 72 * 60 * 60 * 1000;
+const AUTO_RELOGIN_COOLDOWN_MS = 60 * 1000;
+const TRUSTED_PERSISTED_LICENSE_ORIGINS = new Set([
+  "https://drama.puream.cn",
+  "https://drama-slot.puream.cn"
+]);
+
+function normalizeAuthorizationCode(value) {
+  const code = String(value || "").replace(/[\s-]+/g, "").trim().toUpperCase();
+  return /^[A-Z0-9]{12,64}$/.test(code) ? code : "";
+}
+
+function trustedPersistedLicenseBaseUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (url.username || url.password || url.port || url.search || url.hash || (url.pathname && url.pathname !== "/")) return "";
+    if (url.protocol !== "https:" || !TRUSTED_PERSISTED_LICENSE_ORIGINS.has(url.origin)) return "";
+    // Existing installs may have persisted the retired host. Migrate them to the
+    // unified service instead of keeping the old split backend forever.
+    return url.origin === LEGACY_LICENSE_BASE_URL ? DEFAULT_LICENSE_BASE_URL : url.origin;
+  } catch {
+    return "";
+  }
+}
+
+function licenseBypassAllowed() {
+  if (process.env.DRAMA_LICENSE_BYPASS !== "1") return false;
+  // Never honor bypass in packaged release builds.
+  try {
+    if (app?.isPackaged) return false;
+  } catch {
+    /* app may be unavailable in unit tests */
+  }
+  return true;
+}
+
+function getMachineId() {
+  let seed = `${os.hostname()}|${os.platform()}|${os.arch()}|${os.cpus()[0]?.model || ""}`;
+  try {
+    if (process.platform === "win32") {
+      const out = execSync('reg query "HKLM\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid', {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 3000
+      });
+      const match = out.match(/MachineGuid\s+REG_SZ\s+(\S+)/i);
+      if (match?.[1]) seed = match[1];
+    }
+  } catch {
+    /* fall back to hostname seed */
+  }
+  return crypto.createHash("sha256").update(seed).digest("hex").slice(0, 32);
+}
+
+function licenseStatePath() {
+  return path.join(app.getPath("userData"), "drama-license.json");
+}
+
+function encryptSecret(plain) {
+  const text = String(plain || "");
+  if (!text) return "";
+  try {
+    if (safeStorage?.isEncryptionAvailable?.()) {
+      return `safe:${safeStorage.encryptString(text).toString("base64")}`;
+    }
+  } catch {
+    /* fall through */
+  }
+  return `b64:${Buffer.from(text, "utf8").toString("base64")}`;
+}
+
+function decryptSecret(stored) {
+  const raw = String(stored || "");
+  if (!raw) return "";
+  try {
+    if (raw.startsWith("safe:")) {
+      if (!safeStorage?.isEncryptionAvailable?.()) return "";
+      return safeStorage.decryptString(Buffer.from(raw.slice(5), "base64"));
+    }
+    if (raw.startsWith("b64:")) return Buffer.from(raw.slice(4), "base64").toString("utf8");
+    // Legacy plaintext token
+    return raw;
+  } catch {
+    return "";
+  }
+}
+
+function readLicenseState() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(licenseStatePath(), "utf8"));
+    if (parsed.tokenEnc || parsed.token) {
+      parsed.token = decryptSecret(parsed.tokenEnc || parsed.token);
+    }
+    if (parsed.activationCodeEnc) {
+      parsed.activationCode = decryptSecret(parsed.activationCodeEnc);
+    }
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function writeLicenseState(next) {
+  const filePath = licenseStatePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const { token, activationCode, ...rest } = next || {};
+  const persisted = {
+    ...rest,
+    tokenEnc: token ? encryptSecret(token) : "",
+    activationCodeEnc: activationCode ? encryptSecret(activationCode) : ""
+  };
+  delete persisted.token;
+  delete persisted.activationCode;
+  const tmp = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(persisted, null, 2), "utf8");
+  fs.renameSync(tmp, filePath);
+  return { ...rest, token: token || "", activationCode: activationCode || "" };
+}
+
+class DramaLicenseClient {
+  constructor(options = {}) {
+    this.state = typeof options.stateReader === "function" ? (options.stateReader() || {}) : readLicenseState();
+    this.stateWriter = typeof options.stateWriter === "function" ? options.stateWriter : writeLicenseState;
+    const explicitBaseUrl = options.baseUrl || process.env.DRAMA_LICENSE_BASE_URL || "";
+    this.baseUrl = String(explicitBaseUrl || trustedPersistedLicenseBaseUrl(this.state.baseUrl) || DEFAULT_LICENSE_BASE_URL).replace(/\/$/, "");
+    this.heartbeatTimer = null;
+    this.leaseHeartbeats = new Map();
+    this.offlineLeases = new Map();
+    this.pendingCosts = Array.isArray(this.state.pendingCosts)
+      ? this.state.pendingCosts.slice(-200)
+      : [];
+    this.pendingCostKeys = new Set(this.pendingCosts.map(item => this.pendingCostKey(item)));
+    this.autoReloginPromise = null;
+    this.lastAutoReloginAt = 0;
+  }
+
+  machineId() {
+    return getMachineId();
+  }
+
+  getSnapshot() {
+    const lastOk = Date.parse(this.state.lastHeartbeatOkAt || this.state.activatedAt || 0);
+    const graceRemainingMs = Number.isFinite(lastOk)
+      ? Math.max(0, lastOk + OFFLINE_GRACE_MS - Date.now())
+      : 0;
+    return {
+      activated: Boolean(this.state.token && this.state.activationCode),
+      activationCode: this.state.activationCode || "",
+      phone: this.state.phone || "",
+      name: this.state.name || "",
+      machineId: getMachineId(),
+      imageConcurrency: Number(this.state.imageConcurrency || 0),
+      videoConcurrency: Number(this.state.videoConcurrency || 0),
+      distributorId: this.state.distributorId || "",
+      entitlementProduct: this.state.entitlementProduct || APP_ID,
+      sessionAuthority: this.state.sessionAuthority || "drama-admin",
+      appId: APP_ID,
+      baseUrl: this.baseUrl,
+      offlineGrace: Boolean(this.state.offlineGrace),
+      offlineGraceRemainingMs: graceRemainingMs,
+      lastHeartbeatOkAt: this.state.lastHeartbeatOkAt || ""
+    };
+  }
+
+  validOfflineGraceSnapshot(kind = "") {
+    const snapshot = this.getSnapshot();
+    if (!snapshot.activated || !snapshot.offlineGrace || snapshot.offlineGraceRemainingMs <= 0) return null;
+    if (kind) {
+      const limit = Number(kind === "image" ? snapshot.imageConcurrency : snapshot.videoConcurrency);
+      if (!Number.isFinite(limit) || limit < 1) return null;
+    }
+    return snapshot;
+  }
+
+  saveState(next) {
+    this.state = this.stateWriter(next);
+    return this.state;
+  }
+
+  storedActivationCode() {
+    return normalizeAuthorizationCode(this.state.activationCode);
+  }
+
+  storedStateMatchesMachine() {
+    const storedMachineId = String(this.state.machineId || "").trim();
+    // Legacy states did not persist machineId; /api/auth/login remains the authoritative
+    // device-binding check because it always receives the current machineId.
+    return !storedMachineId || storedMachineId === getMachineId();
+  }
+
+  canAutoRelogin() {
+    return Boolean(
+      this.storedActivationCode()
+      && this.storedStateMatchesMachine()
+      && this.state.autoReloginBlocked !== true
+    );
+  }
+
+  async autoRelogin(triggerError) {
+    if (!this.canAutoRelogin()) throw triggerError;
+    if (this.autoReloginPromise) return this.autoReloginPromise;
+    if (Date.now() - this.lastAutoReloginAt < AUTO_RELOGIN_COOLDOWN_MS) throw triggerError;
+    const code = this.storedActivationCode();
+    this.lastAutoReloginAt = Date.now();
+    const attempt = (async () => {
+      try {
+        return await this.login(code);
+      } catch (error) {
+        const block = ["INVALID_CODE", "DEVICE_BOUND", "USER_DISABLED"].includes(String(error?.code || ""));
+        try {
+          this.clearLocalSession(false, { autoReloginBlocked: block });
+        } catch (clearError) {
+          console.warn("[license] failed to clear rejected session", clearError?.message || clearError);
+        }
+        throw error;
+      }
+    })();
+    this.autoReloginPromise = attempt;
+    try {
+      return await attempt;
+    } finally {
+      if (this.autoReloginPromise === attempt) this.autoReloginPromise = null;
+    }
+  }
+
+  enterOfflineGrace(error) {
+    const lastOk = Date.parse(this.state.lastHeartbeatOkAt || this.state.activatedAt || 0);
+    if (this.state.token && this.state.activationCode && Number.isFinite(lastOk) && Date.now() - lastOk < OFFLINE_GRACE_MS) {
+      if (!this.state.offlineGrace) {
+        this.saveState({ ...this.state, offlineGrace: true });
+      }
+      return this.getSnapshot();
+    }
+    throw Object.assign(
+      new Error("授权服务器暂时不可达，且本地离线宽限期已过。请联网后重试。"),
+      { code: "LICENSE_OFFLINE_EXPIRED", cause: error }
+    );
+  }
+
+  async request(pathname, { method = "GET", body, token } = {}) {
+    const headers = { "content-type": "application/json", accept: "application/json" };
+    const auth = token || this.state.token;
+    if (auth) headers.authorization = `Bearer ${auth}`;
+    let res;
+    try {
+      res = await fetch(`${this.baseUrl}${pathname}`, {
+        method,
+        headers,
+        body: body == null ? undefined : JSON.stringify(body)
+      });
+    } catch (error) {
+      throw Object.assign(new Error(`无法连接授权服务器：${error.message || "网络错误"}`), { code: "LICENSE_OFFLINE" });
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      throw Object.assign(new Error(data.message || data.error || `授权失败 HTTP ${res.status}`), {
+        code: data.code || "LICENSE_ERROR",
+        status: res.status,
+        data
+      });
+    }
+    return data;
+  }
+
+  async loginWithPureamWebsite(activationCode) {
+    const code = normalizeAuthorizationCode(activationCode);
+    let res;
+    try {
+      res = await fetch(PUREAM_WEBSITE_DESKTOP_LOGIN_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ activationCode: code, machineId: getMachineId() })
+      });
+    } catch (error) {
+      throw Object.assign(new Error(`无法连接纯梦官网授权服务：${error.message || "网络错误"}`), { code: "LICENSE_OFFLINE" });
+    }
+    const response = await res.json().catch(() => ({}));
+    if (!res.ok || response.ok === false) {
+      throw Object.assign(new Error(response.message || response.error || `纯梦官网授权失败 HTTP ${res.status}`), {
+        code: response.code || "INVALID_CODE",
+        status: res.status,
+        data: response
+      });
+    }
+    const data = response.data && typeof response.data === "object" ? response.data : response;
+    const canonicalCode = normalizeAuthorizationCode(
+      data.pureamAuthorizationCode || data.authorizationCode || data.activationCode || code
+    );
+    if (!canonicalCode) {
+      throw Object.assign(new Error("纯梦官网返回了无效的授权码"), { code: "INVALID_SERVER_CODE" });
+    }
+    const now = new Date().toISOString();
+    // The provider endpoints apply the account's real cloud concurrency and billing.
+    // This token is only a local proof marker; the authorization code itself is kept
+    // encrypted by writeLicenseState and is revalidated with the website on startup.
+    const proof = crypto.createHash("sha256")
+      .update(`${canonicalCode}|${getMachineId()}|${WEBSITE_SESSION_AUTHORITY}`)
+      .digest("hex");
+    this.saveState({
+      token: `website:${proof}`,
+      activationCode: canonicalCode,
+      machineId: getMachineId(),
+      phone: data.phone || data.account?.phone || "",
+      name: data.name || data.account?.name || "",
+      imageConcurrency: 0,
+      videoConcurrency: 0,
+      distributorId: data.distributorId || data.referrerId || data.referralId || "",
+      entitlementProduct: data.entitlementProduct || data.planId || "puream-website",
+      sessionAuthority: WEBSITE_SESSION_AUTHORITY,
+      activatedAt: now,
+      lastHeartbeatOkAt: now,
+      offlineGrace: false,
+      autoReloginBlocked: false,
+      pendingCosts: this.pendingCosts,
+      baseUrl: this.baseUrl
+    });
+    this.startHeartbeat();
+    return this.getSnapshot();
+  }
+
+  async login(activationCode) {
+    const code = normalizeAuthorizationCode(activationCode);
+    if (!code) {
+      throw Object.assign(new Error("请输入纯梦官网发放的授权码"), { code: "INVALID_CODE" });
+    }
+    let data;
+    try {
+      data = await this.request("/api/auth/login", {
+        method: "POST",
+        body: { activationCode: code, machineId: getMachineId() }
+      });
+    } catch (error) {
+      // The short-drama admin still issues legacy 32-character codes. Official
+      // website member codes have a different length and must be authenticated by
+      // the website's desktop endpoint, not rejected or converted locally.
+      if (String(error?.code || "") === "INVALID_CODE" && code.length !== 32) {
+        return this.loginWithPureamWebsite(code);
+      }
+      throw error;
+    }
+    const canonicalCode = normalizeAuthorizationCode(data.pureamAuthorizationCode || data.activationCode || code);
+    if (!canonicalCode) {
+      throw Object.assign(new Error("授权服务器返回了无效的纯梦授权码"), { code: "INVALID_SERVER_CODE" });
+    }
+    this.saveState({
+      token: data.token,
+      activationCode: canonicalCode,
+      machineId: getMachineId(),
+      phone: data.phone || "",
+      name: data.name || "",
+      imageConcurrency: data.imageConcurrency,
+      videoConcurrency: data.videoConcurrency,
+      distributorId: data.distributorId || data.referrerId || data.referralId || "",
+      entitlementProduct: data.entitlementProduct || APP_ID,
+      activatedAt: new Date().toISOString(),
+      lastHeartbeatOkAt: new Date().toISOString(),
+      offlineGrace: false,
+      autoReloginBlocked: false,
+      pendingCosts: this.pendingCosts,
+      baseUrl: this.baseUrl
+    });
+    this.startHeartbeat();
+    void this.flushPendingCosts();
+    return this.getSnapshot();
+  }
+
+  async ensureSession() {
+    if (licenseBypassAllowed()) {
+      return { ...this.getSnapshot(), activated: true, bypass: true };
+    }
+    if (!this.state.token) {
+      const error = Object.assign(new Error("请先输入授权码激活应用"), { code: "NEED_ACTIVATION" });
+      if (this.canAutoRelogin()) return this.autoRelogin(error);
+      throw error;
+    }
+    if (this.state.sessionAuthority === WEBSITE_SESSION_AUTHORITY) {
+      const lastOk = Date.parse(this.state.lastHeartbeatOkAt || 0);
+      if (Number.isFinite(lastOk) && Date.now() - lastOk < 4 * 60_000) {
+        this.startHeartbeat();
+        return this.getSnapshot();
+      }
+      try {
+        return await this.loginWithPureamWebsite(this.storedActivationCode());
+      } catch (error) {
+        if (error.code === "LICENSE_OFFLINE") return this.enterOfflineGrace(error);
+        if (["INVALID_CODE", "DEVICE_BOUND", "USER_DISABLED", "SUBSCRIPTION_EXPIRED"].includes(String(error.code || ""))) {
+          this.clearLocalSession(false, { autoReloginBlocked: true });
+        }
+        throw error;
+      }
+    }
+    try {
+      const data = await this.request("/api/auth/heartbeat", { method: "POST", body: {} });
+      if (data.account) {
+        this.saveState({
+          ...this.state,
+          machineId: getMachineId(),
+          phone: data.account.phone,
+          name: data.account.name,
+          imageConcurrency: data.account.imageConcurrency,
+          videoConcurrency: data.account.videoConcurrency,
+          lastHeartbeatOkAt: new Date().toISOString(),
+          offlineGrace: false
+        });
+      } else {
+        this.saveState({
+          ...this.state,
+          machineId: getMachineId(),
+          lastHeartbeatOkAt: new Date().toISOString(),
+          offlineGrace: false
+        });
+      }
+      this.startHeartbeat();
+      void this.flushPendingCosts();
+      return this.getSnapshot();
+    } catch (error) {
+      if (error.code === "DEVICE_BOUND" || error.code === "USER_DISABLED") {
+        this.clearLocalSession(false, { autoReloginBlocked: true });
+        throw error;
+      }
+      if (error.code === "SESSION_EXPIRED" || error.code === "UNAUTHORIZED") {
+        if (this.canAutoRelogin()) return this.autoRelogin(error);
+        this.clearLocalSession(false);
+        throw error;
+      }
+      if (error.code === "LICENSE_OFFLINE") {
+        return this.enterOfflineGrace(error);
+      }
+      throw error;
+    }
+  }
+
+  clearLocalSession(wipeCode = true, retained = {}) {
+    this.stopHeartbeat();
+    for (const timer of this.leaseHeartbeats.values()) clearInterval(timer);
+    this.leaseHeartbeats.clear();
+    this.offlineLeases.clear();
+    this.saveState(wipeCode ? {} : {
+      activationCode: this.state.activationCode || "",
+      machineId: this.state.machineId || getMachineId(),
+      autoReloginBlocked: retained.autoReloginBlocked === true,
+      pendingCosts: this.pendingCosts,
+      baseUrl: this.baseUrl
+    });
+  }
+
+  startHeartbeat() {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      this.ensureSession().catch((error) => {
+        if (error?.code && !String(error.code).includes("OFFLINE")) {
+          console.warn("[license] heartbeat failed", error.code, error.message);
+        }
+      });
+    }, 5 * 60_000);
+    if (typeof this.heartbeatTimer.unref === "function") this.heartbeatTimer.unref();
+  }
+
+  stopHeartbeat() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
+  async acquireLease(kind, taskId, meta = {}) {
+    const normalizedKind = String(kind || "").trim().toLowerCase();
+    if (!["image", "video"].includes(normalizedKind)) {
+      throw Object.assign(new Error("kind 必须是 image 或 video"), { code: "BAD_KIND" });
+    }
+    if (this.state.sessionAuthority === WEBSITE_SESSION_AUTHORITY) {
+      await this.ensureSession();
+      return {
+        leaseId: `website-${normalizedKind}-${crypto.randomUUID()}`,
+        taskId,
+        kind: normalizedKind,
+        meta,
+        authority: WEBSITE_SESSION_AUTHORITY,
+        upstreamManagedConcurrency: true
+      };
+    }
+    const cached = this.validOfflineGraceSnapshot(normalizedKind);
+    const session = cached || await this.ensureSession();
+    if (session.offlineGrace) return this.acquireOfflineLease(normalizedKind, taskId, meta);
+    const started = Date.now();
+    while (Date.now() - started < 30 * 60_000) {
+      try {
+        const data = await this.request("/api/lease/acquire", {
+          method: "POST",
+          body: { kind: normalizedKind, taskId, meta }
+        });
+        const leaseId = data.leaseId;
+        const timer = setInterval(() => {
+          this.request("/api/lease/heartbeat", { method: "POST", body: { leaseId } }).catch(() => {});
+        }, 60_000);
+        if (typeof timer.unref === "function") timer.unref();
+        this.leaseHeartbeats.set(leaseId, timer);
+        return data;
+      } catch (error) {
+        if (error.code === "LICENSE_OFFLINE") {
+          this.enterOfflineGrace(error);
+          return this.acquireOfflineLease(normalizedKind, taskId, meta);
+        }
+        if (error.code !== "QUEUE" && error.status !== 429) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+      }
+    }
+    throw Object.assign(new Error("排队等待超时，请稍后重试"), { code: "QUEUE_TIMEOUT" });
+  }
+
+  async acquireOfflineLease(kind, taskId, meta = {}) {
+    const started = Date.now();
+    while (Date.now() - started < 30 * 60_000) {
+      const snapshot = this.validOfflineGraceSnapshot(kind);
+      if (!snapshot) {
+        throw Object.assign(new Error("本地离线宽限或缓存权益无效，请联网后重试。"), { code: "LICENSE_OFFLINE_EXPIRED" });
+      }
+      const limit = Math.floor(Number(kind === "image" ? snapshot.imageConcurrency : snapshot.videoConcurrency));
+      const running = [...this.offlineLeases.values()].filter(item => item.kind === kind).length;
+      if (running < limit) {
+        const leaseId = `offline-${kind}-${crypto.randomUUID()}`;
+        const lease = {
+          leaseId,
+          taskId,
+          kind,
+          meta,
+          offlineGrace: true,
+          cachedEntitlement: true,
+          running: running + 1,
+          limit
+        };
+        this.offlineLeases.set(leaseId, lease);
+        return lease;
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    throw Object.assign(new Error("排队等待超时，请稍后重试"), { code: "QUEUE_TIMEOUT" });
+  }
+
+  async releaseLease(leaseId, taskId) {
+    if (String(leaseId || "").startsWith("website-")) {
+      return { released: true, leaseId, taskId, authority: WEBSITE_SESSION_AUTHORITY };
+    }
+    if (leaseId && this.offlineLeases.has(leaseId)) {
+      this.offlineLeases.delete(leaseId);
+      return { released: true, leaseId, taskId, offlineGrace: true };
+    }
+    if (leaseId && this.leaseHeartbeats.has(leaseId)) {
+      clearInterval(this.leaseHeartbeats.get(leaseId));
+      this.leaseHeartbeats.delete(leaseId);
+    }
+    try {
+      await this.request("/api/lease/release", {
+        method: "POST",
+        body: { leaseId, taskId }
+      });
+    } catch {
+      // best-effort release
+    }
+  }
+
+  async reportCost(amountYuan, kind, taskId, meta = {}) {
+    const amount = Number(amountYuan || 0);
+    if (!Number.isFinite(amount) || amount <= 0 || !this.state.token) {
+      return { ok: false, skipped: true };
+    }
+    if (this.state.sessionAuthority === WEBSITE_SESSION_AUTHORITY) {
+      return { ok: true, serverRecorded: true, authority: WEBSITE_SESSION_AUTHORITY };
+    }
+    const payload = { amountYuan: amount, kind, taskId, meta, queuedAt: new Date().toISOString() };
+    if (this.validOfflineGraceSnapshot()) {
+      this.enqueuePendingCost(payload);
+      return { ok: false, pending: true, code: "LICENSE_OFFLINE", message: "离线宽限期内，费用上报已排队" };
+    }
+    try {
+      const result = await this.request("/api/telemetry/cost", {
+        method: "POST",
+        body: { amountYuan: amount, kind, taskId, meta }
+      });
+      return { ok: true, result };
+    } catch (error) {
+      this.enqueuePendingCost(payload);
+      return { ok: false, pending: true, code: error.code || "COST_REPORT_FAILED", message: error.message };
+    }
+  }
+
+  pendingCostKey(item = {}) {
+    const meta = item.meta || {};
+    return [
+      String(item.kind || ""),
+      String(item.taskId || ""),
+      String(Number(item.amountYuan || 0)),
+      String(meta.projectId || ""),
+      String(meta.operation || ""),
+      String(meta.entityId || "")
+    ].join("|");
+  }
+
+  persistPendingCosts() {
+    try {
+      this.saveState({ ...this.state, pendingCosts: this.pendingCosts });
+    } catch {
+      // In-memory queue remains authoritative until persistence is available.
+    }
+  }
+
+  enqueuePendingCost(payload) {
+    const key = this.pendingCostKey(payload);
+    if (this.pendingCostKeys.has(key)) return false;
+    this.pendingCosts.push({ ...payload, reportKey: key });
+    this.pendingCostKeys.add(key);
+    while (this.pendingCosts.length > 200) {
+      const removed = this.pendingCosts.shift();
+      this.pendingCostKeys.delete(removed?.reportKey || this.pendingCostKey(removed));
+    }
+    this.persistPendingCosts();
+    return true;
+  }
+
+  async flushPendingCosts() {
+    if (!this.pendingCosts.length || !this.state.token) return;
+    const queue = this.pendingCosts.splice(0, this.pendingCosts.length);
+    for (let index = 0; index < queue.length; index += 1) {
+      const item = queue[index];
+      try {
+        await this.request("/api/telemetry/cost", {
+          method: "POST",
+          body: {
+            amountYuan: item.amountYuan,
+            kind: item.kind,
+            taskId: item.taskId,
+            meta: { ...(item.meta || {}), flushedFromPending: true, queuedAt: item.queuedAt }
+          }
+        });
+        this.pendingCostKeys.delete(item.reportKey || this.pendingCostKey(item));
+      } catch {
+        this.pendingCosts = [...queue.slice(index), ...this.pendingCosts];
+        break;
+      }
+    }
+    this.persistPendingCosts();
+  }
+}
+
+module.exports = {
+  DramaLicenseClient,
+  getMachineId,
+  normalizeAuthorizationCode,
+  licenseBypassAllowed,
+  APP_ID,
+  DEFAULT_LICENSE_BASE_URL,
+  PUREAM_WEBSITE_DESKTOP_LOGIN_URL,
+  WEBSITE_SESSION_AUTHORITY,
+  OFFLINE_GRACE_MS
+};

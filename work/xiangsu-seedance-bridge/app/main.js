@@ -9,8 +9,15 @@ const { BridgeClient } = require("./bridge-client");
 const { contractFor, providerDisplayName } = require("./puream-video-adapters");
 const { testProvider } = require("./ai-provider");
 const { stageSubmissionMedia } = require("./media-staging");
-const { WorkbenchStore } = require("./workbench-store");
-const { WorkbenchWorkflow } = require("./workbench-workflow");
+const { WorkbenchStore, defaultPromptTemplates } = require("./workbench-store");
+const { WorkbenchWorkflow, projectRequiresFaceMesh, hasOssCredentials } = require("./workbench-workflow");
+const { DramaLicenseClient, licenseBypassAllowed, DEFAULT_LICENSE_BASE_URL } = require("./license-gate");
+const { createIntegrityGuard } = require("./integrity-guard");
+const {
+  hydratePureamDefaults: applyPureamAuthorization,
+  findStoredPureamAuthorization,
+  ensurePureamLicenseSession
+} = require("./puream-auth-config");
 
 const APP_USER_MODEL_ID = "cn.puream.drama.slotmachine";
 const APP_ICON_PATH = path.join(__dirname, "assets", "app.ico");
@@ -24,6 +31,8 @@ app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 
 const bridge = new BridgeClient();
+let dramaLicense;
+const integrityGuard = createIntegrityGuard({ app });
 let mainWindow;
 let workbenchStore;
 let workbenchWorkflow;
@@ -31,48 +40,51 @@ let accountSwitchRequest = null;
 let videoJobSyncRequest = null;
 let rendererCrashReloads = 0;
 
-function readOfficialPureamActivationCode() {
-  const roaming = process.env.APPDATA || app.getPath("appData");
-  const candidates = [
-    path.join(roaming, "@puream", "desktop", "config.json"),
-    path.join(roaming, "纯梦AI创作平台", "config.json"),
-    path.join(roaming, "纯梦大助手", "config.json")
-  ];
-  for (const filePath of candidates) {
-    try {
-      const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      const code = String(value?.savedActivationCode || value?.activationCode || value?.auth?.activationCode || "").trim();
-      if (code) return { code, sourcePath: filePath };
-    } catch {}
-  }
-  return { code: "", sourcePath: "" };
+function hydratePureamDefaults(store, activationCode = "") {
+  return applyPureamAuthorization(store, activationCode, { bridge });
 }
 
-function hydratePureamDefaults(store) {
-  const settings = store.getSettings();
-  const imported = readOfficialPureamActivationCode();
-  const pureamTextCredential = settings.textProviderProfiles?.["puream-relay"]?.apiKey
-    || (settings.textProvider?.kind === "puream-relay" ? settings.textProvider.apiKey : "")
-    || "";
-  const existing = settings.imageProvider?.apiKey || settings.digitalHumanProvider?.apiKey || pureamTextCredential;
-  const credential = existing || imported.code;
-  settings.textProviderProfiles = {
-    ...(settings.textProviderProfiles || {}),
-    "puream-relay": {
-      ...(settings.textProviderProfiles?.["puream-relay"] || {}),
-      kind: "puream-relay",
-      apiKey: credential
-    }
-  };
-  if (settings.textProvider?.kind === "puream-relay") settings.textProvider = { ...settings.textProvider, apiKey: credential };
-  settings.imageProvider = { ...settings.imageProvider, apiKey: credential };
-  settings.digitalHumanProvider = { ...settings.digitalHumanProvider, apiKey: credential };
-  const saved = store.saveSettings(settings);
-  bridge.configure(saved.videoProvider);
+function storedWorkbenchAuthorizationCode() {
+  try { return findStoredPureamAuthorization(requireWorkbench().store.getSettings()); }
+  catch { return ""; }
+}
+
+function redactSettingsForRenderer(settings = {}) {
+  const defaults = defaultPromptTemplates();
+  const storedPrompts = settings.prompts || {};
+  const promptKeys = [...new Set([...Object.keys(defaults), ...Object.keys(storedPrompts)])];
+  const promptModes = { ...(settings.promptModes || {}) };
+  const prompts = {};
+  for (const key of promptKeys) {
+    const current = String(storedPrompts[key] ?? defaults[key] ?? "");
+    const custom = promptModes[key] === "custom";
+    promptModes[key] = custom ? "custom" : "system";
+    prompts[key] = custom ? current : "";
+  }
+  return { ...settings, prompts, promptModes };
+}
+
+function restoreHiddenPromptDefaults(input = {}, current = {}) {
+  if (!input.promptModes || typeof input.promptModes !== "object") return input;
+  const defaults = defaultPromptTemplates();
+  const currentPrompts = current.prompts || {};
+  const keys = [...new Set([...Object.keys(defaults), ...Object.keys(currentPrompts), ...Object.keys(input.promptModes)])];
+  const prompts = {};
+  for (const key of keys) {
+    prompts[key] = input.promptModes[key] === "custom"
+      ? String(input.prompts?.[key] ?? "")
+      : String(defaults[key] ?? currentPrompts[key] ?? "");
+  }
+  return { ...input, prompts, promptModes: { ...input.promptModes } };
+}
+
+function redactPromptPreview(preview = {}) {
+  // Settings-page global prompt templates stay hidden via redactSettingsForRenderer.
+  // Project-level compiled image/video prompts must remain visible so creators can
+  // review and override them. Never blank full/system/compiled/active here.
   return {
-    configured: Boolean(credential),
-    source: existing ? "workbench-safe-storage" : imported.sourcePath ? "official-desktop" : "missing",
-    settings: saved
+    ...preview,
+    systemHidden: false
   };
 }
 
@@ -103,9 +115,11 @@ function publicError(error) {
 }
 
 function createWindow() {
-  const capturePath = process.env.DRAMA_SLOT_CAPTURE_PATH;
+  const capturePath = (!app.isPackaged && process.env.DRAMA_SLOT_CAPTURE_PATH) || "";
   const captureResultPath = process.env.DRAMA_SLOT_CAPTURE_RESULT_PATH;
-  const captureScenario = String(process.env.DRAMA_SLOT_CAPTURE_SCENARIO || "").replace(/[^a-z]/g, "");
+  const captureScenario = capturePath
+    ? String(process.env.DRAMA_SLOT_CAPTURE_SCENARIO || "").replace(/[^a-z]/g, "")
+    : "";
   const captureWidth = Math.max(800, Math.min(2560, Number(process.env.DRAMA_SLOT_CAPTURE_WIDTH) || 1720));
   const captureHeight = Math.max(600, Math.min(1600, Number(process.env.DRAMA_SLOT_CAPTURE_HEIGHT) || 1000));
   const captureZoom = Math.max(0.5, Math.min(2, Number(process.env.DRAMA_SLOT_CAPTURE_ZOOM) || 1));
@@ -145,24 +159,68 @@ function createWindow() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const reason = String(details?.reason || "");
     if (reason === "clean-exit") return;
-    // Soft-render + limited auto-reload: unbounded reload loops look like opening flicker.
+    const detailText = `渲染进程异常退出（${reason || "unknown"}）。可尝试重新加载工作台；若反复出现请重启应用。`;
     if (rendererCrashReloads >= 2) {
-      console.error("[workbench] renderer crash reload budget exhausted; leaving window for manual restart");
+      dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: "工作台已停止响应",
+        message: "渲染进程多次崩溃，已停止自动重载。",
+        detail: detailText,
+        buttons: ["重新加载", "关闭窗口"],
+        defaultId: 0,
+        cancelId: 1
+      }).then((result) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        if (result.response === 0) {
+          rendererCrashReloads = 0;
+          mainWindow.webContents.reload();
+        } else {
+          mainWindow.close();
+        }
+      }).catch(() => {});
       return;
     }
     rendererCrashReloads += 1;
+    dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "工作台异常",
+      message: "界面进程崩溃，即将自动重新加载。",
+      detail: detailText,
+      buttons: ["知道了"]
+    }).catch(() => {});
     setTimeout(() => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
       mainWindow.webContents.reload();
-    }, 250);
+    }, 400);
   });
   mainWindow.webContents.on("unresponsive", () => {
     console.error("[workbench] renderer became unresponsive");
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "工作台无响应",
+      message: "界面暂时卡住。可等待恢复，或强制重新加载。",
+      buttons: ["等待", "重新加载"],
+      defaultId: 0,
+      cancelId: 0
+    }).then((result) => {
+      if (result.response === 1 && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.reload();
+      }
+    }).catch(() => {});
   });
   if (fs.existsSync(APP_ICON_PATH)) {
     try { mainWindow.setIcon(nativeImage.createFromPath(APP_ICON_PATH)); } catch {}
   }
   if (app.isPackaged) {
+    mainWindow.webContents.on("devtools-opened", () => {
+      // Packaged builds already disable DevTools in webPreferences. Treat an
+      // unexpected one-frame open event as something to close and log, not as
+      // permanent proof that every later paid request is unsafe. The guard
+      // still blocks verified debug flags and changed/missing core files.
+      console.warn("[integrity] packaged renderer DevTools event closed");
+      mainWindow.webContents.closeDevTools();
+    });
     mainWindow.webContents.on("before-input-event", (event, input) => {
       const key = String(input.key || "").toLowerCase();
       if (key === "f12" || ((input.control || input.meta) && input.shift && ["i", "j", "c"].includes(key))) event.preventDefault();
@@ -304,16 +362,22 @@ function createWindow() {
             const kind = document.querySelector('#videoProviderKind');
             kind.value = 'puream-hailuo-h3';
             kind.dispatchEvent(new Event('change', { bubbles: true }));
-            document.querySelector('#videoBaseUrl').value = 'https://puream.cn';
-            document.querySelector('#videoApiKey').value = '本机加密保存的纯梦授权码';
-            document.querySelector('#videoOssAccessKeyId').value = 'OSS AccessKey ID';
-            document.querySelector('#videoOssAccessKeySecret').value = '本机加密保存';
-            document.querySelector('#videoOssBucket').value = 'your-bucket';
-            document.querySelector('#videoOssEndpoint').value = 'oss-cn-beijing.aliyuncs.com';
-            document.querySelector('#hailuoApiMode').value = 'multimodal_to_video';
-            document.querySelector('#hailuoApiMode').dispatchEvent(new Event('change', { bubbles: true }));
-            document.querySelector('#hailuoRefImageSize').value = 'max';
-            document.querySelector('#hailuoSeed').value = '20260804';
+            const assign = (selector, value, notify = false) => {
+              const node = document.querySelector(selector);
+              if (!node) return null;
+              node.value = value;
+              if (notify) node.dispatchEvent(new Event('change', { bubbles: true }));
+              return node;
+            };
+            assign('#videoBaseUrl', 'https://puream.cn');
+            assign('#videoApiKey', '');
+            assign('#videoOssAccessKeyId', '');
+            assign('#videoOssAccessKeySecret', '');
+            assign('#videoOssBucket', '');
+            assign('#videoOssEndpoint', '');
+            assign('#hailuoApiMode', 'multimodal_to_video', true);
+            assign('#hailuoRefImageSize', 'max');
+            assign('#hailuoSeed', '20260804');
             document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
             const card = document.querySelector('.video-provider-card');
             const providerField = document.querySelector('#videoProviderKind');
@@ -518,6 +582,216 @@ function createWindow() {
           }
           captureResult = { projectDialogOpened: projectDialogState.opened, projectDialogFocus: projectDialogState.activeElement, strategyDialogOpened: strategyDialogState.opened, strategyDialogFocus: strategyDialogState.activeElement, tabStops };
         }
+        if (captureScenario === "buttonaudit") {
+          captureResult = await mainWindow.webContents.executeJavaScript(`(async () => {
+            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+            for (let attempt = 0; attempt < 100; attempt += 1) {
+              if (document.body.dataset.workbenchReady === 'true' && document.querySelector('#projectSelect option')) break;
+              await wait(50);
+            }
+            await wait(500);
+            const stageResults = [];
+            for (const button of document.querySelectorAll('.stage-button')) {
+              button.click();
+              await wait(40);
+              stageResults.push({
+                stage: button.dataset.stage,
+                activeButton: button.classList.contains('active'),
+                activePanel: Boolean(document.querySelector('.stage-panel.active')?.dataset.panel === button.dataset.stage)
+              });
+            }
+            const libraryResults = [];
+            for (const button of document.querySelectorAll('.library-nav-button')) {
+              button.click();
+              await wait(30);
+              libraryResults.push({
+                library: button.dataset.library,
+                active: button.classList.contains('active'),
+                panelVisible: !document.querySelector('#sidebarLibraryPanel')?.classList.contains('hidden'),
+                title: document.querySelector('#sidebarLibraryTitle')?.textContent || ''
+              });
+            }
+            document.querySelector('#closeSidebarLibrary')?.click();
+            document.querySelector('#newProject')?.click();
+            await wait(50);
+            const newProjectOpened = document.querySelector('#newProjectDialog')?.open === true;
+            document.querySelector('#cancelNewProject')?.click();
+            document.querySelector('#editProjectStrategy')?.click();
+            await wait(50);
+            const strategyOpened = document.querySelector('#projectStrategyDialog')?.open === true;
+            document.querySelector('#projectStrategyDialog')?.close();
+            document.querySelector('#qualityBlueprintToggle')?.click();
+            await wait(30);
+            const blueprintOpened = !document.querySelector('#qualityBlueprintMenu')?.classList.contains('hidden');
+            document.querySelector('#qualityBlueprintToggle')?.click();
+            const firstHelp = document.querySelector('button .info-dot');
+            firstHelp?.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+            await wait(30);
+            const tooltipVisible = document.querySelector('#infoTooltipLayer')?.classList.contains('is-visible') === true
+              && Boolean(document.querySelector('#infoTooltipLayer')?.textContent?.trim());
+            firstHelp?.dispatchEvent(new PointerEvent('pointerout', { bubbles: true }));
+            const buttons = [...document.querySelectorAll('button')].map((button, index) => ({
+              index,
+              id: button.id || '',
+              action: button.dataset.action || '',
+              label: String(button.innerText || button.textContent || button.getAttribute('aria-label') || '').replace(/!/g, '').replace(/\\s+/g, ' ').trim(),
+              disabled: Boolean(button.disabled),
+              hasHelp: Boolean(button.querySelector(':scope > .info-dot')),
+              tooltip: String(button.dataset.tooltip || button.querySelector(':scope > .info-dot')?.dataset.tooltip || '').trim()
+            }));
+            return {
+              buttonCount: buttons.length,
+              buttons,
+              missingLabels: buttons.filter(item => !item.label),
+              missingHelp: buttons.filter(item => !item.hasHelp || !item.tooltip),
+              stageResults,
+              libraryResults,
+              dialogs: { newProjectOpened, strategyOpened, blueprintOpened },
+              tooltipVisible,
+              horizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth + 1,
+              viewport: { width: innerWidth, height: innerHeight, zoom: ${captureZoom} },
+              localComponents: {
+                xiangsuPath: ${JSON.stringify(bridge.locateXiangsu() || "")},
+                ffmpegPath: ${JSON.stringify(locateFfmpeg() || "")}
+              }
+            };
+          })()`);
+          await new Promise(resolve => setTimeout(resolve, 120));
+        }
+        if (captureScenario === "manualentries") {
+          const requestedStage = ["script", "assets", "shots", "videos", "final"].includes(String(process.env.DRAMA_SLOT_CAPTURE_STAGE || ""))
+            ? String(process.env.DRAMA_SLOT_CAPTURE_STAGE)
+            : "assets";
+          captureResult = await mainWindow.webContents.executeJavaScript(`(async () => {
+            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+            for (let attempt = 0; attempt < 100; attempt += 1) {
+              if (document.body.dataset.workbenchReady === 'true' && document.querySelector('#projectSelect option')) break;
+              await wait(50);
+            }
+            const expected = {
+              script: ['importScriptFile'],
+              assets: ['open-independent-library'],
+              shots: ['importStoryboardBatch'],
+              videos: ['importShotPromptsBatch', 'importShotVideosBatch'],
+              final: ['importFinalVideo']
+            };
+            const stages = {};
+            for (const stage of Object.keys(expected)) {
+              document.querySelector('.stage-button[data-stage="' + stage + '"]')?.click();
+              await wait(80);
+              const panel = document.querySelector('.stage-panel[data-panel="' + stage + '"]');
+              const bar = panel?.querySelector('.manual-entry-bar');
+              const buttons = [...(bar?.querySelectorAll('button') || [])];
+              stages[stage] = {
+                visible: Boolean(bar && bar.getBoundingClientRect().width > 0 && bar.getBoundingClientRect().height > 0),
+                label: String(bar?.textContent || '').replace(/\\s+/g, ' ').trim(),
+                buttons: buttons.map(button => ({ id: button.id || '', action: button.dataset.action || '', label: String(button.textContent || '').replace(/!/g, '').replace(/\\s+/g, ' ').trim(), disabled: Boolean(button.disabled) })),
+                expectedPresent: expected[stage].every(token => buttons.some(button => button.id === token || button.dataset.action === token))
+              };
+            }
+            const target = ${JSON.stringify(requestedStage)};
+            document.querySelector('.stage-button[data-stage="' + target + '"]')?.click();
+            await wait(180);
+            const active = document.querySelector('.stage-panel.active');
+            const bar = active?.querySelector('.manual-entry-bar');
+            const scroller = document.querySelector('.main-stage');
+            if (bar && scroller) {
+              const offset = bar.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+              scroller.scrollTop = Math.max(0, offset - 16);
+            } else {
+              bar?.scrollIntoView({ block: 'start' });
+            }
+            await wait(120);
+            return {
+              requestedStage: target,
+              activeStage: active?.dataset.panel || '',
+              stages,
+              manualBarTop: bar?.getBoundingClientRect().top || null,
+              horizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth + 1,
+              viewport: { width: innerWidth, height: innerHeight, zoom: ${captureZoom} }
+            };
+          })()`);
+          await new Promise(resolve => setTimeout(resolve, 120));
+        }
+        if (captureScenario === "manuallibrary") {
+          captureResult = await mainWindow.webContents.executeJavaScript(`(async () => {
+            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+            for (let attempt = 0; attempt < 100; attempt += 1) {
+              if (document.body.dataset.workbenchReady === 'true' && document.querySelector('#projectSelect option')) break;
+              await wait(50);
+            }
+            document.querySelector('.stage-button[data-stage="assets"]')?.click();
+            await wait(120);
+            document.querySelector('[data-action="open-independent-library"]')?.click();
+            for (let attempt = 0; attempt < 50; attempt += 1) {
+              if (document.querySelector('#reusableAssetDialog')?.open) break;
+              await wait(50);
+            }
+            const dialog = document.querySelector('#reusableAssetDialog');
+            const uploadButtons = [...document.querySelectorAll('[data-action="import-reusable-library"]')];
+            return {
+              opened: dialog?.open === true,
+              title: document.querySelector('#reusableAssetDialogTitle')?.textContent || '',
+              uploadKinds: uploadButtons.map(button => button.dataset.kind),
+              uploadLabels: uploadButtons.map(button => String(button.textContent || '').replace(/!/g, '').trim()),
+              cardCount: document.querySelectorAll('#reusableAssetGrid .reusable-asset-card').length,
+              horizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth + 1
+            };
+          })()`);
+          await new Promise(resolve => setTimeout(resolve, 180));
+        }
+        if (captureScenario === "resumestate") {
+          const targetProjectId = String(process.env.DRAMA_SLOT_CAPTURE_PROJECT_ID || "").trim();
+          captureResult = await mainWindow.webContents.executeJavaScript(`(async () => {
+            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+            for (let attempt = 0; attempt < 100; attempt += 1) {
+              if (document.body.dataset.workbenchReady === 'true' && document.querySelector('#projectSelect option')) break;
+              await wait(50);
+            }
+            const select = document.querySelector('#projectSelect');
+            const targetProjectId = ${JSON.stringify(targetProjectId)};
+            if (targetProjectId && select?.querySelector('option[value="' + CSS.escape(targetProjectId) + '"]')) {
+              select.value = targetProjectId;
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+              await wait(350);
+            }
+            document.querySelector('.stage-button[data-stage="script"]')?.click();
+            await wait(250);
+            const resume = document.querySelector('#resumeScriptGeneration');
+            const pipeline = document.querySelector('#continueFromScript');
+            return {
+              projectId: select?.value || '',
+              activeStage: document.querySelector('.stage-panel.active')?.dataset.panel || '',
+              taskState: document.querySelector('#scriptTaskState')?.textContent?.trim() || '',
+              taskMessage: document.querySelector('#scriptTaskMessage')?.textContent?.trim() || '',
+              resume: {
+                visible: Boolean(resume && !resume.classList.contains('hidden')),
+                label: resume?.textContent?.trim() || '',
+                disabled: Boolean(resume?.disabled)
+              },
+              continuePipeline: {
+                visible: Boolean(pipeline && !pipeline.classList.contains('hidden')),
+                label: pipeline?.textContent?.replace(/!/g, '')?.replace(/\\s+/g, ' ')?.trim() || '',
+                disabled: Boolean(pipeline?.disabled),
+                tooltip: pipeline?.dataset.tooltip || ''
+              },
+              scriptReadOnly: Boolean(document.querySelector('#scriptText')?.readOnly),
+              scriptLength: String(document.querySelector('#scriptText')?.value || '').length,
+              horizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth + 1
+            };
+          })()`);
+          await new Promise(resolve => setTimeout(resolve, 120));
+        }
+        if (captureScenario === "localcomponents") {
+          const xiangsuPath = bridge.locateXiangsu();
+          const ffmpegPath = locateFfmpeg();
+          captureResult = {
+            xiangsuPath,
+            xiangsuExists: Boolean(xiangsuPath && fs.existsSync(xiangsuPath)),
+            ffmpegPath,
+            ffmpegExists: Boolean(ffmpegPath && fs.existsSync(ffmpegPath))
+          };
+        }
         if (captureScenario === "scriptwriting") {
           captureResult = await mainWindow.webContents.executeJavaScript(`(async () => {
             const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -629,11 +903,17 @@ function createWindow() {
               node.style.setProperty('display', active ? 'block' : 'none', 'important');
             });
             const kind = document.querySelector('#videoProviderKind');
-            kind.value = 'puream-hailuo-h3';
-            kind.dispatchEvent(new Event('change', { bubbles: true }));
+            if (kind) {
+              kind.value = 'puream-hailuo-h3';
+              kind.dispatchEvent(new Event('change', { bubbles: true }));
+            }
             const card = document.querySelector('.video-provider-card');
+            document.querySelectorAll('.settings-grid > .settings-card').forEach(node => {
+              node.style.setProperty('display', node === card ? 'block' : 'none', 'important');
+            });
             document.querySelector('.settings-grid')?.prepend(card);
-            card?.scrollIntoView({ block: 'start' });
+            const stage = document.querySelector('.main-stage');
+            if (stage && card) stage.scrollTop = Math.max(0, card.offsetTop - 96);
           })()`);
           await new Promise(resolve => setTimeout(resolve, 240));
           await mainWindow.webContents.executeJavaScript(`(() => {
@@ -642,7 +922,12 @@ function createWindow() {
               node.classList.toggle('active', active);
               node.style.setProperty('display', active ? 'block' : 'none', 'important');
             });
-            document.querySelector('.video-provider-card')?.scrollIntoView({ block: 'start' });
+            const card = document.querySelector('.video-provider-card');
+            document.querySelectorAll('.settings-grid > .settings-card').forEach(node => {
+              node.style.setProperty('display', node === card ? 'block' : 'none', 'important');
+            });
+            const stage = document.querySelector('.main-stage');
+            if (stage && card) stage.scrollTop = Math.max(0, card.offsetTop - 96);
           })()`);
           await new Promise(resolve => setTimeout(resolve, 80));
         }
@@ -661,14 +946,13 @@ function createWindow() {
   }
 }
 
+const { locateFfmpeg: locateBundledFfmpeg } = require("./locate-ffmpeg");
+
 function locateFfmpeg() {
-  const xiangsu = bridge.locateXiangsu();
-  if (!xiangsu) return null;
-  const candidates = [
-    path.join(path.dirname(xiangsu), "x64", "ffmpeg.exe"),
-    path.join(path.dirname(xiangsu), "ffmpeg.exe")
-  ];
-  return candidates.find(candidate => fs.existsSync(candidate)) || null;
+  // Prefer the ffmpeg shipped with this product. Sibling apps are last-resort only.
+  let xiangsuPath = "";
+  try { xiangsuPath = bridge.locateXiangsu() || ""; } catch {}
+  return locateBundledFfmpeg({ xiangsuPath });
 }
 
 function readAvMetadata(filePath) {
@@ -724,6 +1008,196 @@ async function describeMedia(filePath, type) {
     size: stat.size,
     ...metadata
   };
+}
+
+const MANUAL_IMAGE_STAGES = new Set(["character_sheet", "character_three_view", "character_intro", "scene_asset", "storyboard_start", "storyboard_end", "storyboard_sheet", "wardrobe_asset", "prop_asset"]);
+const MANUAL_VIDEO_STAGES = new Set(["character_video", "shot_video"]);
+const MANUAL_AUDIO_STAGES = new Set(["character_voice"]);
+
+function manualStageMediaType(stage) {
+  if (MANUAL_IMAGE_STAGES.has(stage)) return "image";
+  if (MANUAL_VIDEO_STAGES.has(stage)) return "video";
+  if (MANUAL_AUDIO_STAGES.has(stage)) return "audio";
+  return "";
+}
+
+function manualAssetCategory(entityType, mediaType) {
+  if (mediaType === "image") {
+    if (entityType === "character" || entityType === "library") return "characters";
+    if (entityType === "scene") return "scenes";
+    return "storyboards";
+  }
+  return mediaType === "video" ? "videos" : "audio";
+}
+
+async function importCandidateFromPath(projectId, entityType, entityId, stage, sourcePath, source = "manual-upload", reusableAssetId = "") {
+  const mediaType = manualStageMediaType(stage);
+  if (!mediaType || !["character", "scene", "shot", "library"].includes(entityType)) {
+    throw Object.assign(new Error("手动资产类型无效"), { code: "IMPORT_STAGE_INVALID" });
+  }
+  const { store, workflow } = requireWorkbench();
+  const described = await describeMedia(sourcePath, mediaType);
+  if (stage === "shot_video" && Number(described.duration) > 15.05) {
+    throw Object.assign(new Error("分镜视频时长不能超过 15 秒"), { code: "VIDEO_DURATION_INVALID" });
+  }
+  if (stage === "character_voice" && Number(described.duration) > 15.05) {
+    throw Object.assign(new Error("单个音色参考不能超过 15 秒"), { code: "AUDIO_DURATION_INVALID" });
+  }
+  const imported = workflow.importAsset(projectId, manualAssetCategory(entityType, mediaType), sourcePath, `${stage}-manual`);
+  let candidate = store.addCandidate(projectId, {
+    entityType,
+    entityId,
+    stage,
+    prompt: source === "reusable-asset-library" ? "从独立资产库绑定" : "手动上传资产",
+    filePath: imported.path,
+    fileUrl: imported.fileUrl,
+    duration: described.duration,
+    width: described.width,
+    height: described.height,
+    source,
+    reusableAssetId: reusableAssetId || undefined,
+    mediaProbeVerified: mediaType === "audio",
+    qualityAudit: MANUAL_VIDEO_STAGES.has(stage)
+      ? { ok: true, mode: "manual", skipped: true, checkedAt: new Date().toISOString() }
+      : undefined,
+    faceMesh: entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(stage)
+      ? { required: projectRequiresFaceMesh(store.getProject(projectId), store.getSettings()), applied: false, method: "manual-awaiting-local-grid" }
+      : undefined
+  });
+  // 手动导入绝不偷偷触发付费生图；需要全脸网格时由用户在候选库点“本地添加全脸网格”。
+  if (["storyboard_start", "storyboard_end", "storyboard_sheet"].includes(stage)) {
+    await workflow.auditStoryboardCandidate(projectId, entityId, candidate.id);
+    candidate = store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+  }
+  if (candidate.qualityAudit?.ok !== false) {
+    candidate = store.confirmCandidate(projectId, candidate.id, false);
+  }
+  if (entityType === "character" && stage === "character_voice") {
+    try {
+      workflow.depositCharacterVoiceToLibrary(projectId, entityId, candidate);
+      candidate = store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+    } catch {}
+  }
+  return { candidate, described };
+}
+
+async function importProductFromPath(projectId, sourcePath, source = "manual-upload", reusableAssetId = "") {
+  const { store, workflow } = requireWorkbench();
+  await describeMedia(sourcePath, "image");
+  const imported = workflow.importAsset(projectId, "product", sourcePath, "product-manual");
+  const project = store.replaceProductAsset(projectId, {
+    imagePath: imported.path,
+    publicUrl: "",
+    source,
+    reusableAssetId: reusableAssetId || ""
+  });
+  return { asset: imported, project: store.getProject(projectId) };
+}
+
+async function importFinalVideoFromPath(projectId, sourcePath, source = "manual-upload", reusableAssetId = "") {
+  const { store, workflow } = requireWorkbench();
+  const described = await describeMedia(sourcePath, "video");
+  const imported = workflow.importAsset(projectId, "final", sourcePath, "final-manual");
+  const project = store.getProject(projectId);
+  project.finalVideoPath = imported.path;
+  project.finalVideoStale = false;
+  project.finalVideoSelected = true;
+  project.finalVideoSource = source;
+  project.finalVideoReusableAssetId = reusableAssetId || "";
+  project.finalVideoStaleReason = "";
+  project.mediaQualityAudit = null;
+  project.finalQualityAudit = {
+    ok: null,
+    mode: "manual",
+    skipped: true,
+    checkedAt: new Date().toISOString(),
+    message: "用户手动上传完整成片；尚未运行自动媒体终审"
+  };
+  store.saveProject(project);
+  return { asset: imported, described, project: store.getProject(projectId) };
+}
+
+function shotNumberFromFile(filePath) {
+  const name = path.basename(filePath, path.extname(filePath));
+  const explicit = name.match(/(?:^|[^a-z0-9])(?:shot|s|镜头)[-_ ]*0*(\d{1,4})(?:[^0-9]|$)/i);
+  if (explicit) return Number(explicit[1]);
+  const leading = name.match(/^0*(\d{1,4})(?:[^0-9]|$)/);
+  return leading ? Number(leading[1]) : null;
+}
+
+function storyboardStageFromFile(filePath) {
+  const name = path.basename(filePath, path.extname(filePath));
+  if (/(?:^|[-_ .])(sheet|board|contact|合图|分镜板)(?:[-_ .]|$)/i.test(name)) return "storyboard_sheet";
+  if (/(?:^|[-_ .])(start|first|首帧|起始)(?:[-_ .]|$)/i.test(name)) return "storyboard_start";
+  if (/(?:^|[-_ .])(end|last|尾帧|结束)(?:[-_ .]|$)/i.test(name)) return "storyboard_end";
+  return "";
+}
+
+function storyboardSlots(project) {
+  const shots = (project.shots || []).slice().sort((left, right) => Number(left.number) - Number(right.number));
+  const mode = project.generation?.mode || "continuation";
+  if (mode === "storyboard_sheet") return shots.map(shot => ({ shot, stage: "storyboard_sheet" }));
+  if (mode === "continuation") return shots.flatMap((shot, index) => index === 0
+    ? [{ shot, stage: "storyboard_start" }, { shot, stage: "storyboard_end" }]
+    : [{ shot, stage: "storyboard_end" }]);
+  return shots.flatMap(shot => [{ shot, stage: "storyboard_start" }, { shot, stage: "storyboard_end" }]);
+}
+
+function planBatchMedia(project, filePaths, kind) {
+  const shots = (project.shots || []).slice().sort((left, right) => Number(left.number) - Number(right.number));
+  const shotByNumber = new Map(shots.map(shot => [Number(shot.number), shot]));
+  const sortedPaths = filePaths.slice().sort((left, right) => path.basename(left).localeCompare(path.basename(right), "zh-CN", { numeric: true }));
+  if (kind === "video") {
+    const explicit = sortedPaths.map(filePath => ({ filePath, shot: shotByNumber.get(shotNumberFromFile(filePath)) })).filter(item => item.shot);
+    if (explicit.length === sortedPaths.length) return explicit.map(item => ({ ...item, stage: "shot_video" }));
+    if (sortedPaths.length === shots.length) return sortedPaths.map((filePath, index) => ({ filePath, shot: shots[index], stage: "shot_video" }));
+    return [];
+  }
+  const explicit = sortedPaths.map(filePath => {
+    const shot = shotByNumber.get(shotNumberFromFile(filePath));
+    let stage = storyboardStageFromFile(filePath);
+    if (!stage && project.generation?.mode === "storyboard_sheet") stage = "storyboard_sheet";
+    return { filePath, shot, stage };
+  }).filter(item => item.shot && item.stage);
+  if (explicit.length === sortedPaths.length) return explicit;
+  const slots = storyboardSlots(project);
+  if (sortedPaths.length === slots.length) return sortedPaths.map((filePath, index) => ({ filePath, ...slots[index] }));
+  return [];
+}
+
+function promptRowsFromJson(value) {
+  if (Array.isArray(value)) return value.map(item => ({ number: Number(item?.number || item?.shotNumber || String(item?.id || "").replace(/\D/g, "")), prompt: String(item?.prompt || item?.videoPrompt || item?.text || "").trim() }));
+  if (value && typeof value === "object") {
+    const nested = Array.isArray(value.shots) ? promptRowsFromJson(value.shots) : [];
+    const keyed = Object.entries(value).map(([key, prompt]) => ({ number: Number(String(key).replace(/\D/g, "")), prompt: typeof prompt === "string" ? prompt.trim() : String(prompt?.prompt || prompt?.videoPrompt || "").trim() }));
+    return [...nested, ...keyed];
+  }
+  return [];
+}
+
+function planBatchPrompts(project, filePaths) {
+  const shots = (project.shots || []).slice().sort((left, right) => Number(left.number) - Number(right.number));
+  const shotByNumber = new Map(shots.map(shot => [Number(shot.number), shot]));
+  const rows = [];
+  for (const filePath of filePaths) {
+    const text = fs.readFileSync(filePath, "utf8").trim();
+    if (!text) continue;
+    if (path.extname(filePath).toLowerCase() === ".json") {
+      try {
+        for (const row of promptRowsFromJson(JSON.parse(text))) {
+          const shot = shotByNumber.get(row.number);
+          if (shot && row.prompt) rows.push({ shot, prompt: row.prompt, filePath });
+        }
+        continue;
+      } catch {}
+    }
+    const shot = shotByNumber.get(shotNumberFromFile(filePath));
+    if (shot) rows.push({ shot, prompt: text, filePath });
+  }
+  if (rows.length) return rows;
+  const sortedPaths = filePaths.slice().sort((left, right) => path.basename(left).localeCompare(path.basename(right), "zh-CN", { numeric: true }));
+  if (sortedPaths.length === shots.length) return sortedPaths.map((filePath, index) => ({ shot: shots[index], prompt: fs.readFileSync(filePath, "utf8").trim(), filePath })).filter(item => item.prompt);
+  return [];
 }
 
 ipcMain.handle("bridge:health", () => bridge.health());
@@ -793,11 +1267,14 @@ ipcMain.handle("app:defaults", () => {
   const contract = contractFor(providerKind);
   const defaultDuration = Math.max(contract.durationMin, Math.min(contract.durationMax, Number(settings.generation?.shotDuration) || 10));
   return {
-    captureMode: Boolean(process.env.DRAMA_SLOT_CAPTURE_PATH),
+    captureMode: Boolean(!app.isPackaged && process.env.DRAMA_SLOT_CAPTURE_PATH),
+    isPackaged: Boolean(app.isPackaged),
     outputDir: path.join(app.getPath("videos"), "纯梦短剧老虎机"),
     providerKind,
     providerName: providerDisplayName(providerKind),
     hailuoApiMode: settings.videoProvider?.hailuoApiMode || "auto",
+    durationMin: contract.durationMin,
+    durationMax: contract.durationMax,
     rules: {
       image: { min: 0, max: contract.imageMax },
       video: { min: 0, max: contract.videoMax, maxDuration: providerKind === "local-xiangsu" ? 10 : null, recommendedMinDuration: providerKind === "puream-hailuo-h3" ? 2 : null, recommendedMaxDuration: providerKind === "puream-hailuo-h3" ? 15 : null },
@@ -953,8 +1430,11 @@ ipcMain.handle("workbench:sync-video-jobs", async () => {
         workflow.reconcileDetachedAutomations();
         return { ok: true, jobs: [] };
       }
-      const health = await bridge.health();
-      if (!(health.ok && health.ready && health.sessionReady)) return { ok: true, jobs: publicPendingJobs(active), deferred: true };
+      const localActive = active.filter(item => !["puream-grok", "puream-gemini"].includes(item.providerKind));
+      if (localActive.length) {
+        const health = await bridge.health();
+        if (!(health.ok && health.ready && health.sessionReady)) return { ok: true, jobs: publicPendingJobs(active), deferred: true };
+      }
       const jobs = await workflow.reconcileOrphanedVideoJobs();
       workflow.reconcileDetachedAutomations();
       return { ok: true, jobs: publicPendingJobs(jobs) };
@@ -1055,11 +1535,21 @@ ipcMain.handle("workbench:list-projects", () => {
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:create-project", (_event, title, options) => {
-  try { return { ok: true, project: requireWorkbench().store.createProject(title, options || {}) }; }
+  try {
+    const { store } = requireWorkbench();
+    const project = store.createProject(title, options || {});
+    const settings = store.getSettings();
+    bridge.configure(settings.videoProvider);
+    return { ok: true, project, settings: redactSettingsForRenderer(settings) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:get-project", (_event, projectId) => {
-  try { return { ok: true, project: requireWorkbench().store.getProject(projectId) }; }
+  try {
+    const { store, workflow } = requireWorkbench();
+    workflow.syncReferenceLibraries(projectId);
+    return { ok: true, project: store.getProject(projectId) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:patch-project", (_event, projectId, patch) => {
@@ -1067,14 +1557,15 @@ ipcMain.handle("workbench:patch-project", (_event, projectId, patch) => {
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:get-settings", () => {
-  try { return { ok: true, settings: requireWorkbench().store.getSettings() }; }
+  try { return { ok: true, settings: redactSettingsForRenderer(requireWorkbench().store.getSettings()) }; }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:save-settings", (_event, settings) => {
   try {
-    const saved = requireWorkbench().store.saveSettings(settings || {});
+    const store = requireWorkbench().store;
+    const saved = store.saveSettings(restoreHiddenPromptDefaults(settings || {}, store.getSettings()));
     bridge.configure(saved.videoProvider);
-    return { ok: true, settings: saved };
+    return { ok: true, settings: redactSettingsForRenderer(saved) };
   }
   catch (error) { return publicError(error); }
 });
@@ -1083,7 +1574,7 @@ ipcMain.handle("workbench:reset-settings", () => {
     const { store } = requireWorkbench();
     const settings = store.resetSettings({ preserveSecrets: true });
     bridge.configure(settings.videoProvider);
-    return { ok: true, settings };
+    return { ok: true, settings: redactSettingsForRenderer(settings) };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:auth-status", () => {
@@ -1097,9 +1588,55 @@ ipcMain.handle("workbench:auth-status", () => {
     return {
       ok: true,
       configured: Boolean(credential),
-      source: settings.textProvider?.authSource || "official-desktop",
+      source: settings.textProvider?.authSource || (credential ? "license-activation" : "missing"),
       masked: credential ? `${credential.slice(0, 2)}••••${credential.slice(-2)}` : ""
     };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("license:status", async () => {
+  try {
+    if (licenseBypassAllowed()) {
+      return { ok: true, activated: true, bypass: true, snapshot: { activated: true, bypass: true, baseUrl: DEFAULT_LICENSE_BASE_URL } };
+    }
+    const settings = requireWorkbench().store.getSettings();
+    const result = await ensurePureamLicenseSession(dramaLicense, settings);
+    const live = result.snapshot;
+    if (!live.activated) return { ok: true, activated: false, snapshot: live };
+    hydratePureamDefaults(requireWorkbench().store, live.activationCode);
+    return {
+      ok: true,
+      activated: true,
+      offlineGrace: Boolean(live.offlineGrace),
+      snapshot: live,
+      recoveredStoredAuthorization: result.recovered
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      activated: false,
+      code: error.code || "LICENSE_ERROR",
+      message: error.message,
+      snapshot: dramaLicense.getSnapshot()
+    };
+  }
+});
+ipcMain.handle("license:activate", async (_event, activationCode) => {
+  try {
+    if (licenseBypassAllowed()) {
+      return { ok: true, activated: true, bypass: true, snapshot: { activated: true, bypass: true } };
+    }
+    const requestedCode = String(activationCode || "").trim()
+      || dramaLicense.storedActivationCode()
+      || storedWorkbenchAuthorizationCode();
+    const snapshot = await dramaLicense.login(requestedCode);
+    const hydrated = hydratePureamDefaults(requireWorkbench().store, snapshot.activationCode);
+    return { ok: true, activated: true, snapshot, configured: hydrated.configured };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("license:logout", () => {
+  try {
+    dramaLicense.clearLocalSession(true);
+    return { ok: true };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:test-provider", async (_event, kind, config) => {
@@ -1124,9 +1661,28 @@ ipcMain.handle("workbench:choose-product", async (_event, projectId) => {
     const { store, workflow } = requireWorkbench();
     const imported = workflow.importAsset(projectId, "product", result.filePaths[0], "product");
     const project = store.getProject(projectId);
-    project.product.imagePath = imported.path;
-    store.saveProject(project);
-    return { ok: true, asset: imported, project };
+    let publicUrl = "";
+    // Best-effort: cache a public URL so later storyboard/video slots can lock the real packshot.
+    try {
+      const settings = store.getSettings();
+      if (hasOssCredentials(settings.videoProvider || {})) {
+        const uploaded = await workflow.resolveHttpsReferenceInputs(settings, [{
+          path: imported.path,
+          url: "",
+          label: "商品参考图",
+          entityType: "product",
+          sourceStage: "product"
+        }]);
+        if (uploaded[0]?.url) publicUrl = uploaded[0].url;
+      }
+    } catch {}
+    const saved = store.replaceProductAsset(projectId, {
+      imagePath: imported.path,
+      publicUrl,
+      source: "manual-upload",
+      reusableAssetId: ""
+    });
+    return { ok: true, asset: imported, project: saved };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:import-text-file", async (_event, kind = "script") => {
@@ -1148,10 +1704,7 @@ ipcMain.handle("workbench:import-text-file", async (_event, kind = "script") => 
 });
 ipcMain.handle("workbench:import-candidate", async (_event, projectId, entityType, entityId, stage) => {
   try {
-    const imageStages = new Set(["character_three_view", "character_intro", "scene_asset", "storyboard_start", "storyboard_end", "wardrobe_asset", "prop_asset"]);
-    const videoStages = new Set(["character_video", "shot_video"]);
-    const audioStages = new Set(["character_voice"]);
-    const type = imageStages.has(stage) ? "image" : videoStages.has(stage) ? "video" : audioStages.has(stage) ? "audio" : "";
+    const type = manualStageMediaType(stage);
     if (!type || !["character", "scene", "shot", "library"].includes(entityType)) throw Object.assign(new Error("手动资产类型无效"), { code: "IMPORT_STAGE_INVALID" });
     const result = await dialog.showOpenDialog(mainWindow, {
       title: "手动上传候选资产",
@@ -1159,40 +1712,128 @@ ipcMain.handle("workbench:import-candidate", async (_event, projectId, entityTyp
       filters: MEDIA_RULES[type].filters
     });
     if (result.canceled) return { ok: true, canceled: true };
-    const { store, workflow } = requireWorkbench();
-    const described = await describeMedia(result.filePaths[0], type);
-    if (stage === "shot_video" && Number(described.duration) > 15.05) {
-      throw Object.assign(new Error("分镜视频参考时长超出合同上限"), { code: "VIDEO_DURATION_INVALID" });
-    }
-    if (stage === "character_voice" && Number(described.duration) > 15.05) {
-      throw Object.assign(new Error("单个音色参考不能超过音频总上限 15 秒"), { code: "AUDIO_DURATION_INVALID" });
-    }
-    const category = type === "image"
-      ? (entityType === "character" || entityType === "library" ? "characters" : entityType === "scene" ? "scenes" : "storyboards")
-      : type === "video" ? "videos" : "audio";
-    const imported = workflow.importAsset(projectId, category, result.filePaths[0], `${stage}-manual`);
-    let candidate = store.addCandidate(projectId, {
-      entityType,
-      entityId,
-      stage,
-      prompt: "手动上传资产",
-      filePath: imported.path,
-      fileUrl: imported.fileUrl,
-      duration: described.duration,
-      source: "manual-upload",
-      qualityAudit: ["shot_video", "character_video"].includes(stage) ? { ok: true, mode: "manual", skipped: true, checkedAt: new Date().toISOString() } : undefined,
-      faceMesh: entityType === "character" && ["character_three_view", "character_intro"].includes(stage)
-        ? { required: store.getProject(projectId).generation?.engine !== "hailuo-h3", applied: false, method: "manual-awaiting-remesh" }
-        : undefined
+    const imported = await importCandidateFromPath(projectId, entityType, entityId, stage, result.filePaths[0]);
+    return { ok: true, ...imported, project: requireWorkbench().store.getProject(projectId) };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:import-batch-media", async (_event, projectId, kind) => {
+  try {
+    if (!["storyboard", "video"].includes(kind)) throw Object.assign(new Error("批量导入类型无效"), { code: "IMPORT_BATCH_KIND_INVALID" });
+    const mediaType = kind === "storyboard" ? "image" : "video";
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: kind === "storyboard" ? "批量上传分镜图" : "批量上传分镜视频",
+      properties: ["openFile", "multiSelections"],
+      filters: MEDIA_RULES[mediaType].filters
     });
-    if (entityType === "character" && ["character_three_view", "character_intro"].includes(stage) && store.getProject(projectId).generation?.engine !== "hailuo-h3") {
-      candidate = await workflow.remeshCharacterAsset(projectId, candidate.id);
+    if (result.canceled) return { ok: true, canceled: true };
+    const { store } = requireWorkbench();
+    const project = store.getProject(projectId);
+    const assignments = planBatchMedia(project, result.filePaths, kind);
+    if (!assignments.length) {
+      const hint = kind === "storyboard"
+        ? "请按 S01-start.png、S01-end.png 或 S01-sheet.png 命名；也可一次选择与当前模式所需槽位数量完全一致的图片。"
+        : "请按 S01.mp4、S02.mp4 命名；也可一次选择与分镜数完全一致的视频。";
+      throw Object.assign(new Error(`无法把文件对应到分镜。${hint}`), { code: "IMPORT_BATCH_MAPPING_FAILED" });
     }
-    if (stage === "storyboard_start" || stage === "storyboard_end") {
-      await workflow.auditStoryboardCandidate(projectId, entityId, candidate.id);
-      candidate = store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+    const imported = [];
+    const failed = [];
+    for (const assignment of assignments) {
+      try {
+        const value = await importCandidateFromPath(projectId, "shot", assignment.shot.id, assignment.stage, assignment.filePath);
+        imported.push({ shotId: assignment.shot.id, shotNumber: assignment.shot.number, stage: assignment.stage, fileName: path.basename(assignment.filePath), candidateId: value.candidate.id, selected: value.candidate.selected === true });
+      } catch (error) {
+        failed.push({ shotId: assignment.shot.id, shotNumber: assignment.shot.number, stage: assignment.stage, fileName: path.basename(assignment.filePath), code: error?.code || "IMPORT_FAILED", message: error?.message || "导入失败" });
+      }
     }
-    return { ok: true, candidate };
+    return { ok: imported.length > 0, imported, failed, project: store.getProject(projectId), message: imported.length ? "" : (failed[0]?.message || "批量导入失败") };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:import-shot-prompts", async (_event, projectId) => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "批量上传分镜提示词",
+      properties: ["openFile", "multiSelections"],
+      filters: [
+        { name: "提示词文件", extensions: ["txt", "md", "markdown", "json"] },
+        { name: "所有文件", extensions: ["*"] }
+      ]
+    });
+    if (result.canceled) return { ok: true, canceled: true };
+    const { store } = requireWorkbench();
+    const project = store.getProject(projectId);
+    const assignments = planBatchPrompts(project, result.filePaths);
+    if (!assignments.length) {
+      throw Object.assign(new Error("无法把提示词对应到分镜。请按 S01.txt、S02.txt 命名，或上传以 S01/S02 为键的 JSON。"), { code: "IMPORT_PROMPT_MAPPING_FAILED" });
+    }
+    const promptByShotId = new Map(assignments.map(item => [item.shot.id, item.prompt]));
+    const shots = project.shots.map(shot => promptByShotId.has(shot.id)
+      ? { ...shot, promptMode: "manual", manualVideoPrompt: promptByShotId.get(shot.id) }
+      : shot);
+    const updated = store.patchProject(projectId, {
+      shots,
+      script: { ...(project.script || {}), manualShotPrompts: true },
+      activitySummary: `批量上传 ${promptByShotId.size} 镜分镜提示词`
+    });
+    return { ok: true, imported: promptByShotId.size, project: updated };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:import-final-video", async (_event, projectId) => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, { title: "上传完整成片", properties: ["openFile"], filters: MEDIA_RULES.video.filters });
+    if (result.canceled) return { ok: true, canceled: true };
+    return { ok: true, ...(await importFinalVideoFromPath(projectId, result.filePaths[0])) };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:import-reusable-asset", async (_event, kind) => {
+  try {
+    const normalizedKind = String(kind || "").trim();
+    const mediaType = ["character", "scene", "image"].includes(normalizedKind) ? "image" : normalizedKind;
+    if (!["character", "scene", "image", "video", "audio"].includes(normalizedKind)) throw Object.assign(new Error("独立资产类型无效"), { code: "REUSABLE_ASSET_KIND_INVALID" });
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: `上传${normalizedKind === "character" ? "人物图" : normalizedKind === "scene" ? "场景图" : mediaType === "image" ? "通用图片" : mediaType === "video" ? "视频" : "音频"}到独立资产库`,
+      properties: ["openFile", "multiSelections"],
+      filters: MEDIA_RULES[mediaType].filters
+    });
+    if (result.canceled) return { ok: true, canceled: true };
+    const { store } = requireWorkbench();
+    const entries = [];
+    for (const filePath of result.filePaths) {
+      const described = await describeMedia(filePath, mediaType);
+      entries.push(store.importReusableAsset(filePath, {
+        kind: normalizedKind,
+        mediaType,
+        label: path.basename(filePath, path.extname(filePath)),
+        duration: described.duration,
+        width: described.width,
+        height: described.height
+      }));
+    }
+    return { ok: true, entries, assets: store.listReusableAssets() };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:delete-reusable-asset", (_event, assetId) => {
+  try {
+    const { store } = requireWorkbench();
+    const removed = store.deleteReusableAsset(assetId);
+    return { ok: true, removed, assets: store.listReusableAssets() };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:bind-library-asset", async (_event, projectId, target, assetId) => {
+  try {
+    const { store } = requireWorkbench();
+    const entry = store.readReusableAssetLibrary().find(item => item.id === assetId);
+    if (!entry?.filePath || !fs.existsSync(entry.filePath)) throw Object.assign(new Error("所选独立资产不存在或文件已丢失"), { code: "REUSABLE_ASSET_NOT_FOUND" });
+    const entityType = String(target?.entityType || "");
+    const stage = String(target?.stage || "");
+    const mediaType = entry.mediaType || (["character", "scene", "image"].includes(entry.kind) ? "image" : entry.kind);
+    const expectedType = entityType === "product" ? "image" : entityType === "final" ? "video" : manualStageMediaType(stage);
+    if (!expectedType || mediaType !== expectedType) throw Object.assign(new Error("该独立资产不能用于当前目标"), { code: "REUSABLE_ASSET_KIND_MISMATCH" });
+    let payload;
+    if (entityType === "product") payload = await importProductFromPath(projectId, entry.filePath, "reusable-asset-library", entry.id);
+    else if (entityType === "final") payload = await importFinalVideoFromPath(projectId, entry.filePath, "reusable-asset-library", entry.id);
+    else payload = await importCandidateFromPath(projectId, entityType, String(target?.entityId || ""), stage, entry.filePath, "reusable-asset-library", entry.id);
+    store.touchReusableAssetUse(entry.id);
+    return { ok: true, ...payload, project: store.getProject(projectId) };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:analyze-script", async (_event, projectId) => {
@@ -1219,6 +1860,22 @@ ipcMain.handle("workbench:run-idea-pipeline", async (_event, projectId) => {
   try { return { ok: true, result: await requireWorkbench().workflow.runIdeaToFullPipeline(projectId) }; }
   catch (error) { return publicError(error); }
 });
+ipcMain.handle("workbench:preview-image-prompt", async (_event, projectId, stage, entityId) => {
+  try { return { ok: true, preview: redactPromptPreview(requireWorkbench().workflow.previewImagePrompt(projectId, stage, entityId)) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:preview-shot-video-prompt", async (_event, projectId, shotId) => {
+  try { return { ok: true, preview: redactPromptPreview(await requireWorkbench().workflow.previewShotVideoPrompt(projectId, shotId)) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:preview-character-video-prompt", async (_event, projectId, characterId) => {
+  try { return { ok: true, preview: redactPromptPreview(requireWorkbench().workflow.previewCharacterVideoPrompt(projectId, characterId)) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:refresh-creator-prompts", async (_event, projectId, options) => {
+  try { return { ok: true, project: await requireWorkbench().workflow.refreshCreatorPrompts(projectId, options || {}) }; }
+  catch (error) { return publicError(error); }
+});
 ipcMain.handle("workbench:generate-image", async (_event, projectId, stage, entityId, prompt) => {
   try { return { ok: true, candidate: await requireWorkbench().workflow.generateImageCandidate(projectId, stage, entityId, prompt) }; }
   catch (error) { return publicError(error); }
@@ -1238,6 +1895,74 @@ ipcMain.handle("workbench:generate-character-video", async (_event, projectId, c
 ipcMain.handle("workbench:extract-character-voice", async (_event, projectId, characterId) => {
   try { return { ok: true, candidate: await requireWorkbench().workflow.extractCharacterVoice(projectId, characterId) }; }
   catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:list-voice-library", () => {
+  try { return { ok: true, voices: requireWorkbench().workflow.listVoiceLibrary() }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:list-reusable-assets", (_event, kind) => {
+  try { return { ok: true, assets: requireWorkbench().store.listReusableAssets(kind || "") }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:bind-reusable-asset", (_event, projectId, entityType, entityId, assetId) => {
+  try { return { ok: true, candidate: requireWorkbench().store.bindReusableAsset(projectId, entityType, entityId, assetId) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:deposit-character-voice", (_event, projectId, characterId) => {
+  try { return { ok: true, entry: requireWorkbench().workflow.depositCharacterVoiceToLibrary(projectId, characterId) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:bind-character-voice-library", async (_event, projectId, characterId, voiceId) => {
+  try { return { ok: true, candidate: requireWorkbench().workflow.bindCharacterVoiceLibrary(projectId, characterId, voiceId) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:delete-voice-library-entry", (_event, voiceId) => {
+  try { return { ok: true, entry: requireWorkbench().store.deleteVoiceLibraryEntry(voiceId) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:import-voice-library", async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "导入长期音色库音频",
+      properties: ["openFile"],
+      filters: MEDIA_RULES.audio.filters
+    });
+    if (result.canceled) return { ok: true, canceled: true };
+    const { store, workflow } = requireWorkbench();
+    const sourcePath = result.filePaths[0];
+    const described = await describeMedia(sourcePath, "audio");
+    if (Number(described.duration) > 15.05) {
+      throw Object.assign(new Error("单个音色参考不能超过音频总上限 15 秒"), { code: "AUDIO_DURATION_INVALID" });
+    }
+    const entryId = require("./workbench-store").makeId("voice");
+    const sourceExtension = `.${described.extension}`;
+    const target = path.join(store.voiceLibraryFilesDir, `${entryId}${sourceExtension}`);
+    fs.mkdirSync(store.voiceLibraryFilesDir, { recursive: true });
+    fs.copyFileSync(sourcePath, target);
+    const baseName = path.basename(sourcePath, path.extname(sourcePath));
+    const entry = store.upsertVoiceLibraryEntry({
+      id: entryId,
+      label: baseName || entryId,
+      characterName: baseName,
+      gender: "",
+      ageBand: "",
+      voiceDescription: "",
+      identityHints: "",
+      tags: [baseName].filter(Boolean),
+      filePath: target,
+      fileUrl: pathToFileURL(target).href,
+      duration: Number(described.duration) || 0,
+      audioSpec: sourceExtension === ".wav"
+        ? { container: "wav", codec: "pcm_s16le", channels: 1, sampleRate: 44100 }
+        : { container: described.extension, codec: "", channels: null, sampleRate: null },
+      audioAudit: { ok: true, source: "manual-import" },
+      mediaProbeVerified: true,
+      fingerprint: `manual|${baseName}|${entryId}`,
+      source: { projectId: "", projectTitle: "", characterId: "", characterName: baseName, candidateId: "" },
+      useCount: 0
+    });
+    return { ok: true, entry, voices: workflow.listVoiceLibrary() };
+  } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-shot-video", async (_event, projectId, shotId, mode) => {
   try { return { ok: true, candidate: await requireWorkbench().workflow.generateShotVideo(projectId, shotId, mode) }; }
@@ -1291,7 +2016,26 @@ ipcMain.handle("workbench:generate-library-asset", async (_event, projectId, lib
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:confirm-candidate", (_event, projectId, candidateId, discardOthers) => {
-  try { return { ok: true, candidate: requireWorkbench().store.confirmCandidate(projectId, candidateId, discardOthers !== false) }; }
+  try {
+    const { store, workflow } = requireWorkbench();
+    const candidate = store.confirmCandidate(projectId, candidateId, discardOthers !== false);
+    if (candidate?.entityType === "character" && candidate?.stage === "character_voice") {
+      workflow.invalidateShotVideosForVoiceChange(projectId, candidate.entityId, candidate);
+    }
+    return { ok: true, candidate };
+  }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:discard-candidate", (_event, projectId, candidateId) => {
+  try { return { ok: true, ...requireWorkbench().store.discardCandidate(projectId, candidateId) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:discard-failed-records", (_event, projectId, scope) => {
+  try { return { ok: true, ...requireWorkbench().store.discardFailedRecords(projectId, scope || null) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:clear-automation-failures", (_event, projectId) => {
+  try { return { ok: true, ...requireWorkbench().store.clearAutomationFailures(projectId) }; }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:stitch", async (_event, projectId) => {
@@ -1302,6 +2046,30 @@ ipcMain.handle("workbench:stitch", async (_event, projectId) => {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
+  process.on("unhandledRejection", (reason) => {
+    console.error("[workbench] unhandledRejection", reason);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: "后台任务异常",
+        message: "有任务未捕获地失败。",
+        detail: String(reason?.message || reason || "unknown"),
+        buttons: ["知道了"]
+      }).catch(() => {});
+    }
+  });
+  process.on("uncaughtException", (error) => {
+    console.error("[workbench] uncaughtException", error);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: "程序异常",
+        message: "主进程发生未处理错误。",
+        detail: String(error?.message || error || "unknown"),
+        buttons: ["知道了"]
+      }).catch(() => {});
+    }
+  });
   app.on("second-instance", () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -1310,6 +2078,10 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
   app.whenReady().then(() => {
+    // safeStorage can only decrypt the persisted authorization after Electron is
+    // ready. Constructing the client at module load made the `safe:` ciphertext
+    // look like a live token and caused every restart to report SESSION_EXPIRED.
+    dramaLicense = new DramaLicenseClient();
     const dataRoot = process.env.DRAMA_SLOT_DATA_ROOT || path.join(app.getPath("userData"), "workbench");
     workbenchStore = new WorkbenchStore(dataRoot, {
       encode: value => {
@@ -1322,12 +2094,15 @@ if (!app.requestSingleInstanceLock()) {
         catch { return ""; }
       }
     });
-    hydratePureamDefaults(workbenchStore);
+    integrityGuard.start();
+    hydratePureamDefaults(workbenchStore, dramaLicense.storedActivationCode());
     workbenchWorkflow = new WorkbenchWorkflow({
       store: workbenchStore,
       bridge,
       locateFfmpeg,
-      stagingRoot: path.join(process.env.LOCALAPPDATA || app.getPath("temp"), "PureamDramaSlot", "staging")
+      stagingRoot: path.join(process.env.LOCALAPPDATA || app.getPath("temp"), "PureamDramaSlot", "staging"),
+      licenseClient: licenseBypassAllowed() ? null : dramaLicense,
+      integrityGuard
     });
     workbenchWorkflow.reconcileDetachedAutomations();
     createWindow();

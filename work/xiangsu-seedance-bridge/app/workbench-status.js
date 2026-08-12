@@ -6,7 +6,7 @@
   if (root) root.DramaSlotStatus = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, () => {
   const ACTIVE_JOB_STATUSES = new Set([
-    "queued", "pending", "submitted", "running", "processing", "uploading", "waiting"
+    "queued", "pending", "submitted", "running", "processing", "uploading", "waiting", "remote_pending", "download_pending"
   ]);
 
   const VIDEO_JOB_TYPES = new Set(["character_video", "shot_video"]);
@@ -19,9 +19,16 @@
     })[0] || null;
   }
 
-  function isActiveVideoJob(job) {
-    return Boolean(job && VIDEO_JOB_TYPES.has(job.type) && ACTIVE_JOB_STATUSES.has(String(job.status || "").toLowerCase()));
+function isActiveVideoJob(job) {
+  if (!job || !VIDEO_JOB_TYPES.has(job.type)) return false;
+  if (!ACTIVE_JOB_STATUSES.has(String(job.status || "").toLowerCase())) return false;
+  // Uploading/queued without a real upstream task id is not “running upstream”.
+  if (!job.taskId && ["uploading", "queued", "pending", "submitted", "waiting"].includes(String(job.status || "").toLowerCase())) {
+    const updatedAt = Date.parse(job.updatedAt || job.createdAt || "");
+    if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > 90_000) return false;
   }
+  return true;
+}
 
   function latestVideoJobs(project) {
     const latest = new Map();
@@ -172,7 +179,7 @@
 
     const status = String(job?.status || "").toLowerCase();
     const progress = videoJobProgress(job);
-    if (ACTIVE_JOB_STATUSES.has(status)) {
+    if (isActiveVideoJob(job)) {
       return {
         key: "generating",
         label: progress.determinate ? `生成中 ${progress.label}` : videoJobStage(job),
@@ -183,15 +190,15 @@
         detail: job?.message || "视频生成任务正在运行"
       };
     }
-    if (status === "failed" || status === "error") {
+    if (status === "failed" || status === "error" || (ACTIVE_JOB_STATUSES.has(status) && !job?.taskId)) {
       return {
         key: "failed",
-        label: "生成失败",
+        label: status === "failed" || status === "error" ? "生成失败" : "未真正提交",
         candidate: null,
         job,
         activeJob: null,
         progress,
-        detail: job?.message || "视频生成失败，可返回分镜视频重试"
+        detail: job?.message || (job?.taskId ? "视频生成失败，可返回分镜视频重试" : "本地显示进行中，但没有上游任务 ID；请重新抽卡")
       };
     }
     return { key: "missing", label: "缺视频", candidate: null, job, activeJob: null, progress: videoJobProgress(null), detail: "该镜头尚无可用视频" };

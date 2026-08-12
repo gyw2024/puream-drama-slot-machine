@@ -29,7 +29,7 @@ const state = {
   submitting: false,
   rules: null,
   providerKind: "local-xiangsu",
-  providerName: "本地像塑 Seedance 2.0 Mini",
+  providerName: "本地像塑",
   hailuoApiMode: "auto",
   draggedImageIndex: null
 };
@@ -138,7 +138,7 @@ function renderVideos() {
       const title = document.createElement("span");
       title.textContent = "添加视频";
       const detail = document.createElement("small");
-      detail.textContent = state.rules.video.maxDuration ? `最长 ${state.rules.video.maxDuration} 秒` : "H3 建议 2–15 秒";
+      detail.textContent = state.rules.video.maxDuration ? `最长 ${state.rules.video.maxDuration} 秒` : "云端算力建议 2–15 秒";
       card.append(icon, title, detail);
       card.addEventListener("click", () => chooseMedia("video"));
     } else {
@@ -433,7 +433,7 @@ elements.diagnostics.addEventListener("click", async () => {
   const result = await window.dramaSlot.diagnostics();
   elements.diagnosticOutput.classList.remove("hidden");
   elements.diagnosticOutput.textContent = result.ok
-    ? `${state.providerName}合同检测通过\n调用模式：${state.providerKind === "puream-hailuo-h3" ? state.hailuoApiMode : "Seedance"}\n本次检测未创建计费任务`
+    ? `${state.providerName}合同检测通过\n调用模式：${state.providerKind === "puream-hailuo-h3" ? state.hailuoApiMode : "本地像塑"}\n本次检测未创建计费任务`
     : (result.message || "检测失败");
   setTimeout(() => elements.diagnosticOutput.classList.add("hidden"), 6000);
 });
@@ -478,21 +478,23 @@ async function bootstrap() {
   const defaults = await window.dramaSlot.defaults();
   state.rules = defaults.rules;
   state.providerKind = defaults.providerKind;
-  state.providerName = defaults.providerName;
+  state.providerName = state.providerKind === "puream-hailuo-h3"
+    ? "云端算力"
+    : state.providerKind === "puream-seedance" ? "回退版本" : "本地像塑";
   state.hailuoApiMode = defaults.hailuoApiMode || "auto";
   state.outputDir = defaults.outputDir;
   elements.outputDir.textContent = defaults.outputDir;
   state.ratio = defaults.rules.ratios[0];
   state.duration = defaults.rules.duration.default;
-  elements.providerSubtitle.textContent = state.providerKind === "puream-hailuo-h3" ? "PUREAM CLOUD · MINIMAX HAILUO H3" : state.providerKind === "puream-seedance" ? "PUREAM CLOUD · SEEDANCE 2.0" : "SEEDANCE 2.0 MINI · XIANGSU SESSION";
+  elements.providerSubtitle.textContent = state.providerKind === "puream-hailuo-h3" ? "PUREAM CLOUD · VIDEO COMPUTE" : state.providerKind === "puream-seedance" ? "PUREAM CLOUD · FALLBACK" : "LOCAL VIDEO COMPUTE · XIANGSU SESSION";
   elements.submitProviderName.textContent = state.providerName;
   elements.startBridge.textContent = state.providerKind === "local-xiangsu" ? "启动后台桥" : "校验纯梦上游";
   elements.hailuoModeField.classList.toggle("hidden", state.providerKind !== "puream-hailuo-h3");
   elements.hailuoApiMode.value = state.hailuoApiMode;
   elements.rulePopover.textContent = state.providerKind === "puream-hailuo-h3"
-    ? "海螺 H3 支持纯提示词、1–9 图、1–3 视频、1–3 独立音频、最多 3 路视频配套音轨，以及两类以上素材的全能多参模式；单文件最大 300MB。"
+    ? "云端算力支持纯提示词、1–9 图、1–3 视频、1–3 独立音频、最多 3 路视频配套音轨，以及两类以上素材的全能多参模式；单文件最大 300MB。"
     : state.providerKind === "puream-seedance"
-    ? "纯梦 Seedance 支持 1–12 个参考素材：最多 9 图、3 视频、3 音频，固定生成 5 秒。"
+    ? "回退版本支持 1–12 个参考素材：最多 9 图、3 视频、3 音频，固定生成 5 秒。"
     : "本地像塑支持最多 9 图、1 个最长 10 秒视频、3 段合计最长 15 秒音频。";
   document.querySelector(".duration-block small").textContent = `${state.rules.duration.min}–${state.rules.duration.max} 秒`;
   renderRatios();

@@ -1,5 +1,8 @@
 "use strict";
 
+const net = require("node:net");
+const dns = require("node:dns").promises;
+
 const LOCAL_XIANGSU_ORIGIN = "http://127.0.0.1:28911";
 const PUREAM_CLOUD_ORIGIN = "https://puream.cn";
 const PUREAM_ROOT_DOMAIN = "puream.cn";
@@ -20,6 +23,85 @@ function policyError(message, code = "VIDEO_PROVIDER_POLICY_REJECTED") {
 function isPureamHostname(hostname) {
   const normalized = String(hostname || "").trim().toLowerCase().replace(/\.$/, "");
   return normalized === PUREAM_ROOT_DOMAIN || normalized.endsWith(`.${PUREAM_ROOT_DOMAIN}`);
+}
+
+function isNonPublicIpAddress(hostname) {
+  const host = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  const mapped = host.match(/^(?:::ffff:|0:0:0:0:0:ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (mapped) {
+    const high = Number.parseInt(mapped[1], 16);
+    const low = Number.parseInt(mapped[2], 16);
+    if (Number.isFinite(high) && Number.isFinite(low)) {
+      return isNonPublicIpAddress(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+    }
+  }
+  const version = net.isIP(host);
+  if (version === 4) {
+    const parts = host.split(".").map(Number);
+    const [a, b] = parts;
+    return a === 0
+      || a === 10
+      || a === 127
+      || (a === 100 && b >= 64 && b <= 127)
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 0 && (parts[2] === 0 || parts[2] === 2))
+      || (a === 192 && b === 168)
+      || (a === 198 && (b === 18 || b === 19))
+      || (a === 198 && b === 51 && parts[2] === 100)
+      || (a === 203 && b === 0 && parts[2] === 113)
+      || a >= 224;
+  }
+  if (version === 6) {
+    if (host === "::" || host === "::1") return true;
+    if (/^::ffff:/.test(host)) return isNonPublicIpAddress(host.replace(/^::ffff:/, ""));
+    return /^(fc|fd)/.test(host)
+      || /^fe[89ab]/.test(host)
+      || /^ff/.test(host)
+      || /^2001:db8(?::|$)/.test(host);
+  }
+  return false;
+}
+
+function assertPublicHostname(parsed, code = "REFERENCE_URL_PRIVATE") {
+  const hostname = String(parsed?.hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (!hostname
+    || hostname === "localhost"
+    || hostname.endsWith(".localhost")
+    || hostname.endsWith(".local")
+    || hostname.endsWith(".lan")
+    || hostname.endsWith(".internal")
+    || hostname === "localtest.me"
+    || hostname.endsWith(".localtest.me")
+    || hostname === "lvh.me"
+    || hostname.endsWith(".lvh.me")
+    || hostname.endsWith(".nip.io")
+    || hostname.endsWith(".sslip.io")
+    || hostname.endsWith(".xip.io")
+    || isNonPublicIpAddress(hostname)) {
+    throw policyError("云端素材地址不能指向本机、局域网、链路本地或保留地址", code);
+  }
+}
+
+async function assertResolvedPublicUrl(value, options = {}) {
+  let parsed;
+  try { parsed = new URL(String(value || "")); }
+  catch { throw policyError("公网地址格式无效", options.invalidCode || "REFERENCE_URL_INVALID"); }
+  assertPublicHostname(parsed, options.privateCode || "REFERENCE_URL_PRIVATE");
+  const hostname = String(parsed.hostname || "").replace(/^\[|\]$/g, "");
+  if (net.isIP(hostname)) return parsed.toString();
+  const lookup = typeof options.lookup === "function" ? options.lookup : dns.lookup;
+  let records;
+  try {
+    records = await lookup(hostname, { all: true, verbatim: true });
+  } catch (error) {
+    throw Object.assign(policyError(`公网地址 DNS 解析失败：${hostname}`, options.unresolvedCode || "REFERENCE_URL_DNS_UNRESOLVED"), { cause: error });
+  }
+  const items = Array.isArray(records) ? records : [records];
+  if (!items.length || items.some(item => !item?.address || isNonPublicIpAddress(item.address))) {
+    throw policyError("公网地址解析到了本机、局域网、链路本地或保留地址", options.privateCode || "REFERENCE_URL_PRIVATE");
+  }
+  return parsed.toString();
 }
 
 function normalizePureamCloudBaseUrl(value) {
@@ -73,6 +155,10 @@ function normalizeHailuoApiMode(value) {
   return HAILUO_API_MODES.has(mode) ? mode : "auto";
 }
 
+function normalizeCloudVideoResolution(value) {
+  return String(value || "").trim() === "768" ? "768" : "480";
+}
+
 function normalizeVideoProvider(config = {}) {
   const kind = normalizeProviderKind(config.kind);
   const common = {
@@ -85,6 +171,7 @@ function normalizeVideoProvider(config = {}) {
     ossBucket: normalizeOssBucket(config.ossBucket || config.bucket || ""),
     ossEndpoint: normalizeOssEndpoint(config.ossEndpoint || config.diyu || ""),
     referenceUrlTtlSeconds: Math.max(3600, Math.min(86400, Number(config.referenceUrlTtlSeconds) || 21600)),
+    cloudVideoResolution: normalizeCloudVideoResolution(config.cloudVideoResolution),
     hailuoApiMode: normalizeHailuoApiMode(config.hailuoApiMode),
     hailuoRefImageSize: config.hailuoRefImageSize === "max" ? "max" : "match",
     hailuoSeed: String(config.hailuoSeed ?? "").trim()
@@ -115,6 +202,7 @@ function assertSafeVideoDownloadUrl(value) {
   if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
     throw policyError("云端视频结果只允许从安全 HTTPS 地址下载", "REMOTE_VIDEO_URL_BLOCKED");
   }
+  assertPublicHostname(parsed, "REMOTE_VIDEO_URL_BLOCKED");
   return parsed.toString();
 }
 
@@ -125,6 +213,7 @@ function assertPublicReferenceUrl(value) {
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
     throw policyError("云端参考素材必须使用公开 HTTP(S) 地址", "REFERENCE_URL_INVALID");
   }
+  assertPublicHostname(parsed, "REFERENCE_URL_PRIVATE");
   return parsed.toString();
 }
 
@@ -135,11 +224,14 @@ module.exports = {
   PUREAM_ROOT_DOMAIN,
   VIDEO_PROVIDER_KINDS,
   assertPublicReferenceUrl,
+  assertResolvedPublicUrl,
   assertPureamCloudRequestUrl,
   assertSafeVideoDownloadUrl,
+  isNonPublicIpAddress,
   isPureamHostname,
   normalizeOssBucket,
   normalizeOssEndpoint,
+  normalizeCloudVideoResolution,
   normalizeHailuoApiMode,
   normalizeProviderKind,
   normalizePureamCloudBaseUrl,

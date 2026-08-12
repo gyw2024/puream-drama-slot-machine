@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="纯梦短剧老虎机应用图标">
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#FFE36A"/><stop offset=".55" stop-color="#FFBE21"/><stop offset="1" stop-color="#FF8C19"/></linearGradient>
+    <radialGradient id="tile" cx="50%" cy="35%" r="75%"><stop stop-color="#17345B"/><stop offset="1" stop-color="#07152D"/></radialGradient>
+    <filter id="glow" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="13" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect x="28" y="28" width="968" height="968" rx="220" fill="url(#tile)"/>
+  <path d="M190 707V338c0-103 76-180 178-180 76 0 126 35 185 94l85 85 116-116c71-71 184-20 184 81v369c0 104-126 155-199 81L533 546l-92 92c-64 64-143 100-251 69Zm112-79c32 2 53-8 83-38l104-104-134-134c-21-21-53-8-53 22v254Zm291-202 202 202c18 18 49 6 49-20V329c0-25-30-37-48-20L593 426Z" fill="url(#gold)" fill-rule="evenodd" filter="url(#glow)"/>
+  <g fill="#07152D" stroke="#FFE36A" stroke-width="10"><rect x="226" y="271" width="104" height="88" rx="17"/><rect x="226" y="387" width="104" height="88" rx="17"/><rect x="226" y="503" width="104" height="88" rx="17"/></g>
+  <g fill="#FFE36A"><circle cx="243" cy="288" r="6"/><circle cx="313" cy="288" r="6"/><circle cx="243" cy="342" r="6"/><circle cx="313" cy="342" r="6"/><circle cx="243" cy="404" r="6"/><circle cx="313" cy="404" r="6"/><circle cx="243" cy="458" r="6"/><circle cx="313" cy="458" r="6"/><circle cx="243" cy="520" r="6"/><circle cx="313" cy="520" r="6"/><circle cx="243" cy="574" r="6"/><circle cx="313" cy="574" r="6"/></g>
+  <path d="M848 225v-73" stroke="#FFB517" stroke-width="28" stroke-linecap="round"/><circle cx="848" cy="135" r="35" fill="#FF8C19" stroke="#FFE36A" stroke-width="12"/>
+</svg>
