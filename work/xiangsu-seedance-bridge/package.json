@@ -1,6 +1,6 @@
 {
   "name": "xiangsu-seedance-bridge",
-  "version": "0.13.18",
+  "version": "0.13.19",
   "description": "纯梦短剧老虎机：纯梦云端算力默认、可切换本地像塑的一键短剧生产工具",
   "main": "app/main.js",
   "author": "PUREAM",
@@ -8,10 +8,15 @@
   "private": true,
   "scripts": {
     "test": "node --test scripts/*.test.js",
+    "verify:build-assets": "node scripts/verify-build-assets.js",
+    "prepare:build-assets": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-build-assets.ps1",
+    "prebuild:dir": "npm run verify:build-assets",
     "build:dir": "electron-builder --win dir --x64",
+    "prebuild:installer": "npm run verify:build-assets",
     "build:installer": "electron-builder --win nsis --x64",
     "audit:packaged": "node scripts/audit-packaged.js",
-    "audit:installed": "node scripts/audit-installed.js"
+    "audit:installed": "node scripts/audit-installed.js",
+    "audit:upload-transport": "electron scripts/electron-upload-transport.audit.js"
   },
   "devDependencies": {
     "axe-core": "4.13.0",
@@ -43,7 +48,7 @@
       }
     ],
     "directories": {
-      "output": "dist-fixed-0.13.18"
+      "output": "dist-fixed-0.13.19"
     },
     "win": {
       "icon": "app/assets/app.ico",

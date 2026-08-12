@@ -17,6 +17,8 @@ const state = {
   drawingScopes: new Set(),
   drawingStages: new Set(),
   pollTimer: null,
+  polling: false,
+  lastPollErrorToastAt: 0,
   scriptPollTimer: null,
   scriptPolling: false,
   scriptEditorDirty: false,
@@ -360,7 +362,7 @@ function decorateFeatureHelp() {
     testTextProvider: "验证当前文本供应商的授权与写作接口是否可用，不会生成正式剧本。",
     testImageProvider: "验证纯梦官网图片授权，不会创建正式图片任务。",
     testVideoProvider: "检查本地像塑或云端算力的连接与授权状态，不会提交正式视频。",
-    resetSettings: "恢复系统维护的默认设置与隐藏提示词，已保存的授权码会保留。",
+    resetSettings: "恢复系统维护的默认设置与隐藏提示词，并清除已保存的供应商密钥和 OSS 凭据。",
     clearVideoOss: "立即清空当前电脑保存的 OSS AccessKey、Bucket 与 Endpoint，不影响已经生成的本地资产。",
     newProject: "创建一个新的漫剧项目，并设置商品、输入方式、画幅与全局目标时长。",
     editProjectStrategy: "调整当前项目的算力来源、制作方式、输入来源、画幅和全局目标时长。",
@@ -420,18 +422,11 @@ function decorateFeatureHelp() {
   };
   Object.entries(help).forEach(([id, tip]) => {
     const node = document.getElementById(id);
-    if (!node || node.querySelector(":scope > .info-dot")) return;
+    if (!node) return;
     node.dataset.tooltip = tip;
-    const dot = document.createElement("span");
-    dot.className = "info-dot action-info";
-    dot.tabIndex = -1;
-    dot.setAttribute("aria-hidden", "true");
-    dot.dataset.tooltip = tip;
-    dot.textContent = "!";
-    node.appendChild(dot);
   });
   document.querySelectorAll("button").forEach(node => {
-    if (node.querySelector(":scope > .info-dot") || node.closest("#infoTooltipLayer")) return;
+    if (node.closest("#infoTooltipLayer")) return;
     const isActionButton = Boolean(node.id || node.dataset.action || node.dataset.tooltip || node.classList.contains("stage-button") || node.classList.contains("library-nav-button"));
     if (!isActionButton) return;
     const label = String(node.innerText || node.textContent || node.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
@@ -457,13 +452,6 @@ function decorateFeatureHelp() {
       || node.title
       || commonHelp;
     node.dataset.tooltip = tip;
-    const dot = document.createElement("span");
-    dot.className = "info-dot action-info";
-    dot.tabIndex = -1;
-    dot.setAttribute("aria-hidden", "true");
-    dot.dataset.tooltip = tip;
-    dot.textContent = "!";
-    node.appendChild(dot);
   });
 }
 
@@ -541,12 +529,12 @@ function installInfoTooltipLayer() {
     featureHelpObserver.observe(document.body, { childList: true, characterData: true, attributes: true, attributeFilter: ["title", "aria-label", "data-tooltip"], subtree: true });
   }
   document.addEventListener("pointerover", event => {
-    const dot = event.target?.closest?.(".info-dot");
-    if (dot) showInfoTooltip(dot);
+    const anchor = event.target?.closest?.("button[data-tooltip], .info-dot");
+    if (anchor) showInfoTooltip(anchor);
   });
   document.addEventListener("pointerout", event => {
-    const dot = event.target?.closest?.(".info-dot");
-    if (dot && !dot.contains(event.relatedTarget)) hideInfoTooltip(dot);
+    const anchor = event.target?.closest?.("button[data-tooltip], .info-dot");
+    if (anchor && !anchor.contains(event.relatedTarget)) hideInfoTooltip(anchor);
   });
   document.addEventListener("focus", event => {
     const anchor = event.target?.closest?.("button[data-tooltip], .info-dot");
@@ -568,6 +556,10 @@ function maskSpecificModelText(value) {
     .replace(/\bhailuo\b|海螺/gi, "纯梦云端算力")
     .replace(/(?:纯梦云端算力[\s/·_-]*){2,}/g, "纯梦云端算力")
     .replace(/Seedance/gi, "本地像塑");
+}
+
+function escapePublicText(value) {
+  return escapeHtml(maskSpecificModelText(value).replace(/(?:[A-Za-z]:\\|\\\\)[^\r\n"']+/g, "本地文件"));
 }
 
 function maskSpecificModelNames(root = document.body) {
@@ -596,14 +588,8 @@ function maskSpecificModelNames(root = document.body) {
       if (masked !== value) element.setAttribute(attribute, masked);
     });
   });
-  const controls = root.matches?.("textarea,input:not([type='hidden']):not([type='radio']):not([type='checkbox']):not([type='password'])")
-    ? [root, ...root.querySelectorAll("textarea,input:not([type='hidden']):not([type='radio']):not([type='checkbox']):not([type='password'])")]
-    : [...root.querySelectorAll?.("textarea,input:not([type='hidden']):not([type='radio']):not([type='checkbox']):not([type='password'])") || []];
-  controls.forEach(control => {
-    const value = control.value || "";
-    const masked = maskSpecificModelText(value);
-    if (masked !== value) control.value = masked;
-  });
+  // Never rewrite editable values. A user's manual prompt must survive display
+  // masking byte-for-byte; system-generated prompt surfaces mask explicitly.
 }
 
 function applyProductSurfaceLabels() {
@@ -698,7 +684,9 @@ function currentAssetLabel(value) {
 
 function fileUrl(filePath) {
   if (!filePath) return "";
-  return encodeURI(`file:///${String(filePath).replace(/\\/g, "/")}`);
+  return encodeURI(`file:///${String(filePath).replace(/\\/g, "/")}`)
+    .replace(/#/g, "%23")
+    .replace(/\?/g, "%3F");
 }
 
 function mediaKind(filePath, fallback = "image") {
@@ -721,7 +709,7 @@ function videoProviderLabel(kind) {
 }
 
 function currentProviderKind() {
-  return state.settings?.videoProvider?.kind || "puream-hailuo-h3";
+  return state.project?.generation?.videoProviderKind || state.settings?.videoProvider?.kind || "puream-hailuo-h3";
 }
 
 function projectRequiresFaceMeshUi(project = state.project) {
@@ -734,9 +722,7 @@ function currentVideoEngineName(project = state.project) {
 }
 
 function videoProviderMatchesProject(kind) {
-  const providerEngine = kind === "puream-hailuo-h3" ? "hailuo-h3" : "seedance";
-  const projectEngine = state.project?.generation?.engine === "hailuo-h3" ? "hailuo-h3" : "seedance";
-  return providerEngine === projectEngine;
+  return ["local-xiangsu", "puream-hailuo-h3", "puream-seedance"].includes(String(kind || ""));
 }
 
 function videoJobStatusClass(job) {
@@ -1126,11 +1112,11 @@ function renderScriptTask() {
   panel.className = `script-task-panel ${visibleStatus}`;
   $("#scriptTaskState").textContent = statusLabels[visibleStatus] || "未开始";
   const live = state.project.script?.generationLive || {};
-  $("#scriptTaskMessage").textContent = task.managed
+  $("#scriptTaskMessage").textContent = maskSpecificModelText(task.managed
     ? task.automation.message || live.message || "模型正在生成并整理剧本"
     : task.status === "failed" || task.status === "cancelled"
       ? task.automation.message || "本次写作已经结束"
-      : "开始写作后，这里会实时显示模型当前阶段和已输出内容。";
+      : "开始写作后，这里会实时显示模型当前阶段和已输出内容。");
   const outputChars = Number(live.outputChars) || String(state.project.script?.raw || "").length;
   const updatedAt = live.updatedAt ? new Date(live.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
   $("#scriptTaskMeta").textContent = task.managed
@@ -1193,7 +1179,14 @@ function ensureScriptLivePolling() {
       if (changed && state.stage === "script") renderScript();
       const task = scriptWorkflowState();
       if (!task.active && !state.busy) stopScriptLivePolling();
-    } catch {} finally {
+    } catch (error) {
+      console.error("script live status sync failed", error);
+      const now = Date.now();
+      if (now - state.lastPollErrorToastAt > 60_000) {
+        state.lastPollErrorToastAt = now;
+        showToast("剧本实时状态同步暂时失败，软件会自动重试", "error");
+      }
+    } finally {
       state.scriptPolling = false;
     }
   }, 800);
@@ -1378,14 +1371,17 @@ async function loadProjects(preferredId) {
   const result = await api.workbench.listProjects();
   if (!result.ok) throw new Error(result.message);
   state.projects = result.projects || [];
-  if (!state.projects.length) {
+  let availableProjects = state.projects.filter(item => item.status !== "corrupted");
+  if (!availableProjects.length) {
     const created = await api.workbench.createProject("我的第一部带货漫剧", { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "continuation", modeConfirmed: state.captureMode, executionMode: "step", inputMode: "ai" });
     if (!created.ok) throw new Error(created.message);
-    state.projects = [{ id: created.project.id, title: created.project.title, updatedAt: created.project.updatedAt }];
+    const summary = { id: created.project.id, title: created.project.title, status: created.project.status, updatedAt: created.project.updatedAt };
+    state.projects = [summary, ...state.projects];
+    availableProjects = [summary];
   }
   const select = $("#projectSelect");
-  select.innerHTML = state.projects.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title)}</option>`).join("");
-  const projectId = preferredId && state.projects.some(item => item.id === preferredId) ? preferredId : state.projects[0].id;
+  select.innerHTML = state.projects.map(item => `<option value="${escapeHtml(item.id)}" ${item.status === "corrupted" ? "disabled" : ""}>${escapeHtml(item.title)}${item.status === "corrupted" ? " · 数据受损，原目录已保留" : ""}</option>`).join("");
+  const projectId = preferredId && availableProjects.some(item => item.id === preferredId) ? preferredId : availableProjects[0].id;
   select.value = projectId;
   await loadProject(projectId);
 }
@@ -1401,7 +1397,9 @@ async function loadProject(projectId, fullRender = true) {
     try {
       const patched = await api.workbench.patchProject(project.id, { shots: healedShots, activitySummary: "自动对齐分镜场景引用" });
       if (patched?.ok) project = patched.project;
-    } catch {}
+    } catch (error) {
+      console.error("shot scene reference repair failed", error);
+    }
   }
   const nextSignature = projectRenderSignature(project);
   const projectChanged = state.project?.id !== project?.id || state.projectRenderSignature !== nextSignature;
@@ -1923,14 +1921,14 @@ function renderJobs() {
   const history = (project.jobs || []).slice().sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || ""))).slice(0, 10);
   if ($("#jobStrip")) {
     $("#jobStrip").innerHTML = activeJobs.length
-      ? activeJobs.map(job => `<div class="job-chip ${videoJobStatusClass(job)}"><div class="job-chip-title"><b>${escapeHtml(stageLabels[job.type] || job.type || "生产任务")}${job.entityId ? ` ${escapeHtml(job.entityId)}` : ""}</b><span>${escapeHtml(videoStatusApi.videoJobProvider(job))}实时同步</span></div>${videoJobProgressMarkup(job)}${job.message ? `<p>${escapeHtml(job.message)}</p>` : ""}</div>`).join("")
+      ? activeJobs.map(job => `<div class="job-chip ${videoJobStatusClass(job)}"><div class="job-chip-title"><b>${escapeHtml(stageLabels[job.type] || job.type || "生产任务")}${job.entityId ? ` ${escapeHtml(job.entityId)}` : ""}</b><span>${escapePublicText(videoStatusApi.videoJobProvider(job))}实时同步</span></div>${videoJobProgressMarkup(job)}${job.message ? `<p>${escapePublicText(job.message)}</p>` : ""}</div>`).join("")
       : `<div class="empty-hint synced-empty"><b>当前没有视频生成任务</b><span>任务状态已与本地项目记录同步</span></div>`;
   }
   $("#jobHistory").innerHTML = [
     ...(activeJobs.length
-      ? activeJobs.map(job => `<div class="candidate-card job-history-card is-drawing ${videoJobStatusClass(job)}"><div class="drawing-banner"><i></i><span>进行中</span></div><div class="candidate-meta"><b>${escapeHtml(stageLabels[job.type] || job.type || "生产任务")}${job.entityId ? ` ${escapeHtml(job.entityId)}` : ""}</b><span>${escapeHtml(videoStatusApi.videoJobProvider(job))}实时同步</span></div>${videoJobProgressMarkup(job)}${job.message ? `<p>${escapeHtml(job.message)}</p>` : ""}</div>`)
+      ? activeJobs.map(job => `<div class="candidate-card job-history-card is-drawing ${videoJobStatusClass(job)}"><div class="drawing-banner"><i></i><span>进行中</span></div><div class="candidate-meta"><b>${escapeHtml(stageLabels[job.type] || job.type || "生产任务")}${job.entityId ? ` ${escapeHtml(job.entityId)}` : ""}</b><span>${escapePublicText(videoStatusApi.videoJobProvider(job))}实时同步</span></div>${videoJobProgressMarkup(job)}${job.message ? `<p>${escapePublicText(job.message)}</p>` : ""}</div>`)
       : [`<div class="empty-hint synced-empty"><b>当前没有进行中的视频任务</b><span>抽卡进度见上方队列面板</span></div>`]),
-    ...history.filter(job => !activeJobs.some(active => active.id === job.id)).slice(0, 8).map(job => `<div class="candidate-card job-history-card ${videoJobStatusClass(job)}"><div class="candidate-meta"><b>${escapeHtml(stageLabels[job.type] || job.type)}${job.entityId ? ` ${escapeHtml(job.entityId)}` : ""}</b><span>${escapeHtml(videoStatusApi.videoJobStage(job))}</span></div><p>${escapeHtml(job.message || "")}</p>${videoJobProgressMarkup(job, true)}</div>`)
+    ...history.filter(job => !activeJobs.some(active => active.id === job.id)).slice(0, 8).map(job => `<div class="candidate-card job-history-card ${videoJobStatusClass(job)}"><div class="candidate-meta"><b>${escapeHtml(stageLabels[job.type] || job.type)}${job.entityId ? ` ${escapeHtml(job.entityId)}` : ""}</b><span>${escapePublicText(videoStatusApi.videoJobStage(job))}</span></div><p>${escapePublicText(job.message || "")}</p>${videoJobProgressMarkup(job, true)}</div>`)
   ].join("");
 }
 
@@ -1995,7 +1993,7 @@ function videoCardMarkup(project, shot) {
       <summary>创作控制 · 视频提示词（点击展开）</summary>
       <div class="creator-panel-body shot-prompt creator-prompt-block video-prompt-block">
         <div class="prompt-mode"><button type="button" data-action="prompt-mode" data-id="${shot.id}" data-mode="system" class="${shot.promptMode !== "manual" ? "active" : ""}">系统编译稿</button><button type="button" data-action="prompt-mode" data-id="${shot.id}" data-mode="manual" class="${shot.promptMode === "manual" ? "active" : ""}">手动改写</button></div>
-        <textarea data-shot-prompt="${shot.id}" ${manualPrompt ? "" : "readonly"} placeholder="${manualPrompt ? "填写本镜完整自定义视频提示词" : "系统编译稿会显示在这里；切到「手动改写」后可直接编辑"}">${escapeHtml(prompt || "")}</textarea>
+        <textarea data-shot-prompt="${shot.id}" maxlength="60000" ${manualPrompt ? "" : "readonly"} placeholder="${manualPrompt ? "填写本镜完整自定义视频提示词" : "系统编译稿会显示在这里；切到「手动改写」后可直接编辑"}">${manualPrompt ? escapeHtml(prompt || "") : escapePublicText(prompt || "")}</textarea>
         <div class="creator-prompt-actions shot-prompt-actions">
           ${manualPrompt ? `<button type="button" class="mini-button" data-action="save-shot-prompt" data-id="${shot.id}">保存自定义提示词</button>` : `<button type="button" class="mini-button" data-action="promote-shot-prompt" data-id="${shot.id}">基于系统稿改写</button>`}
           <button type="button" class="mini-button" data-action="preview-shot-video-prompt" data-id="${shot.id}">大窗查看/刷新编译稿</button>
@@ -2156,7 +2154,26 @@ function renderFinal() {
   }
   const finalVideo = $("#finalVideo");
   finalVideo.style.aspectRatio = normalizedAspectRatio(project.generation?.aspectRatio || "9:16").replace(":", " / ");
-  if (hasFinal) finalVideo.src = fileUrl(project.finalVideoPath);
+  if (hasFinal) {
+    const nextSource = fileUrl(project.finalVideoPath);
+    if (finalVideo.src !== nextSource) finalVideo.src = nextSource;
+  } else {
+    finalVideo.removeAttribute("src");
+    finalVideo.load();
+  }
+  const history = Array.isArray(project.finalVideoHistory) ? project.finalVideoHistory.filter(item => item?.filePath) : [];
+  const historyPanel = $("#finalVideoHistory");
+  if (historyPanel) {
+    historyPanel.classList.toggle("hidden", history.length === 0);
+    historyPanel.innerHTML = history.length
+      ? `<div class="final-history-head"><b>历史成片</b><span>替换前版本仍可回看，不会覆盖当前成片</span></div>${history.map((item, index) => {
+          const date = item.replacedAt ? new Date(item.replacedAt) : null;
+          const dateLabel = date && !Number.isNaN(date.getTime()) ? date.toLocaleString("zh-CN", { hour12: false }) : "时间未知";
+          const sourceLabel = item.source === "manual-upload" ? "手动上传" : item.source === "generated" ? "系统合成" : "旧版本";
+          return `<div class="final-history-item"><div><b>历史版本 ${index + 1}</b><span>${escapeHtml(sourceLabel)} · ${escapeHtml(dateLabel)}${item.stale ? " · 已过期" : ""}</span></div><button type="button" class="asset-open-button" data-action="open-asset" data-path="${escapeHtml(item.filePath)}" data-title="历史成片 ${index + 1}" data-kind="video" data-aspect="${escapeHtml(project.generation?.aspectRatio || "9:16")}">打开历史成片</button></div>`;
+        }).join("")}`
+      : "";
+  }
   renderQualityGate(project);
   renderPipelineVideoStatus(summary);
 }
@@ -2234,11 +2251,15 @@ function qualityBlueprintModuleEnabled(moduleName = "script") {
 }
 
 function renderOssStatus() {
+  const direct = $("#videoStorageMode")?.value === "direct-oss";
   const values = [$("#videoOssAccessKeyId")?.value, $("#videoOssAccessKeySecret")?.value, $("#videoOssBucket")?.value, $("#videoOssEndpoint")?.value];
   const configured = values.every(value => String(value || "").trim());
   const status = $("#videoOssStatus");
-  if (status) status.textContent = configured ? "已配置 · 仅本机加密保存" : "未配置 · 安装包不携带任何 OSS 信息";
-  $("#videoOssFields")?.classList.toggle("is-configured", configured);
+  if (status) status.textContent = direct
+    ? configured ? "自有 OSS 已配置 · 本机加密保存" : "自有 OSS 未配置完整"
+    : "默认由纯梦托管";
+  $("#videoOssFields")?.classList.toggle("is-configured", direct && configured);
+  $("#videoDirectOssFields")?.classList.toggle("hidden", !direct);
 }
 
 function renderSettings() {
@@ -2259,11 +2280,17 @@ function renderSettings() {
   $("#videoBaseUrl").value = s.videoProvider?.kind === "local-xiangsu" ? "http://127.0.0.1:28911" : "https://puream.cn";
   $("#videoApiKey").value = s.videoProvider?.apiKey || "";
   $("#videoModel").value = s.videoProvider?.kind === "local-xiangsu" ? "本地像塑" : "云端算力";
+  if ($("#videoStorageMode")) $("#videoStorageMode").value = s.videoProvider?.storageMode === "direct-oss" ? "direct-oss" : "managed";
+  if ($("#videoOssAccessKeyId")) $("#videoOssAccessKeyId").value = s.videoProvider?.ossAccessKeyId || "";
+  if ($("#videoOssAccessKeySecret")) $("#videoOssAccessKeySecret").value = s.videoProvider?.ossAccessKeySecret || "";
+  if ($("#videoOssBucket")) $("#videoOssBucket").value = s.videoProvider?.ossBucket || "";
+  if ($("#videoOssEndpoint")) $("#videoOssEndpoint").value = s.videoProvider?.ossEndpoint || "";
   if ($("#videoReferenceUrlTtl")) $("#videoReferenceUrlTtl").value = String(s.videoProvider?.referenceUrlTtlSeconds || 21600);
   $("#hailuoApiMode").value = s.videoProvider?.hailuoApiMode || "auto";
   if ($("#cloudVideoResolution")) $("#cloudVideoResolution").value = s.videoProvider?.cloudVideoResolution === "768" ? "768" : "480";
   $("#hailuoRefImageSize").value = s.videoProvider?.hailuoRefImageSize === "max" ? "max" : "match";
   $("#hailuoSeed").value = s.videoProvider?.hailuoSeed || "";
+  renderOssStatus();
   renderVideoProviderPolicy();
   const characterVideoModel = s.videoStageModels?.characterVideo || "inherit-project";
   if ($("#characterVideoModel")) $("#characterVideoModel").value = ["puream-grok", "inherit-project"].includes(characterVideoModel) ? characterVideoModel : "inherit-project";
@@ -2278,7 +2305,7 @@ function renderSettings() {
     return `<div class="prompt-editor-card ${mode === "system" ? "system-mode" : "custom-mode"}">
       <div class="prompt-editor-card-head"><label>${escapeHtml(promptLabels[key] || key)}</label><span class="info-dot" tabindex="0" data-tooltip="系统默认正文会隐藏；示例只说明格式，自定义内容由你自己保存。">!</span><div class="prompt-example-actions"><button class="mini-button" type="button" data-action="view-prompt-example" data-prompt-key="${escapeHtml(key)}">查看示例</button><button class="mini-button" type="button" data-action="download-prompt-example" data-prompt-key="${escapeHtml(key)}">下载示例</button></div></div>
       <div class="prompt-template-mode" role="group" aria-label="${escapeHtml(promptLabels[key] || key)}提示词来源"><button class="mini-button ${mode === "system" ? "active" : ""}" type="button" data-action="set-prompt-template-mode" data-prompt-key="${escapeHtml(key)}" data-mode="system">系统默认（隐藏）</button><button class="mini-button ${mode === "custom" ? "active" : ""}" type="button" data-action="set-prompt-template-mode" data-prompt-key="${escapeHtml(key)}" data-mode="custom">自定义填写</button></div>
-      ${mode === "system" ? `<div class="system-prompt-mask"><b>系统默认提示词已启用</b><span>正文由软件维护并隐藏，不会显示给用户。</span><i></i><i></i><i></i></div>` : `<textarea data-prompt-key="${escapeHtml(key)}" placeholder="填写这一阶段的完整自定义提示词">${escapeHtml(value)}</textarea>`}
+      ${mode === "system" ? `<div class="system-prompt-mask"><b>系统默认提示词已启用</b><span>正文由软件维护并隐藏，不会显示给用户。</span><i></i><i></i><i></i></div>` : `<textarea data-prompt-key="${escapeHtml(key)}" maxlength="100000" placeholder="填写这一阶段的完整自定义提示词">${escapeHtml(value)}</textarea>`}
     </div>`;
   }).join("");
   applyProductSurfaceLabels();
@@ -2378,7 +2405,7 @@ function renderProjectStrategy() {
       shotsBanner.innerHTML = `<b>视频上游不匹配</b><span>项目已锁定${engine}，但系统设置当前是 ${videoProviderLabel(settingsKind)}。分步制作仍可先生成分镜图；进入视频阶段前请切换到对应供应商。</span>`;
     } else {
       shotsBanner.classList.remove("danger");
-      shotsBanner.innerHTML = `<b>v0.13.3 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
+      shotsBanner.innerHTML = `<b>v0.13.19 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
     }
   }
   const strategyLocked = !confirmed;
@@ -2393,6 +2420,8 @@ function renderProjectStrategy() {
   });
   const deleteButton = $("#deleteProject");
   if (deleteButton) deleteButton.disabled = state.busy || automationIsActive(project);
+  const restoreButton = $("#restoreProject");
+  if (restoreButton) restoreButton.disabled = state.busy;
 }
 
 function openProjectStrategyDialog(required = false) {
@@ -2539,7 +2568,7 @@ function renderPipelineLiveStatus(project = state.project) {
       <div class="pipeline-live-state"><i aria-hidden="true"></i><span>${escapeHtml(statusLabel)}</span><b>第 ${phaseIndex + 1}/${pipelinePhases.length} 阶段 · ${escapeHtml(phase.label)}</b></div>
       <div class="pipeline-live-times"><span>已运行 ${escapeHtml(elapsed)}</span><span>${escapeHtml(freshness)}</span></div>
     </div>
-    <p class="pipeline-live-message">${escapeHtml(automation.message || `${phase.label}处理中`)}</p>
+    <p class="pipeline-live-message">${escapePublicText(automation.message || `${phase.label}处理中`)}</p>
     <div class="pipeline-live-context">${priorProgressMarkup}<span>${next && active ? `下一步：${escapeHtml(next.label)}` : status === "completed" ? "所有阶段已经完成" : "可从当前断点继续"}</span></div>
     ${currentProgressMarkup}
     <ol class="pipeline-phase-rail" aria-label="一键全流程阶段">${phaseRail}</ol>`;
@@ -2991,7 +3020,7 @@ function renderAutomationQueue(project = state.project) {
   panel.innerHTML = `<div class="automation-queue-card ${active ? "active" : ""}">
     <div class="automation-queue-head"><span>${escapeHtml(queueStateLabel)}</span><b>${escapeHtml(automationOperationLabel(automation.operation))}</b></div>
     ${active ? `<div class="automation-phase-line"><i aria-hidden="true"></i><b>第 ${phaseIndex + 1}/${pipelinePhases.length} 阶段 · ${escapeHtml(phase.label)}</b><span>已运行 ${escapeHtml(formatRunDuration(automation.startedAt))}</span></div>` : ""}
-    <p>${escapeHtml(automation.message || "等待生产任务")}</p>
+    <p>${escapePublicText(automation.message || "等待生产任务")}</p>
     ${ownsProgress && progress.total ? `<div class="automation-queue-track"><i style="width:${Math.max(0, Math.min(100, progress.percent || 0))}%"></i></div><small>${progress.completed || 0}/${progress.total} 完成${progress.failed ? ` · ${progress.failed} 失败` : ""}</small>` : progress && progress.total ? `<small class="automation-prior-stage">✓ 上一阶段${priorProgressLabel} ${progress.completed || 0}/${progress.total} 已完成</small>` : ""}
     <small class="automation-last-update">${escapeHtml(automationFreshness(automation.updatedAt, active))}</small>
     ${running.length ? `<div class="automation-running-list">${running.slice(0, 8).map(item => `<span class="drawing-chip">${escapeHtml(currentAssetLabel(item.label || item.key))}</span>`).join("")}</div>` : ""}
@@ -3040,6 +3069,7 @@ function renderCandidateCard(item, stageItems) {
     ${mediaHtml(item)}
     <div class="candidate-meta"><b>${escapeHtml(stageLabels[item.stage] || item.stage)} · 第 ${version} 版${archived ? " · 旧制作版" : ""}${item.stale ? " · 待按新上游重抽" : ""}</b><span>${new Date(item.createdAt).toLocaleString()}</span></div>
     ${item.stale ? `<p class="quality-fail">上游参考已更新：${escapeHtml(item.staleReason || "当前卡仍可回看，但不会再作为有效首尾帧")}。原图文件仍在。</p>` : ""}
+    ${item.postProcessWarning ? `<p class="quality-fail">${escapePublicText(item.postProcessWarning)}</p>` : ""}
     ${item.qualityAudit ? `<p class="${item.qualityAudit.ok ? "quality-pass" : "quality-fail"}">${item.qualityAudit.ok ? qualityPassLabel : `质检失败：${escapeHtml((item.qualityAudit.failures || []).map(failure => failure.message).join("；"))}`}</p>` : gatedVideo ? `<p class="quality-fail">${item.stage === "shot_video" ? "待完成音画与首帧资产质检" : "待完成人物声音与首帧资产质检"}</p>` : ""}
     <p>${escapeHtml(item.prompt || "无提示词")}</p>
     <div class="card-actions"><button class="mini-button asset-open-button" data-action="open-asset" data-path="${escapeHtml(item.filePath)}" data-title="${escapeHtml(`${owner.title} · ${stageLabels[item.stage] || item.stage}`)}" data-kind="${escapeHtml(mediaKind(item.filePath))}" data-aspect="${escapeHtml(state.project?.generation?.aspectRatio || "9:16")}">打开资产</button><button class="mini-button accent" data-action="confirm-candidate" data-id="${item.id}" ${item.selected || archived || qualityBlocked || item.stale ? "disabled" : ""}>${archived ? "旧制作版仅回看" : item.stale ? "待重抽不可选" : qualityBlocked ? item.qualityAudit?.ok === false ? "质检失败仅回看" : "待质检不可选" : item.selected ? "已确认" : "选中此卡"}</button>${!item.selected && (item.qualityAudit?.ok === false || qualityBlocked || archived) ? `<button class="mini-button danger-mini" data-action="discard-candidate" data-id="${item.id}">删除失败/旧版</button>` : ""}</div>
@@ -3170,7 +3200,7 @@ async function renderConsole() {
         <span class="console-cost-split">上游已结 ¥${known.toFixed(2)}${estimated > 0 ? ` · 历史估算 ¥${estimated.toFixed(2)}（不计入）` : ""}</span>
         ${unpriced > 0 ? `<span class="console-cost-unpriced">未定价 ${unpriced}</span>` : ""}
       </div>
-      <p class="console-message" title="${escapeHtml(item.automation?.message || "等待操作")}">${escapeHtml(item.automation?.message || "等待操作")}</p>
+      <p class="console-message" title="${escapePublicText(item.automation?.message || "等待操作")}">${escapePublicText(item.automation?.message || "等待操作")}</p>
       <div class="card-actions">
         <button class="mini-button accent" data-action="open-console-project" data-id="${escapeHtml(item.id)}" data-stage="${escapeHtml(item.nextStage || "script")}">进入项目</button>
         <button class="mini-button draw-button" data-action="console-continue" data-id="${escapeHtml(item.id)}" data-stage="${escapeHtml(item.nextStage || "assets")}">从下一环节继续</button>
@@ -3214,12 +3244,12 @@ function collectSettings() {
       apiKey: $("#videoApiKey").value.trim(),
       model: $("#videoModel").value.trim(),
       resolution: "720p",
-      storageMode: "managed",
+      storageMode: $("#videoStorageMode")?.value === "direct-oss" ? "direct-oss" : "managed",
       managedStorageBaseUrl: "https://puream.cn",
-      ossAccessKeyId: "",
-      ossAccessKeySecret: "",
-      ossBucket: "",
-      ossEndpoint: "",
+      ossAccessKeyId: $("#videoOssAccessKeyId")?.value.trim() || "",
+      ossAccessKeySecret: $("#videoOssAccessKeySecret")?.value || "",
+      ossBucket: $("#videoOssBucket")?.value.trim() || "",
+      ossEndpoint: $("#videoOssEndpoint")?.value.trim() || "",
       referenceUrlTtlSeconds: Number($("#videoReferenceUrlTtl")?.value || state.settings.videoProvider?.referenceUrlTtlSeconds) || 21600,
       cloudVideoResolution: $("#cloudVideoResolution")?.value === "768" ? "768" : "480",
       hailuoApiMode: $("#hailuoApiMode")?.value || state.settings.videoProvider?.hailuoApiMode || "auto",
@@ -3245,6 +3275,22 @@ function collectSettings() {
     prompts,
     promptModes: { ...(state.settings.promptModes || {}) }
   };
+}
+
+function validateDirectOssSelection(settings) {
+  if (settings?.videoProvider?.storageMode !== "direct-oss") return true;
+  const required = [
+    ["#videoOssAccessKeyId", settings.videoProvider.ossAccessKeyId, "AccessKey ID"],
+    ["#videoOssAccessKeySecret", settings.videoProvider.ossAccessKeySecret, "AccessKey Secret"],
+    ["#videoOssBucket", settings.videoProvider.ossBucket, "Bucket"],
+    ["#videoOssEndpoint", settings.videoProvider.ossEndpoint, "Endpoint"]
+  ];
+  const missing = required.find(([, value]) => !String(value || "").trim());
+  if (!missing) return true;
+  if ($("#videoOssFields")) $("#videoOssFields").open = true;
+  $(missing[0])?.focus();
+  showToast(`自有 OSS 尚未填写 ${missing[2]}`, "error");
+  return false;
 }
 
 function entityTypeForStage(stage) {
@@ -3303,23 +3349,23 @@ function populateCreatorPromptDialog(spec, preview) {
     title.textContent = `镜头 ${spec.shotNumber || ""} · 分镜视频提示词`;
     meta.textContent = `策略：${spec.strategyLabel || ""} · 提交模式：${preview.promptMode === "manual" ? "手动覆盖" : "系统编译（可查看/改写）"}`;
     setCreatorPromptMode(preview.promptMode === "manual" ? "manual" : "system");
-    text.value = maskSpecificModelText(preview.promptMode === "manual"
+    text.value = preview.promptMode === "manual"
       ? (preview.manualVideoPrompt || compiledText)
-      : visibleCompiledText);
+      : visibleCompiledText;
   } else if (spec.kind === "character-video") {
     title.textContent = `${spec.entityName || "角色"} · 人物视频提示词`;
     meta.textContent = `时长 ${preview.duration || 6} 秒 · ${preview.speechScript ? `测试台词：${preview.speechScript}` : "系统编译稿"}`;
     setCreatorPromptMode(preview.mode === "manual" ? "manual" : "system");
-    text.value = maskSpecificModelText(preview.mode === "manual"
+    text.value = preview.mode === "manual"
       ? (preview.manual || compiledText)
-      : visibleCompiledText);
+      : visibleCompiledText;
   } else {
     title.textContent = `${spec.entityName || "资产"} · ${stageLabels[spec.stage] || spec.stage}`;
     meta.textContent = `${spec.entityType === "character" ? "角色" : spec.entityType === "scene" ? "场景" : "分镜"} · ${stageLabels[spec.stage] || spec.stage}`;
     setCreatorPromptMode(preview.mode === "manual" ? "manual" : "system");
-    text.value = maskSpecificModelText(preview.mode === "manual"
+    text.value = preview.mode === "manual"
       ? (preview.manual || compiledText)
-      : visibleCompiledText);
+      : visibleCompiledText;
   }
   if (!dialog.open) dialog.showModal();
 }
@@ -3671,7 +3717,12 @@ document.addEventListener("click", async event => {
   if (action === "open-asset") return openAssetViewer({ filePath: button.dataset.path, title: button.dataset.title, kind: button.dataset.kind, aspectRatio: button.dataset.aspect });
   if (action === "reupload-product") {
     const result = await api.workbench.chooseProduct(state.project.id);
-    if (!result.canceled) { setStateProject(result.project); renderAll(); showToast("商品原图已更新"); }
+    if (!result?.ok) return showToast(result?.message || "商品原图更新失败", "error");
+    if (!result.canceled) {
+      setStateProject(result.project);
+      renderAll();
+      showToast(result.warning ? `商品原图已更新；公网暂存失败：${result.warning}` : "商品原图已更新", result.warning ? "warning" : "success");
+    }
     return;
   }
   if (action === "generate-image") return runLong("正在调用图片模型抽卡…", () => api.workbench.generateImage(state.project.id, button.dataset.stage, id, ""), { entityType: entityTypeForStage(button.dataset.stage), entityId: id, stage: button.dataset.stage });
@@ -3772,7 +3823,12 @@ document.addEventListener("click", async event => {
       if (button.dataset.stage === "character_voice") await loadVoiceLibrary(false);
       await loadProject(state.project.id);
       openCandidateLibrary(button.dataset.entityType, id);
-      showToast(result.candidate?.selected ? "手动资产已上传并设为当前版本" : "手动资产已上传；质检未通过，暂未设为当前版本", result.candidate?.qualityAudit?.ok === false ? "error" : "success");
+      const message = result.warning
+        ? `手动资产已上传并设为当前版本；独立资产库入库失败：${result.warning}`
+        : result.candidate?.selected
+          ? "手动资产已上传并设为当前版本"
+          : "手动资产已上传；质检未通过，暂未设为当前版本";
+      showToast(message, result.warning ? "warning" : result.candidate?.qualityAudit?.ok === false ? "error" : "success");
     }
     return;
   }
@@ -3963,7 +4019,11 @@ $("#analyzeScript").addEventListener("click", async () => {
 $("#productImage").addEventListener("click", async () => {
   const result = await api.workbench.chooseProduct(state.project.id);
   if (!result.ok) return showToast(result.message, "error");
-  if (!result.canceled) { setStateProject(result.project); renderAll(); showToast("商品参考图已锁定"); }
+  if (!result.canceled) {
+    setStateProject(result.project);
+    renderAll();
+    showToast(result.warning ? `商品参考图已锁定；公网暂存失败：${result.warning}` : "商品参考图已锁定", result.warning ? "warning" : "success");
+  }
 });
 $("#selectProductLibrary")?.addEventListener("click", () => openIndependentAssetLibrary({ entityType: "product", entityId: "product", stage: "product_asset" }));
 $("#editGenerationMode").addEventListener("click", () => openProjectStrategyDialog(false));
@@ -4225,7 +4285,11 @@ $("#creatorPromptDialog")?.addEventListener("cancel", event => {
 });
 $("#runFullPipeline").addEventListener("click", async () => {
   if (!state.project) return;
-  try { await saveScriptFields(); } catch {}
+  try {
+    await saveScriptFields();
+  } catch (error) {
+    return showToast(error?.message || "剧本或商品信息未能保存，已停止启动全流程", "error");
+  }
   const project = state.project;
   const hasShots = Array.isArray(project?.shots) && project.shots.length > 0;
   const hasScript = Boolean(String(project?.script?.raw || "").trim());
@@ -4361,10 +4425,12 @@ $("#qualityGatesEnabled")?.addEventListener("change", event => {
 ["#videoOssAccessKeyId", "#videoOssAccessKeySecret", "#videoOssBucket", "#videoOssEndpoint"].forEach(selector => {
   $(selector)?.addEventListener("input", renderOssStatus);
 });
+$("#videoStorageMode")?.addEventListener("change", renderOssStatus);
 
 $("#clearVideoOss")?.addEventListener("click", async () => {
   if (!window.confirm("清空当前电脑保存的 OSS AccessKey、Bucket 与 Endpoint？已经生成的本地素材不会删除。")) return;
   ["#videoOssAccessKeyId", "#videoOssAccessKeySecret", "#videoOssBucket", "#videoOssEndpoint"].forEach(selector => { if ($(selector)) $(selector).value = ""; });
+  if ($("#videoStorageMode")) $("#videoStorageMode").value = "managed";
   renderOssStatus();
   const result = await api.workbench.saveSettings(collectSettings());
   if (!result?.ok) return showToast(result?.message || "OSS 配置清空失败", "error");
@@ -4380,6 +4446,7 @@ $("#saveSettings").addEventListener("click", async event => {
   button.textContent = "保存中…";
   try {
     const collected = collectSettings();
+    if (!validateDirectOssSelection(collected)) return;
     if (collected.videoProvider.kind !== "local-xiangsu" && !isPureamCloudBaseUrl(collected.videoProvider.baseUrl)) {
       renderVideoProviderPolicy();
       $("#videoBaseUrl")?.focus();
@@ -4411,12 +4478,12 @@ $("#saveSettings").addEventListener("click", async event => {
   }
 });
 $("#resetSettings").addEventListener("click", async () => {
-  if (!window.confirm("恢复全部专业默认提示词，并把写剧本供应商切回纯梦官网？各厂商已保存的密钥都会保留。")) return;
+  if (!window.confirm("恢复全部系统默认设置并清除已保存的供应商密钥和 OSS 凭据？项目与生成资产不会删除。")) return;
   const result = await api.workbench.resetSettings();
   if (!result.ok) return showToast(result.message, "error");
   state.settings = result.settings;
   renderSettings();
-  showToast("已恢复完整专业默认提示词；各厂商密钥保持不变");
+  showToast("已恢复系统默认设置并清除已保存凭据");
 });
 $("#testTextProvider").addEventListener("click", async () => {
   const settings = collectSettings();
@@ -4430,6 +4497,7 @@ $("#testImageProvider").addEventListener("click", async () => {
 });
 $("#testVideoProvider").addEventListener("click", async () => {
   const settings = collectSettings();
+  if (!validateDirectOssSelection(settings)) return;
   if (settings.videoProvider.kind !== "local-xiangsu" && !isPureamCloudBaseUrl(settings.videoProvider.baseUrl)) {
     renderVideoProviderPolicy();
     $("#videoBaseUrl").focus();
@@ -4474,6 +4542,64 @@ $("#deleteProject")?.addEventListener("click", async event => {
   } catch (error) {
     showToast(error.message || "删除项目失败", "error");
     button.disabled = false;
+  }
+});
+
+$("#restoreProject")?.addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const listed = await api.workbench.listDeletedProjects();
+    if (!listed?.ok) throw new Error(listed?.message || "读取项目回收区失败");
+    const projects = Array.isArray(listed.projects) ? listed.projects : [];
+    if (!projects.length) return showToast("项目回收区为空");
+    const select = $("#deletedProjectSelect");
+    select.innerHTML = "";
+    for (const item of projects) {
+      const option = document.createElement("option");
+      option.value = item.archiveId;
+      option.textContent = `${item.title} · ${new Date(item.deletedAt).toLocaleString("zh-CN")}${item.status === "corrupted" ? " · 数据受损，已保留目录" : ""}`;
+      option.dataset.projectId = item.projectId;
+      option.disabled = item.status === "corrupted";
+      select.appendChild(option);
+    }
+    const firstRestorable = projects.find(item => item.status !== "corrupted");
+    if (firstRestorable) select.value = firstRestorable.archiveId;
+    $("#confirmRestoreProject").disabled = !firstRestorable;
+    $("#restoreProjectError").textContent = firstRestorable ? "" : "回收区记录仍在，但目前没有可自动恢复的完整项目；软件不会删除这些受损目录。";
+    $("#restoreProjectDialog").showModal();
+    select.focus();
+  } catch (error) {
+    showToast(error.message || "恢复项目失败", "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+const closeRestoreProjectDialog = () => $("#restoreProjectDialog")?.close();
+$("#closeRestoreProjectDialog")?.addEventListener("click", closeRestoreProjectDialog);
+$("#cancelRestoreProject")?.addEventListener("click", closeRestoreProjectDialog);
+$("#deletedProjectSelect")?.addEventListener("change", event => {
+  $("#confirmRestoreProject").disabled = !event.target.value || event.target.selectedOptions?.[0]?.disabled === true;
+});
+$("#restoreProjectForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  const select = $("#deletedProjectSelect");
+  const archiveId = String(select?.value || "");
+  const selected = select?.selectedOptions?.[0];
+  if (!archiveId) return;
+  const submit = $("#confirmRestoreProject");
+  submit.disabled = true;
+  try {
+    const restored = await api.workbench.restoreProject(archiveId);
+    if (!restored?.ok) throw new Error(restored?.message || "恢复项目失败");
+    closeRestoreProjectDialog();
+    await loadProjects(restored.project?.id || selected?.dataset.projectId || "");
+    showToast(`项目《${selected?.textContent?.split(" · ")[0] || "历史项目"}》已恢复`);
+  } catch (error) {
+    $("#restoreProjectError").textContent = error?.message || "恢复项目失败";
+  } finally {
+    submit.disabled = false;
   }
 });
 
@@ -4598,17 +4724,6 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
   state.strategySaving = true;
   $("#confirmProjectStrategy").disabled = true;
   try {
-    const settings = { ...(state.settings || {}) };
-    const currentBase = String(settings.videoProvider?.baseUrl || "");
-    const cloudBase = /^https:\/\/([a-z0-9.-]+\.)?puream\.cn(\/|$)/i.test(currentBase) ? currentBase : "https://puream.cn";
-    settings.videoProvider = {
-      ...(settings.videoProvider || {}),
-      kind: providerKind,
-      baseUrl: providerKind === "local-xiangsu" ? "http://127.0.0.1:28911" : cloudBase
-    };
-    const saved = await api.workbench.saveSettings(settings);
-    if (!saved?.ok) throw new Error(saved?.message || "视频上游保存失败");
-    state.settings = saved.settings;
     await patchProject({
       generation: {
         ...project.generation,
@@ -4778,6 +4893,8 @@ async function bootstrap() {
     if (state.project) await loadProject(state.project.id, false);
   }
   state.pollTimer = setInterval(async () => {
+    if (state.polling) return;
+    state.polling = true;
     try {
       await refreshHealth(false);
       await api.workbench.syncVideoJobs();
@@ -4795,7 +4912,16 @@ async function bootstrap() {
           if (state.stage === "shots") renderShots();
         }
       }
-    } catch {}
+    } catch (error) {
+      console.error("background status sync failed", error);
+      const now = Date.now();
+      if (now - state.lastPollErrorToastAt > 60_000) {
+        state.lastPollErrorToastAt = now;
+        showToast("后台状态同步暂时失败，软件会自动重试", "error");
+      }
+    } finally {
+      state.polling = false;
+    }
   }, 4000);
 }
 

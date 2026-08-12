@@ -15,6 +15,41 @@ const MIME_BY_EXTENSION = Object.freeze({
   ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
   ".mp3": "audio/mpeg", ".wav": "audio/wav", ".aac": "audio/aac", ".flac": "audio/flac"
 });
+const UPLOAD_FALLBACK_BUFFER_MAX_BYTES = 32 * 1024 * 1024;
+
+async function openUploadBody(fsImpl, filePath, contentType) {
+  if (typeof fsImpl.openAsBlob === "function") {
+    return fsImpl.openAsBlob(filePath, { type: contentType });
+  }
+  const size = Number(fsImpl.statSync(filePath).size) || 0;
+  if (size > UPLOAD_FALLBACK_BUFFER_MAX_BYTES) {
+    throw Object.assign(new Error("当前运行环境不支持大文件流式上传，请升级软件后重试"), { code: "MEDIA_STREAM_UPLOAD_UNAVAILABLE" });
+  }
+  return new Blob([fsImpl.readFileSync(filePath)], { type: contentType });
+}
+
+function createConcurrencyLimiter(maximum = 3) {
+  const limit = Math.max(1, Math.min(8, Number(maximum) || 3));
+  let active = 0;
+  const queue = [];
+  const advance = () => {
+    while (active < limit && queue.length) {
+      const entry = queue.shift();
+      active += 1;
+      Promise.resolve()
+        .then(entry.task)
+        .then(entry.resolve, entry.reject)
+        .finally(() => {
+          active -= 1;
+          advance();
+        });
+    }
+  };
+  return task => new Promise((resolve, reject) => {
+    queue.push({ task, resolve, reject });
+    advance();
+  });
+}
 
 const PROVIDER_CONTRACTS = Object.freeze({
   "local-xiangsu": Object.freeze({ engine: "seedance", remote: false, imageMax: 9, videoMax: 1, audioMax: 3, durationMin: 5, durationMax: 10 }),
@@ -236,10 +271,14 @@ function hasDirectOssCredentials(config = {}) {
     && String(config.ossEndpoint || "").trim());
 }
 
+function safeOssObjectSegment(value) {
+  return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 32);
+}
+
 async function uploadReferenceToOss(config, filePath, requestId, mediaType, index, fetchImpl, fsImpl) {
   const extension = path.extname(filePath).toLowerCase();
   const contentType = MIME_BY_EXTENSION[extension] || "application/octet-stream";
-  const objectKey = `puream-drama-references/${new Date().toISOString().slice(0, 10)}/${requestId}/${mediaType}-${String(index + 1).padStart(2, "0")}${extension || ".bin"}`;
+  const objectKey = `puream-drama-references/${new Date().toISOString().slice(0, 10)}/${safeOssObjectSegment(requestId)}/${safeOssObjectSegment(mediaType).slice(0, 12)}-${String(index + 1).padStart(2, "0")}${extension || ".bin"}`;
   const encodedPath = objectKey.split("/").map(encodeURIComponent).join("/");
   const uploadUrl = `https://${config.ossBucket}.${config.ossEndpoint}/${encodedPath}`;
   const date = new Date().toUTCString();
@@ -250,7 +289,7 @@ async function uploadReferenceToOss(config, filePath, requestId, mediaType, inde
       "content-type": contentType,
       date
     },
-    body: fsImpl.readFileSync(filePath),
+    body: await openUploadBody(fsImpl, filePath, contentType),
     redirect: "error",
     signal: AbortSignal.timeout(600_000)
   });
@@ -270,7 +309,7 @@ async function uploadReferenceToManaged(config, filePath, requestId, mediaType, 
       "x-puream-request-id": requestId,
       "x-puream-file-name": path.basename(filePath)
     },
-    body: fsImpl.readFileSync(filePath),
+    body: await openUploadBody(fsImpl, filePath, MIME_BY_EXTENSION[path.extname(filePath).toLowerCase()] || "application/octet-stream"),
     redirect: "error",
     signal: AbortSignal.timeout(600_000)
   });
@@ -317,7 +356,10 @@ async function buildCloudSubmit(config, payload, fetchImpl, fsImpl) {
   const media = validateProviderPayload(config.kind, effectivePayload);
   validateProviderConfig(config, { hasLocalMedia: [...media.images, ...media.videos, ...media.audios, ...media.videoAudios.filter(Boolean)].some(item => item?.path && !item?.url) });
   const requestId = String(payload.clientRequestId || crypto.randomUUID());
-  const resolveMany = (items, type) => Promise.all(items.map((item, index) => item ? resolveReferenceUrl(config, item, fetchImpl, requestId, type, index, fsImpl) : Promise.resolve(null)));
+  const limitUpload = createConcurrencyLimiter(3);
+  const resolveMany = (items, type) => Promise.all(items.map((item, index) => item
+    ? limitUpload(() => resolveReferenceUrl(config, item, fetchImpl, requestId, type, index, fsImpl))
+    : Promise.resolve(null)));
   const [images, videos, audios, videoAudios] = await Promise.all([
     resolveMany(media.images, "image"), resolveMany(media.videos, "video"), resolveMany(media.audios, "audio"), resolveMany(media.videoAudios, "video-audio")
   ]);
@@ -460,6 +502,7 @@ module.exports = {
   contractFor,
   createOssAuthorization,
   createOssReadUrl,
+  createConcurrencyLimiter,
   resolvePureamMediaUploadConfig,
   resolveReferenceUrl,
   dimensionsForAspectRatio,
@@ -471,6 +514,7 @@ module.exports = {
   normalizeHailuoPrompt,
   normalizeSettlementStatus,
   normalizeTaskStatus,
+  openUploadBody,
   providerDisplayName,
   providerEngine,
   validateProviderConfig,

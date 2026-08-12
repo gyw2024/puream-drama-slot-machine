@@ -90,6 +90,22 @@ const STRUCTURED_TEXT_MAX_CHARS = 7500;
 const SCRIPT_FAST_CONCURRENCY = 8;
 const SCRIPT_FAST_TARGET_SECONDS = 300;
 const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol";
+const IMAGE_BATCH_MAX_CONCURRENCY = 6;
+const VIDEO_BATCH_MAX_CONCURRENCY = 4;
+
+function scriptFastRequestBudgetMs(startedAt, reserveMs = 20_000) {
+  const startedAtMs = Date.parse(String(startedAt || ""));
+  if (!Number.isFinite(startedAtMs)) return 270_000;
+  const remaining = startedAtMs + SCRIPT_FAST_TARGET_SECONDS * 1000 - Date.now() - reserveMs;
+  if (remaining < 10_000) {
+    throw Object.assign(new Error("5分钟快速写作时限已到；已停止继续请求并保留当前断点，可手动继续"), {
+      code: "SCRIPT_FAST_DEADLINE_REACHED",
+      noAutomaticRetry: true,
+      retryRequiresExplicitResume: true
+    });
+  }
+  return Math.min(270_000, remaining);
+}
 
 function fillTemplate(template, values) {
   return String(template || "").replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, key) => values[key] ?? "");
@@ -1977,16 +1993,13 @@ function shotUsesManualVideoPrompt(shot = {}) {
 
 function assertVideoProviderAligned(project, settings) {
   const expectedEngine = projectVideoEngine(project);
-  const activeProviderEngine = providerEngine(settings?.videoProvider?.kind);
-  if (expectedEngine !== activeProviderEngine) {
-    const requested = expectedEngine === "hailuo-h3" ? "海螺 H3" : "Seedance";
-    const active = activeProviderEngine === "hailuo-h3" ? "海螺 H3" : "Seedance";
-    throw Object.assign(new Error(`项目已锁定${requested}模式，但系统设置当前是${active}上游；请到「系统设置」切换到对应视频供应商后再继续。`), {
-      code: "VIDEO_ENGINE_PROVIDER_MISMATCH",
-      expectedEngine,
-      activeProviderEngine
-    });
-  }
+  const providerKind = projectVideoProviderKind(project, settings);
+  const projectProviderEngine = providerEngine(providerKind);
+  if (expectedEngine !== projectProviderEngine) throw Object.assign(new Error("项目视频引擎记录不一致，请重新确认项目制作策略"), {
+    code: "PROJECT_VIDEO_CONTRACT_INVALID",
+    expectedEngine,
+    providerKind
+  });
   return expectedEngine;
 }
 
@@ -1996,6 +2009,18 @@ function projectVideoProviderKind(project, settings = null) {
   const fromSettings = String(settings?.videoProvider?.kind || "").trim();
   if (fromSettings) return fromSettings;
   return project?.generation?.engine === "hailuo-h3" ? "puream-hailuo-h3" : "local-xiangsu";
+}
+
+function projectVideoProviderConfig(project, settings = null) {
+  const kind = projectVideoProviderKind(project, settings);
+  const configured = settings?.videoProvider || {};
+  return {
+    ...configured,
+    kind,
+    baseUrl: kind === "local-xiangsu"
+      ? "http://127.0.0.1:28911"
+      : (/^https:\/\/([a-z0-9.-]+\.)?puream\.cn(\/|$)/i.test(String(configured.baseUrl || "")) ? configured.baseUrl : "https://puream.cn")
+  };
 }
 
 /** Full-face mesh gate is only for cloud PureAM Seedance. Local Xiangsu and Hailuo H3 do not require it. */
@@ -2490,8 +2515,25 @@ function fileSha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
-function videoSubmissionFingerprint(project, providerKind, entityType, entityId, stage, prompt, references = {}, duration = 0, hailuoApiMode = "", cloudVideoResolution = "480") {
+async function fileSha256Async(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return "";
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", reject);
+    stream.on("data", chunk => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+async function videoSubmissionFingerprint(project, providerKind, entityType, entityId, stage, prompt, references = {}, duration = 0, hailuoApiMode = "", cloudVideoResolution = "480") {
   const videos = Array.isArray(references.videos) ? references.videos : references.video ? [references.video] : [];
+  const hashCache = new Map();
+  const hashFile = filePath => {
+    const key = String(filePath || "");
+    if (!hashCache.has(key)) hashCache.set(key, fileSha256Async(key));
+    return hashCache.get(key);
+  };
   const payload = {
     projectId: String(project?.id || ""),
     productionRevision: String(project?.productionRevision || ""),
@@ -2504,28 +2546,28 @@ function videoSubmissionFingerprint(project, providerKind, entityType, entityId,
     aspectRatio: String(references.aspectRatio || project?.generation?.aspectRatio || ""),
     hailuoApiMode: String(hailuoApiMode || ""),
     cloudVideoResolution: normalizeCloudVideoResolution(cloudVideoResolution),
-    images: (references.images || []).map((filePath, index) => ({
-      sha256: fileSha256(filePath),
+    images: await Promise.all((references.images || []).map(async (filePath, index) => ({
+      sha256: await hashFile(filePath),
       remoteUrl: String(references.imageRoles?.[index]?.remoteUrl || ""),
       role: references.imageRoles?.[index] || null
-    })),
-    videos: videos.map((item, index) => ({
-      sha256: fileSha256(item?.path),
+    }))),
+    videos: await Promise.all(videos.map(async (item, index) => ({
+      sha256: await hashFile(item?.path),
       remoteUrl: String(item?.remoteUrl || ""),
       duration: Number(item?.duration) || 0,
       role: references.videoRoles?.[index] || null
-    })),
-    videoAudios: (references.videoAudios || []).map(item => item ? ({
-      sha256: fileSha256(item.path),
+    }))),
+    videoAudios: await Promise.all((references.videoAudios || []).map(async item => item ? ({
+      sha256: await hashFile(item.path),
       remoteUrl: String(item.remoteUrl || ""),
       duration: Number(item.duration) || 0
-    }) : null),
-    audios: (references.audios || []).map(item => ({
-      sha256: fileSha256(item?.path),
+    }) : null)),
+    audios: await Promise.all((references.audios || []).map(async item => ({
+      sha256: await hashFile(item?.path),
       remoteUrl: String(item?.remoteUrl || ""),
       duration: Number(item?.duration) || 0,
       characterId: String(item?.characterId || "")
-    }))
+    })))
   };
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
@@ -2561,9 +2603,9 @@ async function executeShotVideoBatch(shots, runShot) {
       }
     }
   };
-  // AutoDL's one-machine-per-ten-seconds rule belongs to the official queue.
-  // Start every locally ready durable enqueue now instead of serializing POSTs.
-  await Promise.all(Array.from({ length: orderedShots.length }, worker));
+  // Keep the desktop responsive and bound local socket/file pressure. The
+  // official queue remains authoritative for account capacity beyond this cap.
+  await Promise.all(Array.from({ length: Math.min(VIDEO_BATCH_MAX_CONCURRENCY, orderedShots.length) }, worker));
   return { results, batchFailures, recoverablePending };
 }
 
@@ -2775,8 +2817,8 @@ function assertShotReferenceBundle(project, shot, mode, references, previousVide
     if (!path.isAbsolute(role.path) || !fs.existsSync(role.path)) fail(`图${index + 1}素材文件不存在`, "MEDIA_FILE_MISSING");
     if (seen.has(role.path)) fail(`图${index + 1}重复引用了同一个文件`);
     seen.add(role.path);
-    if (role.sourceStage === "character_three_view") {
-      fail(`图${index + 1}直接引用人物三视图，可能被模型误当成成片画面`, "CHARACTER_SHEET_VIDEO_REFERENCE_FORBIDDEN");
+    if (["character_three_view", "character_sheet"].includes(role.sourceStage)) {
+      fail(`图${index + 1}直接引用人物设定板，可能被模型误当成成片画面`, "CHARACTER_SHEET_VIDEO_REFERENCE_FORBIDDEN");
     }
     if (!role.candidateId) return;
     const candidate = project.candidates.find(item => item.id === role.candidateId);
@@ -2837,6 +2879,7 @@ function applyCandidateQualityAudits(project, audit) {
 }
 
 function beginProductionRevision(project) {
+  archiveCurrentFinalVideo(project, "production-revision");
   project.productionRevision = makeId("revision");
   project.finalVideoPath = "";
   project.finalAudioAudit = null;
@@ -2845,6 +2888,25 @@ function beginProductionRevision(project) {
   project.mediaQualityAudit = null;
   project.audioQualityAudit = null;
   return project.productionRevision;
+}
+
+function archiveCurrentFinalVideo(project, reason = "replaced") {
+  if (!project?.finalVideoPath) return project;
+  project.finalVideoHistory = Array.isArray(project.finalVideoHistory) ? project.finalVideoHistory : [];
+  const latest = project.finalVideoHistory[0];
+  if (latest?.filePath !== project.finalVideoPath) {
+    project.finalVideoHistory.unshift({
+      id: makeId("final"),
+      filePath: project.finalVideoPath,
+      source: project.finalVideoSource || "generated",
+      productionRevision: project.productionRevision || "",
+      replacedAt: new Date().toISOString(),
+      stale: project.finalVideoStale === true,
+      staleReason: project.finalVideoStaleReason || reason
+    });
+    project.finalVideoHistory = project.finalVideoHistory.slice(0, 50);
+  }
+  return project;
 }
 
 function isResumableVideoPause(error) {
@@ -3967,14 +4029,9 @@ function summarizeAssetBatch(items = [], waveLabel = "", kind = "asset_batch") {
   };
 }
 
-/**
- * The desktop client must not impose a media concurrency quota. It fans out the
- * whole ready batch; the account lease service is the single source of truth
- * for image/video concurrency and queues requests beyond the administrator-set
- * allowance. Legacy per-project values are intentionally ignored.
- */
-function imageBatchConcurrency(_project) {
-  return Number.MAX_SAFE_INTEGER;
+function imageBatchConcurrency(project) {
+  const requested = Number(project?.generation?.keyframeConcurrency) || IMAGE_BATCH_MAX_CONCURRENCY;
+  return Math.max(1, Math.min(IMAGE_BATCH_MAX_CONCURRENCY, requested));
 }
 
 async function mapWithConcurrency(items, concurrency, worker) {
@@ -6414,6 +6471,19 @@ class WorkbenchWorkflow {
     return (this.activeOperations.get(projectId)?.size || 0) > 0;
   }
 
+  videoBridgeForProject(projectId, job = null) {
+    const project = this.store.getProject(projectId);
+    const settings = this.store.getSettings();
+    const projectConfig = projectVideoProviderConfig(project, settings);
+    const kind = String(job?.providerKind || projectConfig.kind || "local-xiangsu");
+    const config = {
+      ...projectConfig,
+      kind,
+      baseUrl: kind === "local-xiangsu" ? "http://127.0.0.1:28911" : "https://puream.cn"
+    };
+    return this.bridge && typeof this.bridge.fork === "function" ? this.bridge.fork(config) : this.bridge;
+  }
+
   beginActiveOperation(projectId, opId) {
     let bucket = this.activeOperations.get(projectId);
     if (!bucket) {
@@ -6560,7 +6630,7 @@ class WorkbenchWorkflow {
   }
 
   resolveVideoDuration(project, settings, requestedDuration) {
-    const providerKind = settings?.videoProvider?.kind || "local-xiangsu";
+    const providerKind = projectVideoProviderKind(project, settings);
     const engine = projectVideoEngine(project);
     const contract = durationContract(providerKind, { engine });
     return normalizeTargetDurationSeconds(requestedDuration, contract);
@@ -6787,6 +6857,13 @@ class WorkbenchWorkflow {
   }
 
   async runTrackedOperation(projectId, operation, targetId, action) {
+    if (this.hasActiveOperation(projectId)) {
+      throw Object.assign(new Error("当前项目已有任务在运行；可切换到其他项目并行制作，或等待本项目任务完成"), {
+        code: "PROJECT_OPERATION_BUSY",
+        projectId,
+        operation
+      });
+    }
     const opId = makeId("op");
     const first = this.beginActiveOperation(projectId, opId);
     if (first || !this.operationControls.has(projectId)) {
@@ -7039,7 +7116,8 @@ class WorkbenchWorkflow {
         continue;
       }
       try {
-        const result = await this.bridge.query(record.taskId);
+        const savedBeforeQuery = this.store.getProject(record.projectId).jobs.find(item => item.id === record.jobId);
+        const result = await this.videoBridgeForProject(record.projectId, savedBeforeQuery).query(record.taskId);
         const job = this.store.getProject(record.projectId).jobs.find(item => item.id === record.jobId);
         if (!job) continue;
         if (result.status === "finished" && result.localPath) {
@@ -7063,7 +7141,7 @@ class WorkbenchWorkflow {
             progressSource: determinate ? (result.progressSource || "xiangsu") : "status-only",
             progressDeterminate: determinate,
             upstreamStatusCode: result.statusCode ?? null,
-            message: result.message || "正在同步视频上游任务状态",
+            message: `正在恢复已提交的云端任务：${result.message || "同步任务状态"}`,
             ownerInstanceId: this.instanceId
           });
         }
@@ -7263,6 +7341,7 @@ class WorkbenchWorkflow {
     let directData;
     try {
       this.assertOperationActive(projectId);
+      const directTimeoutMs = scriptFastRequestBudgetMs(checkpoint.startedAt);
       const splitAt = Math.ceil(unitCount / 2);
       const segments = [[1, splitAt], [splitAt + 1, unitCount]];
       const rawParts = ["", ""];
@@ -7292,7 +7371,7 @@ class WorkbenchWorkflow {
         requiredKeys: ["c", "sc", "s"],
         unwrapKeys: ["data", "result", "payload", "content"],
         maxTokens: 7_168,
-        timeoutMs: 275_000,
+        timeoutMs: directTimeoutMs,
         sessionId: `${checkpoint.sessionId}-direct-fast-v4-${segmentIndex + 1}`,
         onDelta: text => { rawParts[segmentIndex] = String(text || ""); },
         onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) receipts[segmentIndex] = { ...(usage || {}) }; }
@@ -8685,7 +8764,7 @@ class WorkbenchWorkflow {
 
   importAsset(projectId, category, sourcePath, name = "") {
     const extension = path.extname(sourcePath).toLowerCase();
-    const target = path.join(this.store.assetDir(projectId, category), `${Date.now()}-${slug(name || path.basename(sourcePath, extension))}${extension}`);
+    const target = path.join(this.store.assetDir(projectId, category), `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${slug(name || path.basename(sourcePath, extension))}${extension}`);
     fs.copyFileSync(sourcePath, target);
     return { path: target, fileUrl: pathToFileURL(target).href };
   }
@@ -9277,7 +9356,7 @@ ${shotAnchor}
       prompt += `\n${settings.prompts.seedanceFaceMesh || seedanceFaceMeshInstruction()}`;
     }
     const category = entityType === "character" ? "characters" : entityType === "scene" ? "scenes" : "storyboards";
-    const targetPath = path.join(this.store.assetDir(projectId, category), `${stage}-${slug(entity.name || entity.title || entity.number)}-${Date.now()}.png`);
+    const targetPath = path.join(this.store.assetDir(projectId, category), `${stage}-${slug(entity.name || entity.title || entity.number)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.png`);
     const referenceItems = [];
     const addReference = (candidate, label) => {
       if (!candidate?.filePath && !candidate?.remoteUrl) return;
@@ -9616,7 +9695,9 @@ ${shotAnchor}
               ], { costProjectId: projectId, costOperation: `image_policy_rewrite_${stage}`, timeoutMs: 90_000 });
               const text = typeof rewritten === "string" ? rewritten.trim() : "";
               if (text.length > 40) activePrompt = text;
-            } catch {}
+            } catch (rewriteError) {
+              this.store.addActivity(projectId, "image_policy_rewrite_warning", `图片安全改写未完成：${rewriteError?.message || "未知错误"}`);
+            }
           }
           if (policyAttempt >= 2 && !productRequired && !continuityLocked) readyReferences = [];
           continue;
@@ -9678,7 +9759,7 @@ ${shotAnchor}
       await this.auditSceneAssetCandidate(projectId, entityId, candidate.id);
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
       if (candidate.qualityAudit?.ok === true) {
-        try { this.store.confirmCandidate(projectId, candidate.id, false); } catch {}
+        this.store.confirmCandidate(projectId, candidate.id, false);
         candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
       }
     }
@@ -9688,19 +9769,19 @@ ${shotAnchor}
       // Newly drawn frames that pass QC become the active selection immediately,
       // otherwise the old selected sibling keeps blocking video generation.
       if (candidate.qualityAudit?.ok === true) {
-        try { this.store.confirmCandidate(projectId, candidate.id, false); } catch {}
+        this.store.confirmCandidate(projectId, candidate.id, false);
         candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
       }
     }
     if (stage === "storyboard_sheet") {
       const audit = await this.auditStoryboardCandidate(projectId, entityId, candidate.id);
       if (audit.ok === true) {
-        try { this.store.confirmCandidate(projectId, candidate.id, false); } catch {}
+        this.store.confirmCandidate(projectId, candidate.id, false);
       }
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
     if (stage === "character_sheet") {
-      try { this.store.confirmCandidate(projectId, candidate.id, false); } catch {}
+      this.store.confirmCandidate(projectId, candidate.id, false);
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
     return candidate;
@@ -9746,7 +9827,7 @@ ${shotAnchor}
       throw Object.assign(new Error("人物原图不在当前项目资产库内，请重新上传后再处理"), { code: "FACE_GRID_SOURCE_OUTSIDE_PROJECT" });
     }
     const category = "characters";
-    const target = path.join(this.store.assetDir(projectId, category), `facegrid-${source.entityId}-${Date.now()}.png`);
+    const target = path.join(this.store.assetDir(projectId, category), `facegrid-${slug(source.entityId)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.png`);
     const processed = await this.processFaceGrid({ inputPath: sourcePath, outputPath: target });
     const candidate = this.store.addCandidate(projectId, {
       entityType: source.entityType,
@@ -9885,7 +9966,8 @@ ${shotAnchor}
     }
     const ffmpeg = this.locateFfmpeg();
     if (!ffmpeg) throw Object.assign(new Error("未找到像塑 FFmpeg"), { code: "FFMPEG_NOT_FOUND" });
-    const sheet = selectedOrLatest(project, "character", characterId, "character_three_view");
+    const sheet = selectedOrLatest(project, "character", characterId, "character_sheet")
+      || selectedOrLatest(project, "character", characterId, "character_three_view");
     const [image, sheetImage] = await Promise.all([
       analyzeImageFile(ffmpeg, candidate.filePath),
       sheet?.filePath && fs.existsSync(sheet.filePath) ? analyzeImageFile(ffmpeg, sheet.filePath) : Promise.resolve({ ok: false, hash: "" })
@@ -9993,7 +10075,8 @@ ${shotAnchor}
     const image = await analyzeImageFile(ffmpeg, candidate.filePath);
     const characterReferences = [];
     for (const characterId of shot.characterIds || []) {
-      const portrait = selectedOrLatest(project, "character", characterId, "character_three_view");
+      const portrait = selectedOrLatest(project, "character", characterId, "character_sheet")
+        || selectedOrLatest(project, "character", characterId, "character_three_view");
       if (!portrait?.filePath || !fs.existsSync(portrait.filePath)) continue;
       const character = project.characters.find(item => item.id === characterId);
       const analyzed = await analyzeImageFile(ffmpeg, portrait.filePath);
@@ -10068,7 +10151,9 @@ ${shotAnchor}
     throw Object.assign(new Error(`${storyboardStageLabel(stage)}连续3次生成仍像人物素材板：${(lastAudit?.failures || []).map(item => item.message).join("；")}`), { code: "STORYBOARD_QUALITY_RETRY_EXHAUSTED", shotId, stage, audit: lastAudit });
   }
 
-  async waitForSeedance(taskId, projectId, jobId) {
+  async waitForSeedance(taskId, projectId, jobId, bridgeClient = null) {
+    const initialJob = this.store.getProject(projectId).jobs.find(item => item.id === jobId);
+    const taskBridge = bridgeClient || this.videoBridgeForProject(projectId, initialJob);
     const providerLabel = () => {
       const job = this.store.getProject(projectId).jobs.find(item => item.id === jobId);
       return job?.videoEngine === "hailuo-h3" || job?.providerKind === "puream-hailuo-h3" ? "海螺 H3" : "Seedance";
@@ -10079,7 +10164,7 @@ ${shotAnchor}
       await this.videoQueryPollSleep(5_000);
       let result;
       try {
-        result = await this.bridge.query(taskId);
+        result = await taskBridge.query(taskId);
       } catch (error) {
         if (!error.taskId) error.taskId = taskId;
         if (error.remoteGenerationCompleted !== true && isTransientProviderError(error)) {
@@ -10143,23 +10228,6 @@ ${shotAnchor}
     const providerKind = expectedEngine === "hailuo-h3"
       ? "puream-hailuo-h3"
       : (projectVideoProviderKind(project, settings) || settings.videoProvider?.kind || "local-xiangsu");
-    const providerConfig = {
-      ...(settings.videoProvider || {}),
-      kind: providerKind,
-      baseUrl: providerKind === "local-xiangsu"
-        ? (settings.videoProvider?.baseUrl || "http://127.0.0.1:28911")
-        : (settings.videoProvider?.baseUrl || "https://puream.cn")
-    };
-    if (this.bridge && typeof this.bridge.configure === "function") {
-      this.bridge.configure(providerConfig);
-    }
-    if (expectedEngine === "hailuo-h3" && (!this.bridge || !this.bridge.isRemote || !this.bridge.isRemote())) {
-      throw Object.assign(new Error("项目已锁定海螺 H3，但视频桥仍指向本地像塑；请到系统设置切换到云端算力后再继续"), {
-        code: "VIDEO_ENGINE_PROVIDER_MISMATCH",
-        expectedEngine,
-        providerKind: this.bridge?.config?.kind || ""
-      });
-    }
     const effectiveDuration = this.resolveVideoDuration(project, settings, Number(duration) || Number(project.generation?.shotDuration) || 5);
     const hailuoApiMode = expectedEngine === "hailuo-h3"
       ? normalizeHailuoApiMode(references.hailuoApiMode || settings.videoProvider?.hailuoApiMode)
@@ -10167,7 +10235,7 @@ ${shotAnchor}
     const cloudVideoResolution = expectedEngine === "hailuo-h3"
       ? normalizeCloudVideoResolution(settings.videoProvider?.cloudVideoResolution)
       : "480";
-    const fingerprint = videoSubmissionFingerprint(
+    const fingerprint = await videoSubmissionFingerprint(
       project,
       providerKind,
       entityType,
@@ -10216,22 +10284,7 @@ ${shotAnchor}
     const providerKind = expectedEngine === "hailuo-h3"
       ? "puream-hailuo-h3"
       : (projectVideoProviderKind(project, settings) || settings.videoProvider?.kind || "local-xiangsu");
-    if (this.bridge && typeof this.bridge.configure === "function") {
-      this.bridge.configure({
-        ...(settings.videoProvider || {}),
-        kind: providerKind,
-        baseUrl: providerKind === "local-xiangsu"
-          ? (settings.videoProvider?.baseUrl || "http://127.0.0.1:28911")
-          : (settings.videoProvider?.baseUrl || "https://puream.cn")
-      });
-    }
-    if (expectedEngine === "hailuo-h3" && (!this.bridge || !this.bridge.isRemote || !this.bridge.isRemote())) {
-      throw Object.assign(new Error("项目已锁定海螺 H3，但视频桥仍指向本地像塑；请到系统设置切换到云端算力后再继续"), {
-        code: "VIDEO_ENGINE_PROVIDER_MISMATCH",
-        expectedEngine,
-        providerKind: this.bridge?.config?.kind || ""
-      });
-    }
+    const submissionBridge = this.videoBridgeForProject(projectId, { providerKind });
     const effectiveDuration = this.resolveVideoDuration(project, settings, Number(duration) || Number(project.generation?.shotDuration) || 5);
     const providerLabel = expectedEngine === "hailuo-h3" ? "海螺 H3" : "Seedance";
     const outputDir = this.store.assetDir(projectId, "videos");
@@ -10253,54 +10306,60 @@ ${shotAnchor}
         assertHailuoPromptVoiceBindings(project, activeShot, checkedReferences, prompt);
       }
     }
+    const manifestHashCache = new Map();
+    const manifestHash = filePath => {
+      const key = String(filePath || "");
+      if (!manifestHashCache.has(key)) manifestHashCache.set(key, fileSha256Async(key));
+      return manifestHashCache.get(key);
+    };
     const referenceManifest = {
-      images: (references.images || []).map((filePath, index) => ({
+      images: await Promise.all((references.images || []).map(async (filePath, index) => ({
         index: index + 1,
         filePath,
-        sha256: fileSha256(filePath),
+        sha256: await manifestHash(filePath),
         remoteUrl: references.imageRoles?.[index]?.remoteUrl || "",
         ...(references.imageRoles?.[index] || {})
-      })),
-      videos: videos.map((item, index) => ({
+      }))),
+      videos: await Promise.all(videos.map(async (item, index) => ({
         index: index + 1,
         filePath: item.path,
-        sha256: fileSha256(item.path),
+        sha256: await manifestHash(item.path),
         candidateId: item.candidateId || "",
         entityType: item.entityType || "",
         entityId: item.entityId || "",
         sourceStage: item.sourceStage || "shot_video",
         remoteUrl: item.remoteUrl || "",
         ...(videoRoles[index] || {})
-      })),
+      }))),
       video: videos[0]?.path ? {
         filePath: videos[0].path,
-        sha256: fileSha256(videos[0].path),
+        sha256: await manifestHash(videos[0].path),
         candidateId: videos[0].candidateId || "",
         entityType: videos[0].entityType || "",
         entityId: videos[0].entityId || "",
         sourceStage: videos[0].sourceStage || "shot_video",
         remoteUrl: videos[0].remoteUrl || ""
       } : null,
-      videoAudios: videoAudios.map((item, index) => item ? ({
+      videoAudios: await Promise.all(videoAudios.map(async (item, index) => item ? ({
         index: index + 1,
         filePath: item.path,
-        sha256: fileSha256(item.path),
+        sha256: await manifestHash(item.path),
         duration: item.duration,
         remoteUrl: item.remoteUrl || ""
-      }) : null),
-      audios: (references.audios || []).map((item, index) => ({
+      }) : null)),
+      audios: await Promise.all((references.audios || []).map(async (item, index) => ({
         index: index + 1,
         filePath: item.path,
-        sha256: fileSha256(item.path),
+        sha256: await manifestHash(item.path),
         candidateId: item.candidateId || "",
         sourceStage: item.sourceStage || "character_voice",
         characterId: item.characterId || "",
         characterName: item.characterName || "",
         duration: item.duration,
         remoteUrl: item.remoteUrl || ""
-      }))
+      })))
     };
-    const fingerprint = submissionFingerprint || videoSubmissionFingerprint(
+    const fingerprint = submissionFingerprint || await videoSubmissionFingerprint(
       project,
       providerKind,
       entityType,
@@ -10337,7 +10396,7 @@ ${shotAnchor}
       )
     ));
     if (equivalentJob?.taskId) {
-      return this.resumeVideoJob(projectId, equivalentJob.id, prompt, effectiveDuration);
+      return this.resumeVideoJob(projectId, equivalentJob.id, prompt, effectiveDuration, submissionBridge);
     }
     const staged = stageSubmissionMedia({
       clientRequestId,
@@ -10403,7 +10462,7 @@ ${shotAnchor}
         : 1;
       for (let submitAttempt = 1; submitAttempt <= maxSubmitAttempts; submitAttempt += 1) {
         try {
-          submitted = await this.bridge.submit(staged.payload);
+          submitted = await submissionBridge.submit(staged.payload);
           break;
         } catch (error) {
           const responseUnknown = error?.remoteSubmissionUnknown === true
@@ -10436,7 +10495,7 @@ ${shotAnchor}
         message: submitted.message || `${providerLabel}任务已提交`
       });
       this.store.updateCostEntry(projectId, costEntry.id, { taskId: submitted.taskId, jobId: job.id });
-      const result = await this.waitForSeedance(submitted.taskId, projectId, job.id);
+      const result = await this.waitForSeedance(submitted.taskId, projectId, job.id, submissionBridge);
       const candidate = this.finalizeVideoJob(projectId, { ...job, taskId: submitted.taskId, costEntryId: costEntry.id }, result, false);
       this.settleVideoCost(projectId, { ...job, taskId: submitted.taskId, costEntryId: costEntry.id }, result);
       return candidate;
@@ -10505,7 +10564,7 @@ ${shotAnchor}
     }
   }
 
-  async resumeVideoJob(projectId, jobId, prompt, duration) {
+  async resumeVideoJob(projectId, jobId, prompt, duration, bridgeClient = null) {
     const project = this.store.getProject(projectId);
     const job = project.jobs.find(item => item.id === jobId);
     if (!job?.taskId) throw Object.assign(new Error("待恢复的视频任务没有 taskId"), { code: "VIDEO_TASK_ID_REQUIRED" });
@@ -10523,7 +10582,7 @@ ${shotAnchor}
       return this.auditRecoveredVideoCandidate(projectId, existing);
     }
     try {
-      const result = await this.waitForSeedance(job.taskId, projectId, job.id);
+      const result = await this.waitForSeedance(job.taskId, projectId, job.id, bridgeClient);
       const candidate = this.finalizeVideoJob(projectId, { ...jobWithCost, prompt: prompt || job.prompt, duration: duration || job.duration }, result, true);
       this.settleVideoCost(projectId, jobWithCost, result);
       return this.auditRecoveredVideoCandidate(projectId, candidate);
@@ -10576,8 +10635,21 @@ ${shotAnchor}
         if (options.extractVoice !== false) {
           try {
             await this.extractCharacterVoice(projectId, characterId, { track: false });
-          } catch {
-            // Voice is best-effort after video; user can click「提取音色」retry.
+          } catch (error) {
+            const warning = "人物视频已生成，但自动提取音色失败；请点击“提取音色”重试";
+            const latest = this.store.getProject(projectId);
+            const savedCandidate = latest.candidates.find(item => item.id === candidate.id);
+            if (savedCandidate) savedCandidate.postProcessWarning = warning;
+            latest.activity = Array.isArray(latest.activity) ? latest.activity : [];
+            latest.activity.unshift({
+              id: makeId("activity"),
+              at: new Date().toISOString(),
+              type: "voice_extract_warning",
+              summary: warning,
+              errorCode: String(error?.code || "VOICE_EXTRACTION_FAILED")
+            });
+            latest.activity = latest.activity.slice(0, 300);
+            this.store.saveProject(latest);
           }
         }
         return candidate;
@@ -10627,7 +10699,7 @@ ${shotAnchor}
           || (item.status === "failed" && ["VIDEO_GENERATION_TIMEOUT", "PROVIDER_TIMEOUT", "REMOTE_VIDEO_DNS_UNRESOLVED"].includes(item.errorCode)))
         && item.taskId);
       const targetPath = recoverableCloudJob?.targetPath
-        || path.join(this.store.assetDir(projectId, "videos"), `character-${slug(character.name || characterId)}-${Date.now()}.mp4`);
+        || path.join(this.store.assetDir(projectId, "videos"), `character-${slug(character.name || characterId)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.mp4`);
       const job = recoverableCloudJob || this.store.addJob(projectId, {
         type: "character_video",
         entityType: "character",
@@ -10772,7 +10844,8 @@ ${shotAnchor}
     const ffmpeg = this.locateFfmpeg();
     if (!ffmpeg) throw Object.assign(new Error("未找到像塑 FFmpeg"), { code: "FFMPEG_NOT_FOUND" });
     const intro = selectedOrLatest(project, "character", characterId, "character_intro");
-    const sheet = selectedOrLatest(project, "character", characterId, "character_three_view");
+    const sheet = selectedOrLatest(project, "character", characterId, "character_sheet")
+      || selectedOrLatest(project, "character", characterId, "character_three_view");
     const [audio, endpoints, introImage, sheetImage] = await Promise.all([
       analyzeAudioFile(ffmpeg, candidate.filePath, 10),
       analyzeVideoEndpointFrames(ffmpeg, candidate.filePath),
@@ -10784,8 +10857,8 @@ ${shotAnchor}
     const task = candidate.taskId ? project.jobs.find(item => item.taskId === candidate.taskId) : null;
     const referenceManifest = candidate.referenceManifest || task?.referenceManifest || null;
     const failures = [...audioDecision.failures, ...anchors.failures];
-    if (candidate.taskId && Array.isArray(referenceManifest?.images) && referenceManifest.images.some(item => item.sourceStage === "character_three_view")) {
-      failures.push({ code: "VIDEO_USED_CHARACTER_SHEET_REFERENCE", message: "人物视频生成任务直接使用了人物三视图，必须改用通过质检的单人介绍图" });
+    if (candidate.taskId && Array.isArray(referenceManifest?.images) && referenceManifest.images.some(item => ["character_three_view", "character_sheet"].includes(item.sourceStage))) {
+      failures.push({ code: "VIDEO_USED_CHARACTER_SHEET_REFERENCE", message: "人物视频生成任务直接使用了人物设定板，必须改用通过质检的单人介绍图" });
     } else if (candidate.taskId && (!Array.isArray(referenceManifest?.images) || !referenceManifest.images.length)) {
       failures.push({ code: "VIDEO_REFERENCE_LINEAGE_UNVERIFIED", message: "人物视频缺少参考资产清单，无法证明首帧没有误用三视图" });
     }
@@ -10839,7 +10912,7 @@ ${shotAnchor}
       plan = { mode: "single", start: Number(start.toFixed(3)), duration: Number(duration.toFixed(3)), segments: [{ start: Number(start.toFixed(3)), end: Number((start + duration).toFixed(3)) }], fallback: true };
       usedFallback = true;
     }
-    const target = path.join(this.store.assetDir(projectId, "audio"), `voice-${slug(characterId)}-${Date.now()}.wav`);
+    const target = path.join(this.store.assetDir(projectId, "audio"), `voice-${slug(characterId)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.wav`);
     const commonOut = ["-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le", "-y", target];
     if (plan.mode === "concat" && plan.segments.length > 1) {
       const filters = plan.segments.map((segment, index) => `[0:a]atrim=start=${segment.start}:end=${segment.end},asetpts=PTS-STARTPTS,highpass=f=70,lowpass=f=12000[a${index}]`);
@@ -10886,8 +10959,8 @@ ${shotAnchor}
     const saved = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     try {
       this.depositCharacterVoiceToLibrary(projectId, characterId, saved);
-    } catch {
-      // Deposit is best-effort; project voice candidate remains usable.
+    } catch (error) {
+      this.store.addActivity(projectId, "asset_library_warning", "人物 " + characterId + " 的音色已保存到项目；自动加入独立音色库失败：" + String(error?.message || "未知错误"));
     }
     return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || saved;
   }
@@ -11189,7 +11262,7 @@ ${shotAnchor}
       throw Object.assign(new Error("长期音色库中没有可复用的匹配音色"), { code: "VOICE_LIBRARY_MISS" });
     }
     const sourceExtension = path.extname(entry.filePath).toLowerCase() || ".wav";
-    const target = path.join(this.store.assetDir(projectId, "audio"), `voice-lib-${slug(characterId)}-${Date.now()}${sourceExtension}`);
+    const target = path.join(this.store.assetDir(projectId, "audio"), `voice-lib-${slug(characterId)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}${sourceExtension}`);
     fs.copyFileSync(entry.filePath, target);
     const candidate = this.store.addCandidate(projectId, {
       entityType: "character",
@@ -11233,7 +11306,11 @@ ${shotAnchor}
     const existing = candidateReady(project, "character", characterId, "character_voice")
       || selectedOrLatest(project, "character", characterId, "character_voice");
     if (existing?.filePath && fs.existsSync(existing.filePath)) {
-      try { this.depositCharacterVoiceToLibrary(projectId, characterId, existing); } catch {}
+      try {
+        this.depositCharacterVoiceToLibrary(projectId, characterId, existing);
+      } catch (error) {
+        this.store.addActivity(projectId, "asset_library_warning", "人物 " + characterId + " 的项目音色可用；同步独立音色库失败：" + String(error?.message || "未知错误"));
+      }
       return existing;
     }
     const character = (project.characters || []).find(item => item.id === characterId);
@@ -11889,15 +11966,13 @@ ${shotAnchor}
     }
     // Soft-select the exact frames that will drive this video so UI / QC / retry stay locked.
     for (const frame of requiredFrames.filter(item => item?.id && !item.selected)) {
-      try {
-        const latest = this.store.getProject(projectId);
-        for (const item of latest.candidates || []) {
-          if (item.entityType === "shot" && item.entityId === shot.id && item.stage === frame.stage) {
-            item.selected = item.id === frame.id;
-          }
+      const latest = this.store.getProject(projectId);
+      for (const item of latest.candidates || []) {
+        if (item.entityType === "shot" && item.entityId === shot.id && item.stage === frame.stage) {
+          item.selected = item.id === frame.id;
         }
-        this.store.saveProject(latest);
-      } catch {}
+      }
+      this.store.saveProject(latest);
     }
     for (const frame of manualPromptActive ? [] : (shouldUseImageAnchors ? requiredFrames.filter(Boolean) : [])) {
       const audit = frame.qualityAudit || await this.auditStoryboardCandidate(projectId, shot.id, frame.id);
@@ -13115,7 +13190,7 @@ ${shotAnchor}
     );
     const prompt = withStageParity(authoredAssetPrompt, settings.prompts, stage);
     const category = "characters";
-    const targetPath = path.join(this.store.assetDir(projectId, category), `${stage}-${slug(asset.name)}-${Date.now()}.png`);
+    const targetPath = path.join(this.store.assetDir(projectId, category), `${stage}-${slug(asset.name)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.png`);
     let generated;
     try {
       generated = await generateImage(settings.imageProvider, prompt, targetPath, imageGenerationOptions(project, stage, referenceInputs));
@@ -13614,7 +13689,9 @@ ${shotAnchor}
         failures: [],
         note: "蓝图/质检限制已关闭，已跳过成片终审"
       };
+      archiveCurrentFinalVideo(project, "new-generated-final");
       project.finalVideoPath = outputPath;
+      project.finalVideoSource = "generated";
       project.finalVideoStale = false;
       project.finalVideoStaleAt = "";
       project.finalVideoStaleReason = "";
@@ -13642,7 +13719,9 @@ ${shotAnchor}
       this.store.saveProject(project);
       throw Object.assign(new Error(`成片终审失败：${project.finalQualityAudit.failures.map(item => item.message).join("；")}`), { code: "FINAL_MEDIA_QUALITY_FAILED", audit: project.finalQualityAudit, outputPath });
     }
+    archiveCurrentFinalVideo(project, "new-generated-final");
     project.finalVideoPath = outputPath;
+    project.finalVideoSource = "generated";
     project.finalVideoStale = false;
     project.finalVideoStaleAt = "";
     project.finalVideoStaleReason = "";

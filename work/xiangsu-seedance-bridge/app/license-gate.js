@@ -73,6 +73,21 @@ function licenseStatePath() {
   return path.join(app.getPath("userData"), "drama-license.json");
 }
 
+function replaceFileWithRetries(temporary, target) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 40; attempt += 1) {
+    try {
+      fs.renameSync(temporary, target);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!["EPERM", "EBUSY", "EACCES"].includes(error?.code) || attempt === 40) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  throw lastError;
+}
+
 function encryptSecret(plain) {
   const text = String(plain || "");
   if (!text) return "";
@@ -80,10 +95,10 @@ function encryptSecret(plain) {
     if (safeStorage?.isEncryptionAvailable?.()) {
       return `safe:${safeStorage.encryptString(text).toString("base64")}`;
     }
-  } catch {
-    /* fall through */
+  } catch (error) {
+    throw Object.assign(new Error("系统安全存储不可用，授权码未保存"), { code: "SECRET_STORAGE_UNAVAILABLE", cause: error });
   }
-  return `b64:${Buffer.from(text, "utf8").toString("base64")}`;
+  throw Object.assign(new Error("系统安全存储不可用，授权码未保存"), { code: "SECRET_STORAGE_UNAVAILABLE" });
 }
 
 function decryptSecret(stored) {
@@ -102,18 +117,33 @@ function decryptSecret(stored) {
   }
 }
 
+function decodeLicenseState(parsed) {
+  if (parsed.tokenEnc || parsed.token) parsed.token = decryptSecret(parsed.tokenEnc || parsed.token);
+  if (parsed.activationCodeEnc) parsed.activationCode = decryptSecret(parsed.activationCodeEnc);
+  return parsed;
+}
+
 function readLicenseState() {
+  const filePath = licenseStatePath();
+  if (!fs.existsSync(filePath)) return {};
   try {
-    const parsed = JSON.parse(fs.readFileSync(licenseStatePath(), "utf8"));
-    if (parsed.tokenEnc || parsed.token) {
-      parsed.token = decryptSecret(parsed.tokenEnc || parsed.token);
+    return decodeLicenseState(JSON.parse(fs.readFileSync(filePath, "utf8")));
+  } catch (primaryError) {
+    const backupPath = `${filePath}.bak`;
+    let recoveryTemporary = "";
+    try {
+      const rawBackup = fs.readFileSync(backupPath, "utf8");
+      const recovered = JSON.parse(rawBackup);
+      recoveryTemporary = `${filePath}.${process.pid}.${crypto.randomUUID()}.recovery`;
+      fs.writeFileSync(recoveryTemporary, rawBackup, { encoding: "utf8", mode: 0o600 });
+      replaceFileWithRetries(recoveryTemporary, filePath);
+      recoveryTemporary = "";
+      return decodeLicenseState(recovered);
+    } catch (backupError) {
+      try { if (recoveryTemporary && fs.existsSync(recoveryTemporary)) fs.unlinkSync(recoveryTemporary); } catch {}
+      console.error("[license] activation state is corrupted and no valid backup is available", primaryError?.message, backupError?.message);
+      return { storageCorrupted: true };
     }
-    if (parsed.activationCodeEnc) {
-      parsed.activationCode = decryptSecret(parsed.activationCodeEnc);
-    }
-    return parsed;
-  } catch {
-    return {};
   }
 }
 
@@ -128,9 +158,30 @@ function writeLicenseState(next) {
   };
   delete persisted.token;
   delete persisted.activationCode;
-  const tmp = `${filePath}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(persisted, null, 2), "utf8");
-  fs.renameSync(tmp, filePath);
+  const tmp = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(persisted, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  try {
+    if (fs.existsSync(filePath)) {
+      let backupTemporary = "";
+      try {
+        JSON.parse(fs.readFileSync(filePath, "utf8"));
+        const backupPath = `${filePath}.bak`;
+        backupTemporary = `${backupPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+        fs.copyFileSync(filePath, backupTemporary);
+        JSON.parse(fs.readFileSync(backupTemporary, "utf8"));
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+        replaceFileWithRetries(backupTemporary, backupPath);
+        backupTemporary = "";
+      } catch (error) {
+        try { if (backupTemporary && fs.existsSync(backupTemporary)) fs.unlinkSync(backupTemporary); } catch {}
+        console.warn(`[license] skipped invalid activation-state backup: ${error?.message || error}`);
+      }
+    }
+    replaceFileWithRetries(tmp, filePath);
+  } catch (error) {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch {}
+    throw error;
+  }
   return { ...rest, token: token || "", activationCode: activationCode || "" };
 }
 
@@ -175,7 +226,8 @@ class DramaLicenseClient {
       baseUrl: this.baseUrl,
       offlineGrace: Boolean(this.state.offlineGrace),
       offlineGraceRemainingMs: graceRemainingMs,
-      lastHeartbeatOkAt: this.state.lastHeartbeatOkAt || ""
+      lastHeartbeatOkAt: this.state.lastHeartbeatOkAt || "",
+      storageCorrupted: this.state.storageCorrupted === true
     };
   }
 
@@ -384,6 +436,9 @@ class DramaLicenseClient {
   async ensureSession() {
     if (licenseBypassAllowed()) {
       return { ...this.getSnapshot(), activated: true, bypass: true };
+    }
+    if (this.state.storageCorrupted === true) {
+      throw Object.assign(new Error("本机授权记录已损坏且没有有效备份。旧文件已保留，请重新输入授权码激活。"), { code: "LICENSE_STATE_CORRUPTED" });
     }
     if (!this.state.token) {
       const error = Object.assign(new Error("请先输入授权码激活应用"), { code: "NEED_ACTIVATION" });

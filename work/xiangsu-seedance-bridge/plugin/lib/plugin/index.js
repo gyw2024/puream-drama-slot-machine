@@ -1,9 +1,11 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const dns = require("node:dns").promises;
 const fs = require("node:fs");
 const http = require("node:http");
 const https = require("node:https");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
@@ -11,6 +13,8 @@ const { pathToFileURL } = require("node:url");
 const HOST = "127.0.0.1";
 const PORT = 28911;
 const MAX_BODY_BYTES = 1_000_000;
+const MAX_DIAGNOSTIC_DEPTH = 6;
+const UPLOAD_INFLIGHT = new Map();
 const MODEL_ID = "7648913495051894811";
 const CLIENT_VERSION = "9.1.2";
 const MEDIA_AUDIT_WORKFLOW_ID = "7650417852005810186";
@@ -41,6 +45,21 @@ const MODULE_NAMES = [
   "@orion/Business/AIEffectWindow/UI/AIVideoEditPanel/ParameterPanel/ExampleAudio/Cutter/audioUtils",
   "@orion/Business/AIEffectWindow/UI/AIVideoEditPanel/ParameterPanel/ExampleAudio/Cutter/cropUtils"
 ];
+
+function replaceFileWithRetries(temporary, target) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 40; attempt += 1) {
+    try {
+      fs.renameSync(temporary, target);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!["EPERM", "EBUSY", "EACCES"].includes(error?.code) || attempt === 40) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  throw lastError;
+}
 
 function json(response, status, payload) {
   const body = JSON.stringify(payload);
@@ -89,6 +108,57 @@ function getToken() {
   }
 }
 
+function getTaskRegistryPath() {
+  return path.join(path.dirname(getTokenPath()), "xiangsu-tasks.json");
+}
+
+function writeTaskRegistry(tasks) {
+  const registryPath = getTaskRegistryPath();
+  fs.mkdirSync(path.dirname(registryPath), { recursive: true });
+  const temporary = `${registryPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  const value = Object.fromEntries(tasks instanceof Map ? tasks : Object.entries(tasks || {}));
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  try {
+    if (fs.existsSync(registryPath)) {
+      let backupTemporary = "";
+      try {
+        JSON.parse(fs.readFileSync(registryPath, "utf8"));
+        const backupPath = `${registryPath}.bak`;
+        backupTemporary = `${backupPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+        fs.copyFileSync(registryPath, backupTemporary);
+        JSON.parse(fs.readFileSync(backupTemporary, "utf8"));
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+        replaceFileWithRetries(backupTemporary, backupPath);
+        backupTemporary = "";
+      } catch (error) {
+        try { if (backupTemporary && fs.existsSync(backupTemporary)) fs.unlinkSync(backupTemporary); } catch {}
+        console.warn(`[SeedanceBridge] skipped invalid task-registry backup: ${error?.message || error}`);
+      }
+    }
+    replaceFileWithRetries(temporary, registryPath);
+  } catch (error) {
+    try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch {}
+    throw error;
+  }
+}
+
+function readTaskRegistry() {
+  const registryPath = getTaskRegistryPath();
+  if (!fs.existsSync(registryPath)) return new Map();
+  try {
+    return new Map(Object.entries(JSON.parse(fs.readFileSync(registryPath, "utf8"))));
+  } catch (primaryError) {
+    try {
+      const recovered = JSON.parse(fs.readFileSync(`${registryPath}.bak`, "utf8"));
+      const tasks = new Map(Object.entries(recovered));
+      writeTaskRegistry(tasks);
+      return tasks;
+    } catch {
+      throw Object.assign(new Error("像塑任务索引损坏，且没有可用备份"), { code: "XIANGSU_TASK_REGISTRY_CORRUPTED", cause: primaryError });
+    }
+  }
+}
+
 function authorized(request) {
   const token = getToken();
   const header = request.headers.authorization || "";
@@ -98,9 +168,13 @@ function authorized(request) {
   return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(token));
 }
 
-function describeExport(value) {
+function describeExport(value, state = { seen: new WeakSet(), depth: 0 }) {
   if (value === null) return { type: "null" };
   const type = typeof value;
+  if ((type === "object" || type === "function") && state.seen.has(value)) return { type, circular: true };
+  if ((type === "object" || type === "function") && state.depth >= MAX_DIAGNOSTIC_DEPTH) return { type, truncated: true };
+  const nextState = { seen: state.seen, depth: state.depth + 1 };
+  if (type === "object" || type === "function") state.seen.add(value);
   if (type === "function") {
     let source = "";
     try {
@@ -111,10 +185,13 @@ function describeExport(value) {
       const staticProperties = {};
       for (const key of Object.getOwnPropertyNames(value).sort()) {
         if (["arguments", "caller", "length", "name", "prototype"].includes(key)) continue;
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (/cookie|token|sign|auth|session|passport/i.test(key)) {
-          staticProperties[key] = { type: typeof value[key], redacted: true };
+          staticProperties[key] = { type: descriptor?.get ? "getter" : typeof descriptor?.value, redacted: true };
+        } else if (descriptor?.get || descriptor?.set) {
+          staticProperties[key] = { type: "accessor" };
         } else {
-          staticProperties[key] = describeExport(value[key]);
+          staticProperties[key] = describeExport(descriptor?.value, nextState);
         }
       }
       if (Object.keys(staticProperties).length) output.staticProperties = staticProperties;
@@ -137,10 +214,13 @@ function describeExport(value) {
   if (type !== "object") return { type };
   const properties = {};
   for (const key of Object.getOwnPropertyNames(value).sort()) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (/cookie|token|sign|auth|session|passport/i.test(key)) {
-      properties[key] = { type: typeof value[key], redacted: true };
+      properties[key] = { type: descriptor?.get ? "getter" : typeof descriptor?.value, redacted: true };
+    } else if (descriptor?.get || descriptor?.set) {
+      properties[key] = { type: "accessor" };
     } else {
-      properties[key] = describeExport(value[key]);
+      properties[key] = describeExport(descriptor?.value, nextState);
     }
   }
   const output = { type, properties };
@@ -450,10 +530,15 @@ async function uploadImage(runtime, item) {
     throw Object.assign(new Error("像塑图片上传模块尚未就绪"), { code: "UPLOAD_API_UNAVAILABLE" });
   }
   const media = assertMediaFile(item, "图片");
-  const result = await runtime.uploadApi.uploadFileCommon({
-    filePath: media.stagedPath,
-    fileType: runtime.uploadApi.FileType.Picture
-  });
+  const result = await trackedUpload(
+    `image:${media.stagedPath}`,
+    () => runtime.uploadApi.uploadFileCommon({
+      filePath: media.stagedPath,
+      fileType: runtime.uploadApi.FileType.Picture
+    }),
+    180_000,
+    "图片上传审核超时"
+  );
   const tosKey = result?.data?.decryptedUri;
   if (Number(result?.code) !== 0 || typeof tosKey !== "string" || !tosKey.startsWith("ies.fe.effect/")) {
     throw Object.assign(new Error(result?.message || "图片上传失败"), { code: "IMAGE_UPLOAD_FAILED" });
@@ -469,6 +554,18 @@ function withTimeout(promise, timeoutMs, message) {
       timer = setTimeout(() => reject(Object.assign(new Error(message), { code: "MEDIA_UPLOAD_TIMEOUT" })), timeoutMs);
     })
   ]).finally(() => clearTimeout(timer));
+}
+
+function trackedUpload(key, factory, timeoutMs, message) {
+  let operation = UPLOAD_INFLIGHT.get(key);
+  if (!operation) {
+    operation = Promise.resolve().then(factory);
+    UPLOAD_INFLIGHT.set(key, operation);
+    operation.finally(() => {
+      if (UPLOAD_INFLIGHT.get(key) === operation) UPLOAD_INFLIGHT.delete(key);
+    }).catch(() => {});
+  }
+  return withTimeout(operation, timeoutMs, message);
 }
 
 async function uploadReferenceMedia(runtime, kind, item, uploadedAudioDurationMs) {
@@ -490,12 +587,16 @@ async function uploadReferenceMedia(runtime, kind, item, uploadedAudioDurationMs
     triggerUpdateImageParams: () => {}
   };
   const instance = new Constructor(parent);
-  await withTimeout(
-    Promise.resolve(instance[kind === "audio" ? "uploadAudio" : "uploadVideo"](media.stagedPath)),
+  const uploadedInstance = await trackedUpload(
+    `${kind}:${media.stagedPath}`,
+    async () => {
+      await Promise.resolve(instance[kind === "audio" ? "uploadAudio" : "uploadVideo"](media.stagedPath));
+      return instance;
+    },
     180_000,
     `${kind === "audio" ? "音频" : "视频"}上传审核超时`
   );
-  const info = kind === "audio" ? instance.audioInfo?._value : instance.videoInfo?._value;
+  const info = kind === "audio" ? uploadedInstance.audioInfo?._value : uploadedInstance.videoInfo?._value;
   if (!info || info.uploadState !== "UploadSuccess" || typeof info.vid !== "string" || !info.vid) {
     throw Object.assign(new Error(`${kind === "audio" ? "音频" : "视频"}上传未取得有效 VID`), { code: "MEDIA_UPLOAD_FAILED" });
   }
@@ -572,21 +673,79 @@ function findVideoUrl(result) {
   const nodes = result?.data?.outputNodeList || result?.data?.output_node_list || [];
   for (const node of nodes) {
     const playUrl = node?.videoPlayUrlList?.[0] || node?.video_play_url_list?.[0];
-    if (typeof playUrl === "string" && /^https?:\/\//i.test(playUrl)) return playUrl;
+    if (typeof playUrl === "string" && /^https:\/\//i.test(playUrl)) return playUrl;
     const infoUrl = node?.videoInfoList?.[0]?.url || node?.video_info_list?.[0]?.url;
-    if (typeof infoUrl === "string" && /^https?:\/\//i.test(infoUrl)) return infoUrl;
+    if (typeof infoUrl === "string" && /^https:\/\//i.test(infoUrl)) return infoUrl;
   }
   return null;
 }
 
-function downloadFile(urlString, targetPath, redirects = 0) {
-  if (redirects > 5) return Promise.reject(new Error("视频下载重定向次数过多"));
+function isPrivateAddress(value) {
+  const address = String(value || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  const mapped = address.match(/^(?:::ffff:|0:0:0:0:0:ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (mapped) {
+    const high = Number.parseInt(mapped[1], 16);
+    const low = Number.parseInt(mapped[2], 16);
+    if (Number.isFinite(high) && Number.isFinite(low)) return isPrivateAddress(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+  }
+  if (net.isIPv4(address)) {
+    const parts = address.split(".").map(Number);
+    const [a, b] = parts;
+    return a === 0 || a === 10 || a === 127
+      || (a === 100 && b >= 64 && b <= 127)
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 0 && (parts[2] === 0 || parts[2] === 2))
+      || (a === 192 && b === 168)
+      || (a === 198 && (b === 18 || b === 19))
+      || (a === 198 && b === 51 && parts[2] === 100)
+      || (a === 203 && b === 0 && parts[2] === 113)
+      || a >= 224;
+  }
+  if (net.isIPv6(address)) return address === "::1" || address === "::"
+    || /^(fc|fd)/.test(address)
+    || /^fe[89ab]/.test(address)
+    || /^ff/.test(address)
+    || /^2001:db8(?::|$)/.test(address);
+  return false;
+}
+
+function publicHttpsLookup(hostname, options, callback) {
+  const lookupOptions = typeof options === "object" && options ? options : { family: Number(options) || 0 };
+  dns.lookup(hostname, { all: true, verbatim: true, family: lookupOptions.family || 0, hints: lookupOptions.hints || 0 })
+    .then(records => {
+      if (!records.length || records.some(item => isPrivateAddress(item.address))) {
+        return callback(Object.assign(new Error("视频下载地址解析到了非公网地址"), { code: "VIDEO_DOWNLOAD_URL_BLOCKED" }));
+      }
+      if (lookupOptions.all) return callback(null, records);
+      const selected = records[0];
+      return callback(null, selected.address, selected.family);
+    })
+    .catch(error => callback(error));
+}
+
+async function assertPublicDownloadUrl(urlString) {
   const parsed = new URL(urlString);
-  const transport = parsed.protocol === "https:" ? https : parsed.protocol === "http:" ? http : null;
-  if (!transport) return Promise.reject(new Error("视频下载地址协议无效"));
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || hostname === "localhost" || hostname.endsWith(".local") || isPrivateAddress(hostname)) {
+    throw Object.assign(new Error("视频下载地址必须是公网 HTTPS 地址"), { code: "VIDEO_DOWNLOAD_URL_BLOCKED" });
+  }
+  if (!net.isIP(hostname)) {
+    const records = await dns.lookup(hostname, { all: true, verbatim: true });
+    if (!records.length || records.some(item => isPrivateAddress(item.address))) {
+      throw Object.assign(new Error("视频下载地址解析到了非公网地址"), { code: "VIDEO_DOWNLOAD_URL_BLOCKED" });
+    }
+  }
+  return parsed;
+}
+
+async function downloadFile(urlString, targetPath, redirects = 0) {
+  if (redirects > 5) return Promise.reject(new Error("视频下载重定向次数过多"));
+  const parsed = await assertPublicDownloadUrl(urlString);
+  const transport = https;
 
   return new Promise((resolve, reject) => {
-    const request = transport.get(parsed, { timeout: 60_000 }, response => {
+    const request = transport.get(parsed, { timeout: 60_000, lookup: publicHttpsLookup }, response => {
       if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
         response.resume();
         const nextUrl = new URL(response.headers.location, parsed).toString();
@@ -596,6 +755,19 @@ function downloadFile(urlString, targetPath, redirects = 0) {
       if (response.statusCode !== 200) {
         response.resume();
         reject(new Error(`视频下载失败：HTTP ${response.statusCode}`));
+        return;
+      }
+
+      const contentType = String(response.headers["content-type"] || "").toLowerCase();
+      if (/^(?:text\/html|application\/json)/.test(contentType)) {
+        response.resume();
+        reject(Object.assign(new Error(`视频下载内容类型无效：${contentType}`), { code: "VIDEO_DOWNLOAD_CONTENT_TYPE_INVALID" }));
+        return;
+      }
+      const declaredSize = Number(response.headers["content-length"] || 0);
+      if (Number.isFinite(declaredSize) && declaredSize > 500 * 1024 * 1024) {
+        response.resume();
+        reject(Object.assign(new Error("视频文件超过 500MB 安全限制"), { code: "VIDEO_DOWNLOAD_TOO_LARGE" }));
         return;
       }
 
@@ -983,6 +1155,7 @@ async function handleVideos(request, response, runtime, tasks) {
     submittedAt: new Date().toISOString(),
     localPath: null
   });
+  writeTaskRegistry(tasks);
   return json(response, 200, {
     ok: true,
     taskId,
@@ -1073,6 +1246,7 @@ async function handleVideoQuery(response, runtime, tasks, taskId) {
     ? { path: localPath, size: fs.statSync(localPath).size }
     : await downloadFile(videoUrl, localPath);
   task.localPath = downloaded.path;
+  writeTaskRegistry(tasks);
   return json(response, 200, {
     ok: true,
     taskId,
@@ -1092,7 +1266,12 @@ async function handleVideoQuery(response, runtime, tasks, taskId) {
 class PluginInstance {
   constructor() {
     this.server = null;
-    this.tasks = new Map();
+    this.taskRegistryError = null;
+    try { this.tasks = readTaskRegistry(); }
+    catch (error) {
+      this.tasks = new Map();
+      this.taskRegistryError = error;
+    }
     this.initPlugin = this.initPlugin.bind(this);
     this.deinitPlugin = this.deinitPlugin.bind(this);
   }
@@ -1109,15 +1288,21 @@ class PluginInstance {
         if (request.method === "GET" && url.pathname === "/v1/health") {
           const signerReady = Boolean(runtime.platformUtils && typeof runtime.platformUtils.genSignData === "function");
           const apiReady = Boolean(runtime.aiEffectApi && typeof runtime.aiEffectApi.submitAIGCRequest === "function" && typeof runtime.aiEffectApi.queryAIGCResult === "function");
+          const session = signerReady && apiReady
+            ? await checkOfficialSession(runtime)
+            : { ok: false, authenticated: false, code: "SESSION_PROBE_UNAVAILABLE" };
+          const sessionReady = signerReady && apiReady && session.authenticated === true && !this.taskRegistryError;
           return json(response, 200, {
             ok: true,
-            ready: signerReady && apiReady,
-            sessionReady: signerReady && apiReady,
+            ready: signerReady && apiReady && !this.taskRegistryError,
+            sessionReady,
             signerReady,
             apiReady,
+            sessionCode: session.code || "",
+            taskRegistryReady: !this.taskRegistryError,
             product: "DYEH",
-            version: "0.2.0",
-            message: signerReady && apiReady ? "像塑原生会话桥已就绪" : "插件在线，正在等待像塑业务模块"
+            version: "0.2.1",
+            message: sessionReady ? "像塑原生会话与登录状态已就绪" : (signerReady && apiReady ? session.message : "插件在线，正在等待像塑业务模块")
           });
         }
         if (request.method === "GET" && url.pathname === "/v1/session-check") {
@@ -1151,6 +1336,7 @@ class PluginInstance {
           return await probeExistingTask(response, runtime, taskId);
         }
         if (request.method === "POST" && url.pathname === "/v1/videos") {
+          if (this.taskRegistryError) return json(response, 503, { ok: false, code: this.taskRegistryError.code, message: this.taskRegistryError.message });
           return await handleVideos(request, response, runtime, this.tasks);
         }
         if (request.method === "GET" && url.pathname.startsWith("/v1/videos/")) {
@@ -1181,4 +1367,6 @@ PluginInstance.checkOfficialSession = checkOfficialSession;
 PluginInstance.findStableAccountIdentity = findStableAccountIdentity;
 PluginInstance.invokeOfficialAccountAction = invokeOfficialAccountAction;
 PluginInstance.extractUpstreamProgress = extractUpstreamProgress;
+PluginInstance.isPrivateAddress = isPrivateAddress;
+PluginInstance.publicHttpsLookup = publicHttpsLookup;
 module.exports = PluginInstance;

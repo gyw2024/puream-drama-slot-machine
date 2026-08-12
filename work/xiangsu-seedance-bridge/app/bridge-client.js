@@ -8,6 +8,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const {
   LOCAL_XIANGSU_ORIGIN,
   assertPureamCloudRequestUrl,
+  assertResolvedPublicUrl,
   assertSafeVideoDownloadUrl,
   normalizeProviderKind,
   normalizeVideoProvider
@@ -23,9 +24,115 @@ const {
 
 const BRIDGE_ORIGIN = LOCAL_XIANGSU_ORIGIN;
 const REQUEST_TIMEOUT_MS = 20_000;
+const MAX_REMOTE_VIDEO_BYTES = 500 * 1024 * 1024;
 
 function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+function normalizeRemoteTaskId(taskId) {
+  const value = String(taskId ?? "").trim();
+  if (!value || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
+    const error = new Error("远程视频任务标识无效");
+    error.code = "REMOTE_TASK_ID_INVALID";
+    throw error;
+  }
+  return value;
+}
+
+function safeRemoteTaskFilename(taskId) {
+  const value = normalizeRemoteTaskId(taskId);
+  const stem = /^[A-Za-z0-9_-]{1,160}$/.test(value)
+    ? value
+    : crypto.createHash("sha256").update(value, "utf8").digest("hex");
+  return `${stem}.mp4`;
+}
+
+function replaceFileWithRetries(temporary, target) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 40; attempt += 1) {
+    try {
+      fs.renameSync(temporary, target);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!["EPERM", "EBUSY", "EACCES"].includes(error?.code) || attempt === 40) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  throw lastError;
+}
+
+function atomicWriteJsonWithBackup(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  try {
+    if (fs.existsSync(filePath)) {
+      let backupTemporary = "";
+      try {
+        JSON.parse(fs.readFileSync(filePath, "utf8"));
+        const backupPath = `${filePath}.bak`;
+        backupTemporary = `${backupPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+        fs.copyFileSync(filePath, backupTemporary);
+        JSON.parse(fs.readFileSync(backupTemporary, "utf8"));
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+        replaceFileWithRetries(backupTemporary, backupPath);
+        backupTemporary = "";
+      } catch (error) {
+        try { if (backupTemporary && fs.existsSync(backupTemporary)) fs.unlinkSync(backupTemporary); } catch {}
+        console.warn(`[bridge] skipped invalid task-registry backup: ${error?.message || error}`);
+      }
+    }
+    replaceFileWithRetries(temporary, filePath);
+  } catch (error) {
+    try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch {}
+    throw error;
+  }
+}
+
+async function writeResponseToFile(response, target, maximumBytes = MAX_REMOTE_VIDEO_BYTES) {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maximumBytes) {
+    throw Object.assign(new Error("远程视频超过 500MB 安全上限"), { code: "REMOTE_VIDEO_TOO_LARGE" });
+  }
+  if (!response.body) throw Object.assign(new Error("远程视频响应没有文件内容"), { code: "REMOTE_VIDEO_BODY_MISSING" });
+  const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.part`;
+  const handle = fs.openSync(temporary, "wx");
+  let total = 0;
+  try {
+    for await (const chunk of response.body) {
+      const buffer = Buffer.from(chunk);
+      total += buffer.length;
+      if (total > maximumBytes) throw Object.assign(new Error("远程视频超过 500MB 安全上限"), { code: "REMOTE_VIDEO_TOO_LARGE" });
+      fs.writeSync(handle, buffer);
+    }
+    fs.fsyncSync(handle);
+    fs.closeSync(handle);
+    if (!total) throw Object.assign(new Error("远程视频文件为空"), { code: "REMOTE_VIDEO_EMPTY" });
+    fs.renameSync(temporary, target);
+    return target;
+  } catch (error) {
+    try { fs.closeSync(handle); } catch {}
+    try { fs.unlinkSync(temporary); } catch {}
+    throw error;
+  }
+}
+
+async function fetchPublicVideo(fetchImpl, initialUrl, options = {}, maxRedirects = 5) {
+  let currentUrl = initialUrl;
+  for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
+    currentUrl = await assertResolvedPublicUrl(assertSafeVideoDownloadUrl(currentUrl), {
+      privateCode: "REMOTE_VIDEO_URL_BLOCKED",
+      unresolvedCode: "REMOTE_VIDEO_URL_DNS_UNRESOLVED"
+    });
+    const response = await fetchImpl(currentUrl, { ...options, redirect: "manual" });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    const location = response.headers.get("location");
+    if (!location) throw Object.assign(new Error("远程视频重定向缺少目标地址"), { code: "REMOTE_VIDEO_REDIRECT_INVALID" });
+    currentUrl = new URL(location, currentUrl).toString();
+  }
+  throw Object.assign(new Error("远程视频重定向次数过多"), { code: "REMOTE_VIDEO_REDIRECT_LIMIT" });
 }
 
 function buildWindowHiderCommand(executable, launchedAt = null, mode = "hide", controlPath = "", controlValue = "") {
@@ -166,11 +273,17 @@ function controlXiangsuWindows(executable, launchedAt, mode, controlPath, contro
 class BridgeClient {
   constructor(options = {}) {
     this.fetch = typeof options.fetchImpl === "function" ? options.fetchImpl : globalThis.fetch.bind(globalThis);
-    this.tokenPath = process.env.SEEDANCE_BRIDGE_TOKEN_PATH || path.join(process.env.LOCALAPPDATA || os.tmpdir(), "SeedanceBridge", "bridge-token");
+    this.tokenPath = options.tokenPath || process.env.SEEDANCE_BRIDGE_TOKEN_PATH || path.join(process.env.LOCALAPPDATA || os.tmpdir(), "SeedanceBridge", "bridge-token");
     this.stateDir = path.dirname(this.tokenPath);
     this.remoteTasksPath = path.join(this.stateDir, "remote-tasks.json");
     this.windowControlPath = path.join(this.stateDir, "xiangsu-window-mode");
     this.config = normalizeVideoProvider({ kind: "local-xiangsu" });
+  }
+
+  fork(config = this.config) {
+    const client = new BridgeClient({ fetchImpl: this.fetch, tokenPath: this.tokenPath });
+    client.configure(config);
+    return client;
   }
 
   setWindowMode(mode) {
@@ -274,20 +387,35 @@ class BridgeClient {
     try {
       if (this.isRemote()) {
         validateProviderConfig(this.config, { hasLocalMedia: false });
+        const probeUrl = `${this.config.baseUrl}${apiRoutes(this.config.kind).submit}`;
+        assertPureamCloudRequestUrl(probeUrl);
+        const response = await this.fetch(probeUrl, {
+          method: "HEAD",
+          headers: { authorization: `Bearer ${this.authorization()}` },
+          signal: AbortSignal.timeout(10_000),
+          redirect: "error"
+        });
+        if ([401, 403].includes(response.status)) {
+          throw Object.assign(new Error("授权已失效或没有访问权限"), { code: "PUREAM_AUTH_REJECTED", status: response.status });
+        }
+        if ((response.status >= 400 && response.status !== 405) || response.status >= 500) {
+          throw Object.assign(new Error(`云端服务暂不可用：HTTP ${response.status}`), { code: "PUREAM_HEALTH_FAILED", status: response.status });
+        }
         return {
           ok: true,
           ready: true,
           sessionReady: true,
           remote: true,
           providerKind: this.config.kind,
-          message: `${providerDisplayName(this.config.kind)}接口合同与授权配置已就绪；校验不创建计费任务`
+          status: response.status,
+          message: `${providerDisplayName(this.config.kind)}网络与授权校验通过；校验不创建计费任务`
         };
       }
       return await this.request("/v1/health", { timeoutMs: 2_500 });
     } catch (error) {
       return {
         ok: false,
-        code: error.name === "AbortError" ? "BRIDGE_TIMEOUT" : "BRIDGE_OFFLINE",
+        code: error.name === "AbortError" ? "BRIDGE_TIMEOUT" : (error.code || "BRIDGE_OFFLINE"),
         remote: this.isRemote(),
         message: this.isRemote() ? `${providerDisplayName(this.config.kind)}配置不可用：${error.message}` : "像塑后台桥未连接"
       };
@@ -373,17 +501,36 @@ class BridgeClient {
   }
 
   readRemoteTasks() {
+    if (!fs.existsSync(this.remoteTasksPath)) return {};
     try { return JSON.parse(fs.readFileSync(this.remoteTasksPath, "utf8")); }
-    catch { return {}; }
+    catch (primaryError) {
+      try {
+        const recovered = JSON.parse(fs.readFileSync(`${this.remoteTasksPath}.bak`, "utf8"));
+        this.writeRemoteTasks(recovered);
+        return recovered;
+      } catch {
+        throw Object.assign(new Error("视频任务索引已损坏，且没有可用备份；已停止覆盖任务记录"), {
+          code: "REMOTE_TASK_REGISTRY_CORRUPTED",
+          cause: primaryError
+        });
+      }
+    }
+  }
+
+  writeRemoteTasks(tasks) {
+    atomicWriteJsonWithBackup(this.remoteTasksPath, tasks);
   }
 
   saveRemoteTask(taskId, value) {
-    fs.mkdirSync(this.stateDir, { recursive: true });
+    taskId = normalizeRemoteTaskId(taskId);
     const tasks = this.readRemoteTasks();
-    tasks[taskId] = value;
-    const temporary = `${this.remoteTasksPath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(tasks, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    fs.renameSync(temporary, this.remoteTasksPath);
+    Object.defineProperty(tasks, taskId, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true
+    });
+    this.writeRemoteTasks(tasks);
   }
 
   async submit(payload) {
@@ -391,15 +538,17 @@ class BridgeClient {
     // default (local-xiangsu) swallow a Hailuo H3 / Seedance cloud submission —
     // local plugin only accepts ability SD_2.0_MINI and returns ABILITY_NOT_ALLOWED.
     const requestedKind = normalizeProviderKind(payload?.providerKind || this.config.kind);
-    if (requestedKind !== this.config.kind) {
-      this.configure({
-        ...this.config,
-        kind: requestedKind,
-        baseUrl: requestedKind === "local-xiangsu"
-          ? LOCAL_XIANGSU_ORIGIN
-          : (this.config.baseUrl || "https://puream.cn")
-      });
-    }
+    const scopedConfig = {
+      ...this.config,
+      kind: requestedKind,
+      baseUrl: requestedKind === "local-xiangsu"
+        ? LOCAL_XIANGSU_ORIGIN
+        : (/^https:\/\/([a-z0-9.-]+\.)?puream\.cn(\/|$)/i.test(String(this.config.baseUrl || "")) ? this.config.baseUrl : "https://puream.cn")
+    };
+    return this.fork(scopedConfig).submitScoped(payload);
+  }
+
+  async submitScoped(payload) {
     if (!this.isRemote()) {
       const ability = String(payload?.ability || "SD_2.0_MINI");
       if (ability !== "SD_2.0_MINI") {
@@ -409,7 +558,13 @@ class BridgeClient {
           providerKind: this.config.kind
         });
       }
-      return this.request("/v1/videos", { method: "POST", body: payload, timeoutMs: 600_000 });
+      const result = await this.request("/v1/videos", { method: "POST", body: payload, timeoutMs: 600_000 });
+      if (result?.taskId) this.saveRemoteTask(result.taskId, {
+        outputDir: payload.outputDir,
+        providerKind: "local-xiangsu",
+        submittedAt: new Date().toISOString()
+      });
+      return result;
     }
     const cloud = await buildCloudSubmit(this.config, payload, this.fetch, fs);
     let raw;
@@ -444,6 +599,7 @@ class BridgeClient {
   }
 
   async downloadRemoteVideo(taskId, videoUrl = "") {
+    taskId = normalizeRemoteTaskId(taskId);
     const task = this.readRemoteTasks()[taskId];
     if (!task?.outputDir || !path.isAbsolute(task.outputDir)) {
       const error = new Error("远程任务缺少本地输出目录映射");
@@ -451,12 +607,12 @@ class BridgeClient {
       throw error;
     }
     fs.mkdirSync(task.outputDir, { recursive: true });
-    const target = path.join(task.outputDir, `${taskId}.mp4`);
+    const target = path.join(task.outputDir, safeRemoteTaskFilename(taskId));
     if (fs.existsSync(target) && fs.statSync(target).size > 0) return target;
-    if (task.providerKind && task.providerKind !== this.config.kind) {
-      throw Object.assign(new Error(`该任务由 ${providerDisplayName(task.providerKind)} 提交，请切回对应供应商后继续下载`), { code: "REMOTE_TASK_PROVIDER_MISMATCH" });
-    }
-    let safeVideoUrl = videoUrl ? assertSafeVideoDownloadUrl(videoUrl) : "";
+    let safeVideoUrl = videoUrl ? await assertResolvedPublicUrl(assertSafeVideoDownloadUrl(videoUrl), {
+      privateCode: "REMOTE_VIDEO_URL_BLOCKED",
+      unresolvedCode: "REMOTE_VIDEO_URL_DNS_UNRESOLVED"
+    }) : "";
     if (!safeVideoUrl) {
       const downloadUrl = `${this.config.baseUrl}${apiRoutes(this.config.kind, taskId).download}`;
       assertPureamCloudRequestUrl(downloadUrl);
@@ -467,31 +623,38 @@ class BridgeClient {
         redirect: "manual"
       });
       if ([301, 302, 303, 307, 308].includes(redirect.status)) {
-        safeVideoUrl = assertSafeVideoDownloadUrl(redirect.headers.get("location"));
+        safeVideoUrl = await assertResolvedPublicUrl(assertSafeVideoDownloadUrl(redirect.headers.get("location")), {
+          privateCode: "REMOTE_VIDEO_URL_BLOCKED",
+          unresolvedCode: "REMOTE_VIDEO_URL_DNS_UNRESOLVED"
+        });
       } else if (redirect.ok && String(redirect.headers.get("content-type") || "").toLowerCase().includes("video")) {
-        const temporary = `${target}.part`;
-        fs.writeFileSync(temporary, Buffer.from(await redirect.arrayBuffer()));
-        fs.renameSync(temporary, target);
-        return target;
+        return writeResponseToFile(redirect, target);
       } else {
         const errorText = await redirect.text();
         throw Object.assign(new Error(errorText || `纯梦下载接口失败：HTTP ${redirect.status}`), { code: "PUREAM_DOWNLOAD_REDIRECT_FAILED", status: redirect.status });
       }
     }
-    const response = await this.fetch(safeVideoUrl, { signal: AbortSignal.timeout(600_000), redirect: "follow" });
+    const response = await fetchPublicVideo(this.fetch, safeVideoUrl, { signal: AbortSignal.timeout(600_000) });
     if (!response.ok) throw Object.assign(new Error(`下载远程视频失败：HTTP ${response.status}`), { code: "REMOTE_VIDEO_DOWNLOAD_FAILED" });
-    const temporary = `${target}.part`;
-    fs.writeFileSync(temporary, Buffer.from(await response.arrayBuffer()));
-    fs.renameSync(temporary, target);
-    return target;
+    return writeResponseToFile(response, target);
   }
 
   async query(taskId) {
-    if (!this.isRemote()) return this.request(`/v1/videos/${encodeURIComponent(taskId)}`, { timeoutMs: 120_000 });
+    taskId = normalizeRemoteTaskId(taskId);
     const task = this.readRemoteTasks()[taskId];
-    if (task?.providerKind && task.providerKind !== this.config.kind) {
-      throw Object.assign(new Error(`该任务属于 ${providerDisplayName(task.providerKind)}，当前设置为 ${providerDisplayName(this.config.kind)}`), { code: "REMOTE_TASK_PROVIDER_MISMATCH" });
-    }
+    const taskKind = task?.providerKind ? normalizeProviderKind(task.providerKind) : this.config.kind;
+    const scopedConfig = {
+      ...this.config,
+      kind: taskKind,
+      baseUrl: taskKind === "local-xiangsu"
+        ? LOCAL_XIANGSU_ORIGIN
+        : (/^https:\/\/([a-z0-9.-]+\.)?puream\.cn(\/|$)/i.test(String(this.config.baseUrl || "")) ? this.config.baseUrl : "https://puream.cn")
+    };
+    return this.fork(scopedConfig).queryScoped(taskId, task);
+  }
+
+  async queryScoped(taskId, task = null) {
+    if (!this.isRemote()) return this.request(`/v1/videos/${encodeURIComponent(taskId)}`, { timeoutMs: 120_000 });
     const raw = await this.request(apiRoutes(this.config.kind, taskId).query, { timeoutMs: 120_000 });
     const result = mapQueryResponse(raw, this.config.kind, taskId);
     if (this.config.kind === "puream-hailuo-h3") result.requestedMode = task?.requestedMode || "auto";
@@ -680,4 +843,4 @@ class BridgeClient {
   }
 }
 
-module.exports = { BridgeClient, BRIDGE_ORIGIN, buildWindowHiderCommand };
+module.exports = { BridgeClient, BRIDGE_ORIGIN, buildWindowHiderCommand, safeRemoteTaskFilename };

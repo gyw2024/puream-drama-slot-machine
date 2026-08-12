@@ -65,7 +65,7 @@ function hydratePureamDefaults(store, activationCode = "", options = {}) {
   settings.videoProvider = {
     ...settings.videoProvider,
     apiKey: credential,
-    storageMode: "managed",
+    storageMode: settings.videoProvider?.storageMode === "direct-oss" ? "direct-oss" : "managed",
     managedStorageBaseUrl: "https://puream.cn"
   };
   const saved = store.saveSettings(settings);

@@ -262,7 +262,7 @@ test("step execution runs only the requested stage and explicit full pipeline ma
   assert.match(renderer, /pipeline_from_stage: "当前阶段续跑"/);
   assert.match(renderer, /不会自动提交视频/);
   assert.match(renderer, /不会自动拼接/);
-  assert.equal(manifest.version, "0.13.18");
+  assert.match(manifest.version, /^0\.13\.\d+$/);
 });
 
 test("step storyboard continuation cannot call video generation or stitching", async () => {

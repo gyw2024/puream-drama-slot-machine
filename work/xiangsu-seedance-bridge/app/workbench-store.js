@@ -14,8 +14,12 @@ const {
   normalizeCostLedger
 } = require("./project-costs");
 
-const PROJECT_VERSION = 8;
-const SETTINGS_VERSION = 13;
+const PROJECT_VERSION = 9;
+const SETTINGS_VERSION = 14;
+const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const MAX_SCRIPT_CHARS = 500_000;
+const MAX_MANUAL_PROMPT_CHARS = 60_000;
+const MAX_SETTINGS_PROMPT_CHARS = 100_000;
 const PUREAM_TEXT_MODELS = Object.freeze(["claude-opus-5", "gpt-5-6-sol"]);
 const DEFAULT_QUALITY_GATE_MODULES = Object.freeze({
   script: true,
@@ -24,6 +28,43 @@ const DEFAULT_QUALITY_GATE_MODULES = Object.freeze({
   videos: true,
   delivery: true
 });
+
+function assertTextLimit(value, maximum, label, code) {
+  if (typeof value !== "string" || value.length <= maximum) return;
+  throw Object.assign(new Error(`${label}超过允许上限（${maximum.toLocaleString("zh-CN")} 个字符），请拆分或精简后再保存`), {
+    code,
+    maximum,
+    actual: value.length
+  });
+}
+
+function assertPromptOverrideLimits(entity, label) {
+  for (const [stage, override] of Object.entries(entity?.promptOverrides || {})) {
+    assertTextLimit(override?.manual, MAX_MANUAL_PROMPT_CHARS, `${label}的${stage}手工提示词`, "MANUAL_PROMPT_TOO_LARGE");
+  }
+}
+
+function assertProjectTextLimits(project) {
+  assertTextLimit(project?.script?.raw, MAX_SCRIPT_CHARS, "剧本正文", "SCRIPT_TOO_LARGE");
+  for (const shot of project?.shots || []) {
+    const label = `镜头 ${shot.number || shot.id || ""}`;
+    assertTextLimit(shot?.manualVideoPrompt, MAX_MANUAL_PROMPT_CHARS, `${label}视频手工提示词`, "MANUAL_PROMPT_TOO_LARGE");
+    assertTextLimit(shot?.manualImagePrompt, MAX_MANUAL_PROMPT_CHARS, `${label}图片手工提示词`, "MANUAL_PROMPT_TOO_LARGE");
+    assertPromptOverrideLimits(shot, label);
+  }
+  for (const character of project?.characters || []) {
+    assertPromptOverrideLimits(character, `人物 ${character.name || character.id || ""}`);
+  }
+  for (const scene of project?.scenes || []) {
+    assertPromptOverrideLimits(scene, `场景 ${scene.name || scene.id || ""}`);
+  }
+}
+
+function assertSettingsPromptLimits(prompts) {
+  for (const [key, value] of Object.entries(prompts || {})) {
+    assertTextLimit(value, MAX_SETTINGS_PROMPT_CHARS, `系统提示词 ${key}`, "SETTINGS_PROMPT_TOO_LARGE");
+  }
+}
 // These hashes identify exact historical built-in defaults, never user edits.
 // When a default prompt improves without changing the user's prompt-library
 // version, replace only these byte-identical legacy values. Any edited value is
@@ -813,14 +854,131 @@ function defaultProject(title = "未命名漫剧", options = {}) {
     finalAudioAudit: null,
     finalVisualAudit: null,
     finalVideoPath: "",
+    finalVideoHistory: [],
     activity: []
   };
+}
+
+function deepCloneJson(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function jsonEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function isRecordArray(value) {
+  return Array.isArray(value) && value.every(item => item && typeof item === "object" && !Array.isArray(item) && item.id);
+}
+
+function mergeThreeWay(base, memory, disk) {
+  if (jsonEqual(memory, base)) return deepCloneJson(disk);
+  if (jsonEqual(disk, base)) return deepCloneJson(memory);
+  if (Array.isArray(memory) || Array.isArray(base) || Array.isArray(disk)) {
+    if (!isRecordArray(memory) || !isRecordArray(base || []) || !isRecordArray(disk || [])) return deepCloneJson(memory);
+    const baseMap = new Map((base || []).map(item => [item.id, item]));
+    const memoryMap = new Map(memory.map(item => [item.id, item]));
+    const diskMap = new Map((disk || []).map(item => [item.id, item]));
+    const order = [...memory.map(item => item.id), ...(disk || []).map(item => item.id).filter(id => !memoryMap.has(id))];
+    const result = [];
+    for (const id of order) {
+      const existedAtRead = baseMap.has(id);
+      const existsInMemory = memoryMap.has(id);
+      if (existedAtRead && !existsInMemory) continue;
+      if (!existsInMemory && diskMap.has(id)) {
+        result.push(deepCloneJson(diskMap.get(id)));
+        continue;
+      }
+      result.push(mergeThreeWay(baseMap.get(id), memoryMap.get(id), diskMap.get(id)));
+    }
+    return result;
+  }
+  const memoryObject = memory && typeof memory === "object";
+  const baseObject = base && typeof base === "object";
+  const diskObject = disk && typeof disk === "object";
+  if (!memoryObject || (!baseObject && base !== undefined) || (!diskObject && disk !== undefined)) return deepCloneJson(memory);
+  const result = {};
+  const keys = new Set([
+    ...Object.keys(base || {}),
+    ...Object.keys(disk || {}),
+    ...Object.keys(memory || {})
+  ]);
+  for (const key of keys) {
+    const memoryHas = Object.prototype.hasOwnProperty.call(memory || {}, key);
+    const baseHas = Object.prototype.hasOwnProperty.call(base || {}, key);
+    if (!memoryHas && baseHas) continue;
+    if (!memoryHas) {
+      result[key] = deepCloneJson(disk[key]);
+      continue;
+    }
+    result[key] = mergeThreeWay(base?.[key], memory[key], disk?.[key]);
+  }
+  return result;
+}
+
+function attachStoreBaseline(project, baseline = project) {
+  if (!project || typeof project !== "object") return project;
+  Object.defineProperty(project, "__storeBaseline", {
+    value: deepCloneJson(baseline),
+    enumerable: false,
+    configurable: true,
+    writable: true
+  });
+  return project;
+}
+
+function isPathInside(rootPath, candidatePath) {
+  const relative = path.relative(path.resolve(rootPath), path.resolve(candidatePath));
+  return relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
+}
+
+function readJsonFile(filePath, options = {}) {
+  const validate = typeof options.validate === "function" ? options.validate : () => true;
+  const parse = target => {
+    const parsed = JSON.parse(fs.readFileSync(target, "utf8"));
+    if (!validate(parsed)) throw Object.assign(new Error(`JSON structure is invalid: ${target}`), { code: "JSON_STRUCTURE_INVALID" });
+    return parsed;
+  };
+  if (!fs.existsSync(filePath)) {
+    if (options.missingValue !== undefined) return deepCloneJson(options.missingValue);
+    throw Object.assign(new Error(`JSON file is missing: ${filePath}`), { code: options.errorCode || "JSON_FILE_MISSING" });
+  }
+  try {
+    return parse(filePath);
+  } catch (primaryError) {
+    const backupPath = `${filePath}.bak`;
+    try {
+      const recovered = parse(backupPath);
+      atomicWriteJson(filePath, recovered);
+      return recovered;
+    } catch {
+      throw Object.assign(new Error(options.errorMessage || `JSON file is damaged and no valid backup is available: ${filePath}`), {
+        code: options.errorCode || "JSON_FILE_CORRUPTED",
+        cause: primaryError
+      });
+    }
+  }
 }
 
 function atomicWriteJson(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const temporary = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  if (fs.existsSync(filePath)) {
+    let backupTemporary = "";
+    try {
+      JSON.parse(fs.readFileSync(filePath, "utf8"));
+      const backupPath = `${filePath}.bak`;
+      backupTemporary = `${backupPath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+      fs.copyFileSync(filePath, backupTemporary);
+      if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      fs.renameSync(backupTemporary, backupPath);
+      backupTemporary = "";
+    } catch (error) {
+      try { if (backupTemporary && fs.existsSync(backupTemporary)) fs.unlinkSync(backupTemporary); } catch {}
+      console.warn(`[workbench-store] skipped invalid JSON backup for ${path.basename(filePath)}: ${error?.message || error}`);
+    }
+  }
   let lastError = null;
   for (let attempt = 1; attempt <= 40; attempt += 1) {
     try {
@@ -944,10 +1102,11 @@ function mergeTextProviderDiagnostics(diskDiagnostics = {}, memoryDiagnostics = 
   };
 }
 
-function mergeProjectForConcurrentSave(diskProject, memoryProject) {
+function mergeProjectForConcurrentSave(diskProject, memoryProject, baselineProject = memoryProject?.__storeBaseline) {
   if (!diskProject) return memoryProject;
-  const merged = { ...diskProject, ...memoryProject };
-  // Candidate/job arrays stay memory-authoritative so confirmation deletions are not resurrected.
+  const merged = baselineProject
+    ? mergeThreeWay(baselineProject, memoryProject, diskProject)
+    : { ...diskProject, ...memoryProject };
   merged.automation = mergeAutomationState(diskProject.automation, memoryProject.automation);
   merged.costLedger = mergeCostLedger(diskProject.costLedger, memoryProject.costLedger);
   if (memoryProject.textProviderDiagnostics || diskProject.textProviderDiagnostics) {
@@ -984,16 +1143,25 @@ class WorkbenchStore {
     this.reusableAssetLibraryDir = path.join(rootDir, "reusable-asset-library");
     this.reusableAssetLibraryIndexPath = path.join(this.reusableAssetLibraryDir, "index.json");
     this.reusableAssetLibraryFilesDir = path.join(this.reusableAssetLibraryDir, "files");
-    this.encodeSecret = typeof secretCodec.encode === "function" ? secretCodec.encode : value => value;
+    this.trashDir = path.join(rootDir, "trash");
+    this.encodeSecret = typeof secretCodec.encode === "function" ? secretCodec.encode : value => {
+      if (!value) return "";
+      throw Object.assign(new Error("未配置系统安全存储，供应商凭据未保存"), { code: "SECRET_STORAGE_UNAVAILABLE" });
+    };
     this.decodeSecret = typeof secretCodec.decode === "function" ? secretCodec.decode : value => value;
     fs.mkdirSync(this.projectsDir, { recursive: true });
     fs.mkdirSync(this.deletedProjectsDir, { recursive: true });
     fs.mkdirSync(this.voiceLibraryFilesDir, { recursive: true });
     fs.mkdirSync(this.reusableAssetLibraryFilesDir, { recursive: true });
+    fs.mkdirSync(this.trashDir, { recursive: true });
   }
 
   projectDir(projectId) {
-    return path.join(this.projectsDir, projectId);
+    const id = String(projectId || "").trim();
+    if (!PROJECT_ID_PATTERN.test(id)) {
+      throw Object.assign(new Error("项目编号无效，已阻止访问项目目录"), { code: "PROJECT_ID_INVALID" });
+    }
+    return path.join(this.projectsDir, id);
   }
 
   projectPath(projectId) {
@@ -1009,16 +1177,16 @@ class WorkbenchStore {
   }
 
   listVoiceLibrary() {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.voiceLibraryIndexPath, "utf8"));
-      const voices = Array.isArray(parsed?.voices) ? parsed.voices : [];
-      return voices
-        .filter(item => item?.id && item?.filePath && fs.existsSync(item.filePath))
-        .slice()
-        .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
-    } catch {
-      return [];
-    }
+    const parsed = readJsonFile(this.voiceLibraryIndexPath, {
+      missingValue: { voices: [] },
+      validate: value => Array.isArray(value?.voices),
+      errorCode: "VOICE_LIBRARY_INDEX_CORRUPTED",
+      errorMessage: "声音库索引已损坏，且没有可用备份；已停止写入以保护原文件"
+    });
+    return parsed.voices
+      .filter(item => item?.id && item?.filePath && fs.existsSync(item.filePath))
+      .slice()
+      .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
   }
 
   saveVoiceLibrary(voices) {
@@ -1070,9 +1238,7 @@ class WorkbenchStore {
     if (!target) return null;
     const next = voices.filter(item => item.id !== id);
     this.saveVoiceLibrary(next);
-    if (target.filePath && String(target.filePath).startsWith(this.voiceLibraryFilesDir)) {
-      try { fs.rmSync(target.filePath, { force: true }); } catch {}
-    }
+    this.moveFileToTrash(target.filePath, this.voiceLibraryFilesDir, "voice-library-delete");
     return target;
   }
 
@@ -1087,13 +1253,13 @@ class WorkbenchStore {
   }
 
   readReusableAssetLibrary() {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.reusableAssetLibraryIndexPath, "utf8"));
-      return (Array.isArray(parsed?.assets) ? parsed.assets : [])
-        .filter(item => item?.id && item?.filePath && fs.existsSync(item.filePath));
-    } catch {
-      return [];
-    }
+    const parsed = readJsonFile(this.reusableAssetLibraryIndexPath, {
+      missingValue: { assets: [] },
+      validate: value => Array.isArray(value?.assets),
+      errorCode: "REUSABLE_ASSET_INDEX_CORRUPTED",
+      errorMessage: "独立资产库索引已损坏，且没有可用备份；已停止写入以保护原文件"
+    });
+    return parsed.assets.filter(item => item?.id && item?.filePath && fs.existsSync(item.filePath));
   }
 
   saveReusableAssetLibrary(assets) {
@@ -1157,7 +1323,9 @@ class WorkbenchStore {
       duration: Number(options.duration) || null,
       width: Number(options.width) || null,
       height: Number(options.height) || null,
-      qualityAudit: { ok: true, mode: "manual", source: "direct-library-upload" },
+      qualityAudit: options.qualityAudit && typeof options.qualityAudit === "object"
+        ? { ...options.qualityAudit, mode: "manual", source: "direct-library-upload" }
+        : { ok: false, pendingValidation: true, mode: "manual", source: "direct-library-upload" },
       source: { type: "manual-library-upload", originalName: path.basename(sourcePath) },
       useCount: 0,
       createdAt: now(),
@@ -1189,10 +1357,32 @@ class WorkbenchStore {
     const target = assets.find(item => item.id === id);
     if (!target) return null;
     this.saveReusableAssetLibrary(assets.filter(item => item.id !== id));
-    if (target.filePath && String(target.filePath).startsWith(this.reusableAssetLibraryFilesDir)) {
-      try { fs.rmSync(target.filePath, { force: true }); } catch {}
-    }
+    this.moveFileToTrash(target.filePath, this.reusableAssetLibraryFilesDir, "reusable-asset-delete");
     return target;
+  }
+
+  moveFileToTrash(filePath, ownerRoot, reason = "removed") {
+    if (!filePath || !fs.existsSync(filePath) || !isPathInside(ownerRoot, filePath)) return "";
+    const targetDir = path.join(this.trashDir, new Date().toISOString().slice(0, 10));
+    fs.mkdirSync(targetDir, { recursive: true });
+    const safeName = path.basename(filePath).replace(/[^A-Za-z0-9._-]+/g, "-").slice(-120) || "asset";
+    const targetPath = path.join(targetDir, `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${safeName}`);
+    const manifestPath = path.join(this.trashDir, "manifest.json");
+    let manifest;
+    try {
+      manifest = readJsonFile(manifestPath, { missingValue: { version: 1, entries: [] }, validate: value => Array.isArray(value?.entries) });
+    } catch {
+      if (fs.existsSync(manifestPath)) {
+        const preserved = path.join(this.trashDir, `manifest-corrupt-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.json`);
+        fs.renameSync(manifestPath, preserved);
+      }
+      manifest = { version: 1, entries: [] };
+    }
+    fs.renameSync(filePath, targetPath);
+    manifest.entries.unshift({ id: crypto.randomUUID(), reason, sourcePath: filePath, trashPath: targetPath, removedAt: now() });
+    manifest.entries = manifest.entries.slice(0, 5000);
+    atomicWriteJson(manifestPath, manifest);
+    return targetPath;
   }
 
   depositReusableAssetFromCandidate(projectId, candidateId) {
@@ -1266,7 +1456,8 @@ class WorkbenchStore {
         const supported = (candidate.entityType === "character" && ["character_sheet", "character_intro", "character_three_view"].includes(candidate.stage))
           || (candidate.entityType === "scene" && candidate.stage === "scene_asset");
         if (!supported || !candidate.filePath || !fs.existsSync(candidate.filePath)) continue;
-        try { this.depositReusableAssetFromCandidate(project.id, candidate.id); } catch {}
+        try { this.depositReusableAssetFromCandidate(project.id, candidate.id); }
+        catch (error) { console.warn(`[workbench-store] reusable asset sync skipped ${candidate.id}: ${error?.message || error}`); }
       }
     }
     return this.readReusableAssetLibrary();
@@ -1309,7 +1500,7 @@ class WorkbenchStore {
     const extension = /^\.[a-z0-9]{1,8}$/.test(rawExtension) ? rawExtension : ".png";
     const safeEntityId = String(entityId).replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 80) || "asset";
     const category = normalizedType === "character" ? "characters" : "scenes";
-    const targetPath = path.join(this.assetDir(projectId, category), `${stage}-library-${safeEntityId}-${Date.now()}${extension}`);
+    const targetPath = path.join(this.assetDir(projectId, category), `${stage}-library-${safeEntityId}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}${extension}`);
     fs.copyFileSync(entry.filePath, targetPath);
     const candidate = this.addCandidate(projectId, {
       entityType: normalizedType,
@@ -1338,11 +1529,72 @@ class WorkbenchStore {
 
   readIndex() {
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.indexPath, "utf8"));
-      return Array.isArray(parsed.projects) ? parsed : { projects: [] };
-    } catch {
-      return { projects: [] };
+      const parsed = readJsonFile(this.indexPath, {
+        missingValue: { version: 1, projects: [] },
+        validate: value => Array.isArray(value?.projects),
+        errorCode: "PROJECT_INDEX_CORRUPTED"
+      });
+      const diskProjects = this.scanProjectDirectories();
+      const byId = new Map(parsed.projects.filter(item => item?.id).map(item => [item.id, item]));
+      let changed = false;
+      for (const summary of diskProjects) {
+        const current = byId.get(summary.id);
+        if (!current || String(summary.updatedAt || "") > String(current.updatedAt || "")) {
+          byId.set(summary.id, summary);
+          changed = true;
+        }
+      }
+      const projects = [...byId.values()].filter(item => diskProjects.some(found => found.id === item.id));
+      if (projects.length !== parsed.projects.length) changed = true;
+      const result = { ...parsed, version: 1, projects };
+      if (changed) this.writeIndex(result);
+      return result;
+    } catch (error) {
+      const rebuilt = { version: 1, recoveredAt: now(), projects: this.scanProjectDirectories() };
+      if (rebuilt.projects.length || !fs.existsSync(this.indexPath)) {
+        this.writeIndex(rebuilt);
+        return rebuilt;
+      }
+      throw Object.assign(new Error("项目索引已损坏，且没有可恢复的项目目录；已停止创建新项目以保护历史数据"), {
+        code: "PROJECT_INDEX_CORRUPTED",
+        cause: error
+      });
     }
+  }
+
+  scanProjectDirectories() {
+    if (!fs.existsSync(this.projectsDir)) return [];
+    const summaries = [];
+    for (const entry of fs.readdirSync(this.projectsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !PROJECT_ID_PATTERN.test(entry.name)) continue;
+      const projectPath = path.join(this.projectsDir, entry.name, "project.json");
+      try {
+        const project = readJsonFile(projectPath, {
+          validate: value => value?.id === entry.name,
+          errorCode: "PROJECT_FILE_CORRUPTED"
+        });
+        summaries.push({
+          id: project.id,
+          title: project.title || project.id,
+          status: project.status || "draft",
+          updatedAt: project.updatedAt || project.createdAt || fs.statSync(projectPath).mtime.toISOString()
+        });
+      } catch (error) {
+        let damagedUpdatedAt = now();
+        try {
+          const statTarget = fs.existsSync(projectPath) ? projectPath : path.join(this.projectsDir, entry.name);
+          damagedUpdatedAt = fs.statSync(statTarget).mtime.toISOString();
+        } catch {}
+        summaries.push({
+          id: entry.name,
+          title: `受损项目（${entry.name}）`,
+          status: "corrupted",
+          updatedAt: damagedUpdatedAt,
+          errorCode: String(error?.code || "PROJECT_FILE_CORRUPTED")
+        });
+      }
+    }
+    return summaries.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   }
 
   writeIndex(index) {
@@ -1360,21 +1612,26 @@ class WorkbenchStore {
     if (!summary) throw Object.assign(new Error("要删除的项目不存在"), { code: "PROJECT_NOT_FOUND" });
 
     const sourceDir = path.resolve(this.projectDir(id));
-    const projectsRoot = `${path.resolve(this.projectsDir)}${path.sep}`;
-    if (!sourceDir.toLowerCase().startsWith(projectsRoot.toLowerCase())) {
+    if (!isPathInside(this.projectsDir, sourceDir)) {
       throw Object.assign(new Error("项目路径校验失败，已阻止删除"), { code: "PROJECT_DELETE_PATH_INVALID" });
     }
-    const safeId = id.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 96) || "project";
+    const safeId = id.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 88) || "project";
     const archiveName = `${safeId}-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomUUID().slice(0, 8)}`;
     const archiveDir = path.resolve(this.deletedProjectsDir, archiveName);
-    const deletedRoot = `${path.resolve(this.deletedProjectsDir)}${path.sep}`;
-    if (!archiveDir.toLowerCase().startsWith(deletedRoot.toLowerCase())) {
+    if (!isPathInside(this.deletedProjectsDir, archiveDir)) {
       throw Object.assign(new Error("项目回收路径校验失败，已阻止删除"), { code: "PROJECT_DELETE_PATH_INVALID" });
     }
 
     let moved = false;
     if (fs.existsSync(sourceDir)) {
       fs.renameSync(sourceDir, archiveDir);
+      atomicWriteJson(path.join(archiveDir, "deleted-project.json"), {
+        version: 1,
+        archiveId: archiveName,
+        projectId: id,
+        title: summary.title || id,
+        deletedAt: now()
+      });
       moved = true;
     }
     try {
@@ -1389,6 +1646,64 @@ class WorkbenchStore {
       recoverable: moved,
       archivedPath: moved ? archiveDir : ""
     };
+  }
+
+  listDeletedProjects() {
+    if (!fs.existsSync(this.deletedProjectsDir)) return [];
+    return fs.readdirSync(this.deletedProjectsDir, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && PROJECT_ID_PATTERN.test(entry.name))
+      .map(entry => {
+        const archiveDir = path.join(this.deletedProjectsDir, entry.name);
+        try {
+          const metadata = readJsonFile(path.join(archiveDir, "deleted-project.json"), { missingValue: null });
+          const project = readJsonFile(path.join(archiveDir, "project.json"), { validate: value => PROJECT_ID_PATTERN.test(String(value?.id || "")) });
+          return {
+            archiveId: entry.name,
+            projectId: project.id,
+            title: metadata?.title || project.title || project.id,
+            deletedAt: metadata?.deletedAt || fs.statSync(archiveDir).mtime.toISOString()
+          };
+        } catch (error) {
+          let deletedAt = now();
+          try { deletedAt = fs.statSync(archiveDir).mtime.toISOString(); } catch {}
+          return {
+            archiveId: entry.name,
+            projectId: "",
+            title: `受损回收项目（${entry.name}）`,
+            deletedAt,
+            status: "corrupted",
+            errorCode: String(error?.code || "PROJECT_ARCHIVE_CORRUPTED")
+          };
+        }
+      })
+      .sort((a, b) => String(b.deletedAt || "").localeCompare(String(a.deletedAt || "")));
+  }
+
+  restoreProject(archiveId) {
+    const id = String(archiveId || "").trim();
+    if (!PROJECT_ID_PATTERN.test(id)) throw Object.assign(new Error("回收项目编号无效"), { code: "PROJECT_ARCHIVE_ID_INVALID" });
+    const archiveDir = path.resolve(this.deletedProjectsDir, id);
+    if (!isPathInside(this.deletedProjectsDir, archiveDir) || !fs.existsSync(archiveDir)) {
+      throw Object.assign(new Error("待恢复项目不存在"), { code: "PROJECT_ARCHIVE_NOT_FOUND" });
+    }
+    const project = readJsonFile(path.join(archiveDir, "project.json"), {
+      validate: value => PROJECT_ID_PATTERN.test(String(value?.id || "")),
+      errorCode: "PROJECT_ARCHIVE_CORRUPTED"
+    });
+    const targetDir = path.resolve(this.projectDir(project.id));
+    if (!isPathInside(this.projectsDir, targetDir)) throw Object.assign(new Error("恢复目标路径无效"), { code: "PROJECT_RESTORE_PATH_INVALID" });
+    if (fs.existsSync(targetDir)) throw Object.assign(new Error("同编号项目已经存在，不能覆盖恢复"), { code: "PROJECT_RESTORE_CONFLICT" });
+    fs.renameSync(archiveDir, targetDir);
+    try {
+      const index = this.readIndex();
+      const summary = { id: project.id, title: project.title || project.id, status: project.status || "draft", updatedAt: now() };
+      index.projects = [summary, ...index.projects.filter(item => item.id !== project.id)];
+      this.writeIndex(index);
+      return { ...summary, restored: true };
+    } catch (error) {
+      if (fs.existsSync(targetDir) && !fs.existsSync(archiveDir)) fs.renameSync(targetDir, archiveDir);
+      throw error;
+    }
   }
 
   createProject(title, options = {}) {
@@ -1407,24 +1722,18 @@ class WorkbenchStore {
     const index = this.readIndex();
     index.projects.unshift({ id: project.id, title: project.title, status: project.status, updatedAt: project.updatedAt });
     this.writeIndex(index);
-    const settings = this.getSettings();
-    const currentBase = String(settings.videoProvider?.baseUrl || "");
-    const cloudBase = /^https:\/\/([a-z0-9.-]+\.)?puream\.cn(\/|$)/i.test(currentBase) ? currentBase : "https://puream.cn";
-    this.saveSettings({
-      ...settings,
-      videoProvider: {
-        ...settings.videoProvider,
-        kind: providerKind,
-        baseUrl: providerKind === "local-xiangsu" ? "http://127.0.0.1:28911" : cloudBase
-      }
-    });
-    return project;
+    return attachStoreBaseline(project, project);
   }
 
   getProject(projectId) {
     const filePath = this.projectPath(projectId);
     if (!fs.existsSync(filePath)) throw Object.assign(new Error("漫剧项目不存在"), { code: "PROJECT_NOT_FOUND" });
-    const project = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const project = readJsonFile(filePath, {
+      validate: value => value?.id === String(projectId || ""),
+      errorCode: "PROJECT_FILE_CORRUPTED",
+      errorMessage: "项目文件已损坏，且没有可用备份"
+    });
+    const storeBaseline = deepCloneJson(project);
     project.version = PROJECT_VERSION;
     project.productionRevision = project.productionRevision || "";
     project.characters = Array.isArray(project.characters) ? project.characters : [];
@@ -1433,6 +1742,7 @@ class WorkbenchStore {
     project.candidates = Array.isArray(project.candidates) ? project.candidates : [];
     project.jobs = Array.isArray(project.jobs) ? project.jobs : [];
     project.activity = Array.isArray(project.activity) ? project.activity : [];
+    project.finalVideoHistory = Array.isArray(project.finalVideoHistory) ? project.finalVideoHistory : [];
     project.assetLibraries = {
       ...defaultAssetLibraries(),
       ...(project.assetLibraries || {}),
@@ -1466,17 +1776,21 @@ class WorkbenchStore {
       targetDurationSeconds: Math.max(30, Math.min(3600, Math.round(Number(legacyGeneration.targetDurationSeconds) || 300)))
     };
     project.productionPlan = { ...defaultProductionPlan(), ...(project.productionPlan || {}) };
-    return project;
+    return attachStoreBaseline(project, storeBaseline);
   }
 
   saveProject(project) {
     if (!project?.id) throw Object.assign(new Error("漫剧项目数据无效"), { code: "PROJECT_INVALID" });
     const filePath = this.projectPath(project.id);
     let diskProject = null;
-    try {
-      if (fs.existsSync(filePath)) diskProject = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    } catch {}
-    const merged = mergeProjectForConcurrentSave(diskProject, project);
+    if (fs.existsSync(filePath)) {
+      diskProject = readJsonFile(filePath, {
+        validate: value => value?.id === project.id,
+        errorCode: "PROJECT_FILE_CORRUPTED",
+        errorMessage: "项目文件已损坏，且没有可用备份；已停止保存以保护历史数据"
+      });
+    }
+    const merged = mergeProjectForConcurrentSave(diskProject, project, project.__storeBaseline);
     merged.costLedger = normalizeCostLedger(merged.costLedger || defaultCostLedger());
     merged.assetLibraries = {
       ...defaultAssetLibraries(),
@@ -1494,6 +1808,7 @@ class WorkbenchStore {
     else index.projects.unshift(summary);
     this.writeIndex(index);
     Object.assign(project, merged);
+    attachStoreBaseline(project, merged);
     return merged;
   }
 
@@ -1540,7 +1855,7 @@ class WorkbenchStore {
   patchProject(projectId, patch) {
     const project = this.getProject(projectId);
     const previousShots = Array.isArray(project.shots) ? project.shots.map(item => ({ ...item })) : [];
-    const allowed = ["title", "status", "currentStage", "script", "ideation", "product", "generation", "productionPlan", "characters", "scenes", "shots", "automation", "finalVideoPath"];
+    const allowed = ["title", "status", "currentStage", "script", "ideation", "product", "generation", "productionPlan", "characters", "scenes", "shots", "automation", "finalVideoPath", "finalVideoHistory"];
     for (const key of allowed) {
       if (Object.prototype.hasOwnProperty.call(patch || {}, key)) project[key] = patch[key];
     }
@@ -1602,10 +1917,25 @@ class WorkbenchStore {
         patch.activitySummary = `${String(patch.activitySummary || "保存分镜修改")}（${invalidated}个旧资产已标记待重生）`;
       }
     }
+    assertProjectTextLimits(project);
     project.activity = Array.isArray(project.activity) ? project.activity : [];
     project.activity.unshift({ id: makeId("activity"), at: now(), type: "project_updated", summary: String(patch?.activitySummary || "项目已更新") });
     project.activity = project.activity.slice(0, 300);
     return this.saveProject(project);
+  }
+
+  addActivity(projectId, type, summary) {
+    const project = this.getProject(projectId);
+    project.activity = Array.isArray(project.activity) ? project.activity : [];
+    project.activity.unshift({
+      id: makeId("activity"),
+      at: now(),
+      type: String(type || "notice"),
+      summary: String(summary || "项目状态已更新")
+    });
+    project.activity = project.activity.slice(0, 300);
+    this.saveProject(project);
+    return project.activity[0];
   }
 
   replaceProductAsset(projectId, productPatch = {}) {
@@ -1870,9 +2200,7 @@ class WorkbenchStore {
     if (discardOthers) {
       const rejected = siblings.filter(item => item.id !== candidateId);
       for (const item of rejected) {
-        if (item.filePath && fs.existsSync(item.filePath) && String(item.filePath).startsWith(this.projectDir(projectId))) {
-          fs.unlinkSync(item.filePath);
-        }
+        this.moveFileToTrash(item.filePath, this.projectDir(projectId), "candidate-replaced");
       }
       const rejectedIds = new Set(rejected.map(item => item.id));
       project.candidates = project.candidates.filter(item => !rejectedIds.has(item.id));
@@ -1881,7 +2209,12 @@ class WorkbenchStore {
     if (selected.source !== "reusable-asset-library"
       && ((selected.entityType === "character" && ["character_sheet", "character_intro", "character_three_view"].includes(selected.stage))
         || (selected.entityType === "scene" && selected.stage === "scene_asset"))) {
-      try { this.depositReusableAssetFromCandidate(projectId, selected.id); } catch {}
+      try {
+        this.depositReusableAssetFromCandidate(projectId, selected.id);
+      } catch (error) {
+        this.addActivity(projectId, "asset_library_warning", `${selected.stage} 已确认为项目资产；自动加入独立资产库失败：${String(error?.message || "未知错误")}`);
+        selected.libraryWarning = String(error?.message || "自动加入独立资产库失败");
+      }
     }
     return selected;
   }
@@ -1893,9 +2226,7 @@ class WorkbenchStore {
     if (target.selected) {
       throw Object.assign(new Error("已确认资产不能直接删除，请先确认另一张再清理"), { code: "CANDIDATE_SELECTED" });
     }
-    if (target.filePath && fs.existsSync(target.filePath) && String(target.filePath).startsWith(this.projectDir(projectId))) {
-      try { fs.unlinkSync(target.filePath); } catch {}
-    }
+    this.moveFileToTrash(target.filePath, this.projectDir(projectId), "candidate-discarded");
     project.candidates = project.candidates.filter(item => item.id !== candidateId);
     this.saveProject(project);
     return { removedId: candidateId };
@@ -1912,9 +2243,7 @@ class WorkbenchStore {
       return false;
     });
     for (const item of failed) {
-      if (item.filePath && fs.existsSync(item.filePath) && String(item.filePath).startsWith(this.projectDir(projectId))) {
-        try { fs.unlinkSync(item.filePath); } catch {}
-      }
+      this.moveFileToTrash(item.filePath, this.projectDir(projectId), "failed-candidate-cleared");
     }
     const removedIds = new Set(failed.map(item => item.id));
     project.candidates = project.candidates.filter(item => !removedIds.has(item.id));
@@ -1984,9 +2313,13 @@ class WorkbenchStore {
   }
 
   getSettings() {
-    try {
       const defaults = defaultSettings();
-      const saved = JSON.parse(fs.readFileSync(this.settingsPath, "utf8"));
+      const saved = readJsonFile(this.settingsPath, {
+        missingValue: {},
+        validate: value => value && typeof value === "object" && !Array.isArray(value),
+        errorCode: "SETTINGS_FILE_CORRUPTED",
+        errorMessage: "系统设置文件已损坏，且没有可用备份；已停止覆盖设置"
+      });
       const legacy = Number(saved.settingsVersion || 0) < 3;
       const textProvider = legacy
         ? { ...defaults.textProvider }
@@ -2014,12 +2347,12 @@ class WorkbenchStore {
         ...defaults.videoProvider,
         ...(saved.videoProvider || {}),
         apiKey: this.decodeSecret(saved.videoProvider?.apiKey || ""),
-        storageMode: "managed",
+        storageMode: saved.videoProvider?.storageMode === "direct-oss" ? "direct-oss" : "managed",
         managedStorageBaseUrl: "https://puream.cn",
-        ossAccessKeyId: "",
-        ossAccessKeySecret: "",
-        ossBucket: "",
-        ossEndpoint: ""
+        ossAccessKeyId: String(saved.videoProvider?.ossAccessKeyId || ""),
+        ossAccessKeySecret: this.decodeSecret(saved.videoProvider?.ossAccessKeySecret || ""),
+        ossBucket: String(saved.videoProvider?.ossBucket || ""),
+        ossEndpoint: String(saved.videoProvider?.ossEndpoint || "")
       };
       try {
         videoProvider = normalizeVideoProvider(decodedVideoProvider);
@@ -2078,9 +2411,6 @@ class WorkbenchStore {
         prompts,
         promptModes
       };
-    } catch {
-      return defaultSettings();
-    }
   }
 
   saveSettings(settings) {
@@ -2131,6 +2461,7 @@ class WorkbenchStore {
       prompts: { ...defaults.prompts, ...(settings?.prompts || {}) },
       promptModes: normalizePromptModes(defaults.prompts, settings?.prompts || {}, settings?.promptModes || {})
     };
+    assertSettingsPromptLimits(merged.prompts);
     for (const [key, mode] of Object.entries(merged.promptModes)) {
       if (mode === "system" && Object.prototype.hasOwnProperty.call(defaults.prompts, key)) merged.prompts[key] = defaults.prompts[key];
     }
@@ -2170,7 +2501,7 @@ class WorkbenchStore {
       defaults.imageProvider.apiKey = credential;
       defaults.digitalHumanProvider.apiKey = credential;
       defaults.videoProvider.apiKey = current.videoProvider?.apiKey || "";
-      defaults.videoProvider.storageMode = "managed";
+      defaults.videoProvider.storageMode = current.videoProvider?.storageMode === "direct-oss" ? "direct-oss" : "managed";
       defaults.videoProvider.managedStorageBaseUrl = "https://puream.cn";
       defaults.videoProvider.ossAccessKeyId = current.videoProvider?.ossAccessKeyId || "";
       defaults.videoProvider.ossAccessKeySecret = current.videoProvider?.ossAccessKeySecret || "";
@@ -2200,6 +2531,9 @@ module.exports = {
   defaultAutomation,
   defaultIdeation,
   mergeProjectForConcurrentSave,
+  mergeThreeWay,
+  readJsonFile,
+  isPathInside,
   mergeAutomationState,
   mergeCostLedger,
   mergeTextProviderDiagnostics,

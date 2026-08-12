@@ -4,6 +4,36 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { assertPublicReferenceUrl, assertPureamCloudRequestUrl, assertResolvedPublicUrl, assertSafeVideoDownloadUrl } = require("./video-provider-policy");
+const MAX_REMOTE_IMAGE_BYTES = 30 * 1024 * 1024;
+const MAX_REMOTE_VIDEO_BYTES = 500 * 1024 * 1024;
+
+async function streamResponseToFile(response, targetPath, maximumBytes, tooLargeCode) {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maximumBytes) {
+    throw Object.assign(new Error("远程媒体超过安全大小限制"), { code: tooLargeCode });
+  }
+  if (!response.body) throw Object.assign(new Error("远程媒体响应没有文件内容"), { code: "REMOTE_MEDIA_BODY_MISSING" });
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  const temporary = `${targetPath}.${process.pid}.${crypto.randomUUID()}.part`;
+  const handle = fs.openSync(temporary, "wx");
+  let total = 0;
+  try {
+    for await (const chunk of response.body) {
+      const buffer = Buffer.from(chunk);
+      total += buffer.length;
+      if (total > maximumBytes) throw Object.assign(new Error("远程媒体超过安全大小限制"), { code: tooLargeCode });
+      fs.writeSync(handle, buffer);
+    }
+    fs.fsyncSync(handle);
+    fs.closeSync(handle);
+    if (!total) throw Object.assign(new Error("远程媒体文件为空"), { code: "REMOTE_MEDIA_EMPTY" });
+    fs.renameSync(temporary, targetPath);
+  } catch (error) {
+    try { fs.closeSync(handle); } catch {}
+    try { fs.unlinkSync(temporary); } catch {}
+    throw error;
+  }
+}
 
 function endpoint(baseUrl, suffix) {
   const base = String(baseUrl || "").trim().replace(/\/+$/, "");
@@ -133,6 +163,15 @@ function localImageDataUri(filePath) {
     throw Object.assign(new Error(`参考图片 ${path.basename(filePath)} 超过 20MB，无法安全传入 PUREAM 图片中转`), { code: "IMAGE_REFERENCE_TOO_LARGE" });
   }
   return `data:${mimeType(filePath)};base64,${fs.readFileSync(filePath).toString("base64")}`;
+}
+
+async function openImageUploadBody(filePath) {
+  const size = Number(fs.statSync(filePath).size) || 0;
+  if (size <= 0 || size > 20 * 1024 * 1024) {
+    throw Object.assign(new Error(`参考图片 ${path.basename(filePath)} 必须大于 0 且不超过 20MB`), { code: "IMAGE_REFERENCE_TOO_LARGE" });
+  }
+  if (typeof fs.openAsBlob === "function") return fs.openAsBlob(filePath, { type: mimeType(filePath) });
+  return new Blob([fs.readFileSync(filePath)], { type: mimeType(filePath) });
 }
 
 function contentText(content) {
@@ -885,10 +924,20 @@ async function generateText(config, messages, options = {}) {
 }
 
 async function downloadImage(url, targetPath) {
-  const response = await fetch(url);
+  let currentUrl = assertPublicReferenceUrl(url);
+  let response = null;
+  for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+    currentUrl = await assertResolvedPublicUrl(currentUrl, { privateCode: "IMAGE_DOWNLOAD_URL_BLOCKED", unresolvedCode: "IMAGE_DOWNLOAD_DNS_UNRESOLVED" });
+    response = await fetch(currentUrl, { redirect: "manual", signal: AbortSignal.timeout(120_000) });
+    if (![301, 302, 303, 307, 308].includes(response.status)) break;
+    const location = response.headers.get("location");
+    if (!location || redirectCount === 5) throw Object.assign(new Error("图片下载重定向无效或次数过多"), { code: "IMAGE_DOWNLOAD_REDIRECT_BLOCKED" });
+    currentUrl = assertPublicReferenceUrl(new URL(location, currentUrl).toString());
+  }
   if (!response.ok) throw Object.assign(new Error(`图片下载失败：HTTP ${response.status}`), { code: "IMAGE_DOWNLOAD_FAILED" });
-  const arrayBuffer = await response.arrayBuffer();
-  fs.writeFileSync(targetPath, Buffer.from(arrayBuffer));
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  if (contentType && !contentType.startsWith("image/")) throw Object.assign(new Error(`图片下载内容类型无效：${contentType}`), { code: "IMAGE_DOWNLOAD_CONTENT_TYPE_INVALID" });
+  await streamResponseToFile(response, targetPath, MAX_REMOTE_IMAGE_BYTES, "REMOTE_IMAGE_TOO_LARGE");
 }
 
 function taskIdOf(payload) {
@@ -1343,8 +1392,7 @@ async function generatePureamVideo(config, prompt, targetPath, options = {}) {
       throw Object.assign(new Error(`视频下载内容类型无效：${contentType}`), { code: "VIDEO_DOWNLOAD_CONTENT_TYPE_INVALID" });
     }
     videoUrl = currentUrl;
-    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-    fs.writeFileSync(targetPath, Buffer.from(await response.arrayBuffer()));
+    await streamResponseToFile(response, targetPath, MAX_REMOTE_VIDEO_BYTES, "REMOTE_VIDEO_TOO_LARGE");
   } catch (error) {
     throw Object.assign(new Error(`远端视频已生成，但本地下载待重试：${error.message}`), {
       code: "VIDEO_DOWNLOAD_PENDING",
@@ -1386,7 +1434,7 @@ async function generateImage(config, prompt, targetPath, options = {}) {
     form.append("size", options.size || config.size || "1024x1536");
     form.append("response_format", config.responseFormat || "b64_json");
     for (const filePath of references) {
-      form.append("image[]", new Blob([fs.readFileSync(filePath)], { type: mimeType(filePath) }), path.basename(filePath));
+      form.append("image[]", await openImageUploadBody(filePath), path.basename(filePath));
     }
     const headers = {};
     if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
@@ -1407,7 +1455,19 @@ async function generateImage(config, prompt, targetPath, options = {}) {
   }
   const image = data?.data?.[0];
   if (typeof image?.b64_json === "string" && image.b64_json) {
-    fs.writeFileSync(targetPath, Buffer.from(image.b64_json, "base64"));
+    const compactBase64 = image.b64_json.replace(/\s+/g, "");
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(compactBase64)) {
+      throw Object.assign(new Error("图片模型返回的 base64 数据无效"), { code: "IMAGE_BASE64_INVALID" });
+    }
+    if (compactBase64.length > Math.ceil(MAX_REMOTE_IMAGE_BYTES * 4 / 3) + 8) {
+      throw Object.assign(new Error("图片模型返回的数据超过 30MB 安全上限"), { code: "REMOTE_IMAGE_TOO_LARGE" });
+    }
+    const decoded = Buffer.from(compactBase64, "base64");
+    if (!decoded.length) throw Object.assign(new Error("图片模型返回了空图片"), { code: "IMAGE_RESULT_EMPTY" });
+    if (decoded.length > MAX_REMOTE_IMAGE_BYTES) {
+      throw Object.assign(new Error("图片模型返回的数据超过 30MB 安全上限"), { code: "REMOTE_IMAGE_TOO_LARGE" });
+    }
+    fs.writeFileSync(targetPath, decoded);
   } else if (typeof image?.url === "string" && image.url) {
     await downloadImage(image.url, targetPath);
   } else {
@@ -1449,6 +1509,7 @@ module.exports = {
   testProvider,
   normalizedReferenceInputs,
   localImageDataUri,
+  openImageUploadBody,
   isDeepSeekV4Model,
   openAiCompatibleRequestExtras,
   assistantChoiceText,

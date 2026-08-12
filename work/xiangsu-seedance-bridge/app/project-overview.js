@@ -32,8 +32,9 @@ function stageCounts(project = {}) {
   const wardrobes = Array.isArray(project.assetLibraries?.wardrobes) ? project.assetLibraries.wardrobes : [];
   const props = Array.isArray(project.assetLibraries?.props) ? project.assetLibraries.props : [];
   const videoReady = shots.filter(shot => hasFile(latestCandidate(project, "shot", shot.id, "shot_video"))).length;
-  const mode = project.generation?.mode === "keyframe" ? "keyframe" : project.generation?.mode === "smart" ? "smart" : "continuation";
+  const mode = ["keyframe", "smart", "storyboard_sheet"].includes(project.generation?.mode) ? project.generation.mode : "continuation";
   const storyboardReady = shots.filter(shot => {
+    if (mode === "storyboard_sheet") return hasFile(latestCandidate(project, "shot", shot.id, "storyboard_sheet"));
     let stages = ["storyboard_start", "storyboard_end"];
     if (mode === "continuation" && Number(shot.number) > 1) stages = ["storyboard_end"];
     if (mode === "smart" && Number(shot.number) > 1) {
@@ -44,7 +45,10 @@ function stageCounts(project = {}) {
     }
     return stages.every(stage => hasFile(latestCandidate(project, "shot", shot.id, stage)));
   }).length;
-  const characterReady = characters.filter(character => hasFile(latestCandidate(project, "character", character.id, "character_three_view"))).length;
+  const characterReady = characters.filter(character =>
+    hasFile(latestCandidate(project, "character", character.id, "character_sheet"))
+    || hasFile(latestCandidate(project, "character", character.id, "character_three_view"))
+  ).length;
   const sceneReady = scenes.filter(scene => hasFile(latestCandidate(project, "scene", scene.id, "scene_asset"))).length;
   const wardrobeReady = wardrobes.filter(item => hasFile(latestCandidate(project, "library", item.id, "wardrobe_asset"))).length;
   const propReady = props.filter(item => hasFile(latestCandidate(project, "library", item.id, "prop_asset"))).length;
@@ -101,7 +105,7 @@ function summarizeProjectOverview(project = {}) {
   const counts = stageCounts(project);
   const nextStage = inferNextStage(project, counts);
   const jobs = Array.isArray(project.jobs) ? project.jobs : [];
-  const activeJobs = jobs.filter(job => ["queued", "running", "submitted", "processing"].includes(String(job.status || ""))).length;
+  const activeJobs = jobs.filter(job => ["queued", "pending", "submitted", "running", "processing", "uploading", "waiting", "remote_pending", "download_pending"].includes(String(job.status || "").toLowerCase())).length;
   return {
     id: project.id,
     title: project.title || "未命名项目",

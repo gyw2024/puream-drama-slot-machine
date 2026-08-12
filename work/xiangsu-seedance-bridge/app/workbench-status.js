@@ -31,16 +31,11 @@ function isActiveVideoJob(job) {
 }
 
   function latestVideoJobs(project) {
-    const latest = new Map();
     const activeRevision = project?.productionRevision || "";
-    for (const job of project?.jobs || []) {
-      if (!VIDEO_JOB_TYPES.has(job?.type)) continue;
-      if ((job.productionRevision || "") !== activeRevision) continue;
-      const key = `${job.type}:${job.entityType || ""}:${job.entityId || job.id || ""}`;
-      const previous = latest.get(key);
-      if (!previous || newest([previous, job]) === job) latest.set(key, job);
-    }
-    return [...latest.values()].sort((a, b) => {
+    return (project?.jobs || []).filter(job =>
+      VIDEO_JOB_TYPES.has(job?.type)
+      && (job.productionRevision || "") === activeRevision
+    ).sort((a, b) => {
       const aTime = String(a.updatedAt || a.createdAt || "");
       const bTime = String(b.updatedAt || b.createdAt || "");
       return bTime.localeCompare(aTime);
@@ -70,7 +65,7 @@ function isActiveVideoJob(job) {
     // Character-video stage may run 纯梦 Grok/Gemini on a Hailuo/Seedance project.
     if (job?.providerKind === "puream-grok") return "纯梦 Grok 云端";
     if (job?.providerKind === "puream-gemini") return "纯梦 Gemini 云端";
-    if (job?.providerKind === "puream-hailuo-h3" || job?.videoEngine === "hailuo-h3") return "海螺 H3 云端";
+    if (job?.providerKind === "puream-hailuo-h3" || job?.videoEngine === "hailuo-h3") return "纯梦云端算力";
     if (job?.providerKind === "puream-seedance") return "Seedance 云端";
     return "像塑";
   }

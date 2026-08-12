@@ -166,6 +166,8 @@ function normalizeVideoProvider(config = {}) {
     kind,
     apiKey: String(config.apiKey || "").trim(),
     resolution: "720p",
+    storageMode: config.storageMode === "direct-oss" ? "direct-oss" : "managed",
+    managedStorageBaseUrl: PUREAM_CLOUD_ORIGIN,
     ossAccessKeyId: String(config.ossAccessKeyId || config.aliossid || "").trim(),
     ossAccessKeySecret: String(config.ossAccessKeySecret || config.aliosskey || "").trim(),
     ossBucket: normalizeOssBucket(config.ossBucket || config.bucket || ""),

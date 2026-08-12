@@ -91,30 +91,43 @@ function redactPromptPreview(preview = {}) {
 const MEDIA_RULES = {
   image: {
     maxCount: 9,
+    maxBytes: 30 * 1024 * 1024,
     extensions: ["png", "jpg", "jpeg", "webp"],
     filters: [{ name: "参考图片", extensions: ["png", "jpg", "jpeg", "webp"] }]
   },
   video: {
     maxCount: 3,
+    maxBytes: 500 * 1024 * 1024,
     extensions: ["mp4", "mov"],
     filters: [{ name: "参考视频", extensions: ["mp4", "mov"] }]
   },
   audio: {
     maxCount: 3,
+    maxBytes: 100 * 1024 * 1024,
     extensions: ["mp3", "wav", "aac", "flac"],
     filters: [{ name: "参考音频", extensions: ["mp3", "wav", "aac", "flac"] }]
   }
 };
 
+const TEXT_IMPORT_MAX_BYTES = 2 * 1024 * 1024;
+const SCRIPT_IMPORT_MAX_CHARS = 500_000;
+const PROMPT_IMPORT_MAX_CHARS = 60_000;
+const AV_PROBE_TIMEOUT_MS = 20_000;
+
+function sanitizePublicMessage(value) {
+  return String(value || "发生未知错误")
+    .replace(/(?:[A-Za-z]:\\|\\\\)[^\r\n"']+/g, "本地文件")
+    .replace(/puream[-_]?hailuo[-_]?h3/gi, "纯梦云端算力")
+    .replace(/minimax[\s_-]*h3/gi, "纯梦云端算力")
+    .replace(/hailuo[\s_-]*h3|海螺\s*h3|\bh3\b/gi, "纯梦云端算力")
+    .replace(/\bhailuo\b|海螺/gi, "纯梦云端算力");
+}
+
 function publicError(error) {
   return {
     ok: false,
     code: error?.code || "UNEXPECTED_ERROR",
-    message: String(error?.message || "发生未知错误")
-      .replace(/puream[-_]?hailuo[-_]?h3/gi, "纯梦云端算力")
-      .replace(/minimax[\s_-]*h3/gi, "纯梦云端算力")
-      .replace(/hailuo[\s_-]*h3|海螺\s*h3|\bh3\b/gi, "纯梦云端算力")
-      .replace(/\bhailuo\b|海螺/gi, "纯梦云端算力")
+    message: sanitizePublicMessage(error?.message)
   };
 }
 
@@ -961,24 +974,39 @@ function locateFfmpeg() {
 
 function readAvMetadata(filePath) {
   const ffmpeg = locateFfmpeg();
-  if (!ffmpeg) return Promise.resolve({ duration: null, width: null, height: null });
+  if (!ffmpeg) {
+    return Promise.reject(Object.assign(new Error("媒体检测组件不可用，无法确认文件是否可播放"), { code: "MEDIA_PROBE_UNAVAILABLE" }));
+  }
   return new Promise((resolve, reject) => {
+    let settled = false;
     const child = spawn(ffmpeg, ["-hide_banner", "-i", filePath], {
       windowsHide: true,
       stdio: ["ignore", "ignore", "pipe"]
     });
     let output = "";
+    const finish = callback => value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    const fail = finish(reject);
+    const succeed = finish(resolve);
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch {}
+      fail(Object.assign(new Error("媒体检测超时，请检查文件是否损坏"), { code: "MEDIA_PROBE_TIMEOUT" }));
+    }, AV_PROBE_TIMEOUT_MS);
     child.stderr.on("data", chunk => {
       if (output.length < 256_000) output += chunk.toString("utf8");
     });
-    child.on("error", reject);
+    child.on("error", error => fail(Object.assign(error, { code: error?.code || "MEDIA_PROBE_FAILED" })));
     child.on("close", () => {
       const durationMatch = output.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
       const videoMatch = output.match(/Video:[^\r\n]*?\b(\d{2,5})x(\d{2,5})\b/i);
       const duration = durationMatch
         ? Number(durationMatch[1]) * 3600 + Number(durationMatch[2]) * 60 + Number(durationMatch[3])
         : null;
-      resolve({
+      succeed({
         duration: Number.isFinite(duration) ? duration : null,
         width: videoMatch ? Number(videoMatch[1]) : null,
         height: videoMatch ? Number(videoMatch[2]) : null
@@ -996,12 +1024,27 @@ async function describeMedia(filePath, type) {
     throw error;
   }
   const stat = fs.statSync(filePath);
+  if (!stat.isFile() || stat.size <= 0) {
+    throw Object.assign(new Error("所选媒体为空或不是普通文件"), { code: "MEDIA_FILE_INVALID" });
+  }
+  if (stat.size > rule.maxBytes) {
+    throw Object.assign(new Error(`${type === "image" ? "图片" : type === "video" ? "视频" : "音频"}超过允许大小`), { code: "MEDIA_FILE_TOO_LARGE" });
+  }
   const metadata = type === "image"
     ? (() => {
-        const size = nativeImage.createFromPath(filePath).getSize();
+        const image = nativeImage.createFromPath(filePath);
+        if (image.isEmpty()) throw Object.assign(new Error("图片无法解码，请重新导出后上传"), { code: "IMAGE_DECODE_FAILED" });
+        const size = image.getSize();
+        if (!size.width || !size.height) throw Object.assign(new Error("图片尺寸无效"), { code: "IMAGE_DIMENSIONS_INVALID" });
         return { duration: null, width: size.width, height: size.height };
       })()
     : await readAvMetadata(filePath);
+  if (type === "video" && (!Number.isFinite(metadata.duration) || metadata.duration <= 0 || !metadata.width || !metadata.height)) {
+    throw Object.assign(new Error("视频无法完整解码或缺少有效画面"), { code: "VIDEO_DECODE_FAILED" });
+  }
+  if (type === "audio" && (!Number.isFinite(metadata.duration) || metadata.duration <= 0)) {
+    throw Object.assign(new Error("音频无法完整解码或没有有效时长"), { code: "AUDIO_DECODE_FAILED" });
+  }
   return {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     type,
@@ -1060,7 +1103,7 @@ async function importCandidateFromPath(projectId, entityType, entityId, stage, s
     height: described.height,
     source,
     reusableAssetId: reusableAssetId || undefined,
-    mediaProbeVerified: mediaType === "audio",
+    mediaProbeVerified: true,
     qualityAudit: MANUAL_VIDEO_STAGES.has(stage)
       ? { ok: true, mode: "manual", skipped: true, checkedAt: new Date().toISOString() }
       : undefined,
@@ -1076,13 +1119,17 @@ async function importCandidateFromPath(projectId, entityType, entityId, stage, s
   if (candidate.qualityAudit?.ok !== false) {
     candidate = store.confirmCandidate(projectId, candidate.id, false);
   }
+  let libraryWarning = "";
   if (entityType === "character" && stage === "character_voice") {
     try {
       workflow.depositCharacterVoiceToLibrary(projectId, entityId, candidate);
       candidate = store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
-    } catch {}
+    } catch (error) {
+      libraryWarning = sanitizePublicMessage(error?.message || "音色已保存到项目，但自动加入独立音色库失败");
+      store.addActivity(projectId, "asset_library_warning", `音色已保存到项目；独立音色库入库失败：${libraryWarning}`);
+    }
   }
-  return { candidate, described };
+  return { candidate, described, warning: libraryWarning };
 }
 
 async function importProductFromPath(projectId, sourcePath, source = "manual-upload", reusableAssetId = "") {
@@ -1103,6 +1150,18 @@ async function importFinalVideoFromPath(projectId, sourcePath, source = "manual-
   const described = await describeMedia(sourcePath, "video");
   const imported = workflow.importAsset(projectId, "final", sourcePath, "final-manual");
   const project = store.getProject(projectId);
+  project.finalVideoHistory = Array.isArray(project.finalVideoHistory) ? project.finalVideoHistory : [];
+  if (project.finalVideoPath && project.finalVideoPath !== imported.path) {
+    project.finalVideoHistory.unshift({
+      id: `final-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      filePath: project.finalVideoPath,
+      source: project.finalVideoSource || "previous",
+      replacedAt: new Date().toISOString(),
+      stale: project.finalVideoStale === true,
+      staleReason: project.finalVideoStaleReason || ""
+    });
+    project.finalVideoHistory = project.finalVideoHistory.slice(0, 50);
+  }
   project.finalVideoPath = imported.path;
   project.finalVideoStale = false;
   project.finalVideoSelected = true;
@@ -1184,7 +1243,7 @@ function planBatchPrompts(project, filePaths) {
   const shotByNumber = new Map(shots.map(shot => [Number(shot.number), shot]));
   const rows = [];
   for (const filePath of filePaths) {
-    const text = fs.readFileSync(filePath, "utf8").trim();
+    const text = readBoundedTextFile(filePath, PROMPT_IMPORT_MAX_CHARS).trim();
     if (!text) continue;
     if (path.extname(filePath).toLowerCase() === ".json") {
       try {
@@ -1200,8 +1259,17 @@ function planBatchPrompts(project, filePaths) {
   }
   if (rows.length) return rows;
   const sortedPaths = filePaths.slice().sort((left, right) => path.basename(left).localeCompare(path.basename(right), "zh-CN", { numeric: true }));
-  if (sortedPaths.length === shots.length) return sortedPaths.map((filePath, index) => ({ shot: shots[index], prompt: fs.readFileSync(filePath, "utf8").trim(), filePath })).filter(item => item.prompt);
+  if (sortedPaths.length === shots.length) return sortedPaths.map((filePath, index) => ({ shot: shots[index], prompt: readBoundedTextFile(filePath, PROMPT_IMPORT_MAX_CHARS).trim(), filePath })).filter(item => item.prompt);
   return [];
+}
+
+function readBoundedTextFile(filePath, maxChars) {
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile() || stat.size <= 0) throw Object.assign(new Error("文本文件为空或无效"), { code: "TEXT_FILE_INVALID" });
+  if (stat.size > TEXT_IMPORT_MAX_BYTES) throw Object.assign(new Error("文本文件超过 2MB，请拆分后上传"), { code: "TEXT_FILE_TOO_LARGE" });
+  const text = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+  if (text.length > maxChars) throw Object.assign(new Error(`文本内容超过 ${maxChars.toLocaleString("zh-CN")} 字符`), { code: "TEXT_CONTENT_TOO_LONG" });
+  return text;
 }
 
 ipcMain.handle("bridge:health", () => bridge.health());
@@ -1271,6 +1339,7 @@ ipcMain.handle("app:defaults", () => {
   const contract = contractFor(providerKind);
   const defaultDuration = Math.max(contract.durationMin, Math.min(contract.durationMax, Number(settings.generation?.shotDuration) || 10));
   return {
+    appVersion: app.getVersion(),
     captureMode: Boolean(!app.isPackaged && process.env.DRAMA_SLOT_CAPTURE_PATH),
     isPackaged: Boolean(app.isPackaged),
     outputDir: path.join(app.getPath("videos"), "纯梦短剧老虎机"),
@@ -1336,7 +1405,7 @@ function publicPendingJobs(records) {
     entityType: item.entityType,
     entityId: item.entityId,
     status: item.status,
-    message: item.message,
+    message: sanitizePublicMessage(item.message),
     progress: item.progress,
     progressSource: item.progressSource,
     progressDeterminate: item.progressDeterminate,
@@ -1387,7 +1456,9 @@ async function advanceAccountSwitch(projectId) {
     try {
       const session = await bridge.sessionCheck();
       if (session.ok && session.authenticated && session.accountFingerprint) previousAccountFingerprint = session.accountFingerprint;
-    } catch {}
+    } catch (error) {
+      store.addActivity(projectId, "product_upload_warning", `商品图已保存到项目；公网素材暂存失败：${sanitizePublicMessage(error?.message || "上传失败")}`);
+    }
     if (previousAccountFingerprint) state = store.saveAccountSwitchState({ previousAccountFingerprint });
   }
   workflow.prepareOperationsForAccountSwitch();
@@ -1433,11 +1504,6 @@ ipcMain.handle("workbench:sync-video-jobs", async () => {
       if (!active.length) {
         workflow.reconcileDetachedAutomations();
         return { ok: true, jobs: [] };
-      }
-      const localActive = active.filter(item => !["puream-grok", "puream-gemini"].includes(item.providerKind));
-      if (localActive.length) {
-        const health = await bridge.health();
-        if (!(health.ok && health.ready && health.sessionReady)) return { ok: true, jobs: publicPendingJobs(active), deferred: true };
       }
       const jobs = await workflow.reconcileOrphanedVideoJobs();
       workflow.reconcileDetachedAutomations();
@@ -1558,6 +1624,14 @@ ipcMain.handle("workbench:delete-project", (_event, projectId) => {
   }
   catch (error) { return publicError(error); }
 });
+ipcMain.handle("workbench:list-deleted-projects", () => {
+  try { return { ok: true, projects: requireWorkbench().store.listDeletedProjects() }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:restore-project", (_event, archiveId) => {
+  try { return { ok: true, project: requireWorkbench().store.restoreProject(archiveId) }; }
+  catch (error) { return publicError(error); }
+});
 ipcMain.handle("workbench:get-project", (_event, projectId) => {
   try {
     const { store } = requireWorkbench();
@@ -1585,7 +1659,7 @@ ipcMain.handle("workbench:save-settings", (_event, settings) => {
 ipcMain.handle("workbench:reset-settings", () => {
   try {
     const { store } = requireWorkbench();
-    const settings = store.resetSettings({ preserveSecrets: true });
+    const settings = store.resetSettings({ preserveSecrets: false });
     bridge.configure(settings.videoProvider);
     return { ok: true, settings: redactSettingsForRenderer(settings) };
   } catch (error) { return publicError(error); }
@@ -1628,7 +1702,7 @@ ipcMain.handle("license:status", async () => {
       ok: false,
       activated: false,
       code: error.code || "LICENSE_ERROR",
-      message: error.message,
+      message: sanitizePublicMessage(error.message),
       snapshot: dramaLicense.getSnapshot()
     };
   }
@@ -1672,9 +1746,10 @@ ipcMain.handle("workbench:choose-product", async (_event, projectId) => {
     });
     if (result.canceled) return { ok: true, canceled: true };
     const { store, workflow } = requireWorkbench();
-    const imported = workflow.importAsset(projectId, "product", result.filePaths[0], "product");
-    const project = store.getProject(projectId);
+    const initial = await importProductFromPath(projectId, result.filePaths[0], "manual-upload", "");
+    const imported = initial.asset;
     let publicUrl = "";
+    let warning = "";
     // Best-effort: cache a public URL so later storyboard/video slots can lock the real packshot.
     try {
       const settings = store.getSettings();
@@ -1688,14 +1763,17 @@ ipcMain.handle("workbench:choose-product", async (_event, projectId) => {
         }]);
         if (uploaded[0]?.url) publicUrl = uploaded[0].url;
       }
-    } catch {}
+    } catch (error) {
+      warning = sanitizePublicMessage(error?.message || "商品参考图公网暂存失败");
+      store.addActivity(projectId, "asset_library_warning", `商品图已保存到本地；公网暂存失败：${warning}`);
+    }
     const saved = store.replaceProductAsset(projectId, {
       imagePath: imported.path,
       publicUrl,
       source: "manual-upload",
       reusableAssetId: ""
     });
-    return { ok: true, asset: imported, project: saved };
+    return { ok: true, asset: imported, project: saved, warning };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:import-text-file", async (_event, kind = "script") => {
@@ -1711,7 +1789,7 @@ ipcMain.handle("workbench:import-text-file", async (_event, kind = "script") => 
     });
     if (result.canceled || !result.filePaths?.[0]) return { ok: true, canceled: true };
     const filePath = result.filePaths[0];
-    const text = fs.readFileSync(filePath, "utf8");
+    const text = readBoundedTextFile(filePath, isPrompt ? PROMPT_IMPORT_MAX_CHARS : SCRIPT_IMPORT_MAX_CHARS);
     return { ok: true, text, fileName: path.basename(filePath), filePath };
   } catch (error) { return publicError(error); }
 });
@@ -1755,7 +1833,7 @@ ipcMain.handle("workbench:import-batch-media", async (_event, projectId, kind) =
         const value = await importCandidateFromPath(projectId, "shot", assignment.shot.id, assignment.stage, assignment.filePath);
         imported.push({ shotId: assignment.shot.id, shotNumber: assignment.shot.number, stage: assignment.stage, fileName: path.basename(assignment.filePath), candidateId: value.candidate.id, selected: value.candidate.selected === true });
       } catch (error) {
-        failed.push({ shotId: assignment.shot.id, shotNumber: assignment.shot.number, stage: assignment.stage, fileName: path.basename(assignment.filePath), code: error?.code || "IMPORT_FAILED", message: error?.message || "导入失败" });
+        failed.push({ shotId: assignment.shot.id, shotNumber: assignment.shot.number, stage: assignment.stage, fileName: path.basename(assignment.filePath), code: error?.code || "IMPORT_FAILED", message: sanitizePublicMessage(error?.message || "导入失败") });
       }
     }
     return { ok: imported.length > 0, imported, failed, project: store.getProject(projectId), message: imported.length ? "" : (failed[0]?.message || "批量导入失败") };
@@ -1818,7 +1896,8 @@ ipcMain.handle("workbench:import-reusable-asset", async (_event, kind) => {
         label: path.basename(filePath, path.extname(filePath)),
         duration: described.duration,
         width: described.width,
-        height: described.height
+        height: described.height,
+        qualityAudit: { ok: true, mode: "manual-probe", checkedAt: new Date().toISOString() }
       }));
     }
     return { ok: true, entries, assets: store.listReusableAssets() };
@@ -2098,11 +2177,15 @@ if (!app.requestSingleInstanceLock()) {
     const dataRoot = process.env.DRAMA_SLOT_DATA_ROOT || path.join(app.getPath("userData"), "workbench");
     workbenchStore = new WorkbenchStore(dataRoot, {
       encode: value => {
-        if (!value || !safeStorage.isEncryptionAvailable()) return value;
+        if (!value) return "";
+        if (!safeStorage.isEncryptionAvailable()) {
+          throw Object.assign(new Error("系统安全存储不可用，供应商凭据未保存"), { code: "SECRET_STORAGE_UNAVAILABLE" });
+        }
         return `enc:${safeStorage.encryptString(value).toString("base64")}`;
       },
       decode: value => {
-        if (!String(value || "").startsWith("enc:") || !safeStorage.isEncryptionAvailable()) return value || "";
+        if (!String(value || "").startsWith("enc:")) return value || "";
+        if (!safeStorage.isEncryptionAvailable()) return "";
         try { return safeStorage.decryptString(Buffer.from(String(value).slice(4), "base64")); }
         catch { return ""; }
       }
