@@ -1042,8 +1042,9 @@ function dialogueSentence(turn, context, visibility = {}, timing = null) {
   const delivery = context.deliveryTone || inferEnglishDelivery(context.emotion, context.mainlineStage);
   const compiledDelivery = deliveryMetadataEnglish(turn.metadata);
   const voice = audio
-    ? `using the voice timbre referenced by ${audio}; ${compiledDelivery || delivery}`
-    : `character-consistent voice; ${compiledDelivery || delivery}`;
+    ? `voice timbre referenced by ${audio}`
+    : "character-consistent voice";
+  const deliveryContract = compiledDelivery || delivery;
   const exactDialogue = turn.text.replace(/<\/?d>/gi, "");
   const timePrefix = timing && Number.isFinite(timing.start) && Number.isFinite(timing.end)
     ? `From ${formatTimestamp(timing.start)} to ${formatTimestamp(timing.end)}, `
@@ -1060,15 +1061,16 @@ function dialogueSentence(turn, context, visibility = {}, timing = null) {
     : "";
   const offscreen = turn.onScreen === false || (characterId && (offscreenIds.has(characterId) || !visibleIds.has(characterId)));
   if (offscreen) {
+    const target = listenerSubject || "an implied off-screen story-world listener";
     const reaction = listenerSubject
-      ? `${listenerSubject} silent, ${listenerBeat || "absorbs the line with a visible micro-reaction"}.`
-      : "No on-screen listener; keep the environment reacting only through motivated off-screen sound.";
-    return `${timePrefix}${subject} (${speakerId}) off-screen, ${voice}: <d>[Chinese] ${exactDialogue}</d>; ${reaction}`;
+      ? `${listenerSubject} stays silent and ${listenerBeat || "absorbs the line with a visible micro-reaction"}`
+      : "no listener is visible; only motivated off-screen sound carries the impact";
+    return `${timePrefix}Speaker: ${subject} (${speakerId}, off-screen); ${voice}; delivery: ${deliveryContract}; addresses: ${target}; exact line, say once: <d>[Chinese] ${exactDialogue}</d>; lip sync: off-screen voice only, no visible mouth movement; listener reaction: ${reaction}.`;
   }
   if (!listenerSubject) {
-    return `${timePrefix}${subject} (${speakerId}) faces the unfolding action ahead, never the camera, ${voice}: <d>[Chinese] ${exactDialogue}</d>; exact lip sync, then lips closed.`;
+    return `${timePrefix}Speaker: ${subject} (${speakerId}); ${voice}; delivery: ${deliveryContract}; addresses: the unfolding action ahead, with no visible addressee; exact line, say once: <d>[Chinese] ${exactDialogue}</d>; lip sync: exact and once-only, then lips closed; listener reaction: no listener is visible, so preserve only the authored environmental response.`;
   }
-  return `${timePrefix}${subject} (${speakerId}) faces ${listenerSubject}, never camera, ${voice}: <d>[Chinese] ${exactDialogue}</d>; exact lip sync, then lips closed; ${listenerSubject} silent, ${listenerBeat || "shows a readable reaction without stealing lip sync"}.`;
+  return `${timePrefix}Speaker: ${subject} (${speakerId}); ${voice}; delivery: ${deliveryContract}; addresses: ${listenerSubject} directly, never the camera; exact line, say once: <d>[Chinese] ${exactDialogue}</d>; lip sync: exact and once-only, then lips closed; listener reaction: ${listenerSubject} stays silent and ${listenerBeat || "shows a readable reaction without stealing lip sync"}.`;
 }
 
 function dialogueTimeWindows(shot, plannedItem, index, turns) {

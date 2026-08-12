@@ -1971,6 +1971,10 @@ function projectVideoEngine(project) {
   return project?.generation?.engine === "hailuo-h3" ? "hailuo-h3" : "seedance";
 }
 
+function shotUsesManualVideoPrompt(shot = {}) {
+  return shot?.promptMode === "manual" && Boolean(String(shot?.manualVideoPrompt || "").trim());
+}
+
 function assertVideoProviderAligned(project, settings) {
   const expectedEngine = projectVideoEngine(project);
   const activeProviderEngine = providerEngine(settings?.videoProvider?.kind);
@@ -3367,7 +3371,21 @@ function uniqueDialogueTurns(project, shot) {
     const speaker = canonicalSpeaker.get(rawSpeaker) || rawSpeaker;
     const text = String(turn.spokenText || turn.text || "").trim();
     if (!speaker || !text) return;
-    items.push({ speaker, text, spokenText: text, metadata: turn.metadata || {}, subshotNumber });
+    const metadata = turn.metadata && typeof turn.metadata === "object" ? { ...turn.metadata } : {};
+    for (const key of ["beat", "delivery", "body", "listenerBeat", "intent", "emotionStart", "emotionPeak", "volume", "pace", "stressWord", "breath"]) {
+      if (turn[key] != null && String(turn[key]).trim()) metadata[key] = String(turn[key]).trim();
+    }
+    items.push({
+      speaker,
+      speakerId: String(turn.speakerId || turn.characterId || "").trim(),
+      listenerIds: [...new Set((Array.isArray(turn.listenerIds) ? turn.listenerIds : Array.isArray(turn.listeners) ? turn.listeners : [])
+        .map(value => String(value || "").trim()).filter(Boolean))],
+      text,
+      spokenText: text,
+      metadata,
+      onScreen: turn.onScreen !== false,
+      subshotNumber
+    });
   };
   if (Object.prototype.hasOwnProperty.call(shot || {}, "videoPromptDialogueOverride")) {
     for (const turn of parseCompiledDialogueSegments(shot.videoPromptDialogueOverride, names)) push(turn, 1);
@@ -3888,6 +3906,7 @@ function assertHailuoPromptVoiceBindings(project, shot, references = {}, prompt 
     });
   }
   const lineFailures = [];
+  const performanceFailures = [];
   let searchFrom = 0;
   for (const turn of uniqueDialogueTurns(project, shot)) {
     const character = (project.characters || []).find(item => item.name === turn.speaker || item.id === turn.speaker);
@@ -3901,8 +3920,15 @@ function assertHailuoPromptVoiceBindings(project, shot, references = {}, prompt 
       continue;
     }
     const lead = text.slice(Math.max(searchFrom, markerIndex - 500), markerIndex);
+    const tail = text.slice(markerIndex + marker.length, markerIndex + marker.length + 500);
     const tokenPattern = new RegExp(`voice\\s+timbre\\s+referenced\\s+by\\s+${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i");
     if (!tokenPattern.test(lead)) lineFailures.push(`${turn.speaker}:${spokenText}`);
+    const contractComplete = /Speaker:\s*<Subject\s+\d+>/i.test(lead)
+      && /delivery:\s*[^;]+/i.test(lead)
+      && /addresses:\s*[^;]+/i.test(lead)
+      && /exact line,\s*say once:\s*$/i.test(lead)
+      && /listener reaction:\s*[^.]+/i.test(tail);
+    if (!contractComplete) performanceFailures.push(`${turn.speaker}:${spokenText}`);
     searchFrom = markerIndex + marker.length;
   }
   if (lineFailures.length) {
@@ -3910,6 +3936,13 @@ function assertHailuoPromptVoiceBindings(project, shot, references = {}, prompt 
       code: "HAILUO_PROMPT_DIALOGUE_AUDIO_BINDING_MISSING",
       shotId: shot.id,
       dialogue: lineFailures
+    });
+  }
+  if (performanceFailures.length) {
+    throw Object.assign(new Error(`${shot.id}云端视频提示词缺少逐句表演合同（说话人、对象、语气、原话或听者反应）：${performanceFailures.join("；")}`), {
+      code: "HAILUO_PROMPT_DIALOGUE_PERFORMANCE_MISSING",
+      shotId: shot.id,
+      dialogue: performanceFailures
     });
   }
   return true;
@@ -8907,7 +8940,7 @@ ${shotAnchor}
     let shot = project.shots.find(item => item.id === shotId);
     if (!shot) throw Object.assign(new Error("分镜不存在"), { code: "SHOT_NOT_FOUND" });
     const mode = normalizeProjectMode(project.generation?.mode);
-    if (projectVideoEngine(project) === "hailuo-h3") {
+    if (projectVideoEngine(project) === "hailuo-h3" && !shotUsesManualVideoPrompt(shot)) {
       await this.ensureHailuoPromptSpec(projectId, shotId, mode, settings);
       project = annotateProjectShotStrategies(this.store.getProject(projectId));
       shot = project.shots.find(item => item.id === shotId);
@@ -8915,6 +8948,15 @@ ${shotAnchor}
     const strategy = resolveShotVideoStrategy(project, shot);
     const references = this.shotReferences(project, shot, mode);
     const full = this.buildShotPrompt(project, settings, shot, mode, references);
+    if (projectVideoEngine(project) === "hailuo-h3" && shot.promptMode !== "manual" && String(shot.systemVideoPrompt || "") !== full) {
+      const latestProject = this.store.getProject(projectId);
+      latestProject.shots = latestProject.shots.map(item => item.id === shotId
+        ? { ...item, systemVideoPrompt: full }
+        : item);
+      this.store.saveProject(latestProject);
+      project = latestProject;
+      shot = project.shots.find(item => item.id === shotId) || shot;
+    }
     const authored = shot.promptMode === "manual" && shot.manualVideoPrompt?.trim()
       ? shot.manualVideoPrompt.trim()
       : shot.systemVideoPrompt?.trim() || "";
@@ -10205,9 +10247,11 @@ ${shotAnchor}
     if (expectedEngine === "hailuo-h3" && entityType === "shot" && stage === "shot_video") {
       const activeShot = (project.shots || []).find(item => item.id === entityId);
       if (!activeShot) throw Object.assign(new Error("分镜不存在，禁止提交海螺 H3 任务"), { code: "SHOT_NOT_FOUND" });
-      const checkedReferences = { ...references, hailuoApiMode };
-      assertHailuoDialogueVoiceReferences(project, activeShot, checkedReferences, { requireMultimodal: true });
-      assertHailuoPromptVoiceBindings(project, activeShot, checkedReferences, prompt);
+      if (!shotUsesManualVideoPrompt(activeShot)) {
+        const checkedReferences = { ...references, hailuoApiMode };
+        assertHailuoDialogueVoiceReferences(project, activeShot, checkedReferences, { requireMultimodal: true });
+        assertHailuoPromptVoiceBindings(project, activeShot, checkedReferences, prompt);
+      }
     }
     const referenceManifest = {
       images: (references.images || []).map((filePath, index) => ({
@@ -11678,6 +11722,11 @@ ${shotAnchor}
     const effectiveMode = shotStrategy.strategy;
     const isSheet = projectMode === "storyboard_sheet";
     if (engine === "hailuo-h3") {
+      if (shotUsesManualVideoPrompt(shot)) {
+        // Manual means manual: submit exactly what the user saved. Do not
+        // recompile, rewrite, append the system contract, or gate this text.
+        return String(shot.manualVideoPrompt).trim();
+      }
       const spec = shot.hailuoPromptSpec;
       if (!spec) {
         throw Object.assign(new Error(`镜头 ${shot.id || shot.number} 缺少已验证的海螺英文提示词，禁止使用通用对峙兜底提交付费视频`), {
@@ -11803,7 +11852,11 @@ ${shotAnchor}
     const settings = this.store.getSettings();
     const shot = project.shots.find(item => item.id === shotId);
     if (!shot) throw Object.assign(new Error("分镜不存在"), { code: "SHOT_NOT_FOUND" });
-    if (this.qualityGatesEnabled(settings) && (project.shots || []).length > 0) {
+    const manualPromptActive = shotUsesManualVideoPrompt(shot);
+    const gateSettings = manualPromptActive
+      ? { ...settings, generation: { ...(settings.generation || {}), qualityGatesEnabled: false } }
+      : settings;
+    if (!manualPromptActive && this.qualityGatesEnabled(settings, "script") && (project.shots || []).length > 0) {
       assertProductionHardContracts(project, {
         productName: project.product?.name || "",
         requireProduct: Boolean(project.product?.name),
@@ -11816,7 +11869,7 @@ ${shotAnchor}
     const hailuoApiMode = engine === "hailuo-h3" ? normalizeHailuoApiMode(settings.videoProvider?.hailuoApiMode) : "";
     const shotStrategy = resolveShotVideoStrategy(project, shot);
     const requiredFrameStages = shotStrategy.frameStages;
-    const requiredFrames = requiredFrameStages.map(stage => candidateReady(project, "shot", shot.id, stage, settings));
+    const requiredFrames = requiredFrameStages.map(stage => candidateReady(project, "shot", shot.id, stage, gateSettings));
     const imageAnchorsRequired = engine === "seedance"
       || ["image_to_video", "multimodal_to_video"].includes(hailuoApiMode)
       || shotStrategy.strategy === "continuation"
@@ -11846,14 +11899,14 @@ ${shotAnchor}
         this.store.saveProject(latest);
       } catch {}
     }
-    for (const frame of shouldUseImageAnchors ? requiredFrames.filter(Boolean) : []) {
+    for (const frame of manualPromptActive ? [] : (shouldUseImageAnchors ? requiredFrames.filter(Boolean) : [])) {
       const audit = frame.qualityAudit || await this.auditStoryboardCandidate(projectId, shot.id, frame.id);
       if (!audit.ok && this.qualityGatesEnabled(settings, "storyboards")) {
         throw Object.assign(new Error(`本镜${frame.stage === "storyboard_start" ? "首帧" : "尾帧"}疑似人物素材板，必须先重抽分镜图：${audit.failures.map(item => item.message).join("；")}`), { code: "STORYBOARD_QUALITY_FAILED", audit });
       }
     }
     let refreshedProject = this.store.getProject(projectId);
-    if (projectVideoEngine(refreshedProject) === "hailuo-h3") {
+    if (projectVideoEngine(refreshedProject) === "hailuo-h3" && !manualPromptActive) {
       await this.ensureHailuoPromptSpec(projectId, shotId, mode, settings);
       refreshedProject = this.store.getProject(projectId);
     }
@@ -11871,7 +11924,7 @@ ${shotAnchor}
       const previousShot = refreshedProject.shots.find(item => item.number === activeShot.number - 1);
       const candidate = previousShot ? selectedOrLatest(refreshedProject, "shot", previousShot.id, "shot_video") : null;
       if (!candidate?.filePath) throw Object.assign(new Error("同场景延续必须先生成并选择上一镜视频"), { code: "PREVIOUS_SHOT_REQUIRED" });
-      if (candidate.qualityAudit?.ok !== true && this.qualityGatesEnabled(settings, "videos")) {
+      if (candidate.qualityAudit?.ok !== true && !manualPromptActive && this.qualityGatesEnabled(settings, "videos")) {
         throw Object.assign(new Error("上一镜视频尚未通过音画与资产串线质检，不能继续污染后续镜头"), { code: "PREVIOUS_SHOT_UNVERIFIED" });
       }
       previousVideo = {
@@ -11892,7 +11945,7 @@ ${shotAnchor}
       videoAudios: [],
       aspectRatio: refreshedProject.generation.aspectRatio || settings.generation.aspectRatio || "9:16"
     };
-    if (engine === "hailuo-h3") {
+    if (engine === "hailuo-h3" && !manualPromptActive) {
       // Run before mode filtering so a missing speaker voice reports the real cause instead of silently falling back to image_to_video.
       assertHailuoDialogueVoiceReferences(refreshedProject, activeShot, combinedReferences, { requireMultimodal: false });
     }
@@ -11908,11 +11961,11 @@ ${shotAnchor}
     const references = engine === "hailuo-h3"
       ? selectHailuoReferencesForMode(combinedReferences, hailuoModeForRefs)
       : combinedReferences;
-    if (engine === "hailuo-h3") {
+    if (engine === "hailuo-h3" && !manualPromptActive) {
       await this.verifyHailuoVoiceReferences(refreshedProject, activeShot, references);
       assertHailuoDialogueVoiceReferences(refreshedProject, activeShot, references, { requireMultimodal: true });
     }
-    assertShotReferenceBundle(refreshedProject, activeShot, mode, references, previousVideo, settings);
+    assertShotReferenceBundle(refreshedProject, activeShot, mode, references, previousVideo, gateSettings);
     const requestedDuration = Number(activeShot.duration) || Number(project.generation.shotDuration) || 5;
     const outputDuration = this.resolveVideoDuration(refreshedProject, settings, requestedDuration);
     const promptShot = outputDuration === requestedDuration ? activeShot : {
@@ -11925,7 +11978,20 @@ ${shotAnchor}
       }))
     };
     const prompt = this.buildShotPrompt(refreshedProject, settings, promptShot, mode, references, options.qualityRepair || "");
-    if (engine === "hailuo-h3") assertHailuoPromptVoiceBindings(refreshedProject, activeShot, references, prompt);
+    if (engine === "hailuo-h3" && !manualPromptActive) {
+      assertHailuoPromptVoiceBindings(refreshedProject, activeShot, references, prompt);
+      // The exact prompt shown to the user and the prompt sent to the paid API
+      // must be the same immutable compiler output. Persist it only after the
+      // five-part dialogue contract has passed, immediately before submission.
+      const latestProject = this.store.getProject(projectId);
+      const latestShot = latestProject.shots.find(item => item.id === activeShot.id);
+      if (latestShot && latestShot.promptMode !== "manual" && String(latestShot.systemVideoPrompt || "") !== prompt) {
+        latestProject.shots = latestProject.shots.map(item => item.id === activeShot.id
+          ? { ...item, systemVideoPrompt: prompt }
+          : item);
+        this.store.saveProject(latestProject);
+      }
+    }
     let candidate = await withTransientProviderRetries(
       () => this.submitVideo(projectId, "shot", activeShot.id, "shot_video", prompt, references, outputDuration),
       {
@@ -13587,7 +13653,7 @@ ${shotAnchor}
   }
 }
 
-module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, normalizeTopicOptions, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, renderProductionScript, ideaSignature, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
+module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, normalizeTopicOptions, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, renderProductionScript, ideaSignature, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
 module.exports.reconcileShotSceneCatalog = reconcileShotSceneCatalog;
 module.exports.executeShotVideoBatch = executeShotVideoBatch;
 module.exports.collectCharacterReferenceIds = collectCharacterReferenceIds;

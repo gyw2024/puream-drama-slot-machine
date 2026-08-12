@@ -8,7 +8,7 @@ const axeSource = require("axe-core").source;
 
 async function main() {
   const root = path.resolve(__dirname, "..");
-  const executablePath = path.join(root, "dist-fixed-0.13.16", "win-unpacked", "纯梦短剧老虎机.exe");
+  const executablePath = path.join(root, "dist-fixed-0.13.18", "win-unpacked", "纯梦短剧老虎机.exe");
   const evidenceDir = path.resolve(root, "..", "..", "..", ".codex_tests", "TASK-20260812-DRAMA-SCRIPT-SPEED-EMOTION-051", "packaged-ui");
   const runDir = path.join(evidenceDir, new Date().toISOString().replace(/[:.]/g, "-"));
   const userDataDir = path.join(runDir, "isolated-user-data");

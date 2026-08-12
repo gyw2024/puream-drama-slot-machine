@@ -390,6 +390,7 @@ function decorateFeatureHelp() {
     "character-video": "用已确认的人物形象生成单人说话资产视频。",
     "extract-voice": "从已确认的人物视频中提取并校验角色音色。",
     "shot-video": "按本镜分镜、人物音色与参考资产生成视频。",
+    "reroll-shot-video": "使用当前已保存的手动提示词立即重抽本镜；手动稿不经过系统提示词重编译。",
     "import-candidate": "上传本地文件作为当前对象的一个候选版本。",
     "select-reusable-asset": "从跨项目资产库选择已有形象或场景并绑定到当前对象。",
     "bind-reusable-asset": "把选中的已有资产绑定到当前角色或场景。",
@@ -436,7 +437,7 @@ function decorateFeatureHelp() {
     const label = String(node.innerText || node.textContent || node.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
     if (!label) return;
     const commonHelp = (() => {
-      if (/^[×✕]$/.test(label)) return "关闭当前弹窗，不保存尚未提交的修改。";
+      if (/^[×✕]$/.test(label)) return "关闭当前弹窗并返回主界面。";
       if (/取消|返回/.test(label)) return "取消本次操作并返回，不提交尚未保存的更改。";
       if (/保存/.test(label)) return `保存“${label.slice(0, 32)}”涉及的当前配置，成功或失败会在页面内明确提示。`;
       if (/上传|导入/.test(label)) return `从本机选择文件完成“${label.slice(0, 32)}”，原项目资料不会被删除。`;
@@ -1980,7 +1981,9 @@ function videoCardMarkup(project, shot) {
   const { videoState, video, taskJob, ratio, aspectStyle, emptyText, drawLabel, candidateCount, qualityLabel, drawing, assetSignature, stateSignature } = view;
   const manualPrompt = shot.promptMode === "manual";
   const videoCandidate = chosenCandidate("shot", shot.id, "shot_video");
-  const systemPromptText = String(shot.systemVideoPrompt || videoCandidate?.prompt || "").trim();
+  // A generated candidate records the exact paid-API submission prompt. Prefer
+  // that immutable truth over any older cached draft left by a previous app.
+  const systemPromptText = String(videoCandidate?.prompt || shot.systemVideoPrompt || "").trim();
   const prompt = manualPrompt ? String(shot.manualVideoPrompt || "") : systemPromptText;
   return `<article class="video-card status-${escapeHtml(videoState.key)}${drawing ? " is-drawing has-active-task" : ""}${taskJob && videoStatusApi.isActiveVideoJob(taskJob) ? " has-active-task" : ""}" data-shot-id="${escapeHtml(shot.id)}" data-asset-signature="${escapeHtml(assetSignature)}" data-state-signature="${escapeHtml(stateSignature)}">
   <div class="drawing-banner" aria-hidden="true"><i></i><span>正在抽卡</span></div>
@@ -2222,6 +2225,12 @@ function renderQualityBlueprintToggle() {
     $("#qualityGatesEnabled").checked = enabled;
     $("#qualityGatesEnabled").disabled = false;
   }
+}
+
+function qualityBlueprintModuleEnabled(moduleName = "script") {
+  if (state.settings?.generation?.qualityGatesEnabled === false) return false;
+  const modules = { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings?.generation?.qualityGateModules || {}) };
+  return modules[moduleName] !== false;
 }
 
 function renderOssStatus() {
@@ -3021,7 +3030,8 @@ function renderCandidateCard(item, stageItems) {
   const owner = candidateOwner(item.entityType, item.entityId);
   const archived = (item.productionRevision || "") !== (state.project?.productionRevision || "");
   const gatedVideo = ["shot_video", "character_video"].includes(item.stage);
-  const qualityBlocked = item.qualityAudit?.ok === false || (gatedVideo && item.qualityAudit?.ok !== true);
+  const qualityBlocked = qualityBlueprintModuleEnabled(item.stage === "shot_video" ? "videos" : item.stage === "character_video" ? "assets" : "script")
+    && (item.qualityAudit?.ok === false || (gatedVideo && item.qualityAudit?.ok !== true));
   const qualityPassLabel = item.stage === "shot_video" ? "音画与首帧资产质检通过" : item.stage === "character_video" ? "声音与人物首帧质检通过" : "资产质检通过";
   const ordered = stageItems.slice().sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
   const version = Math.max(1, ordered.findIndex(candidate => candidate.id === item.id) + 1);
@@ -3062,7 +3072,10 @@ function renderCandidates(filter = state.candidateScope) {
   const scope = $("#candidateLibraryScope");
   if (filter) {
     const owner = candidateOwner(filter.entityType, filter.entityId);
-    scope.innerHTML = `<div><span>${escapeHtml(owner.typeLabel)}</span><b>${escapeHtml(owner.title)}</b><small>${escapeHtml(owner.detail)} · 共 ${items.length} 个版本</small></div><button class="mini-button" data-action="clear-candidate-filter">查看全部资产</button>`;
+    const reroll = filter.entityType === "shot" && project.shots.some(item => item.id === filter.entityId)
+      ? `<button class="mini-button accent" data-action="reroll-shot-video" data-id="${escapeHtml(filter.entityId)}">用当前提示词再抽一次</button>`
+      : "";
+    scope.innerHTML = `<div><span>${escapeHtml(owner.typeLabel)}</span><b>${escapeHtml(owner.title)}</b><small>${escapeHtml(owner.detail)} · 共 ${items.length} 个版本</small></div><div class="card-actions">${reroll}<button class="mini-button" data-action="clear-candidate-filter">查看全部资产</button></div>`;
   } else {
     scope.innerHTML = `<div><span>ALL ASSET LIBRARIES</span><b>全部资产</b><small>从人物或分镜卡片打开独立资产库，抽卡版本不会再混在一起。</small></div>`;
   }
@@ -3447,6 +3460,31 @@ function collectEntityFields(card, attrName) {
   return fields;
 }
 
+async function rerollShotVideo(shotId) {
+  let project = requireProject();
+  let shot = project.shots.find(item => item.id === shotId);
+  if (!shot) return showToast("分镜不存在", "error");
+  if (shot.promptMode === "manual") {
+    const editor = document.querySelector(`[data-shot-prompt="${CSS.escape(shotId)}"]`);
+    const editorText = String(editor?.value ?? shot.manualVideoPrompt ?? "").trim();
+    if (!editorText) return showToast("手动提示词不能为空，请填写后再抽", "error");
+    if (editorText !== String(shot.manualVideoPrompt || "").trim()) {
+      const shots = project.shots.map(item => item.id === shotId
+        ? { ...item, promptMode: "manual", manualVideoPrompt: editorText }
+        : item);
+      await patchProject({ shots }, "保存手动提示词并立即重抽", false);
+      project = requireProject();
+      shot = project.shots.find(item => item.id === shotId) || shot;
+    }
+  }
+  closeCandidateLibraryDialog();
+  return runLong(
+    shot.promptMode === "manual" ? "正在按手动提示词直接重抽本镜视频…" : `正在用${currentVideoEngineName()}重抽分镜视频…`,
+    () => api.workbench.generateShotVideo(project.id, shotId, project.generation.mode),
+    { entityType: "shot", entityId: shotId, stage: "shot_video" }
+  );
+}
+
 async function runLong(label, action, candidateScope = null) {
   state.activeJobs = state.activeJobs instanceof Map ? state.activeJobs : new Map();
   state.drawingScopes = state.drawingScopes || new Set();
@@ -3726,7 +3764,7 @@ document.addEventListener("click", async event => {
     await loadVoiceLibrary(true);
     return showToast("已从长期音色库删除");
   }
-  if (action === "shot-video") return runLong(`正在用${currentVideoEngineName()}抽取分镜视频…`, () => api.workbench.generateShotVideo(state.project.id, id, state.project.generation.mode), { entityType: "shot", entityId: id, stage: "shot_video" });
+  if (action === "shot-video" || action === "reroll-shot-video") return rerollShotVideo(id);
   if (action === "import-candidate") {
     const result = await api.workbench.importCandidate(state.project.id, button.dataset.entityType, id, button.dataset.stage);
     if (!result.ok) return showToast(result.message, "error");
@@ -3763,7 +3801,7 @@ document.addEventListener("click", async event => {
     const shot = state.project.shots.find(item => item.id === id);
     if (!shot) return;
     const videoCandidate = chosenCandidate("shot", id, "shot_video");
-    const text = String(shot.systemVideoPrompt || videoCandidate?.prompt || "").trim();
+    const text = String(videoCandidate?.prompt || shot.systemVideoPrompt || "").trim();
     if (!text) {
       return openCreatorPromptDialog({ kind: "shot-video", shotId: id });
     }

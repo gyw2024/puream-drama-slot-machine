@@ -6,7 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { WorkbenchStore, defaultSettings } = require("../app/workbench-store");
-const { WorkbenchWorkflow } = require("../app/workbench-workflow");
+const { WorkbenchWorkflow, isQualityGatesEnabled, shotUsesManualVideoPrompt } = require("../app/workbench-workflow");
 
 const root = path.resolve(__dirname, "..");
 const source = relativePath => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -47,6 +47,120 @@ test("manual IPC routes are bridged and manual candidates become current", () =>
   }
   assert.match(main, /candidate = store\.confirmCandidate\(projectId, candidate\.id, false\)/);
   assert.doesNotMatch(main, /await workflow\.remeshCharacterAsset\(projectId, candidate\.id\)/);
+});
+
+test("manual shot prompt is submitted verbatim and reroll is available inside the asset library", () => {
+  const workflow = new WorkbenchWorkflow({
+    store: { getSettings: () => defaultSettings() },
+    bridge: {},
+    locateFfmpeg: () => "",
+    stagingRoot: ""
+  });
+  const project = { generation: { engine: "hailuo-h3", mode: "storyboard_sheet" }, shots: [] };
+  const shot = {
+    id: "S01",
+    number: 1,
+    duration: 8,
+    promptMode: "manual",
+    manualVideoPrompt: "林青山压着怒气对林宇义说：你到底瞒了我多久？"
+  };
+  assert.equal(shotUsesManualVideoPrompt(shot), true);
+  assert.equal(workflow.buildShotPrompt(project, defaultSettings(), shot, "storyboard_sheet", { images: [], imageRoles: [], audios: [] }), shot.manualVideoPrompt);
+
+  const renderer = source("app/renderer/workbench.js");
+  assert.match(renderer, /data-action="reroll-shot-video"/);
+  assert.match(renderer, /保存手动提示词并立即重抽/);
+  assert.match(renderer, /action === "shot-video" \|\| action === "reroll-shot-video"/);
+  assert.match(renderer, /关闭当前弹窗并返回主界面/);
+  assert.doesNotMatch(renderer, /关闭当前弹窗，不保存尚未提交的修改/);
+});
+
+test("turning off the blueprint master disables every quality module globally", () => {
+  const settings = {
+    generation: {
+      qualityGatesEnabled: false,
+      qualityGateModules: { script: true, assets: true, storyboards: true, videos: true, delivery: true }
+    }
+  };
+  for (const moduleName of ["script", "assets", "storyboards", "videos", "delivery"]) {
+    assert.equal(isQualityGatesEnabled(settings, moduleName), false);
+  }
+  const workflowSource = source("app/workbench-workflow.js");
+  assert.match(workflowSource, /!manualPromptActive && this\.qualityGatesEnabled\(settings, "script"\)/);
+  assert.match(workflowSource, /if \(engine === "hailuo-h3" && !manualPromptActive\)/);
+  assert.match(workflowSource, /if \(!shotUsesManualVideoPrompt\(activeShot\)\)/);
+});
+
+test("manual reroll reaches video submission even when the old storyboard audit failed", async t => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "puream-manual-reroll-"));
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  const sheetPath = path.join(tempRoot, "sheet.png");
+  fs.writeFileSync(sheetPath, "manual-reroll-sheet");
+  const shot = {
+    id: "S01",
+    number: 1,
+    duration: 5,
+    promptMode: "manual",
+    manualVideoPrompt: "用户手动改写后的最终视频提示词",
+    characterIds: [],
+    visibleCharacterIds: [],
+    dialogueTurns: []
+  };
+  const project = {
+    id: "manual-reroll-project",
+    productionRevision: "",
+    productionPlan: { executionMode: "step" },
+    generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "storyboard_sheet", modeConfirmed: true, shotDuration: 5, aspectRatio: "9:16" },
+    product: { name: "" },
+    characters: [],
+    scenes: [],
+    shots: [shot],
+    candidates: [{
+      id: "sheet-1",
+      entityType: "shot",
+      entityId: "S01",
+      stage: "storyboard_sheet",
+      filePath: sheetPath,
+      selected: true,
+      stale: false,
+      productionRevision: "",
+      qualityAudit: { ok: false, failures: [{ message: "旧审核失败" }] }
+    }],
+    jobs: [],
+    automation: {}
+  };
+  const settings = defaultSettings();
+  settings.generation.qualityGatesEnabled = true;
+  const store = {
+    getProject: () => project,
+    getSettings: () => settings,
+    saveProject: next => Object.assign(project, next)
+  };
+  const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: tempRoot });
+  workflow.shotReferences = () => ({
+    images: [sheetPath],
+    imageRoles: [{
+      type: "storyboard_sheet",
+      label: "逐秒合图",
+      path: sheetPath,
+      sourceStage: "storyboard_sheet",
+      candidateId: "sheet-1",
+      entityType: "shot",
+      entityId: "S01"
+    }],
+    audios: [],
+    videos: [],
+    videoRoles: [],
+    videoAudios: []
+  });
+  let submittedPrompt = "";
+  workflow.submitVideo = async (_projectId, _entityType, _entityId, _stage, prompt) => {
+    submittedPrompt = prompt;
+    return { id: "video-2", entityType: "shot", entityId: "S01", stage: "shot_video", filePath: path.join(tempRoot, "video.mp4") };
+  };
+  const result = await workflow.generateShotVideo(project.id, shot.id, project.generation.mode, { track: false, audit: false });
+  assert.equal(result.id, "video-2");
+  assert.equal(submittedPrompt, shot.manualVideoPrompt);
 });
 
 test("independent asset library accepts direct image video and audio uploads", t => {
@@ -148,7 +262,7 @@ test("step execution runs only the requested stage and explicit full pipeline ma
   assert.match(renderer, /pipeline_from_stage: "当前阶段续跑"/);
   assert.match(renderer, /不会自动提交视频/);
   assert.match(renderer, /不会自动拼接/);
-  assert.equal(manifest.version, "0.13.16");
+  assert.equal(manifest.version, "0.13.18");
 });
 
 test("step storyboard continuation cannot call video generation or stitching", async () => {
