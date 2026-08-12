@@ -71,4 +71,3 @@ module.exports = {
   parseCompiledDialogueSegments,
   parseMetadata
 };
-

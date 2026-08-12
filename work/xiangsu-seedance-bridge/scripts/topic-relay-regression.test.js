@@ -67,4 +67,3 @@ test("topic generation allows five minutes for a long reasoning response", () =>
   const topicSource = source.slice(topicStart, scriptStart);
   assert.match(topicSource, /timeoutMs:\s*300_000/);
 });
-

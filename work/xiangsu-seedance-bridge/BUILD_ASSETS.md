@@ -24,4 +24,3 @@ PowerShell 校验：
 ```powershell
 Get-FileHash -Algorithm SHA256 media-tools\ffmpeg.exe,app\assets\face-grid-processor.exe,app\assets\xiangsu-window-hider.exe
 ```
-
