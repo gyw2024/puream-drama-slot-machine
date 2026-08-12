@@ -974,6 +974,7 @@ class WorkbenchStore {
   constructor(rootDir, secretCodec = {}) {
     this.rootDir = rootDir;
     this.projectsDir = path.join(rootDir, "projects");
+    this.deletedProjectsDir = path.join(rootDir, "deleted-projects");
     this.indexPath = path.join(rootDir, "projects.json");
     this.settingsPath = path.join(rootDir, "settings.json");
     this.accountSwitchPath = path.join(rootDir, "account-switch.json");
@@ -986,6 +987,7 @@ class WorkbenchStore {
     this.encodeSecret = typeof secretCodec.encode === "function" ? secretCodec.encode : value => value;
     this.decodeSecret = typeof secretCodec.decode === "function" ? secretCodec.decode : value => value;
     fs.mkdirSync(this.projectsDir, { recursive: true });
+    fs.mkdirSync(this.deletedProjectsDir, { recursive: true });
     fs.mkdirSync(this.voiceLibraryFilesDir, { recursive: true });
     fs.mkdirSync(this.reusableAssetLibraryFilesDir, { recursive: true });
   }
@@ -1349,6 +1351,44 @@ class WorkbenchStore {
 
   listProjects() {
     return this.readIndex().projects.slice().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  }
+
+  deleteProject(projectId) {
+    const id = String(projectId || "").trim();
+    const index = this.readIndex();
+    const summary = index.projects.find(item => item.id === id);
+    if (!summary) throw Object.assign(new Error("要删除的项目不存在"), { code: "PROJECT_NOT_FOUND" });
+
+    const sourceDir = path.resolve(this.projectDir(id));
+    const projectsRoot = `${path.resolve(this.projectsDir)}${path.sep}`;
+    if (!sourceDir.toLowerCase().startsWith(projectsRoot.toLowerCase())) {
+      throw Object.assign(new Error("项目路径校验失败，已阻止删除"), { code: "PROJECT_DELETE_PATH_INVALID" });
+    }
+    const safeId = id.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 96) || "project";
+    const archiveName = `${safeId}-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomUUID().slice(0, 8)}`;
+    const archiveDir = path.resolve(this.deletedProjectsDir, archiveName);
+    const deletedRoot = `${path.resolve(this.deletedProjectsDir)}${path.sep}`;
+    if (!archiveDir.toLowerCase().startsWith(deletedRoot.toLowerCase())) {
+      throw Object.assign(new Error("项目回收路径校验失败，已阻止删除"), { code: "PROJECT_DELETE_PATH_INVALID" });
+    }
+
+    let moved = false;
+    if (fs.existsSync(sourceDir)) {
+      fs.renameSync(sourceDir, archiveDir);
+      moved = true;
+    }
+    try {
+      this.writeIndex({ ...index, projects: index.projects.filter(item => item.id !== id) });
+    } catch (error) {
+      if (moved && fs.existsSync(archiveDir) && !fs.existsSync(sourceDir)) fs.renameSync(archiveDir, sourceDir);
+      throw error;
+    }
+    return {
+      id,
+      title: summary.title || id,
+      recoverable: moved,
+      archivedPath: moved ? archiveDir : ""
+    };
   }
 
   createProject(title, options = {}) {

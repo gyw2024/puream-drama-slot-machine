@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("dramaSlot", {
   workbench: {
     listProjects: () => ipcRenderer.invoke("workbench:list-projects"),
     createProject: (title, options) => ipcRenderer.invoke("workbench:create-project", title, options),
+    deleteProject: projectId => ipcRenderer.invoke("workbench:delete-project", projectId),
     getProject: projectId => ipcRenderer.invoke("workbench:get-project", projectId),
     patchProject: (projectId, patch) => ipcRenderer.invoke("workbench:patch-project", projectId, patch),
     getSettings: () => ipcRenderer.invoke("workbench:get-settings"),

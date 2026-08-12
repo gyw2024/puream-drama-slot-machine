@@ -1548,10 +1548,19 @@ ipcMain.handle("workbench:create-project", (_event, title, options) => {
   }
   catch (error) { return publicError(error); }
 });
-ipcMain.handle("workbench:get-project", (_event, projectId) => {
+ipcMain.handle("workbench:delete-project", (_event, projectId) => {
   try {
     const { store, workflow } = requireWorkbench();
-    workflow.syncReferenceLibraries(projectId);
+    if (workflow.hasActiveOperation(projectId) || store.listActiveVideoJobs(projectId).length > 0) {
+      throw Object.assign(new Error("该项目仍有任务运行，结束或等待任务完成后才能删除"), { code: "PROJECT_DELETE_ACTIVE" });
+    }
+    return { ok: true, result: store.deleteProject(projectId) };
+  }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:get-project", (_event, projectId) => {
+  try {
+    const { store } = requireWorkbench();
     return { ok: true, project: store.getProject(projectId) };
   }
   catch (error) { return publicError(error); }

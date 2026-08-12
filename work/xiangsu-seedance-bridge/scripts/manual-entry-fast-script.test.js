@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { WorkbenchStore, defaultSettings } = require("../app/workbench-store");
+const { WorkbenchWorkflow } = require("../app/workbench-workflow");
 
 const root = path.resolve(__dirname, "..");
 const source = relativePath => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -133,6 +134,110 @@ test("storyboard sheet mode never schedules or reports a tail-frame wave", () =>
   assert.match(workflow, /本模式没有首帧或尾帧/);
   assert.match(renderer, /本模式不生成首帧或尾帧/);
   assert.match(renderer, /本模式不检查尾帧/);
+});
+
+test("step execution runs only the requested stage and explicit full pipeline may cross stages", () => {
+  const workflow = source("app/workbench-workflow.js");
+  const renderer = source("app/renderer/workbench.js");
+  const manifest = JSON.parse(source("package.json"));
+  assert.match(workflow, /const stepExecution = project\.productionPlan\?\.executionMode !== "full" && options\.allowCrossStage !== true/);
+  assert.match(workflow, /stepExecution\s*\? order\.indexOf\(stage\) === start\s*:\s*order\.indexOf\(stage\) >= start/);
+  assert.match(workflow, /runTrackedOperation\(projectId, "full_pipeline"/);
+  assert.match(workflow, /allowCrossStage: true/);
+  assert.match(workflow, /await this\.generateCompleteScript\(projectId, \{ track: false \}\)/);
+  assert.match(renderer, /pipeline_from_stage: "当前阶段续跑"/);
+  assert.match(renderer, /不会自动提交视频/);
+  assert.match(renderer, /不会自动拼接/);
+  assert.equal(manifest.version, "0.13.16");
+});
+
+test("step storyboard continuation cannot call video generation or stitching", async () => {
+  const project = {
+    id: "step-gate-project",
+    productionPlan: { executionMode: "step" },
+    generation: { mode: "storyboard_sheet", modeConfirmed: true, engine: "seedance", videoProviderKind: "local-xiangsu" },
+    script: { raw: "完整剧本" },
+    shots: [{ id: "shot-1", number: 1, duration: 8 }],
+    automation: {}
+  };
+  const calls = [];
+  const store = {
+    getProject: () => project,
+    getSettings: () => ({ videoProvider: { kind: "local-xiangsu" } }),
+    saveProject: next => Object.assign(project, next)
+  };
+  const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: "" });
+  workflow.generateAllStoryboards = async () => { calls.push("storyboards"); return []; };
+  workflow.generateAllShotVideos = async () => { calls.push("videos"); return []; };
+  workflow.stitchProject = async () => { calls.push("stitch"); return {}; };
+
+  await workflow.runPipelineFromStage(project.id, "shots", { track: false });
+  assert.deepEqual(calls, ["storyboards"]);
+
+  const fullCalls = [];
+  workflow.runPipelineFromStage = async (...args) => { fullCalls.push(args); return {}; };
+  await WorkbenchWorkflow.prototype.runFullPipeline.call(workflow, project.id, { track: false });
+  assert.equal(fullCalls.length, 1);
+  assert.equal(fullCalls[0][1], "script");
+  assert.equal(fullCalls[0][2].allowCrossStage, true);
+});
+
+test("different projects can run concurrently while the renderer locks only the active project", async () => {
+  const projects = new Map([
+    ["project-a", { id: "project-a", automation: {} }],
+    ["project-b", { id: "project-b", automation: {} }]
+  ]);
+  const store = {
+    getProject: id => projects.get(id),
+    saveProject: project => projects.set(project.id, project)
+  };
+  const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: "" });
+  let releaseA;
+  const gateA = new Promise(resolve => { releaseA = resolve; });
+  const runningA = workflow.runTrackedOperation("project-a", "topic_ideation", "", () => gateA);
+  await new Promise(resolve => setImmediate(resolve));
+  const runningB = workflow.runTrackedOperation("project-b", "topic_ideation", "", async () => "b-done");
+  assert.equal(workflow.hasActiveOperation("project-a"), true);
+  assert.equal(workflow.hasActiveOperation("project-b"), true);
+  assert.equal(await runningB, "b-done");
+  assert.equal(workflow.hasActiveOperation("project-a"), true);
+  releaseA("a-done");
+  assert.equal(await runningA, "a-done");
+
+  const renderer = source("app/renderer/workbench.js");
+  assert.match(renderer, /activeJobs: new Map\(\)/);
+  assert.match(renderer, /projectBusyCounts: new Map\(\)/);
+  assert.match(renderer, /const projectId = state\.project\?\.id \|\| ""/);
+  assert.match(renderer, /if \(state\.project\?\.id === projectId\)/);
+  assert.match(renderer, /原项目继续在后台运行；已切换查看另一个项目/);
+  assert.doesNotMatch(renderer, /切换项目不会停止后台任务，只是切换查看界面。确定切换/);
+});
+
+test("historical project deletion is recoverable and preserves other projects and shared libraries", t => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "puream-project-delete-"));
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  const store = new WorkbenchStore(path.join(tempRoot, "workbench"));
+  const first = store.createProject("准备删除的历史项目");
+  const second = store.createProject("必须保留的项目");
+  const marker = path.join(store.projectDir(first.id), "delete-scope-marker.txt");
+  fs.writeFileSync(marker, "recoverable", "utf8");
+  const sharedMarker = path.join(store.reusableAssetLibraryDir, "shared-marker.txt");
+  fs.writeFileSync(sharedMarker, "keep", "utf8");
+
+  const result = store.deleteProject(first.id);
+  assert.equal(result.recoverable, true);
+  assert.equal(store.listProjects().some(item => item.id === first.id), false);
+  assert.equal(store.listProjects().some(item => item.id === second.id), true);
+  assert.equal(fs.existsSync(store.projectDir(first.id)), false);
+  assert.equal(fs.readFileSync(path.join(result.archivedPath, "delete-scope-marker.txt"), "utf8"), "recoverable");
+  assert.equal(fs.readFileSync(sharedMarker, "utf8"), "keep");
+
+  const main = source("app/main.js");
+  const preload = source("app/preload.js");
+  const html = source("app/renderer/workbench.html");
+  assert.match(main, /workbench:delete-project/);
+  assert.match(preload, /deleteProject: projectId => ipcRenderer\.invoke\("workbench:delete-project"/);
+  assert.match(html, /id="deleteProject"/);
 });
 
 test("fresh installs and projects default to PUREAM cloud while local Xiangsu remains selectable", t => {

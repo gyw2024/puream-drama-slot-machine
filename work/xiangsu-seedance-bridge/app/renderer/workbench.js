@@ -12,7 +12,8 @@ const state = {
   captureMode: false,
   stage: "script",
   busy: false,
-  activeJobs: new Set(),
+  activeJobs: new Map(),
+  projectBusyCounts: new Map(),
   drawingScopes: new Set(),
   drawingStages: new Set(),
   pollTimer: null,
@@ -26,6 +27,7 @@ const state = {
   newProjectCreating: false,
   strategySaving: false,
   strategyPromptedProjectId: "",
+  requestedProjectId: "",
   assetViewerPath: "",
   videoGridProjectId: "",
   projectRenderSignature: "",
@@ -337,6 +339,7 @@ function openSidebarLibrary(type) {
 function decorateFeatureHelp() {
   const help = {
     runFullPipeline: "按剧本、资产、分镜、视频、拼接顺序完成一键制作。",
+    deleteProject: "把当前历史项目移入本机可恢复回收区；其他项目和独立资产库不会受影响。",
     qualityBlueprintToggle: "打开审核蓝图设置。总开关关闭后不审核、不拦截、不回滚、不自动返修；开启后可分别选择剧本、资产、分镜图、视频和成片模块。",
     pausePipeline: "保存当前断点并暂停自动生产。",
     stopPipeline: "停止当前自动任务，但保留已保存结果。",
@@ -407,7 +410,7 @@ function decorateFeatureHelp() {
     "set-prompt-template-mode": "仅影响系统设置里的全局规则模板：系统默认正文隐藏；自定义后可自行填写。",
     "reupload-product": "更换当前项目锁定的商品原图。",
     "open-console-project": "进入该项目最后保存的生产环节。",
-    "console-continue": "从该项目下一未完成环节继续一键生产。",
+    "console-continue": "从该项目下一未完成环节继续；分步项目只运行当前阶段。",
     "console-pause": "保存断点并暂停该项目的自动生产。",
     "delete-voice-library": "从独立音色库删除这一条记录，不删除项目文件。",
     "edit-entity-prompt": "查看该资产系统编译出的生图提示词，或改写后保存。",
@@ -637,6 +640,7 @@ function projectRenderSignature(project) {
 function setStateProject(project) {
   const previousId = state.project?.id || "";
   state.project = project;
+  state.busy = (state.projectBusyCounts?.get(project?.id || "") || 0) > 0;
   state.projectRenderSignature = projectRenderSignature(project);
   if (previousId && previousId !== project?.id) {
     state.candidateScope = null;
@@ -1069,9 +1073,9 @@ function scriptWorkflowState(project = state.project) {
   const operation = String(automation.operation || "");
   const stage = String(automation.stage || "");
   const status = String(automation.status || "idle");
-  const scriptOperation = ["idea_script", "idea_to_full_pipeline"].includes(operation)
+  const scriptOperation = ["idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(operation)
     || (operation === "pipeline_from_stage" && String(automation.targetId || "") === "script");
-  const inScriptStage = stage.startsWith("script") || stage === "idea_to_full_pipeline";
+  const inScriptStage = stage.startsWith("script") || ["idea_to_full_pipeline", "full_pipeline"].includes(stage);
   const active = scriptOperation && inScriptStage && ["running", "pausing", "stopping"].includes(status);
   const paused = scriptOperation && status === "paused_user" && Boolean(project?.script?.generationCheckpoint);
   const checkpoint = project?.script?.generationCheckpoint || {};
@@ -1153,11 +1157,18 @@ function renderScriptTask() {
   $("#runIdeaPipeline").disabled = state.busy || task.managed || state.project?.generation?.modeConfirmed !== true;
   const continueButton = $("#continueFromScript");
   if (continueButton) {
+    const stepExecution = projectUsesStepExecution();
     const nextShot = `S${String(task.checkpointPlanCount + 1).padStart(2, "0")}`;
-    setButtonLabelPreservingHelp(continueButton, task.writerCheckpoint ? `从 ${nextShot} 继续写完并生产` : "从此环节一键做完");
+    setButtonLabelPreservingHelp(continueButton, task.writerCheckpoint
+      ? (stepExecution ? `从 ${nextShot} 继续写完` : `从 ${nextShot} 继续写完并生产`)
+      : (stepExecution ? "运行当前剧本阶段" : "从此环节继续全流程"));
     const tip = task.writerCheckpoint
-      ? `从已保存的 S01–S${String(task.checkpointPlanCount).padStart(2, "0")} 写作断点继续，不会把未完成草稿当成完整剧本拆解。剧本完成后才进入资产、视频和拼接。`
-      : "从当前完整剧本开始拆镜，再按资产、分镜图、视频和拼接顺序完成后续生产。";
+      ? (stepExecution
+        ? `从已保存的 S01–S${String(task.checkpointPlanCount).padStart(2, "0")} 写作断点继续；剧本完成后停在资产阶段，等待你操作。`
+        : `从已保存的 S01–S${String(task.checkpointPlanCount).padStart(2, "0")} 写作断点继续，不会把未完成草稿当成完整剧本拆解。剧本完成后才进入资产、视频和拼接。`)
+      : (stepExecution
+        ? "只完成剧本写作/拆镜，完成后停在资产阶段，不会自动生成图片或视频。"
+        : "从当前完整剧本开始拆镜，再按资产、分镜图、视频和拼接顺序完成后续生产。");
     continueButton.dataset.tooltip = tip;
     const dot = continueButton.querySelector(":scope > .info-dot");
     if (dot) dot.dataset.tooltip = tip;
@@ -1187,8 +1198,14 @@ function ensureScriptLivePolling() {
   }, 800);
 }
 
-function setBusy(busy, message = "") {
-  state.busy = busy;
+function setBusy(busy, message = "", projectId = state.project?.id || "") {
+  state.projectBusyCounts = state.projectBusyCounts || new Map();
+  const priorCount = state.projectBusyCounts.get(projectId) || 0;
+  const nextCount = busy ? priorCount + 1 : Math.max(0, priorCount - 1);
+  if (nextCount > 0) state.projectBusyCounts.set(projectId, nextCount);
+  else state.projectBusyCounts.delete(projectId);
+  if (state.project?.id !== projectId) return;
+  state.busy = nextCount > 0;
   // Only lock exclusive pipeline controls. Per-card「抽卡」must stay clickable on other cards.
   const exclusiveSelectors = [
     "#generateTopics",
@@ -1215,10 +1232,10 @@ function setBusy(busy, message = "") {
     if (!button) return;
     if (selector === "#stitchVideo") {
       const summary = state.project ? videoStatusApi.summarizeShotVideos(state.project) : { allReady: false };
-      button.disabled = busy || !summary.allReady;
+      button.disabled = state.busy || !summary.allReady;
       return;
     }
-    button.disabled = busy;
+    button.disabled = state.busy;
   });
   if (message) showToast(message);
   if (state.project) {
@@ -1349,14 +1366,9 @@ async function switchStage(stage) {
   if (state.project) {
     try {
       await loadProject(state.project.id, false);
-      if (stage === "script") renderScript();
-      if (stage === "assets") renderAssets(true);
-      if (stage === "shots") renderShots();
-      if (stage === "settings") renderSettings();
-    }
-    catch {
-      if (stage === "final") renderFinal();
-      if (stage === "videos") renderVideos();
+      renderActiveStage(true);
+    } catch (error) {
+      showToast(error.message || "页面切换失败，请重试", "error");
     }
   }
 }
@@ -1378,8 +1390,10 @@ async function loadProjects(preferredId) {
 }
 
 async function loadProject(projectId, fullRender = true) {
+  if (fullRender) state.requestedProjectId = projectId;
   const result = await api.workbench.getProject(projectId);
   if (!result.ok) throw new Error(result.message);
+  if (state.requestedProjectId && projectId !== state.requestedProjectId) return false;
   let project = result.project;
   const healedShots = healShotSceneLinks(project);
   if (healedShots) {
@@ -1665,7 +1679,7 @@ function renderAssets(force = false) {
       path: project.product?.imagePath || "",
       publicUrl: project.product?.publicUrl || ""
     },
-    drawing: [...(state.drawingScopes || [])],
+    drawing: [...(state.drawingScopes || [])].filter(key => key.startsWith(`${project.id}|`)),
     engine: project.generation?.engine || "",
     aspect: project.generation?.aspectRatio || ""
   });
@@ -2325,12 +2339,15 @@ function renderProjectStrategy() {
   const mode = projectModeLabel(project.generation?.mode || "continuation");
   const engine = currentVideoEngineName(project);
   const plan = project.productionPlan || {};
+  const stepExecution = projectUsesStepExecution(project);
   const bar = $("#projectStrategyBar");
   bar.classList.toggle("requires-confirmation", !confirmed);
   $("#projectVideoMode").textContent = confirmed ? `${engine} · ${mode}` : "待确认（视频生产已锁定）";
   setTextIfChanged($("#videoStageTitle"), `${engine} 分镜视频生产线`);
   setTextIfChanged($("#productDropHelp"), `上传原图会被硬锁定；带货镜头必须引用此图，不会凭文字另画商品`);
-  setTextIfChanged($("#productionSequenceNote"), `自动生产会按顺序执行：完整剧本 → 角色/场景资产 → 人物视频与音色 → 分镜图 → ${engine} 分镜视频 → 拼接成片。任务支持断点续做。`);
+  setTextIfChanged($("#productionSequenceNote"), stepExecution
+    ? `分步制作每次只运行当前阶段：剧本 → 资产 → 分镜图 → ${engine} 分镜视频 → 拼接成片；阶段完成后等待你手动继续。`
+    : `自动生产会按顺序执行：完整剧本 → 角色/场景资产 → 人物视频与音色 → 分镜图 → ${engine} 分镜视频 → 拼接成片。任务支持断点续做。`);
   $("#projectExecutionMode").textContent = plan.executionMode === "full" ? "AI 一键制作" : "分步制作";
   $("#projectInputMode").textContent = plan.inputMode === "manual" ? "自己输入/上传" : "AI 生成";
   const targetSeconds = Number(project.generation?.targetDurationSeconds) || 300;
@@ -2340,21 +2357,33 @@ function renderProjectStrategy() {
     : "请先确认视频引擎、生成模式与剧总时长；分镜视频与一键制作暂时锁定。";
   const settingsKind = state.settings?.videoProvider?.kind || "local-xiangsu";
   const providerMismatch = Boolean(project) && !videoProviderMatchesProject(settingsKind);
+  const continuationLabel = stepExecution ? "运行当前阶段" : "从此环节继续全流程";
+  ["#continueFromAssets", "#continueFromShots", "#continueFromVideos"].forEach(selector => {
+    const node = $(selector);
+    if (node) setButtonLabelPreservingHelp(node, continuationLabel);
+  });
   const shotsBanner = document.querySelector('[data-panel="shots"] .build-banner');
   if (shotsBanner) {
     if (providerMismatch) {
       shotsBanner.classList.add("danger");
-      shotsBanner.innerHTML = `<b>视频上游不匹配</b><span>项目已锁定${engine}，但系统设置当前是 ${videoProviderLabel(settingsKind)}。请先到「系统设置」切换对应供应商，再点「从此环节一键做完」。</span>`;
+      shotsBanner.innerHTML = `<b>视频上游不匹配</b><span>项目已锁定${engine}，但系统设置当前是 ${videoProviderLabel(settingsKind)}。分步制作仍可先生成分镜图；进入视频阶段前请切换到对应供应商。</span>`;
     } else {
       shotsBanner.classList.remove("danger");
       shotsBanner.innerHTML = `<b>v0.13.3 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
     }
   }
-  const videoLocked = !confirmed || providerMismatch;
-  ["#runFullPipeline", "#runIdeaPipeline", "#generateAllStoryboards", "#generateAllVideos", "#continueFromShots", "#continueFromVideos", "#continueFromAssets", "#continueFromScript"].forEach(selector => {
+  const strategyLocked = !confirmed;
+  const videoLocked = strategyLocked || providerMismatch;
+  ["#runFullPipeline", "#runIdeaPipeline", "#generateAllAssets", "#generateAllVideos", "#continueFromVideos", "#continueFromAssets"].forEach(selector => {
     const node = $(selector);
     if (node) node.disabled = videoLocked || state.busy;
   });
+  ["#generateAllStoryboards", "#continueFromShots", "#continueFromScript"].forEach(selector => {
+    const node = $(selector);
+    if (node) node.disabled = strategyLocked || (!stepExecution && providerMismatch) || state.busy;
+  });
+  const deleteButton = $("#deleteProject");
+  if (deleteButton) deleteButton.disabled = state.busy || automationIsActive(project);
 }
 
 function openProjectStrategyDialog(required = false) {
@@ -2396,7 +2425,8 @@ const pipelinePhases = [
 ];
 
 const automationOperationLabels = {
-  pipeline_from_stage: "一键全流程",
+  pipeline_from_stage: "当前阶段续跑",
+  full_pipeline: "一键全流程",
   idea_to_full_pipeline: "一键全流程",
   idea_script: "剧本写作",
   topic_ideation: "选题生成",
@@ -2821,7 +2851,10 @@ function drawingEntityKeys(project = state.project) {
       }
     }
   }
-  for (const key of state.drawingScopes || []) keys.add(key);
+  const prefix = `${project?.id || ""}|`;
+  for (const key of state.drawingScopes || []) {
+    if (key.startsWith(prefix)) keys.add(key.slice(prefix.length));
+  }
   return keys;
 }
 
@@ -2849,7 +2882,7 @@ function isEntityDrawing(entityType, entityId, stages = []) {
 }
 
 function isStageDrawing(stage, entityId) {
-  if ((state.drawingStages || new Set()).has(`${stage}:${entityId}`)) return true;
+  if ((state.drawingStages || new Set()).has(`${state.project?.id || ""}|${stage}:${entityId}`)) return true;
   const status = batchFrameStatus(stage, entityId);
   return status === "running" || status === "queued";
 }
@@ -2880,10 +2913,17 @@ function resumeStageLabel(stage) {
   return ({ script: "剧本", assets: "资产", shots: "分镜", videos: "视频", final: "合成" })[stage] || "断点";
 }
 
+function projectUsesStepExecution(project = state.project) {
+  return String(project?.productionPlan?.executionMode || "step") !== "full";
+}
+
 function continuePipeline(project = state.project) {
   if (!project) return;
   const stage = resumeStageForAutomation(project);
-  return runLong(`正在从${resumeStageLabel(stage)}断点继续完整流程…`, () => api.workbench.runPipelineFromStage(project.id, stage));
+  const message = projectUsesStepExecution(project)
+    ? `正在从${resumeStageLabel(stage)}断点继续当前阶段…`
+    : `正在从${resumeStageLabel(stage)}断点继续完整流程…`;
+  return runLong(message, () => api.workbench.runPipelineFromStage(project.id, stage));
 }
 
 function renderPipelineControls(project = state.project) {
@@ -2896,7 +2936,9 @@ function renderPipelineControls(project = state.project) {
   pauseButton.disabled = !active && !resumable;
   pauseButton.dataset.intent = active ? "pause" : "resume";
   pauseButton.textContent = active ? "暂停任务" : "继续任务";
-  pauseButton.title = active ? "保存当前断点并暂停自动生产" : `从${resumeStageLabel(resumeStageForAutomation(project))}断点继续完整流程`;
+  pauseButton.title = active
+    ? "保存当前断点并暂停自动生产"
+    : `从${resumeStageLabel(resumeStageForAutomation(project))}断点继续${projectUsesStepExecution(project) ? "当前阶段" : "完整流程"}`;
   stopButton.hidden = !active;
   stopButton.disabled = !active;
 }
@@ -3046,22 +3088,28 @@ function renderCandidates(filter = state.candidateScope) {
   $("#candidateHistory").innerHTML = [...grouped.entries()].map(([stage, stageItems]) => `<section class="candidate-stage-section"><div class="candidate-stage-head"><b>${escapeHtml(stageLabels[stage] || stage)}</b><span>${stageItems.length} 个版本</span></div>${stageItems.map(item => renderCandidateCard(item, stageItems)).join("")}</section>`).join("");
 }
 
+function renderActiveStage(force = false) {
+  if (!state.project) return;
+  if (state.stage === "script") renderScript();
+  else if (state.stage === "assets") renderAssets(force);
+  else if (state.stage === "shots") renderShots();
+  else if (state.stage === "videos") refreshVideos();
+  else if (state.stage === "final") renderFinal();
+  else if (state.stage === "settings") renderSettings();
+  else if (state.stage === "console") renderConsole();
+}
+
 function renderAll() {
   if (!state.project) return;
-  renderScript();
-  renderAssets();
-  renderShots();
-  refreshVideos();
-  renderFinal();
-  renderSettings();
+  renderActiveStage(true);
+  renderJobs();
   renderOverview();
-  renderCandidates(state.candidateScope);
+  if (state.candidateScope) renderCandidates(state.candidateScope);
   renderAccountSwitch();
   renderProjectStrategy();
   renderPipelineControls(state.project);
   applyProductSurfaceLabels();
   maskSpecificModelNames();
-  if (state.stage === "console") renderConsole();
 }
 
 async function renderConsole() {
@@ -3112,7 +3160,7 @@ async function renderConsole() {
       <p class="console-message" title="${escapeHtml(item.automation?.message || "等待操作")}">${escapeHtml(item.automation?.message || "等待操作")}</p>
       <div class="card-actions">
         <button class="mini-button accent" data-action="open-console-project" data-id="${escapeHtml(item.id)}" data-stage="${escapeHtml(item.nextStage || "script")}">进入项目</button>
-        <button class="mini-button draw-button" data-action="console-continue" data-id="${escapeHtml(item.id)}" data-stage="${escapeHtml(item.nextStage || "assets")}">从下一环节做完</button>
+        <button class="mini-button draw-button" data-action="console-continue" data-id="${escapeHtml(item.id)}" data-stage="${escapeHtml(item.nextStage || "assets")}">从下一环节继续</button>
         ${item.automation?.active ? `<button class="mini-button" data-action="console-pause" data-id="${escapeHtml(item.id)}">暂停</button>` : ""}
       </div>
     </article>`;
@@ -3400,54 +3448,71 @@ function collectEntityFields(card, attrName) {
 }
 
 async function runLong(label, action, candidateScope = null) {
-  state.activeJobs = state.activeJobs || new Set();
+  state.activeJobs = state.activeJobs instanceof Map ? state.activeJobs : new Map();
   state.drawingScopes = state.drawingScopes || new Set();
   state.drawingStages = state.drawingStages || new Set();
-  state.activeJobs.add(label);
+  const projectId = state.project?.id || "";
+  const projectTitle = state.project?.title || "当前项目";
+  const jobKey = `${projectId}:${Date.now()}:${Math.random().toString(36).slice(2, 9)}`;
+  state.activeJobs.set(jobKey, { projectId, label });
   const scopeKey = candidateScope?.entityType && candidateScope?.entityId
-    ? `${candidateScope.entityType}:${candidateScope.entityId}`
+    ? `${projectId}|${candidateScope.entityType}:${candidateScope.entityId}`
     : "";
   const stageKey = candidateScope?.stage && candidateScope?.entityId
-    ? `${candidateScope.stage}:${candidateScope.entityId}`
+    ? `${projectId}|${candidateScope.stage}:${candidateScope.entityId}`
     : "";
   if (scopeKey) state.drawingScopes.add(scopeKey);
   if (stageKey) state.drawingStages.add(stageKey);
   refreshDrawingUi();
-  setBusy(true, [...state.activeJobs].slice(-1)[0] || label);
+  setBusy(true, label, projectId);
   try {
     const result = await action();
     if (!result?.ok) throw Object.assign(new Error(result?.message || "操作失败"), { code: result?.code || "OPERATION_FAILED" });
-    await loadProject(state.project.id);
-    if (candidateScope) openCandidateLibrary(candidateScope.entityType, candidateScope.entityId);
-    showToast("操作完成");
+    if (state.project?.id === projectId) {
+      await loadProject(projectId);
+      if (candidateScope) openCandidateLibrary(candidateScope.entityType, candidateScope.entityId);
+      showToast("操作完成");
+    } else {
+      showToast(`项目《${projectTitle}》后台任务已完成`);
+    }
     return result;
   } catch (error) {
     if (["SCRIPT_GENERATION_PAUSED", "SCRIPT_GENERATION_STOPPED"].includes(error.code)) {
-      await loadProject(state.project.id, false).catch(() => {});
-      if (state.stage === "script") renderScript();
-      showToast(error.code === "SCRIPT_GENERATION_PAUSED" ? "写作已暂停，断点和当前文字已保存" : "写作已停止，当前文字已保留");
+      if (state.project?.id === projectId) {
+        await loadProject(projectId, false).catch(() => {});
+        if (state.stage === "script") renderScript();
+      }
+      showToast(error.code === "SCRIPT_GENERATION_PAUSED" ? `项目《${projectTitle}》写作已暂停，断点已保存` : `项目《${projectTitle}》写作已停止，当前文字已保留`);
       return { ok: false, expectedControl: true, code: error.code };
     }
-    if (["SEEDANCE_DAILY_QUOTA_EXHAUSTED", "ACCOUNT_SWITCH_IN_PROGRESS"].includes(error.code)) {
+    if (state.project?.id === projectId && ["SEEDANCE_DAILY_QUOTA_EXHAUSTED", "ACCOUNT_SWITCH_IN_PROGRESS"].includes(error.code)) {
       switchStage("settings");
       await refreshAccountSwitch(false).catch(() => {});
     }
-    showToast(error.message || String(error), "error");
+    showToast(state.project?.id === projectId ? (error.message || String(error)) : `项目《${projectTitle}》后台任务失败：${error.message || String(error)}`, "error");
   } finally {
-    state.activeJobs.delete(label);
+    state.activeJobs.delete(jobKey);
     if (scopeKey) state.drawingScopes.delete(scopeKey);
     if (stageKey) state.drawingStages.delete(stageKey);
-    setBusy(state.activeJobs.size > 0, [...state.activeJobs].slice(-1)[0] || "");
+    setBusy(false, "", projectId);
     refreshDrawingUi();
-    if (scriptWorkflowState().active) ensureScriptLivePolling();
-    else stopScriptLivePolling();
+    if (state.project?.id === projectId) {
+      if (scriptWorkflowState().active) ensureScriptLivePolling();
+      else stopScriptLivePolling();
+    }
   }
 }
 
 function refreshDrawingUi() {
   const bar = $("#drawingStatusBar");
-  const jobs = [...(state.activeJobs || [])];
-  const scopes = [...(state.drawingScopes || [])];
+  const projectId = state.project?.id || "";
+  const jobs = [...(state.activeJobs instanceof Map ? state.activeJobs.values() : [])]
+    .filter(item => item.projectId === projectId)
+    .map(item => item.label);
+  const prefix = `${projectId}|`;
+  const scopes = [...(state.drawingScopes || [])]
+    .filter(key => key.startsWith(prefix))
+    .map(key => key.slice(prefix.length));
   if (bar) {
     if (jobs.length || scopes.length || state.busy) {
       bar.hidden = false;
@@ -3590,7 +3655,9 @@ document.addEventListener("click", async event => {
         if (gaps.length) return showToast(`空项目请先：${gaps.join(" → ")}`, "error");
       }
     }
-    return runLong("正在从选定环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(id, stage));
+    return runLong(projectUsesStepExecution(project)
+      ? "正在运行选定阶段；完成后等待你的下一步操作…"
+      : "正在从选定环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(id, stage));
   }
   if (action === "console-pause") {
     const result = await api.workbench.pausePipeline(id, "pause");
@@ -3917,43 +3984,71 @@ $("#importFinalVideo")?.addEventListener("click", async () => {
 $("#continueFromScript")?.addEventListener("click", async () => {
   await saveScriptFields();
   const project = state.project;
+  const stepExecution = projectUsesStepExecution(project);
   const hasShots = Array.isArray(project?.shots) && project.shots.length > 0;
   const hasScript = Boolean(String(project?.script?.raw || "").trim());
   const hasCheckpoint = Boolean(project?.script?.generationCheckpoint);
   if (!hasShots && !hasScript && !hasCheckpoint) {
     const gaps = ideaBootstrapGaps(project);
-    if (gaps.length) return showToast(`空项目请先：${gaps.join(" → ")}，再点「生成并自动生产」`, "error");
-    if (!window.confirm("当前还没有剧本。将按已选题材自动写完整剧本，并继续资产→分镜→视频→成片。会产生消耗，确认开始吗？")) return;
-  } else if (!window.confirm("将从剧本环节起自动完成：拆镜→资产→分镜图→视频→成片。已就绪项会跳过。继续吗？")) {
+    if (gaps.length) return showToast(`空项目请先：${gaps.join(" → ")}，再运行剧本阶段`, "error");
+    const message = stepExecution
+      ? "当前还没有剧本。将按已选题材写出完整剧本，完成后停在资产阶段；不会自动生成图片或视频。会产生文本模型消耗，确认开始吗？"
+      : "当前还没有剧本。将按已选题材自动写完整剧本，并继续资产→分镜→视频→成片。会产生消耗，确认开始吗？";
+    if (!window.confirm(message)) return;
+  } else if (!window.confirm(stepExecution
+    ? "只完成当前剧本写作/拆镜，完成后停在资产阶段，不会自动生成图片或视频。继续吗？"
+    : "将从剧本环节起自动完成：拆镜→资产→分镜图→视频→成片。已就绪项会跳过。继续吗？")) {
     return;
   }
-  runLong("正在从剧本环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(state.project.id, "script"));
+  runLong(stepExecution
+    ? "正在完成剧本阶段；完成后将停在资产阶段…"
+    : "正在从剧本环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(state.project.id, "script"));
 });
 $("#continueFromAssets")?.addEventListener("click", () => {
-  if (!window.confirm("将从资产环节起自动补齐后续：资产→分镜图→视频→成片。已就绪项会跳过。继续吗？")) return;
-  runLong("正在从资产环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(state.project.id, "assets"));
+  const stepExecution = projectUsesStepExecution();
+  const message = stepExecution
+    ? "只补齐人物、场景、服装、道具、人物视频与音色资产，完成后停在分镜阶段。不会自动生成分镜图或分镜视频。继续吗？"
+    : "将从资产环节起自动补齐后续：资产→分镜图→视频→成片。已就绪项会跳过。继续吗？";
+  if (!window.confirm(message)) return;
+  runLong(stepExecution
+    ? "正在补齐资产；完成后将停在分镜阶段…"
+    : "正在从资产环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(state.project.id, "assets"));
 });
 $("#continueFromShots")?.addEventListener("click", () => {
-  if (!videoProviderMatchesProject(state.settings?.videoProvider?.kind || "local-xiangsu")) {
+  const stepExecution = projectUsesStepExecution();
+  if (!stepExecution && !videoProviderMatchesProject(state.settings?.videoProvider?.kind || "local-xiangsu")) {
     return showToast(`项目是${currentVideoEngineName()}，请先在系统设置切换到同引擎视频供应商`, "error");
   }
   const sheetMode = state.project?.generation?.mode === "storyboard_sheet";
-  const message = sheetMode
-    ? "将从逐秒合图开始自动补齐：只重试缺失/失败的合图 → 分镜视频 → 成片。本模式不生成首帧或尾帧。继续吗？"
-    : "将从分镜帧开始自动补齐：缺失/失败的首尾帧 → 分镜视频 → 成片。帧未齐时不会进入视频。继续吗？";
+  const message = stepExecution
+    ? (sheetMode
+      ? "只补齐缺失/失败的逐秒合图，完成后停在分镜视频阶段；本模式不生成首帧或尾帧，也不会自动提交视频。继续吗？"
+      : "只补齐缺失/失败的分镜首尾帧，完成后停在分镜视频阶段；不会自动提交视频。继续吗？")
+    : (sheetMode
+      ? "将从逐秒合图开始自动补齐：只重试缺失/失败的合图 → 分镜视频 → 成片。本模式不生成首帧或尾帧。继续吗？"
+      : "将从分镜帧开始自动补齐：缺失/失败的首尾帧 → 分镜视频 → 成片。帧未齐时不会进入视频。继续吗？");
   if (!window.confirm(message)) return;
-  runLong("正在从分镜环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(state.project.id, "shots"));
+  runLong(stepExecution
+    ? "正在补齐分镜图；完成后将停在分镜视频阶段…"
+    : "正在从分镜环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(state.project.id, "shots"));
 });
 $("#continueFromVideos")?.addEventListener("click", () => {
   if (!videoProviderMatchesProject(state.settings?.videoProvider?.kind || "local-xiangsu")) {
     return showToast(`项目是${currentVideoEngineName()}，请先在系统设置切换到同引擎视频供应商`, "error");
   }
+  const stepExecution = projectUsesStepExecution();
   const sheetMode = state.project?.generation?.mode === "storyboard_sheet";
-  const message = sheetMode
-    ? "将检查每镜逐秒合图是否齐全，再补齐分镜视频并拼接；本模式不检查尾帧。继续吗？"
-    : "将检查分镜帧是否齐全，再补齐分镜视频并拼接。缺少尾帧会直接拦截。继续吗？";
+  const message = stepExecution
+    ? (sheetMode
+      ? "将检查每镜逐秒合图是否齐全，只补齐分镜视频，完成后停在合成阶段；本模式不检查尾帧，也不会自动拼接。继续吗？"
+      : "将检查分镜帧是否齐全，只补齐分镜视频，完成后停在合成阶段；不会自动拼接。继续吗？")
+    : (sheetMode
+      ? "将检查每镜逐秒合图是否齐全，再补齐分镜视频并拼接；本模式不检查尾帧。继续吗？"
+      : "将检查分镜帧是否齐全，再补齐分镜视频并拼接。缺少尾帧会直接拦截。继续吗？");
   if (!window.confirm(message)) return;
-  runLong("正在从视频环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(state.project.id, "videos"));
+  runLong(stepExecution
+    ? "正在补齐分镜视频；完成后将停在合成阶段…"
+    : "正在从视频环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(state.project.id, "videos"));
 });
 $("#continueFromFinal")?.addEventListener("click", () => runLong("正在拼接完整短剧…", () => api.workbench.runPipelineFromStage(state.project.id, "final")));
 $("#pausePipeline")?.addEventListener("click", event => {
@@ -4105,7 +4200,10 @@ $("#runFullPipeline").addEventListener("click", async () => {
     if (gaps.length) return showToast(`空项目请先：${gaps.join(" → ")}`, "error");
   }
   const frameStep = project?.generation?.mode === "storyboard_sheet" ? "逐秒合图（无首尾帧）" : "首尾帧/延续帧";
-  if (!window.confirm(`一键全流程将调用你配置的文本模型、图片 API 和${currentVideoEngineName()}上游：自动拆镜→人物/场景→人物视频/音色→${frameStep}→分镜视频→完整成片。此操作会产生对应供应商消耗，确认开始吗？`)) return;
+  const stepNotice = projectUsesStepExecution(project)
+    ? "你当前选择的是分步制作；本次只有因为你明确点击了「一键全流程」，才会临时跨阶段自动生产。"
+    : "";
+  if (!window.confirm(`${stepNotice}一键全流程将调用你配置的文本模型、图片 API 和${currentVideoEngineName()}上游：自动拆镜→人物/场景→人物视频/音色→${frameStep}→分镜视频→完整成片。此操作会产生对应供应商消耗，确认开始吗？`)) return;
   runLong("完整漫剧流水线已经启动，可在任务队列查看进度…", () => api.workbench.runFullPipeline(state.project.id));
 });
 $("#stitchVideo").addEventListener("click", () => runLong("正在按镜号拼接完整短剧…", () => api.workbench.stitch(state.project.id)));
@@ -4312,13 +4410,7 @@ $("#projectSelect").addEventListener("change", async (event) => {
   if (nextId === currentId) return;
   const automation = state.project?.automation;
   const busy = state.busy || ["running", "pausing"].includes(String(automation?.status || ""));
-  if (busy) {
-    const ok = window.confirm("当前项目仍有任务在跑。切换项目不会停止后台任务，只是切换查看界面。确定切换？");
-    if (!ok) {
-      event.target.value = currentId;
-      return;
-    }
-  }
+  if (busy) showToast("原项目继续在后台运行；已切换查看另一个项目");
   try {
     await loadProject(nextId);
   } catch (error) {
@@ -4326,6 +4418,27 @@ $("#projectSelect").addEventListener("change", async (event) => {
     event.target.value = currentId;
   }
 });
+
+$("#deleteProject")?.addEventListener("click", async event => {
+  const project = state.project;
+  if (!project) return;
+  if (state.busy || automationIsActive(project)) return showToast("该项目仍有任务运行，结束或等待完成后才能删除", "error");
+  if (!window.confirm(`删除历史项目《${project.title}》？项目文件会移入本机可恢复回收区；其他项目和独立资产库不会受影响。`)) return;
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const result = await api.workbench.deleteProject(project.id);
+    if (!result?.ok) throw Object.assign(new Error(result?.message || "删除项目失败"), { code: result?.code || "PROJECT_DELETE_FAILED" });
+    state.projectBusyCounts?.delete(project.id);
+    state.requestedProjectId = "";
+    await loadProjects();
+    showToast(`历史项目《${project.title}》已移入本机可恢复回收区`);
+  } catch (error) {
+    showToast(error.message || "删除项目失败", "error");
+    button.disabled = false;
+  }
+});
+
 function closeNewProjectDialog() {
   if (state.newProjectCreating) return;
   const dialog = $("#newProjectDialog");

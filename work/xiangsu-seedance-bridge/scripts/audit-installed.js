@@ -11,6 +11,7 @@ async function main() {
   const electronApp = await electron.launch({ executablePath });
   try {
     const page = await electronApp.firstWindow({ timeout: 20_000 });
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.minimize());
     await page.waitForLoadState("domcontentloaded");
     await page.waitForFunction(() => document.body.dataset.workbenchReady === "true", null, { timeout: 20_000 });
     const [projects, auth, ui] = await Promise.all([

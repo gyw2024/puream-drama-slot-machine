@@ -6631,8 +6631,10 @@ class WorkbenchWorkflow {
       return project.automation;
     }
     const operation = project.automation?.operation || "";
-    const scriptOperation = ["idea_script", "idea_to_full_pipeline"].includes(operation);
-    const scriptStage = String(project.automation?.stage || "").startsWith("script") || ["idea_script", "idea_to_full_pipeline"].includes(project.automation?.stage);
+    const scriptOperation = ["idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(operation)
+      || (operation === "pipeline_from_stage" && String(project.automation?.targetId || "") === "script");
+    const scriptStage = String(project.automation?.stage || "").startsWith("script")
+      || ["idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(project.automation?.stage);
     if (!control || !this.hasActiveOperation(projectId) || !scriptOperation || !scriptStage) {
       throw Object.assign(new Error("当前项目没有正在运行的剧本写作任务"), { code: "SCRIPT_GENERATION_NOT_RUNNING" });
     }
@@ -6694,9 +6696,10 @@ class WorkbenchWorkflow {
       };
       this.store.saveProject(project);
     }
-    return project.automation.operation === "idea_to_full_pipeline"
-      ? this.runIdeaToFullPipeline(projectId)
-      : this.generateCompleteScript(projectId);
+    if (project.automation.operation === "idea_to_full_pipeline") return this.runIdeaToFullPipeline(projectId);
+    if (project.automation.operation === "full_pipeline") return this.runFullPipeline(projectId);
+    if (project.automation.operation === "pipeline_from_stage") return this.runPipelineFromStage(projectId, "script");
+    return this.generateCompleteScript(projectId);
   }
 
   setAutomation(projectId, patch) {
@@ -6819,7 +6822,9 @@ class WorkbenchWorkflow {
       }
       const resumable = isResumableVideoPause(error);
       const failedProject = this.store.getProject(projectId);
-      const scriptOperation = ["idea_script", "idea_to_full_pipeline"].includes(String(failedProject.automation?.operation || ""));
+      const failedOperation = String(failedProject.automation?.operation || "");
+      const scriptOperation = ["idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(failedOperation)
+        || (failedOperation === "pipeline_from_stage" && String(failedProject.automation?.targetId || "") === "script");
       const recoverableScriptFailure = scriptOperation && (
         error?.retryRequiresExplicitResume === true
         || hasRecoverableScriptCheckpoint(failedProject)
@@ -12784,14 +12789,19 @@ ${shotAnchor}
 
   async runPipelineFromStage(projectId, fromStage = "assets", options = {}) {
     if (options.track !== false) {
-      return this.runTrackedOperation(projectId, "pipeline_from_stage", fromStage, () => this.runPipelineFromStage(projectId, fromStage, { track: false }));
+      return this.runTrackedOperation(projectId, "pipeline_from_stage", fromStage, () => this.runPipelineFromStage(projectId, fromStage, { ...options, track: false }));
     }
     const order = ["script", "assets", "shots", "videos", "final"];
     const start = Math.max(0, order.indexOf(fromStage));
     let project = this.store.getProject(projectId);
     assertProjectGenerationMode(project);
-    assertVideoProviderAligned(project, this.store.getSettings());
-    const shouldRun = stage => order.indexOf(stage) >= start;
+    const stepExecution = project.productionPlan?.executionMode !== "full" && options.allowCrossStage !== true;
+    const shouldRun = stage => stepExecution
+      ? order.indexOf(stage) === start
+      : order.indexOf(stage) >= start;
+    if (shouldRun("assets") || shouldRun("videos")) {
+      assertVideoProviderAligned(project, this.store.getSettings());
+    }
     if (shouldRun("script")) {
       const route = scriptPipelineEntryRoute(project);
       if (route === "resume_generation") {
@@ -12813,15 +12823,17 @@ ${shotAnchor}
             code: "SCRIPT_REQUIRED"
           });
         }
-        // AI 一键制作空项目：不要报“没有断点”，直接走选题→剧本→资产链路。
+        // 空项目先写出完整剧本。分步制作到此停止；显式全流程再继续资产链路。
         assertIdeaScriptBootstrapReady(project);
         this.setAutomation(projectId, {
           stage: "script",
-          message: "新项目尚无剧本，正在按已选题材自动生成完整剧本并继续生产"
+          message: stepExecution
+            ? "新项目尚无剧本，正在按已选题材生成完整剧本；完成后停在资产阶段"
+            : "新项目尚无剧本，正在按已选题材自动生成完整剧本并继续生产"
         });
         this.assertOperationActive(projectId);
-        await this.runIdeaToFullPipeline(projectId, { track: false });
-        return this.store.getProject(projectId);
+        await this.generateCompleteScript(projectId, { track: false });
+        project = this.store.getProject(projectId);
       }
       assertScriptMaterializedForPipeline(project);
     }
@@ -13370,7 +13382,10 @@ ${shotAnchor}
   }
 
   async runFullPipeline(projectId, options = {}) {
-    return this.runPipelineFromStage(projectId, "script", options);
+    if (options.track !== false) {
+      return this.runTrackedOperation(projectId, "full_pipeline", "", () => this.runFullPipeline(projectId, { ...options, track: false }));
+    }
+    return this.runPipelineFromStage(projectId, "script", { ...options, track: false, allowCrossStage: true });
   }
 
   async stitchProject(projectId) {
