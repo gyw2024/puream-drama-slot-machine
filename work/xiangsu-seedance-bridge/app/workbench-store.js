@@ -711,10 +711,10 @@ function defaultSettings() {
       outputPricePerMillion: 0
     },
     videoProvider: {
-      kind: "local-xiangsu",
-      baseUrl: "http://127.0.0.1:28911",
+      kind: "puream-hailuo-h3",
+      baseUrl: "https://puream.cn",
       apiKey: "",
-      model: "seedance2.0-mini",
+      model: "hailuo-h3",
       resolution: "720p",
       storageMode: "managed",
       managedStorageBaseUrl: "https://puream.cn",
@@ -1354,7 +1354,7 @@ class WorkbenchStore {
   createProject(title, options = {}) {
     const providerKind = options.videoProviderKind || options.providerKind
       ? normalizeProviderKind(options.videoProviderKind || options.providerKind)
-      : (options.engine === "hailuo-h3" ? "puream-hailuo-h3" : "local-xiangsu");
+      : "puream-hailuo-h3";
     const engine = providerEngine(providerKind);
     const project = defaultProject(String(title || "未命名漫剧").trim() || "未命名漫剧", { ...options, engine });
     project.generation = {

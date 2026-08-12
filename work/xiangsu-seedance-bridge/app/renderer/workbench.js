@@ -259,7 +259,7 @@ function openPromptExample(key) {
   if (!dialog) return;
   dialog.dataset.promptKey = key;
   $("#promptExampleDialogTitle").textContent = `${promptLabels[key] || key} · 示例`;
-  $("#promptExampleText").value = promptExampleForKey(key);
+  $("#promptExampleText").value = maskSpecificModelText(promptExampleForKey(key));
   if (!dialog.open) dialog.showModal();
 }
 
@@ -343,7 +343,7 @@ function decorateFeatureHelp() {
     generateCompleteScript: "只生成完整剧本，不立即生成媒体资产。",
     runIdeaPipeline: "从当前选题和商品信息开始一键生产。",
     generateAllAssets: "按角色、场景、音色和商品依赖顺序生成资产。",
-    generateAllStoryboards: "为每个镜头生成首帧、尾帧和引用计划。",
+    generateAllStoryboards: "按项目模式生成逐秒合图或首尾帧，并绑定引用计划。",
     generateAllVideos: "按镜头计划生成视频并保留可恢复任务。",
     stitchVideo: "按镜头时长和顺序拼接最终成片。",
     importScriptFile: "可上传自然语言、分场剧本或系统 JSON，软件会先归一化。",
@@ -558,9 +558,11 @@ function installInfoTooltipLayer() {
 
 function maskSpecificModelText(value) {
   return String(value || "")
-    .replace(/puream-hailuo-h3|hailuo-h3/gi, "云端算力")
-    .replace(/海螺\s*H3/gi, "云端算力")
-    .replace(/\bH3\b/gi, "云端算力")
+    .replace(/puream[-_]?hailuo[-_]?h3/gi, "纯梦云端算力")
+    .replace(/minimax[\s_-]*h3/gi, "纯梦云端算力")
+    .replace(/hailuo[\s_-]*h3|海螺\s*h3|\bh3\b/gi, "纯梦云端算力")
+    .replace(/\bhailuo\b|海螺/gi, "纯梦云端算力")
+    .replace(/(?:纯梦云端算力[\s/·_-]*){2,}/g, "纯梦云端算力")
     .replace(/Seedance/gi, "本地像塑");
 }
 
@@ -589,6 +591,14 @@ function maskSpecificModelNames(root = document.body) {
       const masked = maskSpecificModelText(value);
       if (masked !== value) element.setAttribute(attribute, masked);
     });
+  });
+  const controls = root.matches?.("textarea,input:not([type='hidden']):not([type='radio']):not([type='checkbox']):not([type='password'])")
+    ? [root, ...root.querySelectorAll("textarea,input:not([type='hidden']):not([type='radio']):not([type='checkbox']):not([type='password'])")]
+    : [...root.querySelectorAll?.("textarea,input:not([type='hidden']):not([type='radio']):not([type='checkbox']):not([type='password'])") || []];
+  controls.forEach(control => {
+    const value = control.value || "";
+    const masked = maskSpecificModelText(value);
+    if (masked !== value) control.value = masked;
   });
 }
 
@@ -706,7 +716,7 @@ function videoProviderLabel(kind) {
 }
 
 function currentProviderKind() {
-  return state.settings?.videoProvider?.kind || "local-xiangsu";
+  return state.settings?.videoProvider?.kind || "puream-hailuo-h3";
 }
 
 function projectRequiresFaceMeshUi(project = state.project) {
@@ -804,7 +814,7 @@ function assetStageTile(candidate, title, kind = "image", aspectRatio = "") {
 
 function showToast(message, kind = "info") {
   const toast = $("#toast");
-  toast.textContent = message;
+  toast.textContent = maskSpecificModelText(message);
   toast.className = `toast show${kind === "error" ? " error" : ""}`;
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => { toast.className = "toast"; }, 4200);
@@ -1356,7 +1366,7 @@ async function loadProjects(preferredId) {
   if (!result.ok) throw new Error(result.message);
   state.projects = result.projects || [];
   if (!state.projects.length) {
-    const created = await api.workbench.createProject("我的第一部带货漫剧", { engine: "seedance", mode: "continuation", modeConfirmed: state.captureMode, executionMode: "step", inputMode: "ai" });
+    const created = await api.workbench.createProject("我的第一部带货漫剧", { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "continuation", modeConfirmed: state.captureMode, executionMode: "step", inputMode: "ai" });
     if (!created.ok) throw new Error(created.message);
     state.projects = [{ id: created.project.id, title: created.project.title, updatedAt: created.project.updatedAt }];
   }
@@ -2222,7 +2232,7 @@ function renderSettings() {
   $("#imageBaseUrl").value = "https://puream.cn";
   $("#imageApiKey").value = s.imageProvider.apiKey || "";
   $("#imageModel").value = "纯梦官网图片算力";
-  $("#videoProviderKind").value = s.videoProvider?.kind || "local-xiangsu";
+  $("#videoProviderKind").value = s.videoProvider?.kind || "puream-hailuo-h3";
   $("#videoBaseUrl").value = s.videoProvider?.kind === "local-xiangsu" ? "http://127.0.0.1:28911" : "https://puream.cn";
   $("#videoApiKey").value = s.videoProvider?.apiKey || "";
   $("#videoModel").value = s.videoProvider?.kind === "local-xiangsu" ? "本地像塑" : "云端算力";
@@ -3203,7 +3213,7 @@ function setCreatorPromptMode(mode) {
       : "当前为系统编译稿（只读）。切到「自定义填写」后可直接改，或点「使用系统稿改写」复制后再改。";
     if (!manual) {
       const compiled = String($("#creatorPromptCompiled")?.value || "").trim();
-      if (compiled) text.value = compiled;
+      if (compiled) text.value = maskSpecificModelText(compiled);
     }
   }
   $("#creatorPromptUseCompiled")?.classList.toggle("hidden", manual);
@@ -3227,27 +3237,28 @@ function populateCreatorPromptDialog(spec, preview) {
     || ""
   ).trim();
   compiled.value = compiledText;
+  const visibleCompiledText = maskSpecificModelText(compiledText);
   if (spec.kind === "shot-video") {
     title.textContent = `镜头 ${spec.shotNumber || ""} · 分镜视频提示词`;
     meta.textContent = `策略：${spec.strategyLabel || ""} · 提交模式：${preview.promptMode === "manual" ? "手动覆盖" : "系统编译（可查看/改写）"}`;
     setCreatorPromptMode(preview.promptMode === "manual" ? "manual" : "system");
-    text.value = preview.promptMode === "manual"
+    text.value = maskSpecificModelText(preview.promptMode === "manual"
       ? (preview.manualVideoPrompt || compiledText)
-      : compiledText;
+      : visibleCompiledText);
   } else if (spec.kind === "character-video") {
     title.textContent = `${spec.entityName || "角色"} · 人物视频提示词`;
     meta.textContent = `时长 ${preview.duration || 6} 秒 · ${preview.speechScript ? `测试台词：${preview.speechScript}` : "系统编译稿"}`;
     setCreatorPromptMode(preview.mode === "manual" ? "manual" : "system");
-    text.value = preview.mode === "manual"
+    text.value = maskSpecificModelText(preview.mode === "manual"
       ? (preview.manual || compiledText)
-      : compiledText;
+      : visibleCompiledText);
   } else {
     title.textContent = `${spec.entityName || "资产"} · ${stageLabels[spec.stage] || spec.stage}`;
     meta.textContent = `${spec.entityType === "character" ? "角色" : spec.entityType === "scene" ? "场景" : "分镜"} · ${stageLabels[spec.stage] || spec.stage}`;
     setCreatorPromptMode(preview.mode === "manual" ? "manual" : "system");
-    text.value = preview.mode === "manual"
+    text.value = maskSpecificModelText(preview.mode === "manual"
       ? (preview.manual || compiledText)
-      : compiledText;
+      : visibleCompiledText);
   }
   if (!dialog.open) dialog.showModal();
 }
@@ -3926,14 +3937,22 @@ $("#continueFromShots")?.addEventListener("click", () => {
   if (!videoProviderMatchesProject(state.settings?.videoProvider?.kind || "local-xiangsu")) {
     return showToast(`项目是${currentVideoEngineName()}，请先在系统设置切换到同引擎视频供应商`, "error");
   }
-  if (!window.confirm("将从分镜帧开始自动补齐：缺失/失败的首尾帧 → 分镜视频 → 成片。帧未齐时不会进入视频。继续吗？")) return;
+  const sheetMode = state.project?.generation?.mode === "storyboard_sheet";
+  const message = sheetMode
+    ? "将从逐秒合图开始自动补齐：只重试缺失/失败的合图 → 分镜视频 → 成片。本模式不生成首帧或尾帧。继续吗？"
+    : "将从分镜帧开始自动补齐：缺失/失败的首尾帧 → 分镜视频 → 成片。帧未齐时不会进入视频。继续吗？";
+  if (!window.confirm(message)) return;
   runLong("正在从分镜环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(state.project.id, "shots"));
 });
 $("#continueFromVideos")?.addEventListener("click", () => {
   if (!videoProviderMatchesProject(state.settings?.videoProvider?.kind || "local-xiangsu")) {
     return showToast(`项目是${currentVideoEngineName()}，请先在系统设置切换到同引擎视频供应商`, "error");
   }
-  if (!window.confirm("将检查分镜帧是否齐全，再补齐分镜视频并拼接。缺少尾帧会直接拦截。继续吗？")) return;
+  const sheetMode = state.project?.generation?.mode === "storyboard_sheet";
+  const message = sheetMode
+    ? "将检查每镜逐秒合图是否齐全，再补齐分镜视频并拼接；本模式不检查尾帧。继续吗？"
+    : "将检查分镜帧是否齐全，再补齐分镜视频并拼接。缺少尾帧会直接拦截。继续吗？";
+  if (!window.confirm(message)) return;
   runLong("正在从视频环节自动完成后续流程…", () => api.workbench.runPipelineFromStage(state.project.id, "videos"));
 });
 $("#continueFromFinal")?.addEventListener("click", () => runLong("正在拼接完整短剧…", () => api.workbench.runPipelineFromStage(state.project.id, "final")));
@@ -4061,7 +4080,7 @@ $("#creatorPromptUseCompiled")?.addEventListener("click", () => {
   const compiled = String($("#creatorPromptCompiled")?.value || "").trim();
   if (!compiled) return showToast("暂无可用的编译稿", "error");
   setCreatorPromptMode("manual");
-  $("#creatorPromptText").value = compiled;
+  $("#creatorPromptText").value = maskSpecificModelText(compiled);
   showToast("已切换到自定义并填入系统编译稿，可继续改写");
 });
 $("#creatorPromptSave")?.addEventListener("click", () => saveCreatorPromptDialog());
@@ -4085,7 +4104,8 @@ $("#runFullPipeline").addEventListener("click", async () => {
     const gaps = ideaBootstrapGaps(project);
     if (gaps.length) return showToast(`空项目请先：${gaps.join(" → ")}`, "error");
   }
-  if (!window.confirm(`一键全流程将调用你配置的文本模型、图片 API 和${currentVideoEngineName()}上游：自动拆镜→人物/场景→人物视频/音色→首尾帧→分镜视频→完整成片。此操作会产生对应供应商消耗，确认开始吗？`)) return;
+  const frameStep = project?.generation?.mode === "storyboard_sheet" ? "逐秒合图（无首尾帧）" : "首尾帧/延续帧";
+  if (!window.confirm(`一键全流程将调用你配置的文本模型、图片 API 和${currentVideoEngineName()}上游：自动拆镜→人物/场景→人物视频/音色→${frameStep}→分镜视频→完整成片。此操作会产生对应供应商消耗，确认开始吗？`)) return;
   runLong("完整漫剧流水线已经启动，可在任务队列查看进度…", () => api.workbench.runFullPipeline(state.project.id));
 });
 $("#stitchVideo").addEventListener("click", () => runLong("正在按镜号拼接完整短剧…", () => api.workbench.stitch(state.project.id)));
@@ -4320,7 +4340,7 @@ $("#newProject").addEventListener("click", () => {
   input.removeAttribute("aria-invalid");
   $("#newProjectError").textContent = "";
   $$("input[name='newVideoMode']").forEach(option => { option.checked = false; });
-  $$("input[name='newVideoProvider']").forEach(option => { option.checked = false; });
+  $$("input[name='newVideoProvider']").forEach(option => { option.checked = option.value === "puream-hailuo-h3"; });
   $$("input[name='newVideoEngine']").forEach(option => { option.checked = false; });
   $$("input[name='newExecutionMode']").forEach(option => { if (option.value === "step") option.checked = true; });
   $$("input[name='newInputMode']").forEach(option => { if (option.value === "ai") option.checked = true; });

@@ -403,7 +403,7 @@ class BridgeClient {
     if (!this.isRemote()) {
       const ability = String(payload?.ability || "SD_2.0_MINI");
       if (ability !== "SD_2.0_MINI") {
-        throw Object.assign(new Error(`本地像塑只允许 SD_2.0_MINI，不能提交 ${ability}；海螺 H3 项目请保持系统设置为云端算力`), {
+        throw Object.assign(new Error(`本地像塑只允许 SD_2.0_MINI，不能提交 ${ability}；纯梦云端算力项目请保持系统设置为云端算力`), {
           code: "ABILITY_NOT_ALLOWED",
           ability,
           providerKind: this.config.kind

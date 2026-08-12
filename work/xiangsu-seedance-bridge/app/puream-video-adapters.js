@@ -67,7 +67,7 @@ function validateProviderConfig(config, options = {}) {
     if (!config.ossEndpoint) throw Object.assign(new Error("请填写 OSS Endpoint"), { code: "OSS_ENDPOINT_REQUIRED" });
   }
   if (config.hailuoSeed && (!/^\d+$/.test(config.hailuoSeed) || Number(config.hailuoSeed) < 0)) {
-    throw Object.assign(new Error("海螺随机种子必须是非负整数"), { code: "HAILUO_SEED_INVALID" });
+    throw Object.assign(new Error("纯梦云端算力随机种子必须是非负整数"), { code: "HAILUO_SEED_INVALID" });
   }
   return contract;
 }
@@ -90,8 +90,8 @@ function validateProviderPayload(kind, payload = {}) {
   if (media.images.length > contract.imageMax) throw Object.assign(new Error(`${providerDisplayName(kind)}参考图片最多 ${contract.imageMax} 张`), { code: "IMAGE_COUNT_INVALID" });
   if (media.videos.length > contract.videoMax) throw Object.assign(new Error(`${providerDisplayName(kind)}参考视频最多 ${contract.videoMax} 个`), { code: "VIDEO_COUNT_INVALID" });
   if (media.audios.length > contract.audioMax) throw Object.assign(new Error(`${providerDisplayName(kind)}独立参考音频最多 ${contract.audioMax} 段`), { code: "AUDIO_COUNT_INVALID" });
-  if (media.videoAudios.length > (contract.pairedAudioMax || 0)) throw Object.assign(new Error("海螺 H3 视频配套音轨最多 3 段"), { code: "VIDEO_AUDIO_COUNT_INVALID" });
-  if (media.videoAudios.length > media.videos.length) throw Object.assign(new Error("海螺 H3 视频配套音轨必须与参考视频按下标对应，允许空位但不能超过视频数量"), { code: "VIDEO_AUDIO_ALIGNMENT_INVALID" });
+  if (media.videoAudios.length > (contract.pairedAudioMax || 0)) throw Object.assign(new Error("纯梦云端算力视频配套音轨最多 3 段"), { code: "VIDEO_AUDIO_COUNT_INVALID" });
+  if (media.videoAudios.length > media.videos.length) throw Object.assign(new Error("纯梦云端算力视频配套音轨必须与参考视频按下标对应，允许空位但不能超过视频数量"), { code: "VIDEO_AUDIO_ALIGNMENT_INVALID" });
   if (duration < contract.durationMin || duration > contract.durationMax || !Number.isInteger(duration)) {
     const label = contract.durationMin === contract.durationMax ? `固定为 ${contract.durationMin} 秒` : `必须是 ${contract.durationMin}-${contract.durationMax} 秒整数`;
     throw Object.assign(new Error(`${providerDisplayName(kind)}生成时长${label}`), { code: "GENERATION_DURATION_INVALID" });
@@ -122,21 +122,21 @@ function validateHailuoModeMedia(value, media = {}) {
   const fail = (message, code = "HAILUO_MODE_REFERENCES_INVALID") => {
     throw Object.assign(new Error(message), { code, mode });
   };
-  if (requestedMode !== mode) fail(`海螺 H3 调用模式无效：${requestedMode}`, "HAILUO_MODE_INVALID");
+  if (requestedMode !== mode) fail(`纯梦云端算力调用模式无效：${requestedMode}`, "HAILUO_MODE_INVALID");
   if (mode === "text_to_video" && imageCount + videoCount + audioCount + pairedAudioCount > 0) {
-    fail("海螺 H3 文生视频模式不能携带参考图片、视频或音频");
+    fail("纯梦云端算力文生视频模式不能携带参考图片、视频或音频");
   }
   if (mode === "image_to_video" && (imageCount < 1 || videoCount || audioCount || pairedAudioCount)) {
-    fail("海螺 H3 图生视频模式需要 1-9 张图片，且不能混入视频或音频");
+    fail("纯梦云端算力图生视频模式需要 1-9 张图片，且不能混入视频或音频");
   }
   if (mode === "video_to_video" && (videoCount < 1 || imageCount || audioCount)) {
-    fail("海螺 H3 视频生视频模式需要 1-3 个参考视频，可按视频下标附带配套音轨，但不能混入图片或独立音频");
+    fail("纯梦云端算力视频生视频模式需要 1-3 个参考视频，可按视频下标附带配套音轨，但不能混入图片或独立音频");
   }
   if (mode === "audio_to_video" && (audioCount < 1 || imageCount || videoCount || pairedAudioCount)) {
-    fail("海螺 H3 音频生视频模式需要 1-3 段独立音频，且不能混入图片或视频");
+    fail("纯梦云端算力音频生视频模式需要 1-3 段独立音频，且不能混入图片或视频");
   }
   if (mode === "multimodal_to_video" && hailuoMediaCategories(media).length < 2) {
-    fail("海螺 H3 全能多参模式至少需要图片、视频、音频中的两类素材");
+    fail("纯梦云端算力全能多参模式至少需要图片、视频、音频中的两类素材");
   }
   return mode;
 }
@@ -172,7 +172,7 @@ function validateHailuoDimensions(width, height) {
     || normalizedHeight < 256 || normalizedHeight > 1536
     || normalizedWidth % 32 !== 0 || normalizedHeight % 32 !== 0
     || normalizedWidth * normalizedHeight > 1_500_000) {
-    throw Object.assign(new Error("海螺 H3 宽高必须为 256-1536 的 32 倍数，且总像素不能超过 1,500,000"), { code: "HAILUO_DIMENSIONS_INVALID" });
+    throw Object.assign(new Error("纯梦云端算力宽高必须为 256-1536 的 32 倍数，且总像素不能超过 1,500,000"), { code: "HAILUO_DIMENSIONS_INVALID" });
   }
   return { width: normalizedWidth, height: normalizedHeight };
 }

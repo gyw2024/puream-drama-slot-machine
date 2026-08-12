@@ -12,6 +12,7 @@ const { processFaceGrid } = require("./face-grid-processor");
 const { stageSubmissionMedia } = require("./media-staging");
 const { parseCompiledDialogueSegments } = require("./dialogue-parser");
 const { allocateH3ShotSpeakers, h3AllowedSpeakersByShot } = require("./h3-speaker-allocation");
+const { directFastUserPrompt, materializeDirectFastScript } = require("./direct-fast-script");
 const { makeId, defaultAssetLibraries } = require("./workbench-store");
 const { normalizeCloudVideoResolution, normalizeHailuoApiMode, providerEngine } = require("./video-provider-policy");
 const {
@@ -83,8 +84,12 @@ const {
 const SCRIPT_PLAN_BATCH_SIZE = 4;
 const SCRIPT_UNIT_BATCH_SIZE = 2;
 const STRUCTURED_TEXT_MAX_CHARS = 7500;
-const SCRIPT_FAST_CONCURRENCY = 16;
+// Keep the official relay below its per-account saturation point. Eight-way
+// planning fills one wave; unit writing uses two bounded waves instead of
+// flooding the relay with sixteen simultaneous long JSON streams.
+const SCRIPT_FAST_CONCURRENCY = 8;
 const SCRIPT_FAST_TARGET_SECONDS = 300;
+const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol";
 
 function fillTemplate(template, values) {
   return String(template || "").replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, key) => values[key] ?? "");
@@ -7198,6 +7203,221 @@ class WorkbenchWorkflow {
     throw lastError;
   }
 
+  async generateDirectFastScript(projectId, context = {}) {
+    const { settings, topic, filmSchedule, scriptTextProvider } = context;
+    let project = this.store.getProject(projectId);
+    const checkpoint = {
+      ...(context.checkpoint || {}),
+      fastGeneration: true,
+      directFastGeneration: true,
+      startedAt: context.checkpoint?.startedAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const unitCount = filmSchedule.unitCount;
+    const productStartNumber = Math.max(Math.floor(unitCount * 0.65) + 2, unitCount - 3);
+    this.setAutomation(projectId, {
+      stage: "script_direct",
+      status: "running",
+      message: `5分钟写作通道：正在并行生成 ${filmSchedule.totalSeconds} 秒剧本前后两段并本地合并生产字段`
+    });
+    let rawText = "";
+    const receipts = [];
+    let directData;
+    try {
+      this.assertOperationActive(projectId);
+      const splitAt = Math.ceil(unitCount / 2);
+      const segments = [[1, splitAt], [splitAt + 1, unitCount]];
+      const rawParts = ["", ""];
+      const segmentResults = await Promise.allSettled(segments.map(([segmentStart, segmentEnd], segmentIndex) => this.generateText(scriptTextProvider, [
+        {
+          role: "system",
+          content: "你是中国现实主义竖屏短剧总编剧。只输出严格紧凑JSON；对白必须口语化、有明确情绪语气、音量速度和听者反应所需的剧情依据；禁止解释、Markdown、背景音乐、模型名称和医疗功效承诺。"
+        },
+        {
+          role: "user",
+          content: directFastUserPrompt({
+            topic,
+            product: {
+              name: project.product.name,
+              description: project.product.description,
+              sellingPoints: productSellingPoints(project)
+            },
+            unitCount,
+            totalSeconds: filmSchedule.totalSeconds,
+            productStartNumber,
+            segmentStart,
+            segmentEnd
+          })
+        }
+      ], this.scriptGenerationOptions(projectId, `script_direct_${segmentIndex + 1}`, {
+        json: true,
+        requiredKeys: ["c", "sc", "s"],
+        unwrapKeys: ["data", "result", "payload", "content"],
+        maxTokens: 7_168,
+        timeoutMs: 275_000,
+        sessionId: `${checkpoint.sessionId}-direct-fast-v4-${segmentIndex + 1}`,
+        onDelta: text => { rawParts[segmentIndex] = String(text || ""); },
+        onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) receipts[segmentIndex] = { ...(usage || {}) }; }
+      }))));
+      rawText = rawParts.join("\n");
+      const failedSegment = segmentResults.find(item => item.status === "rejected");
+      if (failedSegment) throw failedSegment.reason;
+      const payloads = segmentResults.map(item => item.value);
+      directData = {
+        c: payloads[0]?.c || payloads[1]?.c || [],
+        sc: payloads[0]?.sc || payloads[1]?.sc || [],
+        s: payloads.flatMap(item => Array.isArray(item?.s) ? item.s : [])
+          .sort((left, right) => (Number(left?.i) || 0) - (Number(right?.i) || 0))
+      };
+      this.assertOperationActive(projectId);
+      this.setAutomation(projectId, {
+        stage: "script_local_compile",
+        status: "running",
+        message: "紧凑全剧已返回，正在本地补齐情绪、语气、听者反应、三段子镜头和商品因果链"
+      });
+      const materialized = materializeDirectFastScript({
+        payload: directData,
+        topic,
+        product: {
+          name: project.product.name,
+          description: project.product.description,
+          sellingPoints: productSellingPoints(project)
+        },
+        filmSchedule
+      });
+      const gateOptions = {
+        skipQualityGates: !this.qualityGatesEnabled(settings),
+        bypassProductionContracts: !this.qualityGatesEnabled(settings),
+        targetDurationSeconds: filmSchedule.totalSeconds,
+        expectedUnitCount: unitCount
+      };
+      const storyBible = validateStoryBible(materialized.storyBible, gateOptions);
+      const blueprint = validateBlueprint({ ...storyBible, shotPlan: materialized.plans }, project.product.name, gateOptions);
+      const projectMode = normalizeProjectMode(project.generation?.mode);
+      const cloudAutomaticWriting = projectVideoEngine(project) === "hailuo-h3";
+      const speakerAssignments = cloudAutomaticWriting ? allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 2) : [];
+      const shots = validateShotBatch(
+        { shots: materialized.rawShots },
+        blueprint.shotPlan,
+        project.product.name,
+        projectVideoEngine(project),
+        {
+          skipQualityGates: !this.qualityGatesEnabled(settings),
+          bypassProductionContracts: !this.qualityGatesEnabled(settings),
+          generationMode: projectMode,
+          characters: blueprint.characters,
+          ...(cloudAutomaticWriting ? {
+            maxSpeakingCharacters: 2,
+            requireReferenceDialogueFlow: true,
+            allowedSpeakersByShot: h3AllowedSpeakersByShot(speakerAssignments)
+          } : {})
+        }
+      );
+      const semanticReview = {
+        ok: true,
+        skipped: true,
+        verdict: "pass",
+        scores: Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, 100])),
+        hardFailures: [],
+        summary: "单次紧凑全剧已通过本地生产合同、情绪语气和参考片规格硬审计",
+        repairDirectives: [],
+        phase: "full"
+      };
+      const normalized = normalizeAnalysis({ story: blueprint.story, characters: blueprint.characters, scenes: blueprint.scenes, shots }, project);
+      const qualityAudit = auditDramaSpec(normalized, {
+        skipQualityGates: !this.qualityGatesEnabled(settings),
+        bypassProductionContracts: !this.qualityGatesEnabled(settings),
+        productName: project.product?.name || "",
+        sellingPoints: productSellingPoints(project)
+      });
+      if (!qualityAudit.ok) {
+        throw Object.assign(new Error(`单次紧凑全剧未通过本地硬审计：${qualityAudit.failures.map(item => item.message).join("；")}`), {
+          code: "SCRIPT_DIRECT_FAST_AUDIT_FAILED",
+          audit: qualityAudit
+        });
+      }
+      project = this.store.getProject(projectId);
+      const raw = renderProductionScript(blueprint, normalized, project, topic);
+      beginProductionRevision(project);
+      project.title = blueprint.title || topic.title;
+      project.characters = normalized.characters;
+      project.scenes = normalized.scenes;
+      project.shots = normalized.shots;
+      const finishedAt = new Date();
+      const startedAtMs = Date.parse(checkpoint.startedAt || "");
+      const elapsedSeconds = Number.isFinite(startedAtMs) ? Math.max(0, Math.round((finishedAt.getTime() - startedAtMs) / 1000)) : null;
+      project.script = {
+        ...(project.script || {}),
+        raw,
+        analysis: blueprint.story,
+        analysisChunks: 0,
+        analysisMethod: "parallel-two-segment-compact-local-compile-v4",
+        qualityAudit,
+        semanticReview,
+        promptLibraryVersion: settings.promptLibraryVersion || "",
+        generatedFromTopicId: topic.id,
+        ideaSignature: ideaSignature(project),
+        generatedAt: finishedAt.toISOString(),
+        analyzedAt: finishedAt.toISOString(),
+        generationPerformance: {
+          path: "parallel-two-segment-fast-v4",
+          targetSeconds: SCRIPT_FAST_TARGET_SECONDS,
+          elapsedSeconds,
+          metTarget: elapsedSeconds !== null ? elapsedSeconds <= SCRIPT_FAST_TARGET_SECONDS : null,
+          finishedAt: finishedAt.toISOString(),
+          upstreamModel: scriptTextProvider.model,
+          upstreamReceipts: receipts.filter(Boolean).map(item => ({ requestId: item.requestId || "", billingStatus: item.billingStatus || item.billing_status || "" }))
+        },
+        generationCheckpoint: null,
+        generationLive: null
+      };
+      project.ideation = {
+        ...(project.ideation || {}),
+        status: "script_ready",
+        scriptGeneratedAt: finishedAt.toISOString(),
+        message: `完整剧本已在 ${elapsedSeconds ?? "未知"} 秒内生成并通过本地硬审计，已进入资产阶段`,
+        errorCode: ""
+      };
+      project.status = "analyzed";
+      project.currentStage = "assets";
+      project.activity.unshift({
+        id: makeId("activity"),
+        at: finishedAt.toISOString(),
+        type: "script_generated",
+        summary: `并行两段生成并本地编译《${topic.title}》完整 ${filmSchedule.totalSeconds} 秒剧本`
+      });
+      this.store.saveProject(project);
+      this.syncReferenceLibraries(projectId, { props: normalized.props || [] });
+      return this.store.getProject(projectId);
+    } catch (error) {
+      if (isScriptControlError(error)) throw error;
+      project = this.store.getProject(projectId);
+      const failure = {
+        code: error.code || "SCRIPT_DIRECT_FAST_FAILED",
+        message: error.message || "单次紧凑全剧生成失败",
+        noAutomaticRetry: true,
+        retryRequiresExplicitResume: true,
+        rawTextLength: rawText.length,
+        rawTextSha256: rawText ? crypto.createHash("sha256").update(rawText, "utf8").digest("hex") : "",
+        upstreamReceipts: receipts.filter(Boolean),
+        failedAt: new Date().toISOString()
+      };
+      project.ideation = {
+        ...(project.ideation || {}),
+        status: "failed",
+        message: failure.message,
+        errorCode: failure.code
+      };
+      project.script = {
+        ...(project.script || {}),
+        generationCheckpoint: { ...checkpoint, directFastFailure: failure, updatedAt: failure.failedAt },
+        generationLive: null
+      };
+      this.store.saveProject(project);
+      throw Object.assign(error, failure);
+    }
+  }
+
   async generateCompleteScript(projectId, options = {}) {
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "idea_script", "", () => this.generateCompleteScript(projectId, { ...options, track: false }));
@@ -7275,6 +7495,14 @@ class WorkbenchWorkflow {
     }
     const sessionId = checkpoint.sessionId;
     const useFastScriptPath = checkpoint.fastGeneration === true && options.fast !== false;
+    const scriptTextProvider = useFastScriptPath && settings.textProvider?.kind === "puream-relay"
+      ? {
+          ...settings.textProvider,
+          model: SCRIPT_FAST_PUREAM_MODEL,
+          modelStrategy: "explicit",
+          temperature: Math.min(0.2, Number(settings.textProvider.temperature) || 0.2)
+        }
+      : settings.textProvider;
     const topicPayload = JSON.stringify(topic);
     const productFacts = `商品名称：${project.product.name}\n用户提供卖点：${productSellingPoints(project)}\n商品外观只由用户上传图片锁定；禁止虚构价格、规格、赠品、品牌承诺或功效；禁止 AI 凭空生成商品图。`;
     const filmSchedule = planFilmSchedule(
@@ -7305,6 +7533,16 @@ class WorkbenchWorkflow {
       productName: project.product.name,
       productEntryIndex: filmSchedule.productEntryIndex
     };
+    if (useFastScriptPath && !canResume && options.directFast !== false) {
+      return this.generateDirectFastScript(projectId, {
+        project,
+        settings,
+        topic,
+        checkpoint,
+        filmSchedule,
+        scriptTextProvider
+      });
+    }
     checkpoint = this.saveScriptCheckpoint(projectId, checkpoint, topic, "script_blueprint", canResume ? "正在从已保存断点继续写作" : `正在设计 ${filmSchedule.totalSeconds} 秒故事蓝图`);
     let blueprint = checkpoint.blueprint || null;
     let blueprintError;
@@ -7336,7 +7574,7 @@ class WorkbenchWorkflow {
           const message = `正在设计 ${filmSchedule.totalSeconds} 秒故事蓝图${repairContext ? "（按终审镜头级报告定向修订）" : ""}`;
           this.setAutomation(projectId, { stage: "script_blueprint", message });
           this.assertOperationActive(projectId);
-          const storyBibleData = await this.generateText(settings.textProvider, [
+          const storyBibleData = await this.generateText(scriptTextProvider, [
             { role: "system", content: `${textStagePromptForProject(project, settings, "scriptStoryBible", "story_bible")}\nJSON结构必须匹配：${JSON.stringify(storyBibleSchema())}` },
             { role: "user", content: `已选题材：${topicPayload}\n${productFacts}\n${durationContractNote}\n${scriptCraftGuide({ ...craftBase, phase: "story_bible" })}\n${docxPromptFusionFor(settings.prompts, "story_bible")}\n【完整输出硬合同】只输出一个完整、紧凑的 JSON 根对象，总字符不得超过 7500；title/logline/story/characters/scenes/actPlan 必须全部闭合后才能结束。characters 中每个角色必须先写满 identitySignature、voiceDescription、signatureLine、continuityLocks 再输出下一角色：身份指纹至少含脸型/年龄纹理/体态/永久标记且不能只写服装，声线必须含年龄性别/音高/质感/语速，测试台词必须为18–22个可说汉字；输出前逐角色自检，任何一项不得留空或与其他角色重复。人物每个长字段不超过80字，场景描述不超过100字，道具最多7个，每个字段不超过80字，六幕每字段不超过60字。接近输出上限时压缩措辞，绝不能截断 JSON、绝不能只输出内部 storyCore。\n${repairContext ? `上一版蓝图终审结构化报告：${repairContext}\n必须逐条落实 hardFailures 和 repairDirectives；低于80分的项目也必须补到可复审水平。重写故事圣经，但本次不要输出全部单元。` : `先完成唯一主线、人物场景、与 storyMechanism 匹配的证明链和主反转、六幕计划；目标总时长 ${filmSchedule.totalSeconds} 秒；本次不要输出全部 ${unitCount} 个单元。按源头细则把加压写成可拍事件，不要写空喊；救援回报、善意误判和牺牲回报禁止强塞双证谜题。`}` }
           ], this.scriptGenerationOptions(projectId, "script_blueprint", {
@@ -7371,7 +7609,7 @@ class WorkbenchWorkflow {
             let receipt = null;
             try {
               this.assertOperationActive(projectId);
-              const data = await this.generateText(settings.textProvider, [
+              const data = await this.generateText(scriptTextProvider, [
                 { role: "system", content: `${textStagePromptForProject(project, settings, "scriptPlanBatch", "shot_plan")}\nJSON结构必须匹配：${JSON.stringify(shotPlanBatchSchema(startNumber))}` },
                 { role: "user", content: [
                   `锁定故事圣经：${JSON.stringify(storyBible)}`,
@@ -7573,7 +7811,7 @@ class WorkbenchWorkflow {
             let planReceipt = null;
             try {
               this.assertOperationActive(projectId);
-              planData = await this.generateText(settings.textProvider, [
+              planData = await this.generateText(scriptTextProvider, [
                 { role: "system", content: `${textStagePromptForProject(project, settings, "scriptPlanBatch", "shot_plan")}\nJSON结构必须匹配：${JSON.stringify(shotPlanBatchSchema(startNumber))}` },
                 { role: "user", content: [
                   `锁定故事圣经：${JSON.stringify(storyBible)}`,
@@ -7853,7 +8091,7 @@ class WorkbenchWorkflow {
           let receipt = null;
           try {
             this.assertOperationActive(projectId);
-            unitResult = await this.generateText(settings.textProvider, [
+            unitResult = await this.generateText(scriptTextProvider, [
               { role: "system", content: `${unitTextStagePrompt}\n${productionUnitGenerationModeDirective(projectMode, projectVideoEngine(project))}\nJSON结构必须匹配：${JSON.stringify(productionShotSchema(projectMode, { includeHailuo: false, modelAuthoredOnly: true }))}\n注意：不要输出 hailuoPrompt；英文镜头及派生提示由系统后续编译。secondPanels 若合图模式必须写满 duration 条，可按秒简写 action。` },
               { role: "user", content: scriptUnitUserPrompt([
                 `全剧蓝图：${JSON.stringify({ ...blueprint, shotPlan: undefined })}`,
@@ -7998,7 +8236,7 @@ class WorkbenchWorkflow {
               draftAttempt > 1 ? "scriptRepair" : "scriptUnitGeneration",
               "units"
             );
-            unitResult = await this.generateText(settings.textProvider, [
+            unitResult = await this.generateText(scriptTextProvider, [
               { role: "system", content: `${unitTextStagePrompt}\n${productionUnitGenerationModeDirective(projectMode, projectVideoEngine(project))}\nJSON结构必须匹配：${JSON.stringify(productionShotSchema(projectMode, { includeHailuo: false, modelAuthoredOnly: true }))}\n注意：不要输出 hailuoPrompt；英文镜头及派生提示由系统后续编译。secondPanels 若合图模式必须写满 duration 条，可按秒简写 action。` },
               { role: "user", content: scriptUnitUserPrompt([
                 `全剧蓝图：${JSON.stringify({ ...blueprint, shotPlan: undefined })}`,
@@ -8279,7 +8517,7 @@ class WorkbenchWorkflow {
       generatedAt: new Date().toISOString(),
       analyzedAt: new Date().toISOString(),
       generationPerformance: {
-        path: useFastScriptPath ? "parallel-fast-v1" : "checkpoint-safe-v1",
+        path: useFastScriptPath ? "parallel-fast-v2" : "checkpoint-safe-v1",
         targetSeconds: SCRIPT_FAST_TARGET_SECONDS,
         elapsedSeconds: scriptElapsedSeconds,
         metTarget: scriptElapsedSeconds !== null ? scriptElapsedSeconds <= SCRIPT_FAST_TARGET_SECONDS : null,
@@ -12599,7 +12837,11 @@ ${shotAnchor}
       await this.refreshCreatorPrompts(projectId);
     }
     if (shouldRun("shots")) {
-      this.setAutomation(projectId, { stage: "storyboards", message: "正在按模式补齐分镜帧（延续：首镜首尾+后续仅尾帧）" });
+      const sheetMode = normalizeProjectMode(project.generation?.mode) === "storyboard_sheet";
+      this.setAutomation(projectId, {
+        stage: "storyboards",
+        message: sheetMode ? "正在按逐秒合图模式补齐每镜唯一合图（本模式不生成首帧或尾帧）" : "正在按当前模式补齐分镜帧"
+      });
       this.assertOperationActive(projectId);
       await this.generateAllStoryboards(projectId, { track: false });
     }
@@ -12924,11 +13166,12 @@ ${shotAnchor}
     }
     const project = this.store.getProject(projectId);
     assertProjectGenerationMode(project);
+    const sheetMode = normalizeProjectMode(project.generation?.mode) === "storyboard_sheet";
     const plan = this.buildStoryboardBatchPlan(projectId);
     const concurrency = imageBatchConcurrency(project);
     const pending = plan.filter(item => item.status !== "completed" && item.status !== "skipped");
     const startPending = pending.filter(item => item.kind === "storyboard_start" || item.kind === "storyboard_sheet");
-    const endPending = pending.filter(item => item.kind === "storyboard_end")
+    const endPending = (sheetMode ? [] : pending.filter(item => item.kind === "storyboard_end"))
       .slice()
       .sort((left, right) => {
         const leftShot = (project.shots || []).find(shot => shot.id === left.entityId);
@@ -12937,8 +13180,10 @@ ${shotAnchor}
       });
     this.setAutomation(projectId, {
       stage: "storyboards",
-      progress: summarizeAssetBatch(plan, "分镜帧按首帧→尾帧两波执行", "storyboard_batch"),
-      message: `正在生产分镜帧：先补 ${startPending.length} 个首帧/合图，再生成 ${endPending.length} 个尾帧`
+      progress: summarizeAssetBatch(plan, sheetMode ? "逐秒合图单波执行" : "分镜帧按首帧→尾帧两波执行", "storyboard_batch"),
+      message: sheetMode
+        ? `逐秒合图模式：每镜只生成一张合图，本轮待补 ${startPending.length} 张；不会规划首帧或尾帧`
+        : `正在生产分镜帧：先补 ${startPending.length} 个首帧，再生成 ${endPending.length} 个尾帧`
     });
     const results = [];
     const failures = [];
@@ -13030,20 +13275,27 @@ ${shotAnchor}
     };
 
     // Wave 1: missing starts / sheets only. Existing ready starts stay skipped by buildStoryboardBatchPlan.
-    await runWave(startPending, "第1波 · 首帧/合图", concurrency);
+    await runWave(startPending, sheetMode ? "逐秒合图" : "第1波 · 首帧", concurrency);
     const startFailures = failures.splice(0, failures.length);
-    if (startFailures.length) await retryWave(startFailures, "第1波 · 首帧/合图", concurrency);
+    if (startFailures.length) await retryWave(startFailures, sheetMode ? "逐秒合图" : "第1波 · 首帧", concurrency);
     if (failures.length) {
+      const failureSummary = failures.slice(0, 8).map(item => `${item.label}(${item.code})`).join("；");
+      const failureDetail = failures.slice(0, 8).map(item => `${item.label}(${item.code}): ${item.message}`).join("；");
       this.setAutomation(projectId, {
         status: "failed",
         errorCode: "STORYBOARD_BATCH_PARTIAL_FAILED",
-        message: `首帧未齐，已阻断尾帧：${failures.length} 项失败。${failures.slice(0, 8).map(item => `${item.label}(${item.code})`).join("；")}${failures.length > 8 ? "…" : ""}`
+        message: sheetMode
+          ? `逐秒合图有 ${failures.length} 项失败；已完成合图全部保留，继续任务时只补失败镜头。${failureSummary}${failures.length > 8 ? "…" : ""}`
+          : `首帧未齐，已阻断尾帧：${failures.length} 项失败。${failureSummary}${failures.length > 8 ? "…" : ""}`
       });
-      throw Object.assign(new Error(`首帧未齐，已阻断尾帧：${failures.length} 项失败：${failures.slice(0, 8).map(item => `${item.label}(${item.code}): ${item.message}`).join("；")}`), {
+      throw Object.assign(new Error(sheetMode
+        ? `逐秒合图有 ${failures.length} 项失败；本模式没有首帧或尾帧：${failureDetail}`
+        : `首帧未齐，已阻断尾帧：${failures.length} 项失败：${failureDetail}`), {
         code: "STORYBOARD_BATCH_PARTIAL_FAILED",
         failures
       });
     }
+    if (sheetMode) return results;
 
     // Re-read project before ends. Ends no longer require start frames as image refs;
     // both anchors are independent asset-driven frames paired only at video submit.

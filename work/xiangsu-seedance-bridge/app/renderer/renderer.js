@@ -28,24 +28,34 @@ const state = {
   resultPath: null,
   submitting: false,
   rules: null,
-  providerKind: "local-xiangsu",
-  providerName: "本地像塑",
+  providerKind: "puream-hailuo-h3",
+  providerName: "云端算力",
   hailuoApiMode: "auto",
   draggedImageIndex: null
 };
 
 let toastTimer;
 
+function maskProviderText(value) {
+  return String(value || "")
+    .replace(/puream[-_]?hailuo[-_]?h3/gi, "纯梦云端算力")
+    .replace(/minimax[\s_-]*h3/gi, "纯梦云端算力")
+    .replace(/hailuo[\s_-]*h3|海螺\s*h3|\bh3\b/gi, "纯梦云端算力")
+    .replace(/\bhailuo\b|海螺/gi, "纯梦云端算力")
+    .replace(/(?:纯梦云端算力[\s/·_-]*){2,}/g, "纯梦云端算力")
+    .replace(/Seedance/gi, "本地像塑");
+}
+
 function showToast(message, kind = "info") {
   clearTimeout(toastTimer);
-  elements.toast.textContent = message;
+  elements.toast.textContent = maskProviderText(message);
   elements.toast.className = `toast show ${kind === "error" ? "error" : ""}`;
   toastTimer = setTimeout(() => { elements.toast.className = "toast"; }, 3200);
 }
 
 function setBridgeBadge(kind, text) {
   elements.bridgeBadge.className = `bridge-badge ${kind}`;
-  elements.bridgeBadge.querySelector("b").textContent = text;
+  elements.bridgeBadge.querySelector("b").textContent = maskProviderText(text);
 }
 
 function formatDuration(value) {
@@ -349,7 +359,7 @@ function showTaskState(status, message, progress) {
   elements.resultVideo.classList.add("hidden");
   elements.progressState.classList.remove("hidden");
   elements.taskStatus.textContent = status;
-  elements.taskMessage.textContent = message;
+  elements.taskMessage.textContent = maskProviderText(message);
   const determinate = Number.isFinite(Number(progress));
   elements.progressPercent.textContent = determinate ? `${Math.round(Number(progress))}%` : "…";
   elements.progressState.querySelector(".progress-ring").style.setProperty("--progress", determinate ? `${Number(progress)}%` : "24%");
@@ -357,7 +367,7 @@ function showTaskState(status, message, progress) {
   elements.queueEmpty.classList.add("hidden");
   elements.taskCard.classList.remove("hidden");
   elements.queueCount.textContent = "1";
-  elements.queueStatus.textContent = message;
+  elements.queueStatus.textContent = maskProviderText(message);
 }
 
 async function pollTask(taskId) {
@@ -432,9 +442,9 @@ elements.startBridge.addEventListener("click", async () => {
 elements.diagnostics.addEventListener("click", async () => {
   const result = await window.dramaSlot.diagnostics();
   elements.diagnosticOutput.classList.remove("hidden");
-  elements.diagnosticOutput.textContent = result.ok
+  elements.diagnosticOutput.textContent = maskProviderText(result.ok
     ? `${state.providerName}合同检测通过\n调用模式：${state.providerKind === "puream-hailuo-h3" ? state.hailuoApiMode : "本地像塑"}\n本次检测未创建计费任务`
-    : (result.message || "检测失败");
+    : (result.message || "检测失败"));
   setTimeout(() => elements.diagnosticOutput.classList.add("hidden"), 6000);
 });
 elements.submit.addEventListener("click", async () => {

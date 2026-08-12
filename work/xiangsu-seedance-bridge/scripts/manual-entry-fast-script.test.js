@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { WorkbenchStore } = require("../app/workbench-store");
+const { WorkbenchStore, defaultSettings } = require("../app/workbench-store");
 
 const root = path.resolve(__dirname, "..");
 const source = relativePath => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -114,9 +114,43 @@ test("replacing a product image retires product-dependent storyboard and video a
 test("five minute script path fans out planning and formal units without extra review calls", () => {
   const workflow = source("app/workbench-workflow.js");
   assert.match(workflow, /const SCRIPT_FAST_TARGET_SECONDS = 300/);
+  assert.match(workflow, /const SCRIPT_FAST_CONCURRENCY = 8/);
+  assert.match(workflow, /const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol"/);
+  assert.match(workflow, /model: SCRIPT_FAST_PUREAM_MODEL/);
   assert.match(workflow, /mapWithConcurrency\(planTasks, SCRIPT_FAST_CONCURRENCY/);
   assert.match(workflow, /mapWithConcurrency\(unitTasks, SCRIPT_FAST_CONCURRENCY/);
   assert.match(workflow, /useFastScriptPath\s*\?\s*\{/);
-  assert.match(workflow, /path: useFastScriptPath \? "parallel-fast-v1"/);
+  assert.match(workflow, /path: useFastScriptPath \? "parallel-fast-v2"/);
   assert.match(workflow, /metTarget: scriptElapsedSeconds !== null \? scriptElapsedSeconds <= SCRIPT_FAST_TARGET_SECONDS/);
+});
+
+test("storyboard sheet mode never schedules or reports a tail-frame wave", () => {
+  const workflow = source("app/workbench-workflow.js");
+  const renderer = source("app/renderer/workbench.js");
+  assert.match(workflow, /const sheetMode = normalizeProjectMode\(project\.generation\?\.mode\) === "storyboard_sheet"/);
+  assert.match(workflow, /const endPending = \(sheetMode \? \[\] : pending\.filter/);
+  assert.match(workflow, /if \(sheetMode\) return results/);
+  assert.match(workflow, /本模式没有首帧或尾帧/);
+  assert.match(renderer, /本模式不生成首帧或尾帧/);
+  assert.match(renderer, /本模式不检查尾帧/);
+});
+
+test("fresh installs and projects default to PUREAM cloud while local Xiangsu remains selectable", t => {
+  const defaults = defaultSettings();
+  assert.equal(defaults.videoProvider.kind, "puream-hailuo-h3");
+  assert.equal(defaults.videoProvider.baseUrl, "https://puream.cn");
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "puream-default-cloud-"));
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  const store = new WorkbenchStore(path.join(tempRoot, "workbench"));
+  const project = store.createProject("fresh default project");
+  assert.equal(project.generation.videoProviderKind, "puream-hailuo-h3");
+  assert.equal(project.generation.engine, "hailuo-h3");
+  assert.equal(store.getSettings().videoProvider.kind, "puream-hailuo-h3");
+
+  const html = source("app/renderer/workbench.html");
+  assert.match(html, /value="puream-hailuo-h3"/);
+  assert.match(html, /value="local-xiangsu"/);
+  assert.match(html, /纯梦云端算力/);
+  assert.match(html, /本地像塑/);
 });

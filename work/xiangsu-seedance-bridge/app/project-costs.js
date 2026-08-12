@@ -288,7 +288,7 @@ function estimateVideoCost(providerKind = "", durationSeconds = 0) {
     return {
       amountYuan: hailuoVideoCost(durationSeconds),
       status: "estimated",
-      basis: `海螺 H3 按公开价 ¥0.80/秒预估 ${Number(durationSeconds) || 0} 秒（上游未结算时）`
+      basis: `纯梦云端算力按公开价 ¥0.80/秒预估 ${Number(durationSeconds) || 0} 秒（上游未结算时）`
     };
   }
   return { amountYuan: null, status: "unpriced", basis: "未知视频供应商，无法估算" };

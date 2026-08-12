@@ -110,7 +110,11 @@ function publicError(error) {
   return {
     ok: false,
     code: error?.code || "UNEXPECTED_ERROR",
-    message: error?.message || "发生未知错误"
+    message: String(error?.message || "发生未知错误")
+      .replace(/puream[-_]?hailuo[-_]?h3/gi, "纯梦云端算力")
+      .replace(/minimax[\s_-]*h3/gi, "纯梦云端算力")
+      .replace(/hailuo[\s_-]*h3|海螺\s*h3|\bh3\b/gi, "纯梦云端算力")
+      .replace(/\bhailuo\b|海螺/gi, "纯梦云端算力")
   };
 }
 
@@ -1263,7 +1267,7 @@ ipcMain.handle("file:choose-output", async () => {
 });
 ipcMain.handle("app:defaults", () => {
   const settings = workbenchStore?.getSettings?.() || {};
-  const providerKind = settings.videoProvider?.kind || "local-xiangsu";
+  const providerKind = settings.videoProvider?.kind || "puream-hailuo-h3";
   const contract = contractFor(providerKind);
   const defaultDuration = Math.max(contract.durationMin, Math.min(contract.durationMax, Number(settings.generation?.shotDuration) || 10));
   return {
