@@ -4069,8 +4069,29 @@ function hasRecoverableScriptCheckpoint(project = {}) {
   );
 }
 
+function projectDurationContract(project = {}) {
+  const targetSeconds = Math.round(Number(project?.generation?.targetDurationSeconds) || 0);
+  const plannedSeconds = (Array.isArray(project?.shots) ? project.shots : [])
+    .reduce((sum, shot) => sum + (Number(shot?.duration) || 0), 0);
+  const hasShots = Array.isArray(project?.shots) && project.shots.length > 0;
+  const locked = project?.generation?.durationLocked === true || (hasShots && targetSeconds > 0 && plannedSeconds === targetSeconds);
+  return {
+    targetSeconds,
+    plannedSeconds,
+    hasShots,
+    locked,
+    ok: hasShots && targetSeconds > 0 && plannedSeconds === targetSeconds
+  };
+}
+
 function scriptPipelineEntryRoute(project = {}) {
-  if (Array.isArray(project.shots) && project.shots.length > 0) return "ready";
+  const duration = projectDurationContract(project);
+  const raw = String(project?.script?.raw || "");
+  const sourceFingerprint = String(project?.script?.sourceFingerprint || "");
+  if (duration.hasShots && sourceFingerprint
+    && crypto.createHash("sha256").update(raw).digest("hex") !== sourceFingerprint) return "reanalyze_source";
+  if (duration.hasShots && !duration.ok) return "reanalyze_duration";
+  if (duration.hasShots) return "ready";
   if (project?.script?.generationCheckpoint) return "resume_generation";
   if (String(project?.script?.raw || "").trim()) return "analyze_imported";
   return "missing";
@@ -5252,6 +5273,46 @@ function mergeAnalysisChunks(chunks) {
   return { story: story.filter(Boolean), characters: [...characters.values()], scenes: [...scenes.values()], shots };
 }
 
+function analysisChunksForSchedule(text, unitCount) {
+  const count = Math.max(1, Math.floor(Number(unitCount) || 1));
+  const source = String(text || "").trim();
+  if (source.length > count * STRUCTURED_TEXT_MAX_CHARS) {
+    throw Object.assign(new Error(`当前 ${source.length} 字原稿无法在 ${count} 个生成单元内完整保留。请提高目标时长，或先压缩重复内容后再拆镜`), {
+      code: "SCRIPT_TARGET_TOO_SHORT_FOR_SOURCE",
+      sourceChars: source.length,
+      unitCount: count,
+      maxCharsPerUnit: STRUCTURED_TEXT_MAX_CHARS
+    });
+  }
+  let chunks = splitForAnalysis(source, Math.max(2400, Math.min(STRUCTURED_TEXT_MAX_CHARS, Math.ceil(source.length / count))));
+  if (chunks.length > count) {
+    const width = Math.ceil(source.length / count);
+    chunks = [];
+    for (let offset = 0; offset < source.length; offset += width) chunks.push(source.slice(offset, offset + width));
+  }
+  return chunks;
+}
+
+function analysisChunkSchedules(chunks, filmSchedule) {
+  const list = Array.isArray(chunks) ? chunks : [];
+  if (!list.length) return [];
+  const totalUnits = filmSchedule.unitDurations.length;
+  const counts = Array(list.length).fill(1);
+  let remaining = totalUnits - counts.length;
+  while (remaining > 0) {
+    const index = list.map((chunk, position) => ({ position, score: chunk.length / counts[position] }))
+      .sort((left, right) => right.score - left.score || left.position - right.position)[0].position;
+    counts[index] += 1;
+    remaining -= 1;
+  }
+  let cursor = 0;
+  return list.map((text, index) => {
+    const durations = filmSchedule.unitDurations.slice(cursor, cursor + counts[index]);
+    cursor += counts[index];
+    return { text, index, unitCount: counts[index], durations };
+  });
+}
+
 function headingBlocks(text, pattern) {
   const matches = [...String(text || "").matchAll(pattern)];
   return matches.map((match, index) => ({
@@ -5416,6 +5477,20 @@ function auditDramaSpec(normalized, options = {}) {
 
 function parseStructuredProductionScript(text) {
   const source = String(text || "").replace(/\r\n/g, "\n");
+  const trimmed = source.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const candidate = Array.isArray(parsed) ? parsed[0] : parsed;
+      if (candidate && typeof candidate === "object"
+        && Array.isArray(candidate.characters)
+        && Array.isArray(candidate.scenes)
+        && Array.isArray(candidate.shots)
+        && candidate.characters.length > 0
+        && candidate.scenes.length > 0
+        && candidate.shots.length > 0) return candidate;
+    } catch {}
+  }
   const characterBlocks = headingBlocks(source, /^###\s+(C\d{2,})\s+([^\n]+)$/gm);
   const sceneBlocks = headingBlocks(source, /^###\s+(SC\d{2,})\s+([^\n]+)$/gm);
   const shotBlocks = headingBlocks(source, /^###\s+(S\d{2,})｜([^\n]+)$/gm);
@@ -5835,6 +5910,85 @@ function normalizeAnalysis(data, project) {
   const reconciledScenes = reconcileShotSceneCatalog(scenes, shots);
   assertKnownCharacterReferences(reconciledScenes.shots, characters, "SCRIPT_IMPORTED_CHARACTER_REFERENCE_INVALID");
   return { story: data?.story || [], characters, scenes: reconciledScenes.scenes, props, shots: reconciledScenes.shots };
+}
+
+function retimeSubshotsToDuration(subshots, durationSeconds, shot = {}) {
+  const duration = Math.max(0.001, Number(durationSeconds) || 0.001);
+  const source = Array.isArray(subshots) && subshots.length
+    ? subshots.map(item => ({ ...item }))
+    : Array.from({ length: 3 }, (_, index) => ({
+        number: index + 1,
+        start: index / 3,
+        end: (index + 1) / 3,
+        framing: shot.shotSize || "中景",
+        camera: shot.cameraMove || "固定镜头",
+        action: shot.action || shot.visualBeat || `推进第${index + 1}拍`
+      }));
+  const sourceEnd = Math.max(0.001, ...source.map(item => Number(item.end) || 0));
+  const round = value => Number(Math.max(0, Math.min(duration, value)).toFixed(3));
+  const result = source.map((item, index) => ({
+    ...item,
+    number: index + 1,
+    start: round((Number(item.start) || 0) / sourceEnd * duration),
+    end: round((Number(item.end) || sourceEnd) / sourceEnd * duration)
+  })).sort((left, right) => left.start - right.start || left.end - right.end);
+  result[0].start = 0;
+  for (let index = 0; index < result.length; index += 1) {
+    if (index > 0) result[index].start = result[index - 1].end;
+    const minimumEnd = index === result.length - 1 ? duration : result[index].start + 0.001;
+    result[index].end = round(Math.max(minimumEnd, result[index].end));
+  }
+  result[result.length - 1].end = duration;
+  return result;
+}
+
+function conformImportedAnalysisToDurationContract(data, project) {
+  const normalized = normalizeAnalysis(data, project);
+  if (!normalized.shots.length) {
+    throw Object.assign(new Error("上传剧本没有拆出可生产分镜，请检查原稿内容"), { code: "SCRIPT_ANALYSIS_EMPTY" });
+  }
+  const targetSeconds = Math.max(30, Math.min(3600, Math.round(Number(project?.generation?.targetDurationSeconds) || 300)));
+  const providerKind = projectVideoProviderKind(project);
+  const durations = reconcileUnitDurations(
+    normalized.shots.map(shot => Number(shot.duration) || Number(project?.generation?.shotDuration) || 10),
+    targetSeconds,
+    providerKind,
+    { engine: projectVideoEngine(project), unitCount: normalized.shots.length }
+  );
+  const idWidth = Math.max(2, String(normalized.shots.length).length);
+  const shots = normalized.shots.map((shot, index) => {
+    const duration = durations[index];
+    const subshots = retimeSubshotsToDuration(shot.subshots, duration, shot);
+    const next = {
+      ...shot,
+      id: `S${String(index + 1).padStart(idWidth, "0")}`,
+      number: index + 1,
+      duration,
+      subshots
+    };
+    next.secondPanels = normalizeSecondPanels(shot.secondPanels, duration, next);
+    return next;
+  });
+  const plannedSeconds = shots.reduce((sum, shot) => sum + shot.duration, 0);
+  if (plannedSeconds !== targetSeconds) {
+    throw Object.assign(new Error(`分镜合计 ${plannedSeconds} 秒，与目标 ${targetSeconds} 秒不一致`), {
+      code: "FILM_DURATION_CONTRACT_MISMATCH",
+      targetSeconds,
+      plannedSeconds
+    });
+  }
+  return {
+    ...normalized,
+    shots,
+    durationContract: {
+      locked: true,
+      targetSeconds,
+      plannedSeconds,
+      unitCount: shots.length,
+      providerKind,
+      checkedAt: new Date().toISOString()
+    }
+  };
 }
 
 const SEMANTIC_SCORE_FIELDS = [
@@ -7440,7 +7594,10 @@ class WorkbenchWorkflow {
         repairDirectives: [],
         phase: "full"
       };
-      const normalized = normalizeAnalysis({ story: blueprint.story, characters: blueprint.characters, scenes: blueprint.scenes, shots }, project);
+      const normalized = conformImportedAnalysisToDurationContract({ story: blueprint.story, characters: blueprint.characters, scenes: blueprint.scenes, shots }, {
+        ...project,
+        generation: { ...(project.generation || {}), targetDurationSeconds: filmSchedule.totalSeconds }
+      });
       const qualityAudit = auditDramaSpec(normalized, {
         skipQualityGates: !this.qualityGatesEnabled(settings),
         bypassProductionContracts: !this.qualityGatesEnabled(settings),
@@ -7460,6 +7617,13 @@ class WorkbenchWorkflow {
       project.characters = normalized.characters;
       project.scenes = normalized.scenes;
       project.shots = normalized.shots;
+      project.generation = {
+        ...(project.generation || {}),
+        targetDurationSeconds: filmSchedule.totalSeconds,
+        durationLocked: true,
+        durationContract: normalized.durationContract,
+        shotDuration: filmSchedule.preferredUnit
+      };
       const finishedAt = new Date();
       const startedAtMs = Date.parse(checkpoint.startedAt || "");
       const elapsedSeconds = Number.isFinite(startedAtMs) ? Math.max(0, Math.round((finishedAt.getTime() - startedAtMs) / 1000)) : null;
@@ -7476,6 +7640,8 @@ class WorkbenchWorkflow {
         ideaSignature: ideaSignature(project),
         generatedAt: finishedAt.toISOString(),
         analyzedAt: finishedAt.toISOString(),
+        sourceFingerprint: crypto.createHash("sha256").update(raw).digest("hex"),
+        durationContract: normalized.durationContract,
         generationPerformance: {
           path: "parallel-two-segment-fast-v4",
           targetSeconds: SCRIPT_FAST_TARGET_SECONDS,
@@ -8066,7 +8232,7 @@ class WorkbenchWorkflow {
           throw Object.assign(new Error(`故事蓝图终审未通过：${blueprintReview.summary || blueprintReview.hardFailures.map(item => item.message).join("；")}`), { code: "SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED", review: blueprintReview });
         }
         const planSum = (candidateBlueprint.shotPlan || []).reduce((sum, item) => sum + (Number(item.duration) || 0), 0);
-        if (planSum !== filmSchedule.totalSeconds && this.qualityGatesEnabled(settings)) {
+        if (planSum !== filmSchedule.totalSeconds) {
           throw Object.assign(new Error(`单元时长合计 ${planSum} 秒，必须精确等于剧总时长 ${filmSchedule.totalSeconds} 秒`), { code: "SCRIPT_DURATION_CONTRACT_FAILED" });
         }
         blueprint = { ...candidateBlueprint, semanticReview: blueprintReview, targetDurationSeconds: filmSchedule.totalSeconds };
@@ -8561,7 +8727,10 @@ class WorkbenchWorkflow {
       this.store.saveProject(project);
       throw error;
     }
-    const normalized = normalizeAnalysis({ story: blueprint.story, characters: blueprint.characters, scenes: blueprint.scenes, shots }, project);
+    const normalized = conformImportedAnalysisToDurationContract({ story: blueprint.story, characters: blueprint.characters, scenes: blueprint.scenes, shots }, {
+      ...project,
+      generation: { ...(project.generation || {}), targetDurationSeconds: filmSchedule.totalSeconds }
+    });
     const qualityAudit = auditDramaSpec(normalized, {
       skipQualityGates: !this.qualityGatesEnabled(settings),
       bypassProductionContracts: !this.qualityGatesEnabled(settings),
@@ -8615,6 +8784,13 @@ class WorkbenchWorkflow {
     project.characters = normalized.characters;
     project.scenes = normalized.scenes;
     project.shots = normalized.shots;
+    project.generation = {
+      ...(project.generation || {}),
+      targetDurationSeconds: filmSchedule.totalSeconds,
+      durationLocked: true,
+      durationContract: normalized.durationContract,
+      shotDuration: filmSchedule.preferredUnit
+    };
     const scriptFinishedAt = new Date();
     const scriptStartedAtMs = Date.parse(checkpoint.startedAt || "");
     const scriptElapsedSeconds = Number.isFinite(scriptStartedAtMs)
@@ -8633,6 +8809,8 @@ class WorkbenchWorkflow {
       ideaSignature: ideaSignature(project),
       generatedAt: new Date().toISOString(),
       analyzedAt: new Date().toISOString(),
+      sourceFingerprint: crypto.createHash("sha256").update(raw).digest("hex"),
+      durationContract: normalized.durationContract,
       generationPerformance: {
         path: useFastScriptPath ? "parallel-fast-v2" : "checkpoint-safe-v1",
         targetSeconds: SCRIPT_FAST_TARGET_SECONDS,
@@ -8683,34 +8861,56 @@ class WorkbenchWorkflow {
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
     if (!project.script?.raw?.trim()) throw Object.assign(new Error("请先粘贴完整短剧剧本"), { code: "SCRIPT_REQUIRED" });
-    const structured = parseStructuredProductionScript(project.script.raw);
-    if (structured) {
-      const normalized = normalizeAnalysis(structured, project);
-      project.characters = normalized.characters;
-      project.scenes = normalized.scenes;
-      project.shots = normalized.shots;
-      project.script.analysis = normalized.story;
-      project.script.analysisChunks = 0;
-      project.script.analysisMethod = "structured-local";
-      project.script.qualityAudit = auditDramaSpec(normalized, {
+    const commitAnalysis = (normalized, analysisMethod, analysisChunks) => {
+      const qualityAudit = auditDramaSpec(normalized, {
         skipQualityGates: !this.qualityGatesEnabled(settings),
         bypassProductionContracts: !this.qualityGatesEnabled(settings),
         productName: project.product?.name || "",
         sellingPoints: productSellingPoints(project)
       });
+      project.script.analysis = normalized.story;
+      project.script.analysisChunks = analysisChunks;
+      project.script.analysisMethod = analysisMethod;
+      project.script.qualityAudit = qualityAudit;
       project.script.promptLibraryVersion = settings.promptLibraryVersion || "";
       project.script.analyzedAt = new Date().toISOString();
-      if (!project.script.qualityAudit.ok) {
+      project.script.sourceFingerprint = crypto.createHash("sha256").update(String(project.script.raw || "")).digest("hex");
+      project.script.durationContract = normalized.durationContract;
+      if (!qualityAudit.ok) {
         project.currentStage = "script";
         project.status = "script_needs_revision";
         this.store.saveProject(project);
-        const error = Object.assign(new Error(`剧本未达到参考片规格：${project.script.qualityAudit.failures.map(item => item.message).join("；")}`), { code: "SCRIPT_REFERENCE_SPEC_FAILED", audit: project.script.qualityAudit });
-        throw error;
+        throw Object.assign(new Error(`剧本未达到参考片规格：${qualityAudit.failures.map(item => item.message).join("；")}`), {
+          code: "SCRIPT_REFERENCE_SPEC_FAILED",
+          audit: qualityAudit
+        });
       }
+      beginProductionRevision(project);
+      project.characters = normalized.characters;
+      project.scenes = normalized.scenes;
+      project.shots = normalized.shots;
+      project.generation = {
+        ...(project.generation || {}),
+        durationLocked: true,
+        durationContract: normalized.durationContract
+      };
+      project.script.generationCheckpoint = null;
+      project.script.generationLive = null;
       project.currentStage = "assets";
       project.status = "analyzed";
       this.store.saveProject(project);
+      this.syncReferenceLibraries(projectId, { props: normalized.props || [] });
       return this.store.getProject(projectId);
+    };
+    const structured = parseStructuredProductionScript(project.script.raw);
+    if (structured) {
+      try {
+        return commitAnalysis(conformImportedAnalysisToDurationContract(structured, project), "structured-local-duration-contract", 0);
+      } catch (error) {
+        if (error?.code !== "DURATION_TOTAL_UNREPRESENTABLE") throw error;
+        // The authored shot count cannot represent the requested total. Keep the
+        // source verbatim and let the duration-aware analyzer split/compress it.
+      }
     }
     const analysisMode = normalizeProjectMode(project.generation?.mode);
     const authoredShotSchema = productionShotSchema(analysisMode, { includeHailuo: false, modelAuthoredOnly: true }).shots[0];
@@ -8720,46 +8920,33 @@ class WorkbenchWorkflow {
       scenes: [{ name: "场景名", description: "空间结构门窗家具机位光线与连续性锚点", time: "时间", atmosphere: "氛围与环境声" }],
       shots: [authoredShotSchema]
     };
-    const chunks = splitForAnalysis(project.script.raw);
-    const partials = [];
-    for (let index = 0; index < chunks.length; index += 1) {
-      partials.push(await this.generateText(settings.textProvider, [
+    const targetSeconds = Math.max(30, Math.min(3600, Math.round(Number(project.generation?.targetDurationSeconds) || 300)));
+    const providerKind = projectVideoProviderKind(project, settings);
+    const filmSchedule = planFilmSchedule(targetSeconds, providerKind, { engine: projectVideoEngine(project) });
+    const chunks = analysisChunksForSchedule(project.script.raw, filmSchedule.unitCount);
+    const chunkSchedules = analysisChunkSchedules(chunks, filmSchedule);
+    const partials = await mapWithConcurrency(chunkSchedules, Math.min(4, chunkSchedules.length), async chunk => {
+      const partial = await this.generateText(settings.textProvider, [
         { role: "system", content: `${appendDocxPromptFusion(
           textStagePromptForProject(project, settings, "scriptAnalysis", "script_analysis"),
           settings.prompts,
           "script_analysis"
-        )}\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n只输出 JSON，不要解释。JSON 结构必须匹配：${JSON.stringify(schema)}` },
-        { role: "user", content: `这是完整剧本的第 ${index + 1}/${chunks.length} 段。原稿可以是对白台本、分场剧本、梗概或混合自然文本，不要求任何系统格式。相邻段可能在句中断开，请只拆解本段实际包含的内容，不重复虚构前后剧情。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n商品名称：${project.product?.name || "未填写"}\n商品说明：${project.product?.description || "未填写"}\n识别商品被提及、手持、展示或解决剧情需求的单元，并把 productMention 设为 true；商品镜按品类采用整体/细节/使用/客观结果/受益者反应与决定变化，不得套固定试戴或饥饿模板。\n\n剧本片段：\n${chunks[index]}` }
-      ], { json: true, costProjectId: projectId, costOperation: `script_analysis_chunk_${index + 1}` }));
-    }
-    const data = mergeAnalysisChunks(partials);
-    const normalized = normalizeAnalysis(data, project);
-    project.characters = normalized.characters;
-    project.scenes = normalized.scenes;
-    project.shots = normalized.shots;
-    project.script.raw = project.script.raw;
-    project.script.analysis = normalized.story;
-    project.script.analysisChunks = chunks.length;
-    project.script.qualityAudit = auditDramaSpec(normalized, {
-      skipQualityGates: !this.qualityGatesEnabled(settings),
-      bypassProductionContracts: !this.qualityGatesEnabled(settings),
-      productName: project.product?.name || "",
-      sellingPoints: productSellingPoints(project)
+        )}\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。只输出 JSON，不要解释。JSON 结构必须匹配：${JSON.stringify(schema)}` },
+        { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。原稿可以是对白台本、分场剧本、梗概或混合自然文本，不要求任何系统格式。必须保留原稿事实、人物关系、事件顺序和本段结尾；允许压缩重复描写或把密集动作拆开，但不得改写结局、凭空补剧情或丢失最后事件。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n商品名称：${project.product?.name || "未填写"}\n商品说明：${project.product?.description || "未填写"}\n识别商品被提及、手持、展示或解决剧情需求的单元，并把 productMention 设为 true；商品镜按品类采用整体/细节/使用/客观结果/受益者反应与决定变化，不得套固定试戴或饥饿模板。\n\n剧本片段：\n${chunk.text}` }
+      ], { json: true, costProjectId: projectId, costOperation: `script_analysis_chunk_${chunk.index + 1}` });
+      const actualCount = Array.isArray(partial?.shots) ? partial.shots.length : 0;
+      if (actualCount !== chunk.unitCount) {
+        throw Object.assign(new Error(`剧本第 ${chunk.index + 1}/${chunks.length} 段应拆成 ${chunk.unitCount} 个生成单元，实际返回 ${actualCount} 个；已停止进入资产阶段，避免遗漏原稿内容`), {
+          code: "SCRIPT_ANALYSIS_UNIT_COUNT_MISMATCH",
+          chunkIndex: chunk.index,
+          expectedCount: chunk.unitCount,
+          actualCount
+        });
+      }
+      return partial;
     });
-    project.script.promptLibraryVersion = settings.promptLibraryVersion || "";
-    project.script.analyzedAt = new Date().toISOString();
-    if (!project.script.qualityAudit.ok) {
-      project.currentStage = "script";
-      project.status = "script_needs_revision";
-      this.store.saveProject(project);
-      const error = Object.assign(new Error(`剧本未达到参考片规格：${project.script.qualityAudit.failures.map(item => item.message).join("；")}`), { code: "SCRIPT_REFERENCE_SPEC_FAILED", audit: project.script.qualityAudit });
-      throw error;
-    }
-    project.currentStage = "assets";
-    project.status = "analyzed";
-    this.store.saveProject(project);
-    this.syncReferenceLibraries(projectId, { props: normalized.props || [] });
-    return this.store.getProject(projectId);
+    const data = mergeAnalysisChunks(partials);
+    return commitAnalysis(conformImportedAnalysisToDurationContract(data, project), "ai-duration-contract", chunks.length);
   }
 
   importAsset(projectId, category, sourcePath, name = "") {
@@ -12953,8 +13140,10 @@ ${shotAnchor}
         this.assertOperationActive(projectId);
         await this.generateCompleteScript(projectId, { track: false });
         project = this.store.getProject(projectId);
-      } else if (route === "analyze_imported") {
-        this.setAutomation(projectId, { stage: "script", message: "正在拆解已导入的完整剧本" });
+      } else if (["analyze_imported", "reanalyze_duration", "reanalyze_source"].includes(route)) {
+        this.setAutomation(projectId, { stage: "script", message: route === "reanalyze_duration"
+          ? "检测到旧分镜时长与目标不一致，正在按当前时长重新拆镜"
+          : route === "reanalyze_source" ? "检测到剧本原稿已变化，正在隔离旧生产版本并重新拆镜" : "正在拆解已导入的完整剧本" });
         this.assertOperationActive(projectId);
         await this.analyzeScript(projectId);
         project = this.store.getProject(projectId);
@@ -13548,7 +13737,7 @@ ${shotAnchor}
     }
     const targetSeconds = Math.round(Number(project.generation?.targetDurationSeconds) || 0);
     const plannedSeconds = project.shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
-    const durationLocked = project.generation?.durationLocked === true || Boolean(project.script?.generationCheckpoint?.blueprint?.targetDurationSeconds);
+    const durationLocked = projectDurationContract(project).locked || Boolean(project.script?.generationCheckpoint?.blueprint?.targetDurationSeconds);
     if (durationLocked && targetSeconds > 0 && plannedSeconds !== targetSeconds) {
       throw Object.assign(new Error(`分镜合计 ${plannedSeconds} 秒，与剧总时长合同 ${targetSeconds} 秒不一致，请先按合同重算分镜`), { code: "FILM_DURATION_CONTRACT_MISMATCH" });
     }
@@ -13597,9 +13786,9 @@ ${shotAnchor}
     const listPath = path.join(finalDir, `concat-${Date.now()}.txt`);
     const rawPath = path.join(finalDir, `concat-raw-${Date.now()}.mp4`);
     const outputPath = path.join(finalDir, `${slug(project.title)}-${Date.now()}.mp4`);
-    const exactDurationH3 = projectVideoEngine(project) === "hailuo-h3";
+    const exactDurationRequired = durationLocked && targetSeconds > 0;
     const exactTargetSeconds = targetSeconds > 0 ? targetSeconds : plannedSeconds;
-    if (exactDurationH3) {
+    if (exactDurationRequired) {
       const orderedShots = project.shots.slice().sort((a, b) => a.number - b.number);
       const inputArgs = videos.flatMap(item => ["-i", String(item.filePath)]);
       const filter = h3ExactStitchFilter(orderedShots, exactTargetSeconds, 24);
@@ -13622,8 +13811,8 @@ ${shotAnchor}
         }
       }
       if (!encoded) {
-        throw Object.assign(new Error(`海螺 H3 精确时长拼接失败：${lastError?.message || "视频编码器不可用"}`), {
-          code: "H3_EXACT_STITCH_FAILED",
+        throw Object.assign(new Error(`精确时长成片拼接失败：${lastError?.message || "视频编码器不可用"}`), {
+          code: "EXACT_STITCH_FAILED",
           cause: lastError
         });
       }
@@ -13649,7 +13838,7 @@ ${shotAnchor}
       }
     }
     let finalDurationAudit = null;
-    if (exactDurationH3) {
+    if (exactDurationRequired) {
       const [videoSeconds, audioSeconds] = await Promise.all([
         probeMediaStreamDuration(ffmpeg, outputPath, "0:v:0"),
         probeMediaStreamDuration(ffmpeg, outputPath, "0:a:0")
@@ -13668,8 +13857,8 @@ ${shotAnchor}
         fps: 24,
         toleranceSeconds
       };
-      if (!finalDurationAudit.ok && this.qualityGatesEnabled(null, "delivery")) {
-        throw Object.assign(new Error(`海螺 H3 成片实际时长未锁定：目标 ${exactTargetSeconds} 秒，画面 ${videoSeconds.toFixed(3)} 秒，音频 ${audioSeconds.toFixed(3)} 秒`), {
+      if (!finalDurationAudit.ok) {
+        throw Object.assign(new Error(`成片实际时长未锁定：目标 ${exactTargetSeconds} 秒，画面 ${videoSeconds.toFixed(3)} 秒，音频 ${audioSeconds.toFixed(3)} 秒`), {
           code: "FINAL_DURATION_CONTRACT_FAILED",
           audit: finalDurationAudit,
           outputPath
@@ -13700,7 +13889,7 @@ ${shotAnchor}
       this.store.saveProject(project);
       return { path: outputPath, fileUrl: pathToFileURL(outputPath).href };
     }
-    const finalDuration = exactDurationH3 ? exactTargetSeconds : project.shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
+    const finalDuration = exactDurationRequired ? exactTargetSeconds : project.shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
     const [finalAudioAudit, finalVisualAudit] = await Promise.all([
       analyzeAudioFile(ffmpeg, outputPath, finalDuration),
       analyzeVisualFile(ffmpeg, outputPath, finalDuration, 1)
@@ -13732,7 +13921,7 @@ ${shotAnchor}
   }
 }
 
-module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, normalizeTopicOptions, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, renderProductionScript, ideaSignature, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
+module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, renderProductionScript, ideaSignature, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
 module.exports.reconcileShotSceneCatalog = reconcileShotSceneCatalog;
 module.exports.executeShotVideoBatch = executeShotVideoBatch;
 module.exports.collectCharacterReferenceIds = collectCharacterReferenceIds;

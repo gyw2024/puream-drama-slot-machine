@@ -838,7 +838,9 @@ function defaultProject(title = "未命名漫剧", options = {}) {
       keyframeConcurrency: 2,
       aspectRatio: "9:16",
       shotDuration: [5, 10, 15].includes(Number(options.shotDuration)) ? Number(options.shotDuration) : 10,
-      targetDurationSeconds: Math.max(30, Math.min(3600, Math.round(Number(options.targetDurationSeconds) || 300)))
+      targetDurationSeconds: Math.max(30, Math.min(3600, Math.round(Number(options.targetDurationSeconds) || 300))),
+      durationLocked: false,
+      durationContract: null
     },
     productionPlan: defaultProductionPlan(options),
     characters: [],
@@ -857,6 +859,112 @@ function defaultProject(title = "未命名漫剧", options = {}) {
     finalVideoHistory: [],
     activity: []
   };
+}
+
+function hasMaterializedProduction(project = {}) {
+  const revision = String(project.productionRevision || "");
+  return Boolean(
+    (project.shots || []).length
+    || (project.characters || []).length
+    || (project.scenes || []).length
+    || project.script?.analyzedAt
+    || project.script?.generationCheckpoint
+    || project.script?.generationLive
+    || project.finalVideoPath
+    || (project.candidates || []).some(item => (item.productionRevision || "") === revision && item.stale !== true)
+    || (project.jobs || []).some(item => (item.productionRevision || "") === revision && item.staleByEdit !== true)
+  );
+}
+
+function productionInputChangeReasons(project = {}, patch = {}) {
+  const reasons = [];
+  if (Object.prototype.hasOwnProperty.call(patch?.script || {}, "raw")
+    && String(patch.script.raw || "") !== String(project.script?.raw || "")) reasons.push("剧本原稿");
+
+  if (Object.prototype.hasOwnProperty.call(patch || {}, "generation")) {
+    const current = project.generation || {};
+    const requested = { ...current, ...(patch.generation || {}) };
+    const nextTarget = Math.max(30, Math.min(3600, Math.round(Number(requested.targetDurationSeconds) || 300)));
+    if (nextTarget !== Math.max(30, Math.min(3600, Math.round(Number(current.targetDurationSeconds) || 300)))) reasons.push("目标时长");
+    if (normalizeVideoEngine(requested.engine) !== normalizeVideoEngine(current.engine)) reasons.push("视频引擎");
+    if (normalizeGenerationMode(requested.mode) !== normalizeGenerationMode(current.mode)) reasons.push("生成模式");
+    if (String(requested.videoProviderKind || "") !== String(current.videoProviderKind || "")) reasons.push("视频上游");
+    if (String(requested.aspectRatio || "9:16") !== String(current.aspectRatio || "9:16")) reasons.push("画幅");
+    if (Number(requested.shotDuration || 10) !== Number(current.shotDuration || 10)) reasons.push("单元时长");
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch || {}, "product")) {
+    const current = project.product || {};
+    const requested = { ...current, ...(patch.product || {}) };
+    for (const [key, label] of [["name", "商品名称"], ["description", "商品说明"], ["sellingPoints", "商品卖点"], ["imagePath", "商品图片"]]) {
+      if (String(requested[key] || "") !== String(current[key] || "")) reasons.push(label);
+    }
+  }
+  return [...new Set(reasons)];
+}
+
+function archiveStoreFinalVideo(project, reason) {
+  if (!project?.finalVideoPath) return;
+  project.finalVideoHistory = Array.isArray(project.finalVideoHistory) ? project.finalVideoHistory : [];
+  if (project.finalVideoHistory[0]?.filePath !== project.finalVideoPath) {
+    project.finalVideoHistory.unshift({
+      id: makeId("final"),
+      filePath: project.finalVideoPath,
+      source: project.finalVideoSource || "generated",
+      productionRevision: project.productionRevision || "",
+      replacedAt: now(),
+      stale: true,
+      staleReason: reason
+    });
+    project.finalVideoHistory = project.finalVideoHistory.slice(0, 50);
+  }
+}
+
+function invalidateProjectProductionPlan(project, reasons = []) {
+  const oldRevision = project.productionRevision || "";
+  const reasonText = `${reasons.join("、") || "生产输入"}已变化；旧资产仅保留在历史中`;
+  archiveStoreFinalVideo(project, reasonText);
+  for (const candidate of project.candidates || []) {
+    if ((candidate.productionRevision || "") !== oldRevision) continue;
+    candidate.stale = true;
+    candidate.staleAt = now();
+    candidate.staleReason = reasonText;
+    candidate.selected = false;
+  }
+  for (const job of project.jobs || []) {
+    if ((job.productionRevision || "") !== oldRevision) continue;
+    job.staleByEdit = true;
+    job.staleReason = "任务提交后生产输入已变化；结果只保留历史，不进入当前成片";
+  }
+  project.productionRevision = makeId("revision");
+  project.characters = [];
+  project.scenes = [];
+  project.shots = [];
+  project.script = { ...(project.script || {}) };
+  for (const key of ["analysis", "analysisChunks", "analysisMethod", "qualityAudit", "promptLibraryVersion", "analyzedAt", "sourceFingerprint", "durationContract", "generationCheckpoint", "generationLive"]) {
+    delete project.script[key];
+  }
+  project.generation = { ...(project.generation || {}), durationLocked: false, durationContract: null };
+  project.productionContractAudit = null;
+  project.mediaQualityAudit = null;
+  project.audioQualityAudit = null;
+  project.finalQualityAudit = null;
+  project.finalAudioAudit = null;
+  project.finalVisualAudit = null;
+  project.finalDurationAudit = null;
+  project.finalVideoPath = "";
+  project.finalVideoSource = "";
+  project.finalVideoStale = false;
+  project.finalVideoStaleAt = "";
+  project.finalVideoStaleReason = "";
+  project.automation = {
+    ...defaultAutomation(),
+    message: "生产输入已变化；旧任务断点已退出当前版本，等待重新拆镜",
+    updatedAt: now()
+  };
+  project.currentStage = "script";
+  project.status = "script_needs_analysis";
+  return reasonText;
 }
 
 function deepCloneJson(value) {
@@ -1773,7 +1881,11 @@ class WorkbenchStore {
       keyframeConcurrency: Math.max(1, Math.min(999, Number(legacyGeneration.keyframeConcurrency) || 2)),
       aspectRatio: legacyGeneration.aspectRatio || "9:16",
       shotDuration: [5, 10, 15].includes(Number(legacyGeneration.shotDuration)) ? Number(legacyGeneration.shotDuration) : 10,
-      targetDurationSeconds: Math.max(30, Math.min(3600, Math.round(Number(legacyGeneration.targetDurationSeconds) || 300)))
+      targetDurationSeconds: Math.max(30, Math.min(3600, Math.round(Number(legacyGeneration.targetDurationSeconds) || 300))),
+      durationLocked: legacyGeneration.durationLocked === true,
+      durationContract: legacyGeneration.durationContract && typeof legacyGeneration.durationContract === "object"
+        ? legacyGeneration.durationContract
+        : null
     };
     project.productionPlan = { ...defaultProductionPlan(), ...(project.productionPlan || {}) };
     return attachStoreBaseline(project, storeBaseline);
@@ -1855,9 +1967,21 @@ class WorkbenchStore {
   patchProject(projectId, patch) {
     const project = this.getProject(projectId);
     const previousShots = Array.isArray(project.shots) ? project.shots.map(item => ({ ...item })) : [];
+    const inputChangeReasons = productionInputChangeReasons(project, patch);
+    if (inputChangeReasons.length && ["running", "pausing", "stopping"].includes(project.automation?.status)) {
+      throw Object.assign(new Error(`当前项目正在运行，不能同时修改${inputChangeReasons.join("、")}；请先暂停或结束当前任务，避免新旧生产版本混用`), {
+        code: "PROJECT_MUTATION_BUSY",
+        reasons: inputChangeReasons
+      });
+    }
+    const shouldInvalidatePlan = inputChangeReasons.length > 0 && hasMaterializedProduction(project);
+    let activitySummary = String(patch?.activitySummary || "项目已更新");
     const allowed = ["title", "status", "currentStage", "script", "ideation", "product", "generation", "productionPlan", "characters", "scenes", "shots", "automation", "finalVideoPath", "finalVideoHistory"];
     for (const key of allowed) {
-      if (Object.prototype.hasOwnProperty.call(patch || {}, key)) project[key] = patch[key];
+      if (!Object.prototype.hasOwnProperty.call(patch || {}, key)) continue;
+      project[key] = ["script", "product", "generation", "productionPlan", "automation"].includes(key)
+        ? { ...(project[key] || {}), ...(patch[key] || {}) }
+        : patch[key];
     }
     if (Object.prototype.hasOwnProperty.call(patch || {}, "generation")) {
       const requested = { ...(project.generation || {}), ...(patch.generation || {}) };
@@ -1875,6 +1999,10 @@ class WorkbenchStore {
     }
     if (Object.prototype.hasOwnProperty.call(patch || {}, "productionPlan")) {
       project.productionPlan = { ...defaultProductionPlan(), ...(patch.productionPlan || {}) };
+    }
+    if (shouldInvalidatePlan) {
+      invalidateProjectProductionPlan(project, inputChangeReasons);
+      activitySummary = `${activitySummary}（${inputChangeReasons.join("、")}已变化，旧生产计划转入历史，等待重新拆镜）`;
     }
     if (Object.prototype.hasOwnProperty.call(patch || {}, "shots") && Array.isArray(project.shots)) {
       const previousById = new Map(previousShots.map(item => [String(item.id || ""), item]));
@@ -1914,12 +2042,12 @@ class WorkbenchStore {
         project.finalVideoStale = true;
         project.finalVideoStaleAt = now();
         project.finalVideoStaleReason = `已修改${invalidationByShot.size}个分镜；${videoInvalidated}个旧分镜视频退出当前成片`;
-        patch.activitySummary = `${String(patch.activitySummary || "保存分镜修改")}（${invalidated}个旧资产已标记待重生）`;
+        activitySummary = `${String(activitySummary || "保存分镜修改")}（${invalidated}个旧资产已标记待重生）`;
       }
     }
     assertProjectTextLimits(project);
     project.activity = Array.isArray(project.activity) ? project.activity : [];
-    project.activity.unshift({ id: makeId("activity"), at: now(), type: "project_updated", summary: String(patch?.activitySummary || "项目已更新") });
+    project.activity.unshift({ id: makeId("activity"), at: now(), type: "project_updated", summary: activitySummary });
     project.activity = project.activity.slice(0, 300);
     return this.saveProject(project);
   }

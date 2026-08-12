@@ -1480,7 +1480,12 @@ function renderScript() {
     image.src = fileUrl(project.product.imagePath);
     productButton.prepend(image);
   }
-  $("#analysisSummary").textContent = project.script?.analyzedAt ? `上次拆解：${new Date(project.script.analyzedAt).toLocaleString()}` : "尚未拆解";
+  const targetSeconds = Math.round(Number(project.generation?.targetDurationSeconds) || 300);
+  const plannedSeconds = (project.shots || []).reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
+  const durationLabel = project.shots?.length
+    ? ` · 目标 ${targetSeconds}秒 · 分镜合计 ${plannedSeconds}秒 · ${plannedSeconds === targetSeconds ? "时长已锁定" : "需要重新拆镜"}`
+    : ` · 目标 ${targetSeconds}秒`;
+  $("#analysisSummary").textContent = project.script?.analyzedAt ? `上次拆解：${new Date(project.script.analyzedAt).toLocaleString()}${durationLabel}` : `尚未拆解${durationLabel}`;
   $("#analysisStats").innerHTML = [
     ["识别人物", project.characters.length],
     ["识别场景", project.scenes.length],
@@ -4716,11 +4721,15 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
     return;
   }
   const project = requireProject();
-  const modeChanged = project.generation?.modeConfirmed === true && (mode !== project.generation?.mode || engine !== (project.generation?.engine || "seedance") || providerKind !== currentProviderKind());
-  const hasProductionHistory = project.candidates?.length || project.jobs?.length;
-  if (modeChanged && hasProductionHistory && !window.confirm(providerKind === "puream-seedance"
-    ? "修改视频上游或生成模式只影响后续任务；已有资产、抽卡历史和成片不会删除。切到云端算力后人物资产会重新做一致性检查。确认修改吗？"
-    : "修改视频上游或生成模式只影响后续任务；已有资产、抽卡历史和成片不会删除。确认修改吗？")) return;
+  const targetDurationSeconds = Math.max(30, Math.min(3600, Math.round(Number($("#projectTargetDuration")?.value) || project.generation?.targetDurationSeconds || 300)));
+  const strategyChanged = (
+    mode !== project.generation?.mode
+    || engine !== (project.generation?.engine || "seedance")
+    || providerKind !== String(project.generation?.videoProviderKind || "")
+    || targetDurationSeconds !== Number(project.generation?.targetDurationSeconds || 300)
+  );
+  const hasProductionHistory = project.shots?.length || project.candidates?.length || project.jobs?.length || project.finalVideoPath;
+  if (strategyChanged && hasProductionHistory && !window.confirm("修改目标时长、视频上游或生成模式后，当前分镜和资产会退出生产版本并保留在历史中，项目返回剧本阶段等待重新拆镜；不会自动发起任何付费生成。确认修改吗？")) return;
   state.strategySaving = true;
   $("#confirmProjectStrategy").disabled = true;
   try {
@@ -4732,7 +4741,7 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
         mode,
         modeConfirmed: true,
         modeConfirmedAt: new Date().toISOString(),
-        targetDurationSeconds: Math.max(30, Math.min(3600, Math.round(Number($("#projectTargetDuration")?.value) || project.generation?.targetDurationSeconds || 300)))
+        targetDurationSeconds
       },
       productionPlan: {
         executionMode: $("input[name='projectExecutionMode']:checked")?.value || "step",
@@ -4741,7 +4750,9 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
     }, "确认项目视频上游与制作策略");
     $("#projectStrategyDialog").close();
     state.strategyPromptedProjectId = project.id;
-    showToast(`已确认${videoProviderLabel(providerKind)} · ${projectModeLabel(mode)}；单步与一键入口均已解锁`);
+    showToast(strategyChanged && state.project?.currentStage === "script"
+      ? `已更新${videoProviderLabel(providerKind)} · ${projectModeLabel(mode)} · ${targetDurationSeconds}秒；请重新拆镜后再生成资产`
+      : `已确认${videoProviderLabel(providerKind)} · ${projectModeLabel(mode)}；单步与一键入口均已解锁`);
   } catch (error) {
     $("#projectStrategyError").textContent = error.message || "制作策略保存失败";
   } finally {

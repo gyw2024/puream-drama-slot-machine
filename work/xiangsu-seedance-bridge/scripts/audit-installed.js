@@ -12,7 +12,9 @@ async function main() {
     || path.join(process.env.LOCALAPPDATA || "", "Programs", packageJson.name, `${packageJson.build.productName}.exe`);
   if (!fs.existsSync(executablePath)) throw new Error(`installed executable missing: ${executablePath}`);
 
-  const evidenceRoot = path.resolve(root, "..", "..", "..", "..", "..", ".codex_tests", "TASK-20260812-DRAMA-ADVERSARIAL-FIX-060", "installed-ui");
+  const evidenceRoot = process.env.DRAMA_SLOT_AUDIT_EVIDENCE_DIR
+    ? path.resolve(process.env.DRAMA_SLOT_AUDIT_EVIDENCE_DIR)
+    : path.resolve(root, "..", "..", "..", "..", "..", ".codex_tests", process.env.DRAMA_SLOT_AUDIT_TASK_ID || "TASK-DRAMA-INSTALLED-AUDIT", "installed-ui");
   const runDir = path.join(evidenceRoot, new Date().toISOString().replace(/[:.]/g, "-"));
   const userDataDir = path.join(runDir, "isolated-user-data");
   const workbenchDir = path.join(runDir, "isolated-workbench");

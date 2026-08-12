@@ -10,7 +10,9 @@ async function main() {
   const root = path.resolve(__dirname, "..");
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   const executablePath = path.join(root, packageJson.build.directories.output, "win-unpacked", "纯梦短剧老虎机.exe");
-  const evidenceDir = path.resolve(root, "..", "..", "..", "..", "..", ".codex_tests", "TASK-20260812-DRAMA-ADVERSARIAL-FIX-060", "packaged-ui");
+  const evidenceDir = process.env.DRAMA_SLOT_AUDIT_EVIDENCE_DIR
+    ? path.resolve(process.env.DRAMA_SLOT_AUDIT_EVIDENCE_DIR)
+    : path.resolve(root, "..", "..", "..", "..", "..", ".codex_tests", process.env.DRAMA_SLOT_AUDIT_TASK_ID || "TASK-DRAMA-PACKAGED-AUDIT", "packaged-ui");
   const runDir = path.join(evidenceDir, new Date().toISOString().replace(/[:.]/g, "-"));
   const userDataDir = path.join(runDir, "isolated-user-data");
   const workbenchDir = path.join(runDir, "isolated-workbench");
@@ -75,9 +77,10 @@ async function main() {
     const layoutMatrix = [];
     for (const view of [
       { width: 1024, height: 720, zoom: 1 },
-      { width: 1180, height: 760, zoom: 1 },
+      { width: 1280, height: 800, zoom: 1 },
       { width: 1440, height: 900, zoom: 1 },
-      { width: 1180, height: 760, zoom: 2 }
+      { width: 1920, height: 1080, zoom: 1 },
+      { width: 1280, height: 800, zoom: 2 }
     ]) {
       const viewport = { width: view.width, height: view.height };
       await page.setViewportSize(viewport);

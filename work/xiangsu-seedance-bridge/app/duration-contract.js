@@ -161,6 +161,15 @@ function reconcileUnitDurations(requested = [], targetTotalSeconds, providerKind
     sum += 1;
     guard += 1;
   }
+  if (sum !== totalSeconds) {
+    throw Object.assign(new Error(`目标时长 ${totalSeconds} 秒无法由 ${count} 个 ${min}-${max} 秒的生成单元精确组成`), {
+      code: "DURATION_TOTAL_UNREPRESENTABLE",
+      targetTotalSeconds: totalSeconds,
+      unitCount: count,
+      min,
+      max
+    });
+  }
   return Object.freeze(values);
 }
 
