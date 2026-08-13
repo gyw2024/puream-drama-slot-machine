@@ -13,6 +13,7 @@ const LEGACY_LICENSE_BASE_URL = "https://drama.puream.cn";
 // Website-issued codes must use the short-drama authorization endpoint. It owns a
 // separate device slot and never reads or writes the AI Creation Platform slot.
 const PUREAM_WEBSITE_DESKTOP_LOGIN_URL = "https://puream.cn/api/drama/auth/login";
+const PUREAM_WEBSITE_BASE_URL = "https://puream.cn";
 const WEBSITE_SESSION_AUTHORITY = "puream-website";
 const ADMIN_CONCURRENCY_AUTHORITY = "drama-admin";
 const APP_ID = "puream-drama-slot-stats";
@@ -336,6 +337,53 @@ class DramaLicenseClient {
       });
     }
     return data;
+  }
+
+  async websiteRequest(pathname, { method = "GET", body } = {}) {
+    const activationCode = this.storedActivationCode();
+    if (!activationCode) throw Object.assign(new Error("请先激活纯梦账号"), { code: "PUREAM_AUTH_REQUIRED" });
+    let res;
+    try {
+      res = await fetch(`${PUREAM_WEBSITE_BASE_URL}${pathname}`, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          authorization: `Bearer puream-desktop:${activationCode}`
+        },
+        body: body == null ? undefined : JSON.stringify(body)
+      });
+    } catch (error) {
+      throw Object.assign(new Error("官网账户服务正在自动重连"), { code: "PUREAM_ACCOUNT_OFFLINE", cause: error });
+    }
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || payload.ok === false) {
+      throw Object.assign(new Error(payload.message || payload.error || `官网账户请求失败 HTTP ${res.status}`), {
+        code: payload.code || "PUREAM_ACCOUNT_ERROR",
+        status: res.status
+      });
+    }
+    return payload.data && typeof payload.data === "object" ? payload.data : payload;
+  }
+
+  async walletStatus() {
+    return this.websiteRequest("/api/desktop/account/balance");
+  }
+
+  async createRechargeOrder(amountYuan) {
+    const rechargeCents = Math.round(Number(amountYuan) * 100);
+    if (!Number.isFinite(rechargeCents) || rechargeCents < 3000) {
+      throw Object.assign(new Error("充值金额最低 30 元"), { code: "RECHARGE_AMOUNT_INVALID" });
+    }
+    return this.websiteRequest("/api/desktop/payments/create", { method: "POST", body: { rechargeCents } });
+  }
+
+  async rechargeOrderStatus(orderNo) {
+    const safeOrderNo = String(orderNo || "").trim();
+    if (!/^[A-Za-z0-9_-]{8,80}$/.test(safeOrderNo)) {
+      throw Object.assign(new Error("充值订单号无效"), { code: "RECHARGE_ORDER_INVALID" });
+    }
+    return this.websiteRequest(`/api/desktop/payments/${encodeURIComponent(safeOrderNo)}/status`);
   }
 
   async loginWithPureamWebsite(activationCode) {

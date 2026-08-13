@@ -679,7 +679,8 @@ async function generatePureamTextOnce(config, messages, options = {}) {
     });
     if (streamError) throw markCompletedUpstream(Object.assign(new Error(streamError), {
       code: String(streamErrorCode || "").startsWith("PUREAM_") ? streamErrorCode : "PUREAM_TEXT_STREAM_ERROR",
-      upstreamCode: streamErrorCode || ""
+      upstreamCode: streamErrorCode || "",
+      partialText: text.trim() ? text : ""
     }));
     if (!text.trim()) {
       const eventSummary = events.map(item => `${item.event}:${item.textLength}${item.outputTokens ? `/${item.outputTokens}tok` : ""}`).join(", ") || "无SSE事件";
@@ -723,46 +724,81 @@ async function generatePureamTextOnce(config, messages, options = {}) {
 }
 
 async function generatePureamText(config, messages, options = {}) {
-  // A transport failure has unknown upstream state. Never turn one click into
-  // several billable requests; the user can explicitly retry after seeing the
-  // bounded failure state.
+  // The website relay distinguishes a rejected pre-response request from an
+  // accepted/billable completion.  Reconnect only the former, retaining the
+  // same logical session id.  This keeps a short network wobble in the
+  // background instead of turning a multi-segment script into a user-visible
+  // failed project.
   const stableSessionId = String(options.sessionId || `puream-${Date.now()}-${crypto.randomUUID()}`);
   const isTransportInterruption = error => {
     const code = String(error?.code || error?.cause?.code || "").toUpperCase();
+    const upstreamCode = String(error?.upstreamCode || "").toUpperCase();
     const text = `${error?.message || ""} ${error?.cause?.message || ""}`.toLowerCase();
-    return ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED", "EAI_AGAIN", "ENOTFOUND", "ERR_EMPTY_RESPONSE"].includes(code)
-      || /fetch failed|socket closed|socket hang up|connection reset|other side closed|err_empty_response|empty response/.test(text);
+    return ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED", "EAI_AGAIN", "ENOTFOUND", "ERR_EMPTY_RESPONSE", "PUREAM_TRANSPORT_INTERRUPTED"].includes(code)
+      || ["UPSTREAM_NETWORK_ERROR", "UPSTREAM_CAPACITY_BUSY", "UPSTREAM_429", "UPSTREAM_502", "UPSTREAM_503", "UPSTREAM_504"].includes(upstreamCode)
+      || (code === "PUREAM_TEXT_STREAM_ERROR" && /连接失败|网络|繁忙|稍后重试/.test(text))
+      || (code === "PUREAM_TEXT_HTTP_ERROR" && [408, 425, 429, 500, 502, 503, 504].includes(Number(error?.status)))
+      || /fetch failed|socket closed|socket hang up|connection reset|other side closed|err_empty_response|empty response|upstream_network_error/.test(text);
   };
-  try {
-    return await generatePureamTextOnce(config, messages, {
-      ...options,
-      attempt: 1,
-      sessionId: stableSessionId
-    });
-  } catch (error) {
-    error.attempt = 1;
-    error.sessionId = error.sessionId || stableSessionId;
-    if (isTransportInterruption(error) && !String(error?.code || "").startsWith("PUREAM_")) {
-      error = Object.assign(new Error("纯梦文本连接被中断，请稍后重试"), {
-        code: "PUREAM_TRANSPORT_INTERRUPTED",
-        cause: error,
-        attempt: 1,
-        sessionId: stableSessionId,
-        noAutomaticRetry: true
+  const waitForRetry = ms => new Promise((resolve, reject) => {
+    const signal = options.signal;
+    if (signal?.aborted) {
+      reject(signal.reason instanceof Error ? signal.reason : Object.assign(new Error("文本生成已取消"), { code: "PROVIDER_REQUEST_ABORTED" }));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      reject(signal.reason instanceof Error ? signal.reason : Object.assign(new Error("文本生成已取消"), { code: "PROVIDER_REQUEST_ABORTED" }));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+  let attempt = 0;
+  while (true) {
+    attempt += 1;
+    try {
+      return await generatePureamTextOnce(config, messages, {
+        ...options,
+        attempt,
+        sessionId: stableSessionId
       });
-    }
-    if (typeof options.onAttemptFailure === "function") {
-      try {
-        options.onAttemptFailure({
-          attempt: 1,
-          sessionId: error.sessionId,
-          model: config?.model || "",
-          code: error?.code || "TEXT_PROVIDER_FAILED",
-          message: error?.message || ""
+    } catch (caught) {
+      let error = caught;
+      error.attempt = attempt;
+      error.sessionId = error.sessionId || stableSessionId;
+      const recoverable = !options.signal?.aborted
+        && error?.upstreamDone !== true
+        && !error?.upstreamReceipt
+        && !String(error?.partialText || "").trim()
+        && isTransportInterruption(error);
+      if (recoverable && !String(error?.code || "").startsWith("PUREAM_")) {
+        error = Object.assign(new Error("文本链路正在自动恢复"), {
+          code: "PUREAM_TRANSPORT_INTERRUPTED",
+          cause: error,
+          attempt,
+          sessionId: stableSessionId
         });
-      } catch {}
+      }
+      if (typeof options.onAttemptFailure === "function") {
+        try {
+          options.onAttemptFailure({
+            attempt,
+            retrying: recoverable,
+            retryDelayMs: recoverable ? Math.min(15_000, 1_000 * (2 ** Math.min(attempt - 1, 4))) : 0,
+            sessionId: error.sessionId,
+            model: config?.model || "",
+            code: error?.code || "TEXT_PROVIDER_FAILED",
+            message: recoverable ? "文本链路波动，正在后台自动重连" : (error?.message || "")
+          });
+        } catch {}
+      }
+      if (!recoverable) throw error;
+      await waitForRetry(Math.min(15_000, 1_000 * (2 ** Math.min(attempt - 1, 4))));
     }
-    throw error;
   }
 }
 

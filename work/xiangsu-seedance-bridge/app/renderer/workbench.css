@@ -34,6 +34,11 @@ button { color: inherit; }
 .project-switcher label { flex: 0 0 auto; color: var(--muted); font-size: 12px; white-space: nowrap; writing-mode: horizontal-tb; }
 .project-switcher select { flex: 1 1 auto; min-width: 140px; height: 38px; padding: 0 34px 0 12px; color: var(--text); background: #11100e; border: 1px solid #343027; border-radius: 9px; outline: none; }
 .top-status { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; justify-content: flex-end; }
+.wallet-chip { min-width:112px; min-height:44px; height:44px; padding:0 10px; border:1px solid rgba(72,244,138,.38); border-radius:22px; background:linear-gradient(180deg,rgba(18,57,34,.72),rgba(8,28,17,.92)); color:#d9ffe6; display:inline-flex; align-items:center; gap:6px; white-space:nowrap; cursor:pointer; }
+.wallet-chip span { color:#8ccaa2; font-size:10px; }
+.wallet-chip b { color:#79f5a5; font-size:12px; }
+.wallet-chip i { color:#ffd08a; font-size:10px; font-style:normal; }
+.wallet-chip:hover { border-color:#48f48a; box-shadow:0 0 16px rgba(72,244,138,.14); }
 .bridge-badge { display: flex; align-items: center; gap: 7px; height: 36px; padding: 0 12px; font-size: 11px; border: 1px solid #2e2b25; border-radius: 20px; background: #0d0d0c; }
 .bridge-badge i { width: 7px; height: 7px; border-radius: 50%; background: #777; box-shadow: 0 0 10px currentColor; }
 .bridge-badge.online i { background: var(--green); }
@@ -92,6 +97,18 @@ button { color: inherit; }
 .primary-button:hover { filter: brightness(1.1); transform: translateY(-1px); }
 .stage-head button, .idea-machine-head button, .project-strategy-bar button { white-space: nowrap; }
 .primary-button:disabled, .outline-button:disabled { opacity: .45; cursor: wait; transform: none; }
+.wallet-summary { display:grid; grid-template-columns:1fr auto; gap:5px 16px; padding:16px; border:1px solid rgba(72,244,138,.28); border-radius:10px; background:rgba(19,65,37,.18); }
+.wallet-summary span { color:#b8cbbf; }
+.wallet-summary b { grid-row:1 / 3; grid-column:2; align-self:center; color:#71f29e; font-size:25px; }
+.wallet-summary small { color:#7f9285; }
+.recharge-order { display:grid; grid-template-columns:170px 1fr; gap:18px; align-items:center; padding:14px; border:1px solid #4a3b27; border-radius:10px; background:#0d0c0a; }
+.recharge-order img { width:170px; height:170px; object-fit:contain; border-radius:8px; background:#fff; }
+.recharge-order > div { display:grid; gap:10px; }
+.recharge-order span { color:var(--muted); line-height:1.55; overflow-wrap:anywhere; }
+.script-format-examples { display:flex; align-items:center; flex-wrap:wrap; gap:7px; padding:10px; border:1px solid #3e3426; border-radius:9px; background:#12100d; }
+.script-format-examples b { color:#d9c39d; font-size:11px; }
+.script-format-examples button { min-height:44px; padding:0 10px; border:1px solid #58401f; border-radius:7px; background:#20170d; color:#efbd70; font-size:10px; cursor:pointer; }
+.script-format-examples button:hover { border-color:#d98b1d; color:#ffe2ab; }
 .danger-button { min-height: 38px; padding: 0 13px; border: 1px solid rgba(255,107,95,.5); border-radius: 8px; background: linear-gradient(180deg,rgba(76,24,21,.92),rgba(35,14,13,.96)); color: #ffaaa3; font-weight: 700; cursor: pointer; transition: .18s ease; }
 .danger-button:hover:not(:disabled) { border-color: var(--red); color: #ffe0dd; transform: translateY(-1px); box-shadow: 0 0 18px rgba(255,107,95,.14); }
 .danger-button:focus-visible, .script-control-button:focus-visible { outline: 2px solid #ffd08a; outline-offset: 2px; }
@@ -821,13 +838,14 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
 @media (max-width: 1180px) {
   .app { grid-template-columns: 72px minmax(0,1fr); }
   .topbar { gap: 10px; padding: 0 104px 0 12px; }
-  .brand { min-width: 205px; }
-  .brand h1 { font-size: 16px; }
-  .brand p { display: none; }
+  .brand { min-width: 46px; flex-basis:46px; }
+  .brand > div { display:none; }
   .brand-icon { width: 38px; height: 38px; }
   .project-switcher { max-width: 260px; }
   .project-switcher label { display: none; }
   .top-status #accountSwitchShortcut, .top-status #startBridge, .top-status .bridge-badge { display: none; }
+  .wallet-chip { min-width:76px; width:76px; padding:0 8px; justify-content:center; }
+  .wallet-chip span,.wallet-chip i { display:none; }
   .pipeline-nav { grid-column: 1; padding-inline: 7px; }
   .pipeline-title, .stage-button span, .stage-button > i, .local-note { display: none; }
   .stage-button { min-height: 56px; padding: 9px; justify-content: center; }

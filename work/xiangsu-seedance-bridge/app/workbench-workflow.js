@@ -125,7 +125,10 @@ const SCRIPT_FAST_CONCURRENCY = 8;
 const SCRIPT_FAST_TARGET_SECONDS = 300;
 const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol";
 const SCRIPT_DIRECT_SEGMENT_UNITS = 5;
-const SCRIPT_DIRECT_MAX_CONCURRENCY = 3;
+// Keep one long structured stream per project.  Completed segments are still
+// checkpointed immediately, while avoiding the three simultaneous relay
+// handshakes that previously made an otherwise healthy account fail at once.
+const SCRIPT_DIRECT_MAX_CONCURRENCY = 1;
 const IMAGE_BATCH_MAX_CONCURRENCY = 6;
 const VIDEO_BATCH_MAX_CONCURRENCY = 4;
 

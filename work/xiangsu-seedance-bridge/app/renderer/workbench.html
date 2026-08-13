@@ -26,6 +26,7 @@
         <button id="runFullPipeline" class="primary-button"><img src="../assets/icons/sparkle.png" alt="">一键全流程</button>
         <button id="pausePipeline" class="outline-button" type="button" title="暂停当前自动化/抽卡">暂停任务</button>
         <button id="stopPipeline" class="danger-button" type="button" title="结束当前自动化/抽卡">结束任务</button>
+        <button id="walletShortcut" class="wallet-chip" type="button" title="查看余额并充值"><span>余额</span><b id="walletBalance">读取中</b><i>充值</i></button>
         <div id="bridgeBadge" class="bridge-badge offline"><i></i><b>像塑检测中</b></div>
         <button id="qualityBlueprintToggle" class="review-blueprint-toggle" type="button" aria-pressed="true" aria-expanded="false"><span class="review-blueprint-indicator" aria-hidden="true"></span><span id="qualityBlueprintToggleLabel">审核蓝图：开启</span></button>
         <div id="qualityBlueprintMenu" class="quality-blueprint-menu hidden" role="dialog" aria-labelledby="qualityBlueprintMenuTitle" tabindex="-1">
@@ -445,6 +446,7 @@
         </label>
       </div></fieldset>
       <div class="script-format-guarantee" role="note"><b>生产能力不缩水</b><span>任一模式都会完整编译资产提示词、场景四视图、分镜图提示词、视频提示词和商品植入因果；每一阶段也都可以从 0 批量上传自己的提示词。</span></div>
+      <div class="script-format-examples" role="group" aria-label="下载剧本格式示例"><b>先看示例：</b><button type="button" data-script-format-example="production">完整制作稿示例</button><button type="button" data-script-format-example="dialogue">简易对白稿示例</button><button type="button" data-script-format-example="timed_storyboard">秒级分镜成片稿示例</button></div>
       <p id="scriptFormatError" class="field-error" role="alert" aria-live="polite"></p>
       <div class="dialog-actions">
         <button id="cancelScriptFormat" class="outline-button" type="button">取消写作</button>
@@ -510,6 +512,16 @@
         <button type="button" value="cancel" class="outline-button" id="creatorPromptCancel">取消</button>
         <button type="button" id="creatorPromptSave" class="primary-button">保存并应用</button>
       </div>
+    </form>
+  </dialog>
+  <dialog id="rechargeDialog" class="project-dialog recharge-dialog" aria-labelledby="rechargeDialogTitle">
+    <form id="rechargeForm" class="dialog-panel" novalidate>
+      <div class="dialog-head"><div><span class="step-tag">PUREAM WALLET</span><h2 id="rechargeDialogTitle">余额与充值</h2></div><button id="closeRechargeDialog" class="dialog-close" type="button" aria-label="关闭充值窗口">×</button></div>
+      <div class="wallet-summary"><span>当前可用余额</span><b id="rechargeCurrentBalance">¥--</b><small id="rechargeFrozenBalance">冻结 ¥0.00</small></div>
+      <label>充值金额（元）<input id="rechargeAmount" type="number" min="30" step="1" value="100" inputmode="decimal"></label>
+      <div id="rechargeOrderPanel" class="recharge-order hidden" aria-live="polite"><img id="rechargeQr" alt="微信充值二维码"><div><b id="rechargeOrderState">请扫码支付</b><span id="rechargeOrderMeta"></span><button id="openRechargePage" class="outline-button" type="button">打开支付页面</button></div></div>
+      <p id="rechargeError" class="field-error" role="alert" aria-live="polite"></p>
+      <div class="dialog-actions"><button id="cancelRecharge" class="outline-button" type="button">关闭</button><button id="createRecharge" class="primary-button" type="submit">生成充值二维码</button></div>
     </form>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

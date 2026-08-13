@@ -50,6 +50,11 @@ const state = {
   voiceLibrary: [],
   voiceLibraryRenderSignature: "",
   creatorPromptSpec: null
+  ,wallet: null
+  ,walletRefreshing: false
+  ,walletLastRefreshAt: 0
+  ,rechargeOrder: null
+  ,rechargePollTimer: null
 };
 
 const DEFAULT_QUALITY_GATE_MODULES = Object.freeze({
@@ -2644,6 +2649,18 @@ function promptSuggestionTemplate(scope = "all") {
   }, null, 2);
 }
 
+const scriptFormatExamples = Object.freeze({
+  production: `# 完整制作稿示例\n\n## 故事简介\n退休教师林秋月发现儿子隐瞒债务，她必须在保护家庭与揭开真相之间作出选择。\n\n## 人物\n- C01 林秋月：62岁，克制、敏锐；紧张时捏住衣角。\n- C02 周远：35岁，林秋月之子；嘴硬但内疚。\n\n## SC01｜客厅｜傍晚\n【情节】林秋月从旧账本中找到转账记录。\n【动作】她把账本推到周远面前，手指停在日期上。\n【对白】\n- 林秋月（压低声音，失望但保持克制，对周远说）：你告诉我，这一笔钱到底去了哪里？\n- 周远（避开视线，语速加快，心虚地对母亲说）：妈，这件事我能处理，你别再问了。\n【商品节点】只有当剧情需要核对记录时，才让用户提供的商品作为解决问题的工具出现；名称与卖点必须来自用户资料。\n【承接】周远的回避促使林秋月继续追问。`,
+  dialogue: `# 简易对白稿示例\n\n【背景】傍晚客厅。林秋月发现旧账本里的异常转账，周远刚进门。\n\n林秋月（压低声音，失望又克制，盯着周远，对周远说）：你告诉我，这一笔钱到底去了哪里？\n\n周远（避开母亲的视线，语速加快，心虚地对林秋月说）：妈，这件事我能处理，你别再问了。\n\n【简单情节】林秋月没有争吵，而是把带日期的凭据推到他面前。周远看到日期后沉默。\n\n林秋月（眼眶发红，语速放慢，忍着怒气对周远说）：我不是怕你欠钱，我怕你连真话都不肯跟我说。\n\n【商品出现规则】如本段确实需要商品，必须使用用户上传的产品名称、图片和卖点，并让商品承担明确剧情作用；不得凭空添加。`,
+  timed_storyboard: `# 秒级分镜成片稿示例\n\n## S01｜0.0–8.0秒｜客厅｜中近景转特写\n【人物与位置】林秋月在画面左前景，周远在右后景；两人保持视线轴。\n【0.0–2.0秒】林秋月把旧账本推到桌面中央，手指压住一行日期。表情克制，呼吸变重。\n【2.0–5.2秒｜对白】林秋月（压低声音，失望又克制，盯着周远，对周远说）：你告诉我，这一笔钱到底去了哪里？\n【5.2–8.0秒｜反应】周远先看日期，再避开母亲视线，吞咽一下。\n【声音】纸页摩擦、室内低环境声；对白清晰置前。\n【承接】切到周远近景回答。\n\n## S02｜8.0–15.0秒｜周远近景\n【8.0–11.5秒｜对白】周远（语速加快，心虚，避开视线，对林秋月说）：妈，这件事我能处理，你别再问了。\n【11.5–15.0秒｜反应】林秋月在前景虚焦中收紧手指；周远说完后短暂停顿。\n【商品节点】仅在剧本因果需要时引用用户产品，完整保留用户名称和卖点。`
+});
+
+function downloadScriptFormatExample(format) {
+  const normalized = ["production", "dialogue", "timed_storyboard"].includes(format) ? format : "production";
+  const names = { production: "完整制作稿", dialogue: "简易对白稿", timed_storyboard: "秒级分镜成片稿" };
+  downloadTextFile(`纯梦老虎机-${names[normalized]}-示例.txt`, scriptFormatExamples[normalized]);
+}
+
 async function importPromptBatchForScope(scope = "all") {
   if (!state.project) return;
   const result = await api.workbench.importPromptBatch(state.project.id, scope);
@@ -5138,6 +5155,9 @@ $("#scriptFormatDialog").addEventListener("cancel", event => {
 $$("input[name='scriptFormat']").forEach(input => input.addEventListener("change", () => {
   $("#scriptFormatError").textContent = "";
 }));
+$$('[data-script-format-example]').forEach(button => button.addEventListener("click", () => {
+  downloadScriptFormatExample(button.dataset.scriptFormatExample);
+}));
 $("#startBridge").addEventListener("click", async () => {
   $("#startBridge").disabled = true;
   const result = await api.startBridge();
@@ -5254,12 +5274,122 @@ async function ensureLicenseGate() {
   });
 }
 
+function walletYuan(cents) {
+  const value = Number(cents);
+  return Number.isFinite(value) ? `¥${(value / 100).toFixed(2)}` : "¥--";
+}
+
+function renderWallet() {
+  const wallet = state.wallet || {};
+  const available = Number.isFinite(Number(wallet.availableCents)) ? wallet.availableCents : wallet.balanceCents;
+  if ($("#walletBalance")) $("#walletBalance").textContent = walletYuan(available);
+  if ($("#rechargeCurrentBalance")) $("#rechargeCurrentBalance").textContent = walletYuan(available);
+  if ($("#rechargeFrozenBalance")) $("#rechargeFrozenBalance").textContent = `冻结 ${walletYuan(wallet.frozenCents || 0)}`;
+}
+
+async function refreshWallet(force = false) {
+  if (state.captureMode || state.walletRefreshing || !api.workbench.walletStatus) return state.wallet;
+  if (!force && Date.now() - state.walletLastRefreshAt < 30_000) return state.wallet;
+  state.walletRefreshing = true;
+  try {
+    const result = await api.workbench.walletStatus();
+    if (!result?.ok) throw new Error(result?.message || "余额刷新失败");
+    state.wallet = result.wallet || result.data || {};
+    state.walletLastRefreshAt = Date.now();
+    renderWallet();
+    return state.wallet;
+  } catch (error) {
+    console.warn("wallet refresh deferred", error?.message || error);
+    return state.wallet;
+  } finally {
+    state.walletRefreshing = false;
+  }
+}
+
+function stopRechargePolling() {
+  if (state.rechargePollTimer) clearInterval(state.rechargePollTimer);
+  state.rechargePollTimer = null;
+}
+
+function closeRechargeDialog() {
+  stopRechargePolling();
+  state.rechargeOrder = null;
+  $("#rechargeDialog")?.close();
+}
+
+async function pollRechargeOrder() {
+  const orderNo = state.rechargeOrder?.orderNo;
+  if (!orderNo || !api.workbench.rechargeOrderStatus) return;
+  const result = await api.workbench.rechargeOrderStatus(orderNo).catch(() => null);
+  if (!result?.ok) return;
+  if (result.wallet) {
+    state.wallet = result.wallet;
+    state.walletLastRefreshAt = Date.now();
+    renderWallet();
+  }
+  const order = result.order || {};
+  const paid = order.status === "PAID";
+  $("#rechargeOrderState").textContent = paid ? "充值到账" : "等待微信支付";
+  $("#rechargeOrderMeta").textContent = paid
+    ? `已到账 ${walletYuan(order.amountCents)}，全局余额已刷新。`
+    : `订单 ${order.orderNo || orderNo} · ${walletYuan(order.amountCents)}`;
+  if (paid) {
+    stopRechargePolling();
+    showToast("充值已到账，余额已刷新");
+  }
+}
+
+async function openRechargeDialog() {
+  const dialog = $("#rechargeDialog");
+  if (!dialog) return;
+  $("#rechargeError").textContent = "";
+  $("#rechargeOrderPanel").classList.add("hidden");
+  await refreshWallet(true);
+  if (!dialog.open) dialog.showModal();
+  $("#rechargeAmount")?.focus({ preventScroll: true });
+}
+
+async function createRecharge(event) {
+  event?.preventDefault?.();
+  const button = $("#createRecharge");
+  const errorEl = $("#rechargeError");
+  errorEl.textContent = "";
+  const amountYuan = Number($("#rechargeAmount").value);
+  if (!Number.isFinite(amountYuan) || amountYuan < 30) {
+    errorEl.textContent = "充值金额最低 30 元";
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "正在生成…";
+  try {
+    const result = await api.workbench.createRechargeOrder(amountYuan);
+    if (!result?.ok || !result.order?.orderNo) throw new Error(result?.message || "充值订单创建失败");
+    state.rechargeOrder = result.order;
+    $("#rechargeOrderPanel").classList.remove("hidden");
+    const qr = $("#rechargeQr");
+    qr.src = String(result.order.qrDataUrl || "");
+    qr.hidden = !qr.src;
+    $("#rechargeOrderState").textContent = "请使用微信扫码支付";
+    $("#rechargeOrderMeta").textContent = `订单 ${result.order.orderNo} · ${walletYuan(result.order.amountCents)}`;
+    $("#openRechargePage").disabled = !result.order.payUrl;
+    stopRechargePolling();
+    state.rechargePollTimer = setInterval(() => pollRechargeOrder().catch(() => {}), 3000);
+    await pollRechargeOrder();
+  } catch (error) {
+    errorEl.textContent = error?.message || "充值订单创建失败";
+  } finally {
+    button.disabled = false;
+    button.textContent = "生成充值二维码";
+  }
+}
+
 async function bootstrap() {
   const appDefaults = await api.defaults();
   state.captureMode = Boolean(appDefaults?.captureMode);
   state.isPackaged = Boolean(appDefaults?.isPackaged);
   state.appDefaults = appDefaults || {};
   if (!state.captureMode) await ensureLicenseGate();
+  if (!state.captureMode) await refreshWallet(true);
   const settingsResult = await api.workbench.getSettings();
   if (!settingsResult.ok) throw new Error(settingsResult.message);
   state.settings = settingsResult.settings;
@@ -5285,6 +5415,7 @@ async function startBackgroundServices() {
     state.polling = true;
     try {
       await refreshHealth(false);
+      await refreshWallet(false);
       const syncResult = await api.workbench.syncVideoJobs();
       if (state.accountSwitch?.status === "draining") await refreshAccountSwitch(true);
       else {
@@ -5352,6 +5483,14 @@ function bindProductSurfaceEvents() {
     downloadTextFile(`${dialog?.dataset.promptKey || "prompt"}-example.json`, $("#promptExampleText")?.value || "{}");
   });
   applyProductSurfaceLabels();
+  $("#walletShortcut")?.addEventListener("click", () => openRechargeDialog().catch(error => showToast(error.message || "余额读取失败", "error")));
+  $("#rechargeForm")?.addEventListener("submit", createRecharge);
+  $("#closeRechargeDialog")?.addEventListener("click", closeRechargeDialog);
+  $("#cancelRecharge")?.addEventListener("click", closeRechargeDialog);
+  $("#openRechargePage")?.addEventListener("click", async () => {
+    const url = state.rechargeOrder?.payUrl;
+    if (url) await api.workbench.openExternal(url);
+  });
 }
 
 const captureParams = new URLSearchParams(window.location.search || window.location.hash.replace(/^#/, ""));

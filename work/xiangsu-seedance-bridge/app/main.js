@@ -1901,6 +1901,32 @@ ipcMain.handle("license:logout", () => {
     return { ok: true };
   } catch (error) { return publicError(error); }
 });
+ipcMain.handle("license:wallet", async () => {
+  try {
+    const wallet = await dramaLicense.walletStatus();
+    return { ok: true, wallet };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("license:payment-create", async (_event, amountYuan) => {
+  try {
+    const order = await dramaLicense.createRechargeOrder(amountYuan);
+    return { ok: true, order };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("license:payment-status", async (_event, orderNo) => {
+  try {
+    const result = await dramaLicense.rechargeOrderStatus(orderNo);
+    return { ok: true, ...result };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("shell:open-external", async (_event, value) => {
+  try {
+    const target = new URL(String(value || ""));
+    if (target.protocol !== "https:") throw Object.assign(new Error("只能打开安全支付地址"), { code: "EXTERNAL_URL_REJECTED" });
+    await shell.openExternal(target.href);
+    return { ok: true };
+  } catch (error) { return publicError(error); }
+});
 ipcMain.handle("workbench:test-provider", async (_event, kind, config) => {
   try {
     if (kind === "video") {
