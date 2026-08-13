@@ -43,6 +43,9 @@ const state = {
   reusableAssets: [],
   reusableAssetTarget: null,
   reusableAssetRenderSignature: "",
+  reusableCharacterLibraryLoaded: false,
+  reusableCharacterLibraryLoading: false,
+  reusableCharacterLibraryError: "",
   assetsRenderSignature: "",
   voiceLibrary: [],
   voiceLibraryRenderSignature: "",
@@ -341,7 +344,7 @@ function renderVoiceBindingGrid() {
     </div>`).join("") : `<div class="empty-hint">先生成或导入角色，随后可在这里直接绑定音色。</div>`;
 }
 
-function openSidebarLibrary(type) {
+async function openSidebarLibrary(type) {
   const panel = $("#sidebarLibraryPanel");
   if (!panel) return;
   if (activeSidebarLibrary === type && !panel.classList.contains("hidden")) {
@@ -355,6 +358,7 @@ function openSidebarLibrary(type) {
   setTextIfChanged($("#sidebarLibraryTitle"), titles[type] || "独立资产库");
   $$("[data-library-section]").forEach(section => section.classList.toggle("active", section.dataset.librarySection === type));
   $$(".library-nav-button").forEach(button => button.classList.toggle("active", button.dataset.library === type));
+  if (type === "characters") await loadReusableCharacterLibrary();
 }
 
 function decorateFeatureHelp() {
@@ -1628,22 +1632,56 @@ function renderVoiceLibraryGrid() {
 function renderCharacterImageLibrary() {
   const grid = $("#sidebarCharacterGridHost");
   if (!grid) return;
-  const project = state.project || {};
-  const characters = project.characters || [];
-  grid.innerHTML = characters.length ? characters.map(character => {
-    const identity = chosenCandidate("character", character.id, "character_sheet")
-      || chosenCandidate("character", character.id, "character_intro")
-      || chosenCandidate("character", character.id, "character_three_view");
-    const boundVoice = (state.voiceLibrary || []).find(item => item.id === character.voiceLibraryId);
-    const count = candidates("character", character.id, "character_sheet").length
-      + candidates("character", character.id, "character_intro").length
-      + candidates("character", character.id, "character_three_view").length;
+  if (state.reusableCharacterLibraryLoading) {
+    grid.innerHTML = `<div class="empty-hint">正在读取本机跨项目人物形象库…</div>`;
+    return;
+  }
+  if (state.reusableCharacterLibraryError) {
+    grid.innerHTML = `<div class="empty-hint">人物形象库读取失败：${escapeHtml(state.reusableCharacterLibraryError)}。请点“刷新人物库”重试。</div>`;
+    return;
+  }
+  if (!state.reusableCharacterLibraryLoaded) {
+    grid.innerHTML = `<div class="empty-hint">打开人物形象库后，会从本机独立资产库读取所有项目已确认的人物形象。</div>`;
+    return;
+  }
+  const assets = (state.reusableAssets || []).filter(item => item.kind === "character");
+  const currentCharacters = state.project?.characters || [];
+  const bindingHint = currentCharacters.length
+    ? "需要用于当前项目时，请在“角色与场景”的对应角色卡片点“从已有资产库选择”进行绑定。"
+    : "当前项目还没有角色；先上传并拆解剧本或生成剧本，识别角色后即可绑定这些人物形象。";
+  grid.innerHTML = `<div class="empty-hint">跨项目人物形象 ${assets.length} 项。${escapeHtml(bindingHint)}</div>${assets.length ? assets.map(item => {
     return `<article class="sidebar-character-card">
-      <div class="sidebar-character-card-head">${assetPreview(identity, "image")}<div><b>${escapeHtml(character.name || character.id)}</b><small>${escapeHtml(character.role || character.description || "人物形象资产")}</small></div></div>
-      <div class="sidebar-character-meta"><span>${identity ? "已确认形象" : "待生成形象"}</span><span>候选 ${count}</span>${boundVoice ? `<span>已绑定音色</span>` : ""}</div>
-      <div class="sidebar-character-actions"><button class="mini-button" type="button" data-action="select-reusable-asset" data-entity-type="character" data-id="${escapeHtml(character.id)}">从已有资产库选择</button><button class="mini-button asset-library-button" type="button" data-action="focus-candidates" data-entity-type="character" data-id="${escapeHtml(character.id)}">当前角色版本</button></div>
+      <div class="sidebar-character-card-head">${assetPreview(item, "image")}<div><b>${escapeHtml(item.label || item.id)}</b><small>${escapeHtml(item.description || "跨项目可复用人物形象")}</small></div></div>
+      <div class="sidebar-character-meta"><span>${escapeHtml(stageLabels[item.stage] || "人物形象")}</span><span>使用 ${Number(item.useCount || 0)} 次</span><span>${escapeHtml(item.source?.projectTitle || "本地上传")}</span></div>
+      <div class="sidebar-character-actions"><button class="mini-button asset-library-button" type="button" data-action="open-asset" data-path="${escapeHtml(item.filePath || "")}" data-title="${escapeHtml(item.label || "人物形象")}" data-kind="image">打开人物图</button></div>
     </article>`;
-  }).join("") : `<div class="empty-hint">完成剧本拆镜后，人物形象会自动进入这里。</div>`;
+  }).join("") : `<div class="empty-hint">独立人物形象库目前为空。已确认的人物形象和手动上传到独立库的人物图会自动在所有项目中显示。</div>`}`;
+}
+
+async function loadReusableCharacterLibrary({ force = false } = {}) {
+  if (state.reusableCharacterLibraryLoading) return;
+  if (state.reusableCharacterLibraryLoaded && !force) {
+    renderCharacterImageLibrary();
+    return;
+  }
+  state.reusableCharacterLibraryLoading = true;
+  state.reusableCharacterLibraryError = "";
+  renderCharacterImageLibrary();
+  try {
+    const result = await api.workbench.listReusableAssets("character");
+    if (!result?.ok) throw new Error(result?.message || "读取人物形象库失败");
+    const characters = (Array.isArray(result.assets) ? result.assets : []).filter(item => item.kind === "character");
+    state.reusableAssets = [
+      ...(state.reusableAssets || []).filter(item => item.kind !== "character"),
+      ...characters
+    ];
+    state.reusableCharacterLibraryLoaded = true;
+  } catch (error) {
+    state.reusableCharacterLibraryError = error?.message || "读取人物形象库失败";
+  } finally {
+    state.reusableCharacterLibraryLoading = false;
+    renderCharacterImageLibrary();
+  }
 }
 
 function renderAssets(force = false) {
@@ -2452,7 +2490,7 @@ function renderProjectStrategy() {
       shotsBanner.innerHTML = `<b>视频上游不匹配</b><span>项目已锁定${engine}，但系统设置当前是 ${videoProviderLabel(settingsKind)}。分步制作仍可先生成分镜图；进入视频阶段前请切换到对应供应商。</span>`;
     } else {
       shotsBanner.classList.remove("danger");
-      shotsBanner.innerHTML = `<b>v0.13.25 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
+      shotsBanner.innerHTML = `<b>v0.13.26 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
     }
   }
   const strategyLocked = !confirmed;
@@ -3029,7 +3067,16 @@ async function openReusableAssetLibrary(entityType, entityId) {
   state.reusableAssetRenderSignature = "";
   const result = await api.workbench.listReusableAssets(entityType);
   if (!result?.ok) return showToast(result?.message || "读取已有资产库失败", "error");
-  state.reusableAssets = Array.isArray(result.assets) ? result.assets : [];
+  const scopedAssets = Array.isArray(result.assets) ? result.assets : [];
+  state.reusableAssets = [
+    ...(state.reusableAssets || []).filter(item => item.kind !== entityType),
+    ...scopedAssets
+  ];
+  if (entityType === "character") {
+    state.reusableCharacterLibraryLoaded = true;
+    state.reusableCharacterLibraryError = "";
+    renderCharacterImageLibrary();
+  }
   renderReusableAssetLibrary();
   const dialog = $("#reusableAssetDialog");
   if (dialog && !dialog.open) dialog.showModal();
@@ -3041,6 +3088,9 @@ async function openIndependentAssetLibrary(target = { entityType: "manager" }) {
   const result = await api.workbench.listReusableAssets();
   if (!result?.ok) return showToast(result?.message || "读取独立资产库失败", "error");
   state.reusableAssets = Array.isArray(result.assets) ? result.assets : [];
+  state.reusableCharacterLibraryLoaded = true;
+  state.reusableCharacterLibraryError = "";
+  renderCharacterImageLibrary();
   renderReusableAssetLibrary();
   const dialog = $("#reusableAssetDialog");
   if (dialog && !dialog.open) dialog.showModal();
@@ -3859,7 +3909,7 @@ document.addEventListener("click", async event => {
   if (button.classList.contains("stage-button")) return switchStage(button.dataset.stage);
   if (button.classList.contains("library-nav-button")) return openSidebarLibrary(button.dataset.library);
   if (button.id === "closeSidebarLibrary") return openSidebarLibrary(activeSidebarLibrary);
-  if (button.id === "sidebarRefreshCharacterLibrary") return renderCharacterImageLibrary();
+  if (button.id === "sidebarRefreshCharacterLibrary") return loadReusableCharacterLibrary({ force: true });
   if (button.dataset.action === "view-prompt-example") return openPromptExample(button.dataset.promptKey);
   if (button.dataset.action === "download-prompt-example") return downloadTextFile(`${button.dataset.promptKey || "prompt"}-example.json`, promptExampleForKey(button.dataset.promptKey));
   const action = button.dataset.action;
@@ -3882,8 +3932,11 @@ document.addEventListener("click", async event => {
       if (!result?.ok) return showToast(result?.message || "上传到独立资产库失败", "error");
       if (result.canceled) return;
       state.reusableAssets = Array.isArray(result.assets) ? result.assets : state.reusableAssets;
+      state.reusableCharacterLibraryLoaded = true;
+      state.reusableCharacterLibraryError = "";
       state.reusableAssetRenderSignature = "";
       renderReusableAssetLibrary();
+      renderCharacterImageLibrary();
       return showToast(`已上传 ${result.entries?.length || 0} 个文件到独立资产库`);
     } finally {
       button.disabled = false;
@@ -3894,8 +3947,11 @@ document.addEventListener("click", async event => {
     const result = await api.workbench.deleteReusableAsset(id);
     if (!result?.ok) return showToast(result?.message || "删除失败", "error");
     state.reusableAssets = Array.isArray(result.assets) ? result.assets : state.reusableAssets.filter(item => item.id !== id);
+    state.reusableCharacterLibraryLoaded = true;
+    state.reusableCharacterLibraryError = "";
     state.reusableAssetRenderSignature = "";
     renderReusableAssetLibrary();
+    renderCharacterImageLibrary();
     return showToast("已从独立资产库删除");
   }
   if (action === "bind-independent-asset") {

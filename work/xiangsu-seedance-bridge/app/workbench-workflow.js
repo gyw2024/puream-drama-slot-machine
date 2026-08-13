@@ -288,6 +288,48 @@ function normalizeTopicOptions(data, { expectedCount = 10, idOffset = 0 } = {}) 
   return topics;
 }
 
+function topicJsonParseOptions() {
+  return {
+    requiredKeys: ["topics"],
+    unwrapKeys: ["data", "result", "payload", "content", "response", "output", "message", "choices"],
+    rootArrayKey: "topics",
+    rootArrayAliases: ["items", "options", "ideas", "topicOptions", "topicList", "选题", "选题列表"],
+    recursiveUnwrap: true
+  };
+}
+
+function recoverTopicOptionsFromDiagnostics(project) {
+  const requestSessionId = String(project?.ideation?.requestSessionId || "");
+  const failures = Array.isArray(project?.textProviderDiagnostics?.failures)
+    ? project.textProviderDiagnostics.failures
+    : [];
+  let matchingFailureCount = 0;
+  for (const failure of failures) {
+    if (String(failure?.operation || "") !== "topic_ideation"
+      || String(failure?.code || "") !== "MODEL_JSON_INVALID"
+      || (requestSessionId && String(failure?.sessionId || "") !== requestSessionId)) continue;
+    matchingFailureCount += 1;
+    const rawText = String(failure.rawText || "");
+    const actualSha256 = crypto.createHash("sha256").update(rawText, "utf8").digest("hex");
+    if (!rawText
+      || failure.rawTextTruncated === true
+      || Number(failure.rawTextLength) !== rawText.length
+      || String(failure.rawTextSha256 || "").toLowerCase() !== actualSha256) continue;
+    try {
+      const parsed = parseStructuredJson(rawText, topicJsonParseOptions());
+      return {
+        status: "recovered",
+        topics: normalizeTopicOptions(parsed),
+        failureId: String(failure.id || ""),
+        rawTextSha256: actualSha256,
+        sessionId: String(failure.sessionId || requestSessionId),
+        recoveredAt: new Date().toISOString()
+      };
+    } catch {}
+  }
+  return matchingFailureCount ? { status: "invalid", matchingFailureCount } : { status: "none" };
+}
+
 const TOPIC_GLOBAL_SUFFIX_MARKER = "【K3·v23 全局硬卡·仅文本LLM阶段】";
 
 function stripGlobalTextSuffix(basePrompt) {
@@ -8659,6 +8701,32 @@ class WorkbenchWorkflow {
     }
     let project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
+    const recoveryEligible = ["failed", "generating"].includes(String(project.ideation?.status || ""));
+    const recovered = recoveryEligible ? recoverTopicOptionsFromDiagnostics(project) : { status: "none" };
+    if (recovered.status === "recovered") {
+      const selectedTopicId = recovered.topics.some(item => item.id === project.ideation?.selectedTopicId)
+        ? project.ideation.selectedTopicId
+        : "";
+      project.ideation = {
+        ...(project.ideation || {}),
+        status: "ready",
+        topics: recovered.topics,
+        selectedTopicId,
+        generatedAt: recovered.recoveredAt,
+        recoveredAt: recovered.recoveredAt,
+        recoverySourceFailureId: recovered.failureId,
+        recoveryRawTextSha256: recovered.rawTextSha256,
+        message: "已从上次模型原始回复本地恢复 10 个候选题材，未再次提交上游，也未新增文本费用",
+        errorCode: ""
+      };
+      project.activity.unshift({
+        id: makeId("activity"),
+        at: recovered.recoveredAt,
+        type: "topics_recovered",
+        summary: "从已保存的模型回复本地恢复10个选题，未再次提交或扣费"
+      });
+      return this.store.saveProject(project);
+    }
     // Persist one logical topic request across reconnects and explicit resume.
     // A wall-clock id created on every click causes an unknown SSE response to
     // become a second paid server request after the user presses Continue.
@@ -8689,8 +8757,7 @@ class WorkbenchWorkflow {
         // not discarded by the desktop client.
         ], {
           json: true,
-          requiredKeys: ["topics"],
-          unwrapKeys: ["data", "result", "payload", "content"],
+          ...topicJsonParseOptions(),
           sessionId: topicSessionId,
           timeoutMs: 300_000,
           maxTokens: 2_400,
@@ -8712,8 +8779,8 @@ class WorkbenchWorkflow {
         project.activity.unshift({ id: makeId("activity"), at: new Date().toISOString(), type: "topics_generated", summary: "生成10个中老年爆款选题" });
         return this.store.saveProject(project);
       } catch (error) {
-        if (shouldStopAutomaticTextRetry(error)) throw error;
         lastError = error;
+        if (shouldStopAutomaticTextRetry(error)) break;
       }
     }
     project = this.store.getProject(projectId);
@@ -15465,7 +15532,7 @@ ${shotAnchor}
   }
 }
 
-module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, projectScriptFormat, assertAiScriptFormatConfirmed, scriptFormatDirective, viewerComprehensionPriorityDirective, renderProductionScript, renderDialogueScript, renderTimedStoryboardScript, renderScriptForProject, ideaSignature, parseTimedStoryboardScript, expandTimedStoryboardForProvider, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
+module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, topicJsonParseOptions, recoverTopicOptionsFromDiagnostics, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, projectScriptFormat, assertAiScriptFormatConfirmed, scriptFormatDirective, viewerComprehensionPriorityDirective, renderProductionScript, renderDialogueScript, renderTimedStoryboardScript, renderScriptForProject, ideaSignature, parseTimedStoryboardScript, expandTimedStoryboardForProvider, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
 module.exports.reconcileShotSceneCatalog = reconcileShotSceneCatalog;
 module.exports.activeBlueprintFailures = activeBlueprintFailures;
 module.exports.scriptQualityGateOptions = scriptQualityGateOptions;

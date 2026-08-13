@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const assert = require("node:assert/strict");
 const { _electron: electron } = require("playwright-core");
 const axeSource = require("axe-core").source;
@@ -19,6 +20,31 @@ async function main() {
   fs.mkdirSync(evidenceDir, { recursive: true });
   fs.mkdirSync(runDir, { recursive: true });
   fs.mkdirSync(userDataDir, { recursive: true });
+  const reusableAssetDir = path.join(workbenchDir, "reusable-asset-library");
+  const reusableFilesDir = path.join(reusableAssetDir, "files");
+  fs.mkdirSync(reusableFilesDir, { recursive: true });
+  const reusableCharacterPath = path.join(reusableFilesDir, "audit-cross-project-character.png");
+  fs.copyFileSync(path.join(root, "app", "assets", "drama-slot-mark.png"), reusableCharacterPath);
+  const reusableCharacterSha256 = crypto.createHash("sha256").update(fs.readFileSync(reusableCharacterPath)).digest("hex");
+  fs.writeFileSync(path.join(reusableAssetDir, "index.json"), JSON.stringify({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    assets: [{
+      id: "audit-cross-project-character",
+      kind: "character",
+      mediaType: "image",
+      stage: "character_sheet",
+      label: "跨项目测试人物",
+      description: "来自另一个项目的已确认人物形象",
+      filePath: reusableCharacterPath,
+      sha256: reusableCharacterSha256,
+      fingerprint: `character:${reusableCharacterSha256}`,
+      source: { projectId: "another-project", projectTitle: "另一个历史项目" },
+      useCount: 2,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }]
+  }, null, 2), "utf8");
   const licenseSource = process.env.DRAMA_SLOT_AUDIT_LICENSE_SOURCE
     || path.join(process.env.APPDATA || "", packageJson.name, "drama-license.json");
   if (!fs.existsSync(licenseSource)) throw new Error("packaged audit requires an existing local activation snapshot; set DRAMA_SLOT_AUDIT_LICENSE_SOURCE");
@@ -515,6 +541,21 @@ async function main() {
     };
     await switchProject(stateTransitions.firstId);
     await switchProject(stateTransitions.secondId);
+    await page.click('.library-nav-button[data-library="characters"]');
+    await page.waitForFunction(() => document.querySelectorAll("#sidebarCharacterGridHost .sidebar-character-card").length > 0, null, { timeout: 10_000 });
+    const crossProjectCharacterLibrary = await page.evaluate(async () => {
+      const current = await window.dramaSlot.workbench.getProject(document.querySelector("#projectSelect")?.value || "");
+      return {
+        currentProjectCharacterCount: current.project?.characters?.length || 0,
+        cardCount: document.querySelectorAll("#sidebarCharacterGridHost .sidebar-character-card").length,
+        text: document.querySelector("#sidebarCharacterGridHost")?.innerText || "",
+        visible: !document.querySelector("#sidebarLibraryPanel")?.classList.contains("hidden")
+      };
+    });
+    await page.mouse.move(900, 500);
+    await page.waitForTimeout(300);
+    await captureBackground("cross-project-character-library-empty-project");
+    await page.click("#closeSidebarLibrary");
     await page.evaluate(() => document.querySelector('.stage-button[data-stage="shots"]')?.click());
     const selectedStoryboardMode = await page.evaluate(() => document.querySelector("#generationMode")?.value || "");
     await page.evaluate(() => document.querySelector('.stage-button[data-stage="videos"]')?.click());
@@ -617,6 +658,13 @@ async function main() {
     assert.deepEqual(visibilityAudit.forbiddenMatches, [], "user-visible flow must not expose H3/Hailuo/海螺");
     assert.deepEqual(switched, { ok: true, kind: "local-xiangsu" }, "manual local switch must persist");
     assert.equal(concurrencyUi.selectedProjectId, stateTransitions.secondId, "switching away from a running project must complete");
+    assert.deepEqual({
+      currentProjectCharacterCount: crossProjectCharacterLibrary.currentProjectCharacterCount,
+      cardCount: crossProjectCharacterLibrary.cardCount,
+      visible: crossProjectCharacterLibrary.visible
+    }, { currentProjectCharacterCount: 0, cardCount: 1, visible: true }, "an empty project must still show the global cross-project character library");
+    assert.match(crossProjectCharacterLibrary.text, /跨项目测试人物/);
+    assert.match(crossProjectCharacterLibrary.text, /另一个历史项目/);
     assert.equal(selectedStoryboardMode, "storyboard_sheet", "storyboard-sheet mode must survive reload and project switches");
     assert.equal(concurrencyUi.topicDisabled, false, "another project's topic button must not inherit the running project's lock");
     assert.equal(concurrencyUi.videoDisabled, false, "another project's explicit video button must remain available");
@@ -677,6 +725,7 @@ async function main() {
       visibilityAudit,
       manualSwitch: switched,
       selectedStoryboardMode,
+      crossProjectCharacterLibrary,
       concurrencyUi,
       deletedProjectRoundTrip: deleted,
       runtime,

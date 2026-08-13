@@ -275,6 +275,13 @@ function parseStructuredJson(text, options = {}) {
   const unwrapKeys = Array.isArray(options.unwrapKeys)
     ? [...new Set(options.unwrapKeys.map(key => String(key || "").trim()).filter(Boolean))]
     : [];
+  const rootArrayKey = String(options.rootArrayKey || "").trim();
+  const rootArrayAliases = Array.isArray(options.rootArrayAliases)
+    ? [...new Set(options.rootArrayAliases.map(key => String(key || "").trim()).filter(Boolean))]
+    : [];
+  const recursiveUnwrap = options.recursiveUnwrap === true;
+  const recursiveDepth = Math.max(0, Number(options._recursiveDepth) || 0);
+  const rootArrayEnvelopeKeys = new Set(["data", "result", "payload", "content", "response", "output"]);
   const schemaAware = requiredKeys.length > 0;
   const parsedCandidates = [];
   const tryParse = candidate => {
@@ -290,25 +297,47 @@ function parseStructuredJson(text, options = {}) {
     const repairedParsed = tryParse(repaired.text);
     return repairedParsed ? { ...repairedParsed, quoteRepairs: repaired.repairs } : null;
   };
-  const addCandidate = (value, origin, depth = 0) => {
+  const addCandidate = (value, origin, depth = 0, allowRootArray = false) => {
     if (value === null || value === undefined || depth > 4) return;
-    parsedCandidates.push({ value, origin, depth });
+    parsedCandidates.push({ value, origin, depth, allowRootArray });
+    if (recursiveUnwrap && Array.isArray(value)) {
+      value.slice(0, 64).forEach((nested, index) => addCandidate(nested, `${origin}[${index}]`, depth + 1, false));
+      return;
+    }
     if (!unwrapKeys.length || !value || typeof value !== "object" || Array.isArray(value)) return;
     for (const key of unwrapKeys) {
       if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
       const nested = value[key];
       if (typeof nested === "string") {
-        const parsed = tryParse(nested);
-        if (parsed) addCandidate(parsed.value, `${origin}.${key}`, depth + 1);
+        const parsed = tryParseWithQuoteRepair(nested);
+        if (parsed) {
+          addCandidate(parsed.value, `${origin}.${key}`, depth + 1, rootArrayEnvelopeKeys.has(key));
+        } else if (recursiveUnwrap && recursiveDepth < 4) {
+          try {
+            addCandidate(parseStructuredJson(nested, {
+              ...options,
+              _recursiveDepth: recursiveDepth + 1
+            }), `${origin}.${key}`, depth + 1);
+          } catch {}
+        }
       } else {
         addCandidate(nested, `${origin}.${key}`, depth + 1);
       }
     }
   };
-  const schemaMatch = value => (
-    value && typeof value === "object" && !Array.isArray(value)
-    && requiredKeys.every(key => Object.prototype.hasOwnProperty.call(value, key))
-  );
+  const normalizeSchemaCandidate = (value, allowRootArray = false) => {
+    if (rootArrayKey && requiredKeys.length === 1 && requiredKeys[0] === rootArrayKey) {
+      if (allowRootArray && Array.isArray(value)) return { [rootArrayKey]: value };
+      if (value && typeof value === "object" && !Array.isArray(value)
+        && !Object.prototype.hasOwnProperty.call(value, rootArrayKey)) {
+        const alias = rootArrayAliases.find(key => Array.isArray(value[key]));
+        if (alias) return { ...value, [rootArrayKey]: value[alias] };
+      }
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)
+      && requiredKeys.every(key => Object.prototype.hasOwnProperty.call(value, key))) return value;
+    return null;
+  };
   const fail = extra => {
     const rawTextLimit = 200_000;
     throw Object.assign(new Error(schemaAware
@@ -327,7 +356,7 @@ function parseStructuredJson(text, options = {}) {
   const direct = tryParseWithQuoteRepair(raw);
   if (direct) {
     if (!schemaAware) return direct.value;
-    addCandidate(direct.value, "direct");
+    addCandidate(direct.value, "direct", 0, Array.isArray(direct.value));
   }
 
   // Models sometimes wrap the payload in prose or one of several code fences.
@@ -336,7 +365,7 @@ function parseStructuredJson(text, options = {}) {
     const parsed = tryParseWithQuoteRepair(match[1]);
     if (!parsed) continue;
     if (!schemaAware) return parsed.value;
-    addCandidate(parsed.value, "fence");
+    addCandidate(parsed.value, "fence", 0, Array.isArray(parsed.value));
   }
 
   // Recover the first balanced JSON object or array embedded in prose. The
@@ -376,7 +405,7 @@ function parseStructuredJson(text, options = {}) {
         const parsed = tryParseWithQuoteRepair(raw.slice(start, index + 1));
         if (parsed) {
           if (!schemaAware) return parsed.value;
-          addCandidate(parsed.value, `balanced:${start}`);
+          addCandidate(parsed.value, `balanced:${start}`, 0, !direct && Array.isArray(parsed.value));
         }
         break;
       }
@@ -385,13 +414,16 @@ function parseStructuredJson(text, options = {}) {
 
   if (schemaAware) {
     const match = parsedCandidates
-      .filter(candidate => schemaMatch(candidate.value))
+      .map(candidate => ({ ...candidate, normalizedValue: normalizeSchemaCandidate(candidate.value, candidate.allowRootArray) }))
+      .filter(candidate => candidate.normalizedValue)
       .sort((left, right) => {
-        const leftSize = JSON.stringify(left.value).length;
-        const rightSize = JSON.stringify(right.value).length;
+        const explicitRootDifference = Number(Array.isArray(left.value)) - Number(Array.isArray(right.value));
+        if (explicitRootDifference) return explicitRootDifference;
+        const leftSize = JSON.stringify(left.normalizedValue).length;
+        const rightSize = JSON.stringify(right.normalizedValue).length;
         return rightSize - leftSize || left.depth - right.depth;
       })[0];
-    if (match) return match.value;
+    if (match) return match.normalizedValue;
     fail({
       jsonCandidateCount: parsedCandidates.length,
       jsonCandidateKeyCounts: parsedCandidates.slice(0, 20).map(candidate => ({
