@@ -9,6 +9,8 @@ const { WorkbenchStore } = require("../app/workbench-store");
 const {
   assertDirectFastSegment,
   assertDirectFastStorySpine,
+  buildDirectFastFallbackSegment,
+  buildDirectFastFallbackSpine,
   directFastProductStartIndex,
   directFastReversalIndex,
   directFastSegmentRanges,
@@ -163,6 +165,69 @@ test("global story spine locks cast, scenes and causal handoffs before parallel 
   assert.equal(assertDirectFastSegment(segment, 6, 10, { characters: spine.c, scenes: spine.sc, strict: true }), segment);
 });
 
+test("local fallback compiles strict five and ten minute segment contracts", () => {
+  const topic = {
+    title: "门口真相",
+    relationship: "母女",
+    hook: "住手！你凭什么推她？",
+    logline: "女儿误解母亲，随后按证据查明真相。",
+    proofChain: "日期、签名和证言相互印证。",
+    reversal: "女儿确认母亲一直替她承担。",
+    emotionalPayoff: "女儿用持续行动修复关系。"
+  };
+  const product = { name: "护膝", description: "日常支撑", sellingPoints: "贴合膝部、活动支撑" };
+  for (const seconds of [300, 600]) {
+    const schedule = planFilmSchedule(seconds, "puream-hailuo-h3", { engine: "hailuo-h3" });
+    const ranges = directFastSegmentRanges(schedule.unitCount);
+    const spine = buildDirectFastFallbackSpine({ topic, ranges });
+    assert.equal(assertDirectFastStorySpine(spine, ranges), spine);
+    for (const [start, end] of ranges) {
+      const segmentPayload = buildDirectFastFallbackSegment({
+        spine,
+        topic,
+        segmentStart: start,
+        segmentEnd: end,
+        unitDurations: schedule.suggestedDurations
+      });
+      assert.equal(assertDirectFastSegment(segmentPayload, start, end, {
+        characters: spine.c,
+        scenes: spine.sc,
+        durations: schedule.suggestedDurations,
+        strict: true
+      }), segmentPayload);
+    }
+    const completedPayload = {
+      ...spine,
+      spineLocked: true,
+      s: ranges.flatMap(([start, end]) => buildDirectFastFallbackSegment({
+        spine,
+        topic,
+        segmentStart: start,
+        segmentEnd: end,
+        unitDurations: schedule.suggestedDurations
+      }).s)
+    };
+    const materialized = materializeDirectFastScript({ payload: completedPayload, topic, product, filmSchedule: schedule });
+    const options = { targetDurationSeconds: seconds, expectedUnitCount: schedule.unitCount };
+    const storyBible = validateStoryBible(materialized.storyBible, options);
+    const blueprint = validateBlueprint({ ...storyBible, shotPlan: materialized.plans }, product.name, options);
+    const assignments = allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 2);
+    const shots = validateShotBatch({ shots: materialized.rawShots }, blueprint.shotPlan, product.name, "hailuo-h3", {
+      generationMode: "keyframe",
+      characters: blueprint.characters,
+      maxSpeakingCharacters: 2,
+      requireReferenceDialogueFlow: true,
+      allowedSpeakersByShot: h3AllowedSpeakersByShot(assignments)
+    });
+    const normalized = normalizeAnalysis({ story: blueprint.story, characters: blueprint.characters, scenes: blueprint.scenes, shots }, {
+      product,
+      generation: { targetDurationSeconds: seconds, engine: "hailuo-h3", mode: "keyframe" }
+    });
+    const audit = auditDramaSpec(normalized, { productName: product.name, sellingPoints: product.sellingPoints });
+    assert.equal(audit.ok, true, audit.failures.map(item => item.message).join("；"));
+  }
+});
+
 test("the direct compiler supports a real 20-second two-shot smoke drama", () => {
   const topic = {
     title: "门口真相",
@@ -270,7 +335,7 @@ test("the direct compiler adapts product actions by category instead of forcing 
   assert.doesNotMatch(productText, /膝部|绑带|跪地量裁|戴好/);
 });
 
-test("failed direct segment is checkpointed and explicit resume requests only that segment", async t => {
+test("failed direct segment is locally completed without blocking the project or issuing a second request", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-direct-resume-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -323,30 +388,12 @@ test("failed direct segment is checkpointed and explicit resume requests only th
     }
   });
 
-  await assert.rejects(workflow.generateCompleteScript(created.id), error => error.code === "PUREAM_TEXT_STREAM_ERROR");
-  const failed = store.getProject(created.id);
-  assert.equal(failed.automation.recoverableFailure, true);
-  assert.ok(failed.script.generationCheckpoint.directFastSegments.length >= 4);
-  assert.ok(failed.script.generationCheckpoint.directFastFailure.failedSegmentRanges.some(range => range[0] === 11 && range[1] === 15));
-  const firstCalls = new Map(calls);
-
-  let completed;
-  let resumeError = null;
-  for (let attempt = 0; attempt < 3 && !completed; attempt += 1) {
-    try { completed = await workflow.resumeScriptGeneration(created.id); }
-    catch (error) {
-      resumeError = error;
-      if (error.code !== "SCRIPT_DIRECT_SEGMENT_CONTRACT_FAILED") throw error;
-    }
-  }
-  assert.ok(completed, resumeError?.message || "resume did not complete");
-  assert.ok(calls.get(11) >= 2);
-  for (const [start, count] of firstCalls) {
-    if (![11, 16].includes(start)) assert.equal(calls.get(start), count, `S${start} segment must be reused`);
-  }
+  const completed = await workflow.generateCompleteScript(created.id);
+  assert.equal(calls.get(11), 1, "invalid upstream output must not trigger a second billable request");
   assert.equal(completed.script.generationCheckpoint, null);
   assert.equal(completed.shots.length, 30);
   assert.equal(completed.currentStage, "assets");
+  assert.ok(completed.script.generationPerformance.localFallbackCount >= 1);
 });
 
 test("one-call compact script is locally expanded into a 300-second production-ready drama", () => {

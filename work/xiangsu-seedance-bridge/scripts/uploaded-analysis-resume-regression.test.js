@@ -60,7 +60,7 @@ function responseFor(messages) {
   };
 }
 
-test("uploaded-script analysis resumes only the failed bounded chunk", async t => {
+test("uploaded-script analysis locally completes a failed bounded chunk without a second billable request", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-analysis-resume-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -101,20 +101,9 @@ test("uploaded-script analysis resumes only the failed bounded chunk", async t =
     }
   });
 
-  await assert.rejects(workflow.analyzeScript(project.id), error => error?.code === "PUREAM_TRANSPORT_INTERRUPTED");
-  const failed = store.getProject(project.id);
-  const totalChunks = failed.script.analysisCheckpoint.totalChunks;
-  assert.ok(totalChunks >= 2);
-  assert.equal(failed.script.analysisCheckpoint.chunks.length, totalChunks - 1);
-  assert.equal(failed.automation.recoverableFailure, true);
-  const completedCalls = new Map(calls);
-
   const analyzed = await workflow.analyzeScript(project.id);
-  assert.equal(calls.get(2), 2);
-  for (const [chunkNumber, count] of completedCalls) {
-    if (chunkNumber !== 2) assert.equal(calls.get(chunkNumber), count, `chunk ${chunkNumber} should be reused`);
-  }
-  assert.equal(sessions.get(2)[0], sessions.get(2)[1]);
+  assert.equal(calls.get(2), 1, "failed chunk must be completed locally without a second upstream request");
+  assert.equal(sessions.get(2).length, 1);
   assert.equal(analyzed.script.analysisCheckpoint, null);
   assert.equal(analyzed.currentStage, "assets");
   assert.equal(analyzed.script.sourceDialogueLedger.length, 24);

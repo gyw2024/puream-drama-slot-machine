@@ -15,6 +15,8 @@ const { allocateH3ShotSpeakers, h3AllowedSpeakersByShot } = require("./h3-speake
 const {
   assertDirectFastSegment,
   assertDirectFastStorySpine,
+  buildDirectFastFallbackSegment,
+  buildDirectFastFallbackSpine,
   directFastProductStartIndex,
   directFastSegmentRanges,
   directFastSpineFromLegacyPayload,
@@ -117,18 +119,19 @@ const STRUCTURED_TEXT_MAX_CHARS = 7500;
 // several simultaneous context-heavy requests that stall the desktop relay.
 const UPLOADED_ANALYSIS_MAX_SOURCE_CHARS = 5000;
 const UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST = 5;
-const UPLOADED_ANALYSIS_MAX_CONCURRENCY = 3;
+const UPLOADED_ANALYSIS_MAX_CONCURRENCY = 2;
 // Keep the official relay below its per-account saturation point. Eight-way
 // planning fills one wave; unit writing uses two bounded waves instead of
 // flooding the relay with sixteen simultaneous long JSON streams.
 const SCRIPT_FAST_CONCURRENCY = 8;
-const SCRIPT_FAST_TARGET_SECONDS = 300;
+const SCRIPT_FAST_TARGET_SECONDS = 600;
 const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol";
 const SCRIPT_DIRECT_SEGMENT_UNITS = 5;
-// Keep one long structured stream per project.  Completed segments are still
-// checkpointed immediately, while avoiding the three simultaneous relay
-// handshakes that previously made an otherwise healthy account fail at once.
-const SCRIPT_DIRECT_MAX_CONCURRENCY = 1;
+// Match the website relay's two text slots. More than two causes queue churn;
+// one makes 5-10 minute scripts miss the writing SLA.
+const SCRIPT_DIRECT_MAX_CONCURRENCY = 2;
+const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = 60_000;
+const SCRIPT_WRITING_SLA_MS = 9 * 60_000;
 const IMAGE_BATCH_MAX_CONCURRENCY = 6;
 const VIDEO_BATCH_MAX_CONCURRENCY = 4;
 
@@ -6107,16 +6110,9 @@ function analysisChunksForSchedule(text, unitCount, options = {}) {
 function uploadedAnalysisConcurrency(chunkSchedules = []) {
   const list = Array.isArray(chunkSchedules) ? chunkSchedules : [];
   if (!list.length) return 1;
-  const maxSourceChars = Math.max(...list.map(item => String(item?.text || "").length));
-  const maxUnits = Math.max(...list.map(item => Number(item?.unitCount) || 0));
-  // Very dense excerpts are held to two streams. Normal uploaded scripts use
-  // three, below the relay's long-JSON saturation point while still allowing
-  // different projects to be queued independently by the management backend.
-  return Math.max(1, Math.min(
-    UPLOADED_ANALYSIS_MAX_CONCURRENCY,
-    list.length,
-    maxSourceChars > UPLOADED_ANALYSIS_MAX_SOURCE_CHARS || maxUnits > UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST ? 2 : 3
-  ));
+  // Match the website relay's two text slots. A third long JSON stream only
+  // creates queue churn and increases the chance of a zero-unit response.
+  return Math.max(1, Math.min(UPLOADED_ANALYSIS_MAX_CONCURRENCY, list.length));
 }
 
 function analysisChunkSchedules(chunks, filmSchedule) {
@@ -6147,6 +6143,131 @@ function analysisChunkSchedules(chunks, filmSchedule) {
       durations
     };
   });
+}
+
+function localUploadedAnalysisChunk(chunk, project = {}) {
+  const ledger = (Array.isArray(chunk?.sourceDialogueLedger) ? chunk.sourceDialogueLedger : []).map(item => ({ ...item }));
+  const names = [...new Set(ledger.map(item => String(item?.speaker || item?.speakerRaw || "").trim()).filter(Boolean))];
+  if (!names.length) names.push("讲述者");
+  const characters = names.map((name, index) => ({
+    id: `C${String(index + 1).padStart(2, "0")}`,
+    name,
+    age: "以用户原稿与后续资产图为准",
+    role: index === 0 ? "原稿主要说话人" : "原稿关系人物",
+    description: `${name}的脸型、年龄纹理、发型、体态和永久识别特征以用户后续确认的资产为准`,
+    identitySignature: `${name}姓名与原稿身份固定；脸型、年龄纹理和体态在全剧保持一致`,
+    voiceDescription: `${name}按原稿括号语气表演；口语清楚，重音、速度和音量随原稿情绪变化`,
+    signatureLine: String(ledger.find(item => item.speaker === name)?.text || `${name}会把原稿内容完整说清楚`).slice(0, 22),
+    importance: index === 0 ? "lead" : "supporting"
+  }));
+  const characterByName = new Map(characters.map(item => [item.name, item]));
+  const sceneMatch = String(chunk?.text || "").match(/(?:【场景】|场景[：:])\s*([^\n]{2,40})/);
+  const sceneName = String(sceneMatch?.[1] || `用户原稿场景${Number(chunk?.index || 0) + 1}`).trim();
+  const scenes = [{
+    id: `SC${String(Number(chunk?.index || 0) + 1).padStart(2, "0")}`,
+    name: sceneName,
+    description: `${sceneName}的门窗、主要家具、人物走位区和正反打轴线固定；具体美术以原稿与用户资产为准`,
+    interiorExterior: "以原稿为准",
+    time: "以原稿为准",
+    lighting: "保持人物面部和动作清楚，主光方向连续",
+    atmosphere: "保留现场环境声，台词清晰",
+    scenePurpose: "完整承载用户原稿的事件、对白和人物关系"
+  }];
+  const unitCount = Math.max(1, Number(chunk?.unitCount) || 1);
+  const groups = Array.from({ length: unitCount }, () => []);
+  if (ledger.length) {
+    let groupIndex = 0;
+    const targetTurns = Math.max(1, Math.ceil(ledger.length / unitCount));
+    for (const line of ledger) {
+      const current = groups[groupIndex];
+      const speakers = new Set(current.map(item => item.speaker));
+      const introducesThirdSpeaker = !speakers.has(line.speaker) && speakers.size >= 2;
+      if (groupIndex < unitCount - 1 && current.length && (current.length >= targetTurns || introducesThirdSpeaker)) groupIndex += 1;
+      groups[groupIndex].push(line);
+    }
+  }
+  const proseParts = String(chunk?.text || "").split(/\n+/).map(item => item.trim()).filter(Boolean);
+  const shots = groups.map((lines, index) => {
+    const duration = Math.max(5, Math.min(15, Number(chunk?.durations?.[index]) || 10));
+    const speakers = [...new Set(lines.map(item => item.speaker))];
+    const scenePresenceCharacterIds = speakers.map(name => characterByName.get(name)?.id).filter(Boolean);
+    const visibleCharacterIds = scenePresenceCharacterIds.slice(0, 2);
+    const focusCharacterId = visibleCharacterIds[0] || characters[0].id;
+    const counterpartCharacterId = visibleCharacterIds.find(id => id !== focusCharacterId) || "";
+    const bindings = lines.map((item, turnIndex) => {
+      const speakerId = characterByName.get(item.speaker)?.id || focusCharacterId;
+      const listeners = visibleCharacterIds.filter(id => id !== speakerId).slice(0, 1);
+      return {
+        sourceDialogueId: item.id,
+        listenerIds: listeners,
+        subshotNumber: Math.min(3, Math.floor(turnIndex * 3 / Math.max(1, lines.length)) + 1),
+        onScreen: visibleCharacterIds.includes(speakerId),
+        intent: item.metadata?.intent || item.tone || "推进原稿事实",
+        emotion: item.metadata?.emotion || item.tone || "按原稿处境自然表达",
+        delivery: item.metadata?.delivery || item.tone || "口语清楚、句意完整",
+        volume: item.metadata?.volume || "按情绪自然变化",
+        pace: item.metadata?.pace || "按句意自然停连",
+        body: item.metadata?.body || item.tone || "视线朝向听者，表情和手部动作与台词同步",
+        listenerBeat: listeners.length ? "听者在眼神、呼吸和手部出现可见反应" : "画外听者反应由下一镜承接"
+      };
+    });
+    const sourceAction = proseParts[Math.min(proseParts.length - 1, index)] || lines.map(item => item.text).join("；") || "按用户原稿推进本段事件";
+    const splitA = Math.max(1, Math.round(duration * 0.3));
+    const splitB = Math.max(splitA + 1, Math.round(duration * 0.7));
+    const boundaries = [[0, splitA], [splitA, splitB], [splitB, duration]];
+    const subshots = boundaries.map(([start, end], subIndex) => ({
+      number: subIndex + 1,
+      start,
+      end,
+      shotType: subIndex === 0 ? "说话人近景" : subIndex === 1 ? "听者反应" : "动作结果",
+      cutReason: subIndex === 0 ? "承接上一镜事实" : subIndex === 1 ? "台词落点切听者" : "末句切动作结果",
+      framing: subIndex === 2 ? "手部与表情特写" : "中近景",
+      camera: subIndex === 1 ? "轻微推进" : "稳定机位",
+      action: `${sourceAction.slice(0, 160)}；第${subIndex + 1}拍完成可见变化`,
+      sourceDialogueIds: bindings.filter(item => item.subshotNumber === subIndex + 1).map(item => item.sourceDialogueId),
+      visibleCharacterIds,
+      speakerIds: [],
+      offscreenSpeakerIds: scenePresenceCharacterIds.filter(id => !visibleCharacterIds.includes(id)),
+      sound: "连续现场环境底噪、清晰对白与同步动作声",
+      transition: subIndex === 2 ? "末句、视线或手部动作桥接下一镜" : "台词与反应接力"
+    }));
+    return {
+      id: `U${Number(chunk?.index || 0) + 1}_${index + 1}`,
+      title: `原稿拆镜${Number(chunk?.index || 0) + 1}-${index + 1}`,
+      duration,
+      characters: speakers,
+      scene: sceneName,
+      scenePresenceCharacterIds,
+      visibleCharacterIds,
+      focusCharacterId,
+      counterpartCharacterId,
+      action: sourceAction.slice(0, 240),
+      stateBefore: index === 0 ? "承接用户原稿本段入口" : "承接上一镜末句和动作结果",
+      stateAfter: lines.length ? `原稿台词 ${lines.at(-1).id} 已完整表达并触发下一动作` : "本段事件形成下一镜入口",
+      causalLink: "严格按用户原稿事件顺序和台词顺序推进",
+      visualBeat: sourceAction.slice(0, 180),
+      emotion: lines.map(item => item.tone).filter(Boolean).join("→") || "按原稿情节递进",
+      performance: "说话人朝向听者，以原稿语气、表情和动作完整说出台词；听者必须有可见反应",
+      sourceDialogueBindings: bindings,
+      sourceDialogueIds: bindings.map(item => item.sourceDialogueId),
+      offscreenSpeakerIds: scenePresenceCharacterIds.filter(id => !visibleCharacterIds.includes(id)),
+      productMention: false,
+      productShotType: "none",
+      subshots
+    };
+  });
+  return bindSourceDialogueLedgerToAnalysis({
+    story: {
+      synopsis: String(chunk?.text || "").replace(/\s+/g, " ").slice(0, 500),
+      premise: "按用户上传原稿识别人物关系、事件顺序和冲突",
+      hook: String(proseParts[0] || ledger[0]?.text || "按原稿开场").slice(0, 120),
+      conflict: "保持用户原稿中的冲突与因果，不新增或改写台词",
+      ending: String(proseParts.at(-1) || ledger.at(-1)?.text || "按原稿结尾").slice(0, 120)
+    },
+    characters,
+    scenes,
+    shots
+  }, ledger);
 }
 
 function headingBlocks(text, pattern) {
@@ -8118,6 +8239,11 @@ class WorkbenchWorkflow {
     const callerOnDelta = options.onDelta;
     return {
       ...options,
+      timeoutMs: Math.max(1_000, Number(options.timeoutMs) || SCRIPT_TEXT_REQUEST_TIMEOUT_MS),
+      // The website has no durable response replay for an ambiguous desktop
+      // reconnect. One logical request therefore gets one billable attempt;
+      // the script compiler falls back locally instead of charging twice.
+      maxReconnectAttempts: Math.max(1, Number(options.maxReconnectAttempts) || 1),
       signal: control?.controller.signal,
       onDelta: text => {
         this.writeLiveScriptOutput(projectId, stage, text);
@@ -8839,6 +8965,10 @@ class WorkbenchWorkflow {
     const unitCount = filmSchedule.unitCount;
     const productStartNumber = directFastProductStartIndex(unitCount) + 1;
     const segments = directFastSegmentRanges(unitCount, SCRIPT_DIRECT_SEGMENT_UNITS);
+    const writingDeadlineAt = Math.min(
+      Date.now() + SCRIPT_WRITING_SLA_MS,
+      (Date.parse(checkpoint.startedAt || "") || Date.now()) + SCRIPT_WRITING_SLA_MS
+    );
     checkpoint.directFastSegmentTotal = segments.length;
     const segmentKey = (start, end) => `${start}-${end}`;
     let directFastSpine = checkpoint.directFastSpine || null;
@@ -8867,8 +8997,8 @@ class WorkbenchWorkflow {
       stage: "script_direct",
       status: "running",
       message: initiallyCompleted
-        ? `正在从本地断点续写：已保留 ${initiallyCompleted}/${segments.length} 段，只补未完成剧本段；不设总耗时截止线`
-        : `优先加速写作：正在以每段最多 ${SCRIPT_DIRECT_SEGMENT_UNITS} 镜、最多 ${SCRIPT_DIRECT_MAX_CONCURRENCY} 路并发生成 ${filmSchedule.totalSeconds} 秒剧本；每段完成即保存`
+        ? `正在从本地断点续写：已保留 ${initiallyCompleted}/${segments.length} 段，只补未完成剧本段；上游异常会立即切换本地编剧`
+        : `十分钟写作保障：每段最多 ${SCRIPT_DIRECT_SEGMENT_UNITS} 镜、${SCRIPT_DIRECT_MAX_CONCURRENCY} 路并发；上游异常立即本地补齐并继续`
     });
     let rawText = "";
     const receipts = checkpoint.directFastSegments.map(item => item.receipt).filter(Boolean);
@@ -8891,40 +9021,53 @@ class WorkbenchWorkflow {
           status: "running",
           message: `正在先锁定全剧人物、场景与 ${segments.length} 段因果骨架，再并发写正文；避免长剧人物串号和剧情漂移`
         });
-        directFastSpine = await this.generateText(scriptTextProvider, [
-          {
-            role: "system",
-            content: `你是中国现实主义竖屏短剧总编剧。只输出严格紧凑JSON；先锁定全剧人物关系、场景任务和相邻段因果，不写空泛概述。\n${viewerComprehensionPriorityDirective()}\n${scriptFormatDirective(project)}`
-          },
-          {
-            role: "user",
-            content: directFastStorySpinePrompt({
-              topic,
-              product: {
-                name: project.product.name,
-                description: project.product.description,
-                sellingPoints: productSellingPoints(project)
-              },
-              unitCount,
-              totalSeconds: filmSchedule.totalSeconds,
-              productStartNumber,
-              segmentRanges: segments
-            })
-          }
-        ], this.scriptGenerationOptions(projectId, "script_direct_spine", {
-          json: true,
-          requiredKeys: ["c", "sc", "b"],
-          unwrapKeys: ["data", "result", "payload", "content"],
-          maxTokens: 3_072,
-          sessionId: `${checkpoint.sessionId}-direct-fast-v6-spine`,
-          onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) spineReceipt = { ...(usage || {}) }; }
-        }));
+        let spineFallbackReason = "";
+        try {
+          directFastSpine = await this.generateText(scriptTextProvider, [
+            {
+              role: "system",
+              content: `你是中国现实主义竖屏短剧总编剧。只输出严格紧凑JSON；先锁定全剧人物关系、场景任务和相邻段因果，不写空泛概述。\n${viewerComprehensionPriorityDirective()}\n${scriptFormatDirective(project)}`
+            },
+            {
+              role: "user",
+              content: directFastStorySpinePrompt({
+                topic,
+                product: {
+                  name: project.product.name,
+                  description: project.product.description,
+                  sellingPoints: productSellingPoints(project)
+                },
+                unitCount,
+                totalSeconds: filmSchedule.totalSeconds,
+                productStartNumber,
+                segmentRanges: segments
+              })
+            }
+          ], this.scriptGenerationOptions(projectId, "script_direct_spine", {
+            json: true,
+            requiredKeys: ["c", "sc", "b"],
+            unwrapKeys: ["data", "result", "payload", "content", "response", "output"],
+            recursiveUnwrap: true,
+            maxTokens: 3_072,
+            sessionId: `${checkpoint.sessionId}-direct-fast-v7-spine`,
+            onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) spineReceipt = { ...(usage || {}) }; }
+          }));
+          assertDirectFastStorySpine(directFastSpine, segments);
+        } catch (error) {
+          if (isScriptControlError(error)) throw error;
+          spineFallbackReason = `${error?.code || "TEXT_RESULT_INVALID"}:${String(error?.message || "").slice(0, 180)}`;
+          directFastSpine = buildDirectFastFallbackSpine({ topic, ranges: segments });
+          assertDirectFastStorySpine(directFastSpine, segments);
+        }
         assertDirectFastStorySpine(directFastSpine, segments);
         checkpoint = this.saveScriptCheckpoint(projectId, {
           ...checkpoint,
           directFastSpine,
+          directFastFallbacks: spineFallbackReason ? [{ kind: "spine", reason: spineFallbackReason }] : [],
           directFastFailure: null
-        }, topic, "script_direct_spine", "全剧人物、场景和因果骨架已保存，开始并发写各段对白正文");
+        }, topic, "script_direct_spine", spineFallbackReason
+          ? "上游未按结构返回，已切换本地编剧锁定全剧骨架；不会重复请求"
+          : "全剧人物、场景和因果骨架已保存，开始并发写各段对白正文");
         if (spineReceipt) receipts.push(spineReceipt);
       } else if (!checkpoint.directFastSpine) {
         checkpoint = this.saveScriptCheckpoint(projectId, {
@@ -8940,7 +9083,15 @@ class WorkbenchWorkflow {
       const segmentResults = await mapWithConcurrency(pending, SCRIPT_DIRECT_MAX_CONCURRENCY, async segment => {
         let receipt = null;
         try {
-          const payload = await this.generateText(scriptTextProvider, [
+          const payload = Date.now() >= writingDeadlineAt
+            ? buildDirectFastFallbackSegment({
+                spine: directFastSpine,
+                topic,
+                segmentStart: segment.start,
+                segmentEnd: segment.end,
+                unitDurations: filmSchedule.suggestedDurations
+              })
+            : await this.generateText(scriptTextProvider, [
             {
               role: "system",
               content: `你是中国现实主义竖屏短剧总编剧。只输出严格紧凑JSON；对白必须口语化、有明确情绪语气、音量速度和听者反应所需的剧情依据；禁止解释、Markdown、背景音乐、模型名称和医疗功效承诺。\n${viewerComprehensionPriorityDirective()}\n${scriptFormatDirective(project)}`
@@ -8967,9 +9118,10 @@ class WorkbenchWorkflow {
           ], this.scriptGenerationOptions(projectId, `script_direct_S${String(segment.start).padStart(2, "0")}_S${String(segment.end).padStart(2, "0")}`, {
             json: true,
             requiredKeys: ["s"],
-            unwrapKeys: ["data", "result", "payload", "content"],
+            unwrapKeys: ["data", "result", "payload", "content", "response", "output"],
+            recursiveUnwrap: true,
             maxTokens: 4_608,
-            sessionId: `${checkpoint.sessionId}-direct-fast-v6-${segment.key}`,
+            sessionId: `${checkpoint.sessionId}-direct-fast-v7-${segment.key}`,
             onDelta: text => { rawParts.set(segment.key, String(text || "")); },
             onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) receipt = { ...(usage || {}) }; }
           }));
@@ -8998,7 +9150,46 @@ class WorkbenchWorkflow {
           if (receipt) receipts.push(receipt);
           return { status: "fulfilled", segment };
         } catch (error) {
-          return { status: "rejected", segment, error };
+          if (isScriptControlError(error)) throw error;
+          try {
+            const payload = buildDirectFastFallbackSegment({
+              spine: directFastSpine,
+              topic,
+              segmentStart: segment.start,
+              segmentEnd: segment.end,
+              unitDurations: filmSchedule.suggestedDurations
+            });
+            assertDirectFastSegment(payload, segment.start, segment.end, {
+              characters: directFastSpine.c,
+              scenes: directFastSpine.sc,
+              durations: filmSchedule.suggestedDurations,
+              strict: true
+            });
+            const saved = {
+              key: segment.key,
+              start: segment.start,
+              end: segment.end,
+              payload,
+              receipt,
+              localFallback: true,
+              fallbackReason: `${error?.code || "TEXT_RESULT_INVALID"}:${String(error?.message || "").slice(0, 180)}`,
+              completedAt: new Date().toISOString()
+            };
+            completedByKey.set(segment.key, saved);
+            checkpoint = this.saveScriptCheckpoint(projectId, {
+              ...checkpoint,
+              directFastSegments: segments.map(([start, end]) => completedByKey.get(segmentKey(start, end))).filter(Boolean),
+              directFastFallbacks: [
+                ...(Array.isArray(checkpoint.directFastFallbacks) ? checkpoint.directFastFallbacks : []),
+                { kind: "segment", range: [segment.start, segment.end], reason: saved.fallbackReason }
+              ],
+              directFastFailure: null
+            }, topic, "script_direct", `S${String(segment.start).padStart(2, "0")}–S${String(segment.end).padStart(2, "0")} 上游未按结构返回，已由本地编剧补齐；继续处理其余段`);
+            if (receipt) receipts.push(receipt);
+            return { status: "fulfilled", segment, localFallback: true };
+          } catch (fallbackError) {
+            return { status: "rejected", segment, error: fallbackError };
+          }
         }
       });
       rawText = [...rawParts.values()].join("\n");
@@ -9039,42 +9230,90 @@ class WorkbenchWorkflow {
         status: "running",
         message: "紧凑全剧已返回，正在本地补齐情绪、语气、听者反应、三段子镜头和商品因果链"
       });
-      const materialized = materializeDirectFastScript({
-        payload: directData,
-        topic,
-        product: {
-          name: project.product.name,
-          description: project.product.description,
-          sellingPoints: productSellingPoints(project)
-        },
-        filmSchedule
-      });
-      const gateOptions = {
-        ...scriptQualityGateOptions(settings),
-        targetDurationSeconds: filmSchedule.totalSeconds,
-        expectedUnitCount: unitCount
-      };
-      const storyBible = validateStoryBible(materialized.storyBible, gateOptions);
-      const blueprint = validateBlueprint({ ...storyBible, shotPlan: materialized.plans }, project.product.name, gateOptions);
-      const projectMode = normalizeProjectMode(project.generation?.mode);
-      const cloudAutomaticWriting = projectVideoEngine(project) === "hailuo-h3";
-      const speakerAssignments = cloudAutomaticWriting ? allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 2) : [];
-      const shots = validateShotBatch(
-        { shots: materialized.rawShots },
-        blueprint.shotPlan,
-        project.product.name,
-        projectVideoEngine(project),
-        {
+      const compileDirectPayload = payload => {
+        const materialized = materializeDirectFastScript({
+          payload,
+          topic,
+          product: {
+            name: project.product.name,
+            description: project.product.description,
+            sellingPoints: productSellingPoints(project)
+          },
+          filmSchedule
+        });
+        const gateOptions = {
           ...scriptQualityGateOptions(settings),
-          generationMode: projectMode,
-          characters: blueprint.characters,
-          ...(cloudAutomaticWriting ? {
-            maxSpeakingCharacters: 2,
-            requireReferenceDialogueFlow: true,
-            allowedSpeakersByShot: h3AllowedSpeakersByShot(speakerAssignments)
-          } : {})
+          targetDurationSeconds: filmSchedule.totalSeconds,
+          expectedUnitCount: unitCount
+        };
+        const storyBible = validateStoryBible(materialized.storyBible, gateOptions);
+        const blueprint = validateBlueprint({ ...storyBible, shotPlan: materialized.plans }, project.product.name, gateOptions);
+        const projectMode = normalizeProjectMode(project.generation?.mode);
+        const cloudAutomaticWriting = projectVideoEngine(project) === "hailuo-h3";
+        const speakerAssignments = cloudAutomaticWriting ? allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 2) : [];
+        const shots = validateShotBatch(
+          { shots: materialized.rawShots },
+          blueprint.shotPlan,
+          project.product.name,
+          projectVideoEngine(project),
+          {
+            ...scriptQualityGateOptions(settings),
+            generationMode: projectMode,
+            characters: blueprint.characters,
+            ...(cloudAutomaticWriting ? {
+              maxSpeakingCharacters: 2,
+              requireReferenceDialogueFlow: true,
+              allowedSpeakersByShot: h3AllowedSpeakersByShot(speakerAssignments)
+            } : {})
+          }
+        );
+        const normalized = conformImportedAnalysisToDurationContract({ story: blueprint.story, characters: blueprint.characters, scenes: blueprint.scenes, shots }, {
+          ...project,
+          generation: { ...(project.generation || {}), targetDurationSeconds: filmSchedule.totalSeconds }
+        });
+        const qualityAudit = auditDramaSpec(normalized, {
+          ...scriptQualityGateOptions(settings),
+          productName: project.product?.name || "",
+          sellingPoints: productSellingPoints(project)
+        });
+        if (!qualityAudit.ok) {
+          throw Object.assign(new Error(`单次紧凑全剧未通过本地硬审计：${qualityAudit.failures.map(item => item.message).join("；")}`), {
+            code: "SCRIPT_DIRECT_FAST_AUDIT_FAILED",
+            audit: qualityAudit
+          });
         }
-      );
+        return { blueprint, normalized, qualityAudit };
+      };
+      let compiled;
+      try {
+        compiled = compileDirectPayload(directData);
+      } catch (error) {
+        if (isScriptControlError(error)) throw error;
+        directData = {
+          c: directFastSpine.c,
+          sc: directFastSpine.sc,
+          b: directFastSpine.b,
+          spineLocked: true,
+          s: segments.flatMap(([start, end]) => buildDirectFastFallbackSegment({
+            spine: directFastSpine,
+            topic,
+            segmentStart: start,
+            segmentEnd: end,
+            unitDurations: filmSchedule.suggestedDurations
+          }).s)
+        };
+        checkpoint.directFastFallbacks = [
+          ...(Array.isArray(checkpoint.directFastFallbacks) ? checkpoint.directFastFallbacks : []),
+          { kind: "full_local_recompile", reason: `${error?.code || "SCRIPT_LOCAL_AUDIT_FAILED"}:${String(error?.message || "").slice(0, 180)}` }
+        ];
+        this.setAutomation(projectId, {
+          stage: "script_local_compile",
+          status: "running",
+          message: "上游正文未通过本地生产合同，已在本地重新编排全剧；不再请求上游"
+        });
+        compiled = compileDirectPayload(directData);
+      }
+      const { blueprint, normalized, qualityAudit } = compiled;
       const semanticReview = {
         ok: true,
         skipped: true,
@@ -9085,21 +9324,6 @@ class WorkbenchWorkflow {
         repairDirectives: [],
         phase: "full"
       };
-      const normalized = conformImportedAnalysisToDurationContract({ story: blueprint.story, characters: blueprint.characters, scenes: blueprint.scenes, shots }, {
-        ...project,
-        generation: { ...(project.generation || {}), targetDurationSeconds: filmSchedule.totalSeconds }
-      });
-      const qualityAudit = auditDramaSpec(normalized, {
-        ...scriptQualityGateOptions(settings),
-        productName: project.product?.name || "",
-        sellingPoints: productSellingPoints(project)
-      });
-      if (!qualityAudit.ok) {
-        throw Object.assign(new Error(`单次紧凑全剧未通过本地硬审计：${qualityAudit.failures.map(item => item.message).join("；")}`), {
-          code: "SCRIPT_DIRECT_FAST_AUDIT_FAILED",
-          audit: qualityAudit
-        });
-      }
       project = this.store.getProject(projectId);
       const raw = renderScriptForProject(blueprint, normalized, project, topic);
       beginProductionRevision(project);
@@ -9122,7 +9346,7 @@ class WorkbenchWorkflow {
         raw,
         analysis: blueprint.story,
         analysisChunks: 0,
-        analysisMethod: "global-spine-resumable-five-shot-segments-local-compile-v6",
+        analysisMethod: "global-spine-resumable-five-shot-segments-local-compile-v7",
         qualityAudit,
         semanticReview,
         promptLibraryVersion: settings.promptLibraryVersion || "",
@@ -9133,12 +9357,13 @@ class WorkbenchWorkflow {
         sourceFingerprint: crypto.createHash("sha256").update(raw).digest("hex"),
         durationContract: normalized.durationContract,
         generationPerformance: {
-          path: "global-spine-resumable-bounded-segments-fast-v6",
+          path: "global-spine-resumable-bounded-segments-fast-v7",
           targetSeconds: SCRIPT_FAST_TARGET_SECONDS,
           elapsedSeconds,
           metTarget: elapsedSeconds !== null ? elapsedSeconds <= SCRIPT_FAST_TARGET_SECONDS : null,
           finishedAt: finishedAt.toISOString(),
           upstreamModel: scriptTextProvider.model,
+          localFallbackCount: (Array.isArray(checkpoint.directFastFallbacks) ? checkpoint.directFastFallbacks : []).length,
           upstreamReceipts: receipts.filter(Boolean).map(item => ({ requestId: item.requestId || "", billingStatus: item.billingStatus || item.billing_status || "" }))
         },
         generationCheckpoint: null,
@@ -10363,13 +10588,12 @@ class WorkbenchWorkflow {
         productName: project.product?.name || "",
         sellingPoints: productSellingPoints(project)
       });
-      const userAuthoredTimedStoryboard = projectInputMode(project) === "manual"
-        && normalized?.detectedFormat === "timed_storyboard";
-      // A complete user-authored second-by-second production blueprint is an
-      // instruction source, not prose for the AI to rewrite. Keep blueprint
-      // findings as visible suggestions while structural parsing, duration and
-      // exact-dialogue parity remain hard local contracts.
-      const qualityAudit = userAuthoredTimedStoryboard && !auditedQuality.ok
+      const userAuthoredScript = projectInputMode(project) === "manual";
+      const userAuthoredTimedStoryboard = userAuthoredScript && normalized?.detectedFormat === "timed_storyboard";
+      // User-authored material is an instruction source, not prose for the AI
+      // to rewrite. Keep quality findings visible as suggestions while local
+      // structure, duration and exact-dialogue parity remain hard contracts.
+      const qualityAudit = userAuthoredScript && !auditedQuality.ok
         ? {
             ...auditedQuality,
             ok: true,
@@ -10377,7 +10601,7 @@ class WorkbenchWorkflow {
             advisoryFailures: auditedQuality.failures,
             ignoredFailures: auditedQuality.failures,
             failures: [],
-            note: "用户上传的秒级分镜成片稿已按原稿执行；审核发现项作为提示词建议展示，不擅自改写或拦截原稿"
+            note: "用户上传剧本已按原稿执行；审核发现项作为提示词建议展示，不擅自改写或拦截原稿"
           }
         : auditedQuality;
       project.script.analysis = normalized.story;
@@ -10643,53 +10867,69 @@ class WorkbenchWorkflow {
     };
     const pendingChunks = chunkSchedules.filter(chunk => !reusableIndices.has(chunk.index));
     await mapWithConcurrency(pendingChunks, analysisConcurrency, async chunk => {
-      let repair = "";
-      let lastError = null;
-      for (let attempt = 1; attempt <= 2; attempt += 1) {
-        try {
-          this.assertOperationActive(projectId);
-          const ledgerPrompt = sourceDialoguePromptBlock(chunk.sourceDialogueLedger);
-          const messages = [
-            { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}${repair ? `\n【上次输出修复】${repair}` : ""}` },
-            { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先判断本段故事因果、人物关系、每句话的说话人/听者/语气/表情和商品出现时机，再写人物场景资产信息、分镜结构与sourceDialogueBindings。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。\n\n剧本片段：\n${chunk.text}` }
-          ];
-          const requestChars = JSON.stringify(messages).length;
-          const control = this.operationControls.get(projectId);
-          const partial = await this.generateText(settings.textProvider, messages, {
-            json: true,
-            signal: control?.controller.signal,
-            sessionId: `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-${attempt}`,
-            maxTokens: Math.min(16384, 4096 + chunk.unitCount * 2400),
-            costProjectId: projectId,
-            costOperation: `script_analysis_chunk_${chunk.index + 1}_attempt_${attempt}`
+      this.assertOperationActive(projectId);
+      const ledgerPrompt = sourceDialoguePromptBlock(chunk.sourceDialogueLedger);
+      const messages = [
+        { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}` },
+        { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先判断本段故事因果、人物关系、每句话的说话人/听者/语气/表情和商品出现时机，再写人物场景资产信息、分镜结构与sourceDialogueBindings。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。\n\n剧本片段：\n${chunk.text}` }
+      ];
+      const requestChars = JSON.stringify(messages).length;
+      const control = this.operationControls.get(projectId);
+      let bound;
+      let fallbackReason = "";
+      try {
+        const partial = await this.generateText(settings.textProvider, messages, {
+          json: true,
+          requiredKeys: ["shots"],
+          rootArrayKey: "shots",
+          rootArrayAliases: ["units", "scriptUnits", "productionShots", "storyboards"],
+          unwrapKeys: ["data", "result", "payload", "content", "response", "output", "analysis"],
+          recursiveUnwrap: true,
+          signal: control?.controller.signal,
+          timeoutMs: SCRIPT_TEXT_REQUEST_TIMEOUT_MS,
+          maxReconnectAttempts: 1,
+          sessionId: `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-once-v3`,
+          maxTokens: Math.min(16384, 4096 + chunk.unitCount * 2400),
+          costProjectId: projectId,
+          costOperation: `script_analysis_chunk_${chunk.index + 1}`
+        });
+        const actualCount = Array.isArray(partial?.shots) ? partial.shots.length : 0;
+        if (actualCount !== chunk.unitCount
+          || !Array.isArray(partial?.characters) || !partial.characters.length
+          || !Array.isArray(partial?.scenes) || !partial.scenes.length) {
+          throw Object.assign(new Error(`剧本第 ${chunk.index + 1}/${chunks.length} 段结构不完整：需要 ${chunk.unitCount} 个生成单元，实际 ${actualCount} 个`), {
+            code: "SCRIPT_ANALYSIS_UNIT_COUNT_MISMATCH"
           });
-          const actualCount = Array.isArray(partial?.shots) ? partial.shots.length : 0;
-          if (actualCount !== chunk.unitCount) {
-            throw Object.assign(new Error(`剧本第 ${chunk.index + 1}/${chunks.length} 段应拆成 ${chunk.unitCount} 个生成单元，实际返回 ${actualCount} 个`), {
-              code: "SCRIPT_ANALYSIS_UNIT_COUNT_MISMATCH",
-              chunkIndex: chunk.index,
-              expectedCount: chunk.unitCount,
-              actualCount
-            });
-          }
-          const bound = bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger);
-          partials[chunk.index] = bound;
-          saveCompletedAnalysisChunk(chunk, bound, requestChars);
-          return bound;
-        } catch (error) {
-          lastError = error;
-          if (attempt >= 2 || !["SCRIPT_ANALYSIS_UNIT_COUNT_MISMATCH", "SCRIPT_DIALOGUE_BINDING_INVALID"].includes(error?.code)) throw error;
-          repair = `${error.message}。重新输出完整JSON；shots数量、全部sourceDialogueId一次性覆盖、说话人和原稿台词事实必须同时满足。`;
         }
+        bound = bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger);
+      } catch (error) {
+        if (isScriptControlError(error)) throw error;
+        fallbackReason = `${error?.code || "TEXT_RESULT_INVALID"}:${String(error?.message || "").slice(0, 180)}`;
+        bound = localUploadedAnalysisChunk(chunk, project);
       }
-      throw lastError;
+      partials[chunk.index] = bound;
+      saveCompletedAnalysisChunk(chunk, {
+        ...bound,
+        ...(fallbackReason ? { localFallback: true, fallbackReason } : {})
+      }, requestChars);
+      if (fallbackReason) {
+        const latest = this.store.getProject(projectId);
+        latest.automation = {
+          ...(latest.automation || {}),
+          stage: "script_analysis",
+          message: `第 ${chunk.index + 1}/${chunks.length} 段上游未按结构返回，已在本地按原稿台词拆镜；不会重复请求或重复扣费`,
+          updatedAt: new Date().toISOString()
+        };
+        this.store.saveProject(latest);
+      }
+      return bound;
     });
     const data = mergeAnalysisChunks(partials);
     return commitAnalysis(conformImportedAnalysisToDurationContract(
       data,
       project,
       { adaptiveTargetSeconds: filmSchedule.totalSeconds, durationEstimate }
-    ), projectInputMode(project) === "manual" ? "uploaded-script-adaptive-dialogue-ledger-v2" : "ai-duration-contract-dialogue-ledger-v1", chunks.length);
+    ), projectInputMode(project) === "manual" ? "uploaded-script-adaptive-dialogue-ledger-v3" : "ai-duration-contract-dialogue-ledger-v2", chunks.length);
   }
 
   importAsset(projectId, category, sourcePath, name = "") {
@@ -15753,7 +15993,7 @@ ${shotAnchor}
   }
 }
 
-module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, topicJsonParseOptions, recoverTopicOptionsFromDiagnostics, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, projectScriptFormat, assertAiScriptFormatConfirmed, scriptFormatDirective, viewerComprehensionPriorityDirective, renderProductionScript, renderDialogueScript, renderTimedStoryboardScript, renderScriptForProject, ideaSignature, parseTimedStoryboardScript, expandTimedStoryboardForProvider, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
+module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, topicJsonParseOptions, recoverTopicOptionsFromDiagnostics, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, projectScriptFormat, assertAiScriptFormatConfirmed, scriptFormatDirective, viewerComprehensionPriorityDirective, renderProductionScript, renderDialogueScript, renderTimedStoryboardScript, renderScriptForProject, ideaSignature, parseTimedStoryboardScript, expandTimedStoryboardForProvider, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, localUploadedAnalysisChunk, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
 module.exports.reconcileShotSceneCatalog = reconcileShotSceneCatalog;
 module.exports.activeBlueprintFailures = activeBlueprintFailures;
 module.exports.scriptQualityGateOptions = scriptQualityGateOptions;

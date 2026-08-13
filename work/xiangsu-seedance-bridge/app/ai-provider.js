@@ -577,10 +577,10 @@ async function generatePureamTextOnce(config, messages, options = {}) {
   });
   const controller = new AbortController();
   const externalSignal = options.signal;
-  // Text generation has no total-duration deadline. The external signal still
-  // supports the user's explicit pause/stop action, and transport failures are
-  // surfaced without silently issuing another billable request.
-  const timeoutMs = 0;
+  // Script-writing callers provide a bounded deadline so a malformed or stalled
+  // upstream stream cannot leave an Electron project in "generating" forever.
+  // Other media stages keep their existing polling policy.
+  const timeoutMs = Math.max(0, Number(options.timeoutMs) || 0);
   let timedOut = false;
   const abortFromExternal = () => controller.abort(externalSignal?.reason);
   if (externalSignal?.aborted) throw externalSignal.reason instanceof Error
@@ -758,6 +758,7 @@ async function generatePureamText(config, messages, options = {}) {
     signal?.addEventListener("abort", abort, { once: true });
   });
   let attempt = 0;
+  const maxAttempts = Math.max(1, Math.min(3, Number(options.maxReconnectAttempts) || 3));
   while (true) {
     attempt += 1;
     try {
@@ -771,6 +772,7 @@ async function generatePureamText(config, messages, options = {}) {
       error.attempt = attempt;
       error.sessionId = error.sessionId || stableSessionId;
       const recoverable = !options.signal?.aborted
+        && attempt < maxAttempts
         && error?.upstreamDone !== true
         && !error?.upstreamReceipt
         && !String(error?.partialText || "").trim()
@@ -803,8 +805,7 @@ async function generatePureamText(config, messages, options = {}) {
 }
 
 function providerTimeout(options = {}) {
-  void options;
-  return 0;
+  return Math.max(0, Number(options.timeoutMs) || 0);
 }
 
 function normalizedMaxTokens(config, fallback = 16384) {

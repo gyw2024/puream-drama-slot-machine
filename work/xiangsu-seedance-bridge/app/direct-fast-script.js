@@ -298,6 +298,86 @@ function characterFallbacks(topic = {}) {
   ];
 }
 
+function buildDirectFastFallbackSpine({ topic = {}, ranges = [] } = {}) {
+  const characters = characterFallbacks(topic);
+  const scenes = [
+    { n: "家庭客厅", d: "门口、沙发、茶几与通道关系清楚，承担冲突开场和关系施压" },
+    { n: "旧物整理间", d: "纸箱、桌面与文件阅读区固定，承担证据递进和主反转" },
+    { n: "社区工作室", d: "工作台、低柜与行动通道固定，承担商品真实使用和结局回收" }
+  ];
+  const items = sourceArray(ranges);
+  return {
+    c: characters,
+    sc: scenes,
+    b: items.map(([start, end], index) => ({
+      a: Number(start),
+      z: Number(end),
+      sc: (index % scenes.length) + 1,
+      en: index === 0
+        ? compact(topic.hook, "伤害动作已经发生，冲突双方当场对峙", 120)
+        : `承接上一段留下的物件、末句和未解决事实${index}`,
+      g: compact([topic.proofChain, topic.logline, topic.reversal, topic.emotionalPayoff][index % 4], `第${index + 1}段只推进一项新证据和可见行动`, 120),
+      ex: `第${index + 1}段完成动作后形成不可逆的新关系状态`,
+      h: index === items.length - 1 ? "人物用持续行动完成结局" : `以第${index + 1}段末句、视线和手部动作交给下一段`
+    }))
+  };
+}
+
+function fallbackDialogue(number, duration, focus, other, solo) {
+  const seconds = Math.max(5, Math.min(15, Number(duration) || 10));
+  const count = 2 + Math.round(seconds * 0.4);
+  const target = Math.round(seconds * 4);
+  const templates = number === 1
+    ? ["住手你凭什么动她", "事情没有你说的简单", "证据就在这张纸上", "别再替错误找借口", "我现在当面查清楚", "今天必须给出结果", "说完就用行动负责", "谁都不能继续躲开"]
+    : ["这件事必须说清楚", "我只按眼前事实说", "日期就在这张纸上", "别再转移真正问题", "我现在就当面核对", "错了就必须去承担", "下一步马上去落实", "结果会给所有人看"];
+  const lengths = Array.from({ length: count }, (_, index) => Math.floor(target / count) + (index < target % count ? 1 : 0));
+  return lengths.map((length, index) => {
+    const source = `${templates[index % templates.length]}第${number}步`;
+    const text = [...source.replace(/[，。！？!?；;：:…]/g, "")].slice(0, Math.max(3, length)).join("");
+    return [solo || index % 2 === 0 ? focus : other, `${text}${number === 1 && index === 0 ? "！" : "。"}`];
+  });
+}
+
+function buildDirectFastFallbackSegment({ spine = {}, topic = {}, segmentStart = 1, segmentEnd = 1, unitDurations = [] } = {}) {
+  const characters = sourceArray(spine.c).length >= 3 ? spine.c : characterFallbacks(topic);
+  const scenes = sourceArray(spine.sc).length ? spine.sc : buildDirectFastFallbackSpine({ topic, ranges: [[segmentStart, segmentEnd]] }).sc;
+  const start = Math.max(1, Math.floor(Number(segmentStart) || 1));
+  const end = Math.max(start, Math.floor(Number(segmentEnd) || start));
+  return {
+    s: Array.from({ length: end - start + 1 }, (_, offset) => {
+      const number = start + offset;
+      const duration = Math.max(5, Math.min(15, Number(unitDurations[number - 1]) || 10));
+      // Keep emergency dialogue on the two dramatic leads. The third character
+      // remains a silent witness so H3's two-speaker allocation cannot drift.
+      const focus = number % 2 === 0 ? 2 : 1;
+      const other = focus === 1 ? 2 : 1;
+      const solo = number % 2 === 0;
+      const beat = sourceArray(spine.b).find(item => Number(item?.a) <= number && Number(item?.z) >= number) || {};
+      const stage = stageFor(number - 1, Math.max(end, unitDurations.length || end));
+      const focusName = compact(characters[focus - 1]?.n, `角色${focus}`, 12);
+      const otherName = compact(characters[other - 1]?.n, `角色${other}`, 12);
+      const coreAction = compact(beat.g, `拿起第${number}项物证当面核对，并迫使对方完成新的行动`, 78);
+      return {
+        i: number,
+        t: number === 1 ? "当场制止" : stage === "main_reversal" ? "证据翻转" : `行动推进${number}`,
+        a: number === 1
+          ? `${focusName}冲过去推开正在伤人的手并拦住对方，${otherName}当场回应；${compact(topic.hook, "当场伤害被制止", 54)}`
+          : solo
+            ? `${focusName}回答画外听者并${coreAction}`
+            : `${focusName}质问，${otherName}回应；${coreAction}`,
+        bf: compact(beat.en, `第${number}镜开始时上一项事实仍未解决`, 120),
+        af: compact(beat.ex, `第${number}镜结束时关系和证据状态已经改变`, 120),
+        em: stage === "main_reversal" ? "压抑→看清证据→情绪崩开→决定承担" : "克制→事实刺激→情绪抬升→压住余震",
+        f: focus,
+        v: solo ? [focus] : [focus, other],
+        d: fallbackDialogue(number, duration, focus, other, solo)
+      };
+    }),
+    c: characters,
+    sc: scenes
+  };
+}
+
 function materializeCharacters(payload, topic) {
   const authored = sourceArray(payload?.c).slice(0, 5);
   const fallbacks = characterFallbacks(topic);
@@ -538,7 +618,7 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
     }));
     const dialogueVisibleIds = productMention ? visibleCharacterIds.slice(0, 1) : visibleCharacterIds;
     const action = index === 0
-      ? compact(topic.hook, "对方踢开跪地劳作的人，婚纱裙摆从手中滑落", 88)
+      ? compact(source.a || source.action || topic.hook, "对方踢开跪地劳作的人，婚纱裙摆从手中滑落", 88)
       : productRole === "product_packshot"
         ? `${product.name}整体、包装与用户图片中可见的真实外观细节在干净承载面上清晰呈现，不出现人物脸部`
       : productMention
@@ -757,6 +837,8 @@ module.exports = {
   directFastResponseSchema,
   directFastStorySpineSchema,
   directFastStorySpinePrompt,
+  buildDirectFastFallbackSegment,
+  buildDirectFastFallbackSpine,
   directFastProductStartIndex,
   directFastReversalIndex,
   directFastSegmentRanges,
