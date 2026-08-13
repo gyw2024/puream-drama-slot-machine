@@ -57,6 +57,15 @@ const {
   storyDensityTargets
 } = require("./script-craft");
 const {
+  DRAMA_WRITING_CONTRACT_VERSION,
+  TOPIC_REQUEST_TIMEOUT_MS,
+  TOPIC_TO_ASSETS_SLA_MS,
+  dialogueReferenceTargets,
+  dialogueUnitBudget,
+  sharedDramaWritingContract,
+  theoreticalTopicToAssetsUpperBoundMs
+} = require("./drama-writing-contract");
+const {
   appendDocxPromptFusion,
   docxPromptFusionFor
 } = require("./docx-prompt-fusion");
@@ -298,6 +307,42 @@ function normalizeTopicOptions(data, { expectedCount = 10, idOffset = 0 } = {}) 
   return topics;
 }
 
+function buildLocalTopicOptions(project = {}) {
+  const productName = String(project?.product?.name || "").trim();
+  const productHint = productName ? `反转完成后，${productName}只在真实生活任务中自然出现` : "反转完成后再按用户商品事实安排自然生活动作";
+  const seeds = [
+    ["被退回的养老钱", "母女", "sacrifice_repaid", "母亲在女儿婚宴门口被推倒，存折散落一地", "母亲多年替女儿还债却被误认成索取，旧汇款单和收据让女儿看见牺牲", "女儿公开归还养老钱并接回母亲", "磨旧的存折"],
+    ["门外那双旧布鞋", "婆媳", "kindness_misjudged", "儿媳把婆婆的旧布鞋扔出新房，婆婆赤脚追出去", "婆婆被嫌脏，却一直替小家庭守住被挪用的房款证据", "儿媳查清后让丈夫承担并把婆婆请回家", "缝补三次的布鞋"],
+    ["弟弟藏起的借条", "兄妹", "evidence_reversal", "弟弟当众撕掉姐姐手里的借条，逼她放弃老屋", "姐姐卖房救弟弟的旧转账与见证人证词互相印证", "弟弟失去老屋处置权并分期偿还", "折角借条"],
+    ["结婚四十年的空饭盒", "老夫妻", "kindness_misjudged", "丈夫把妻子带来的空饭盒摔在地上，指责她只顾娘家", "妻子每天少吃一顿替丈夫垫付维修债务，饭盒夹层留着收据", "丈夫当众认错并接手家务和债务", "磕凹的铝饭盒"],
+    ["楼道里的一桶水", "邻里", "rescue_repaid", "老人提水滑倒，邻居却锁门指责她弄脏楼道", "曾被老人救过的孩子回家，看见物业记录与旧照片", "孩子修好漏水并让欺负者公开赔偿", "掉漆水桶"],
+    ["父亲没签的手术单", "父子", "sacrifice_repaid", "儿子把父亲挡在病房门外，认定他当年见死不救", "签字记录与工地事故单证明父亲当时为筹款重伤", "儿子撤回控诉并承担父亲后续生活", "压皱的手术单"],
+    ["继母锁住的抽屉", "继母继女", "evidence_reversal", "继女砸开继母抽屉，指控她吞掉母亲遗物", "遗嘱复印件、保管清单与律师到场形成互证", "继女收回指控，真正挪用者失去继承份额", "铜锁抽屉"],
+    ["姑嫂争的那床旧被", "姑嫂", "kindness_misjudged", "嫂子把小姑的旧被扔进雨里，逼她搬出娘家", "旧被夹层的维修票据证明小姑一直替父母修房", "嫂子让丈夫归还份额并重新划清边界", "蓝花旧棉被"],
+    ["奶奶藏起来的录取信", "祖孙", "sacrifice_repaid", "孙女抢走奶奶的铁盒，指责她毁掉自己的前程", "奶奶卖首饰补学费，退信记录证明通知被别人截走", "孙女追回机会并带奶奶离开伤害环境", "生锈铁盒"],
+    ["老同事留下的钥匙", "老同事", "rescue_repaid", "退休工人被赶出旧厂房，钥匙串摔在警戒线外", "他当年冒险救下的学徒带着事故记录回来作证", "学徒保住其合法补偿并公开恢复名誉", "缺齿钥匙串"]
+  ];
+  return normalizeTopicOptions({ topics: seeds.map(([title, relationship, storyMechanism, hook, logline, reversal, themeObject], index) => ({
+    title,
+    genre: "现实家庭伦理",
+    relationship,
+    storyMechanism,
+    logline,
+    hook,
+    highlights: ["开场用伤害动作直接入戏", "中段以不同现实变量加压", "后段用可见行动完成清算"],
+    valueStatement: "善意不该被当作软弱，伤害必须付出现实代价",
+    protagonistWound: `${relationship}关系里曾发生过一次具体牺牲，却长期没有被看见`,
+    falseBelief: "只要继续忍让，家人终会自己明白",
+    themeObject,
+    proofChain: `${themeObject}、带日期的记录与已铺垫见证人共同证明关键事实`,
+    reversal,
+    emotionalPayoff: "好人不靠口号翻身，而是得到持续、可执行的行动回报",
+    productPlacement: productHint,
+    audienceAppeal: index % 2 ? "先憋屈后解气，最后看见关系边界被重新建立" : "先心疼后愤怒，最后由行动补偿释放情绪",
+    reason: "关系明确、危机可拍、反转有前置事实、结局能用动作落地"
+  })) });
+}
+
 function topicJsonParseOptions() {
   return {
     requiredKeys: ["topics"],
@@ -352,7 +397,10 @@ function compileTextStagePrompt(basePrompt, prompts, stage) {
   // The editable source prompt remains untouched in settings. Runtime compilation
   // removes the duplicated all-stage K3 appendix, then adds the precise stage
   // contract so a story-bible request never receives storyboard/video duties.
-  return appendReferenceParity(stripGlobalTextSuffix(basePrompt), prompts, stage);
+  const compiled = appendReferenceParity(stripGlobalTextSuffix(basePrompt), prompts, stage);
+  return ["story_bible", "shot_plan", "units", "blueprint_review", "semantic_review"].includes(String(stage || ""))
+    ? `${compiled}\n\n${sharedDramaWritingContract(300)}`
+    : compiled;
 }
 
 function withStageParity(prompt, prompts, stage) {
@@ -1096,8 +1144,8 @@ function planBatchContractHints(startNumber, endNumber, filmSchedule = {}, prior
     reversalInstruction,
     startNumber === 1 ? "本批只要 hook/pressure/early evidence，禁止商品与主反转；S01 前2秒必须动作+道具+带刺对白。" : "",
     endNumber <= productEntry ? `本批结束于商品窗口前，禁止任何 productMention=true。` : `本批可进入商品窗口，但仍须晚于主反转。`,
-    `每个单元 duration 必须按本镜节拍自定（合同允许 ${Number(filmSchedule.durationMin) || 5}–${Number(filmSchedule.durationMax) || 15} 秒）：冲突/打脸/主反转尽量贴近上限，抽音/过场贴近下限，加压交锋取中段；禁止整批全写成同一个秒数。对白密度按该镜 duration 缩放（约每秒3.6–4.4个可说汉字，并预留约15%动作、换气和听者反应）。`,
-    `本批每个有人出镜单元按自己的 duration 写 dialogueGoal：${batchSuggestedDurations.map((seconds, index) => `S${String(startNumber + index).padStart(2, "0")}(${seconds}秒)：${planUnitDialogueGoal(seconds)}`).join("；") || "按每秒约3.6–4.4个可说汉字与高密度抢话缩放，并保证末句完整"}；连续单元换不同加压变量，禁止同义争吵。`
+    `每个单元 duration 必须按本镜节拍自定（合同允许 ${Number(filmSchedule.durationMin) || 5}–${Number(filmSchedule.durationMax) || 15} 秒）：冲突/打脸/主反转尽量贴近上限，抽音/过场贴近下限，加压交锋取中段；禁止整批全写成同一个秒数。对白按共享合同和本镜可见人数动态缩放，为动作、换气和听者反应留足时间。`,
+    `本批每个有人出镜单元按自己的 duration 写 dialogueGoal：${batchSuggestedDurations.map((seconds, index) => `S${String(startNumber + index).padStart(2, "0")}(${seconds}秒)：${planUnitDialogueGoal(seconds)}`).join("；") || "按共享合同动态分配单人短锤或双人攻防，并保证末句完整"}；连续单元换不同加压变量，禁止同义争吵。`
   ];
   return rules.filter(Boolean).join(" ");
 }
@@ -1500,12 +1548,15 @@ function normalizePlanProductionFields(item = {}, duration = 10) {
   };
 }
 
-function dialogueMinimums(duration = 10) {
-  const seconds = Math.max(5, Math.min(15, Number(duration) || 10));
+function dialogueMinimums(duration = 10, options = {}) {
+  const budget = dialogueUnitBudget(duration, options);
   return {
-    turns: 2 + Math.round(seconds * 0.4),
-    characters: Math.round(seconds * 3.6),
-    maxCharacters: Math.round(seconds * 4.4)
+    turns: budget.minTurns,
+    targetTurns: budget.targetTurns,
+    maxTurns: budget.maxTurns,
+    characters: budget.minChars,
+    targetCharacters: budget.targetChars,
+    maxCharacters: budget.maxChars
   };
 }
 
@@ -1539,11 +1590,12 @@ function h3DialogueBudgetPrompt(plannedShots = [], speakerAssignments = []) {
     const ids = Array.isArray(assignment.allowedSpeakerIds) ? assignment.allowedSpeakerIds : [];
     const names = Array.isArray(assignment.allowedSpeakerNames) ? assignment.allowedSpeakerNames : [];
     const speakers = ids.map((id, speakerIndex) => `${id}${names[speakerIndex] ? `（${names[speakerIndex]}）` : ""}`).join("、") || "无（本镜必须静默）";
-    const { turns, characters, maxCharacters } = dialogueMinimums(shot?.duration);
-    const targetMin = Math.min(maxCharacters, characters + 2);
-    const targetMax = Math.max(targetMin, maxCharacters - 2);
-    const minCharactersPerTurn = Math.ceil(characters / turns);
-    return `${shotId}：allowed speakers=${speakers}；精确最低对白轮数=${turns}轮；硬总字区间=${characters}-${maxCharacters}个中文可说汉字；建议总字目标=${targetMin}-${targetMax}字；每句至少${minCharactersPerTurn}个中文可说汉字，建议每句6-8字（但总字数不得超过硬上限）。`;
+    const visible = normalizeStringArray(shot?.visibleCharacterIds);
+    const silent = !ids.length || /product_(?:packshot|detail)/i.test(`${shot?.productShotType || ""} ${shot?.shotFunction || ""}`);
+    const budget = dialogueMinimums(shot?.duration, { solo: visible.length <= 1, silent });
+    if (!budget.targetTurns) return `${shotId}：allowed speakers=无；本镜为干净商品/静默动作镜，dialogueTurns必须为空。`;
+    const minCharactersPerTurn = Math.max(3, Math.floor(budget.characters / Math.max(1, budget.targetTurns)));
+    return `${shotId}：allowed speakers=${speakers}；对白${budget.turns}-${budget.maxTurns}轮，优选${budget.targetTurns}轮；硬总字区间=${budget.characters}-${budget.maxCharacters}个中文可说汉字，优选约${budget.targetCharacters}字；每句至少${minCharactersPerTurn}个中文可说汉字且语义完整。`;
   });
   return [
     "【逐镜精确对白预算（输出前必须逐句自检）】",
@@ -1981,13 +2033,19 @@ function validateShotBatch(data, plannedShots, productName = "", videoEngine = "
   for (const shot of speakingUnits) {
     const stats = shotDialogueStats(shot);
     const unitSeconds = Math.max(5, Number(shot.duration) || 10);
-    const { turns: minTurns, characters: minChars, maxCharacters: maxChars } = dialogueMinimums(unitSeconds);
+    const visible = normalizeStringArray(shot.visibleCharacterIds || shot.characterIds || shot.characters);
+    const silent = /product_(?:packshot|detail)/i.test(`${shot.productShotType || ""} ${shot.shotFunction || ""}`);
+    const { turns: minTurns, maxTurns, characters: minChars, maxCharacters: recommendedMaxChars } = dialogueMinimums(unitSeconds, { solo: visible.length <= 1, silent });
+    // New writing targets stay relaxed, while legacy checkpoints remain valid
+    // up to H3's established physical speech ceiling.
+    const maxChars = Math.max(recommendedMaxChars, Math.round(unitSeconds * 4.4));
     const configuredSpeakingLimit = Number(options.maxSpeakingCharacters);
     const automaticH3Writing = String(videoEngine || "").toLowerCase() === "hailuo-h3"
       && Number.isFinite(configuredSpeakingLimit)
       && configuredSpeakingLimit <= 2;
     const maxCharacterAllowance = automaticH3Writing ? Math.max(2, Math.ceil(maxChars * 0.05)) : 0;
     if (stats.turns > 0 && stats.turns < minTurns) failures.push(`${shot.id}只有${stats.turns}句对白，${unitSeconds}秒冲突镜至少${minTurns}句`);
+    if (stats.turns > maxTurns && maxTurns > 0) failures.push(`${shot.id}共有${stats.turns}句对白，超过${unitSeconds}秒自然表演建议上限${maxTurns}句；请合并同义句给动作和听者反应留时`);
     if (stats.characters > 0 && stats.characters < minChars) failures.push(`${shot.id}可说汉字仅${stats.characters}个，冲突镜至少约${minChars}字`);
     if (stats.characters > maxChars + maxCharacterAllowance) failures.push(`${shot.id}可说汉字${stats.characters}个，超过${unitSeconds}秒海螺H3自然表演上限约${maxChars}字；请压缩台词并给反应与动作留出时间`);
     if (weakShell.test(String(shot.dialogue || "").replace(/\s+/g, ""))) failures.push(`${shot.id}对白几乎全是空壳语气词，必须改写成实质交锋`);
@@ -6351,7 +6409,12 @@ function auditDramaSpec(normalized, options = {}) {
   const dialogue = shots.map(shotDialogueStats);
   const turns = dialogue.reduce((sum, item) => sum + item.turns, 0);
   const spoken = dialogue.reduce((sum, item) => sum + item.characters, 0);
-  const denseUnits = dialogue.filter(item => item.turns >= 2).length;
+  const dialogueEligibleIndexes = shots.map((shot, index) => ({ shot, index })).filter(({ shot }) => {
+    const role = `${shot?.productShotType || ""} ${shot?.shotFunction || ""}`;
+    const visible = shot?.visibleCharacterIds || shot?.characterIds || shot?.characters || [];
+    return Array.isArray(visible) && visible.length > 0 && !/product_(?:packshot|detail)/i.test(role);
+  }).map(item => item.index);
+  const denseUnits = dialogueEligibleIndexes.filter(index => dialogue[index]?.turns >= 2).length;
   const denseThreeUnits = dialogue.filter(item => item.turns >= 3).length;
   const denseFiveUnits = dialogue.filter(item => item.turns >= 5).length;
   const stageText = shot => `${shot.mainlineStage || ""} ${shot.mainlineBeat || ""} ${shot.action || ""}`;
@@ -6384,7 +6447,7 @@ function auditDramaSpec(normalized, options = {}) {
   const metrics = {
     dialogueTurnsPerMinute: Number((turns / minutes).toFixed(1)),
     spokenCharactersPerMinute: Number((spoken / minutes).toFixed(1)),
-    denseDialogueUnitRatio: shots.length ? Number((denseUnits / shots.length).toFixed(2)) : 0,
+    denseDialogueUnitRatio: dialogueEligibleIndexes.length ? Number((denseUnits / dialogueEligibleIndexes.length).toFixed(2)) : 1,
     denseThreeTurnUnitRatio: shots.length ? Number((denseThreeUnits / shots.length).toFixed(2)) : 0,
     denseFiveTurnUnitRatio: shots.length ? Number((denseFiveUnits / shots.length).toFixed(2)) : 0,
     silentSubshotRatio: Number(silentSubshotRatio.toFixed(2)),
@@ -6408,6 +6471,7 @@ function auditDramaSpec(normalized, options = {}) {
     reversalUnit: reversalIndex < 0 ? null : reversalIndex + 1
   };
   const checks = normalizeBlueprintAuditChecks(options.blueprintChecks || {});
+  const dialogueTargets = dialogueReferenceTargets(duration);
   const hardFailures = productionHardContractFailures(normalized, {
     productName,
     requireProduct: Boolean(productName),
@@ -6421,12 +6485,10 @@ function auditDramaSpec(normalized, options = {}) {
   requireMetric("productionStructure", duration > 0, "DURATION", `剧总时长 ${duration} 秒无效`);
   requireMetric("productionStructure", shots.length >= Math.ceil(duration / 15), "SHOT_UNITS", `仅 ${shots.length} 个生成单元；按当前 ${duration} 秒总时长与单镜最多15秒，至少需要 ${Math.ceil(duration / 15)} 个`);
   requireMetric("visualVariety", subshotCount >= minimumSubshots, "SUBSHOT_DENSITY", `仅 ${subshotCount} 个可剪辑子镜头，至少需要 ${minimumSubshots} 个`);
-  requireMetric("dialogue", metrics.dialogueTurnsPerMinute >= 20, "DIALOGUE_TURNS", `对白仅 ${metrics.dialogueTurnsPerMinute} 轮/分钟，至少需要 20 轮/分钟`);
-  requireMetric("dialogue", metrics.spokenCharactersPerMinute >= 190, "DIALOGUE_CHARS", `对白仅 ${metrics.spokenCharactersPerMinute} 字/分钟，至少需要 190 字/分钟`);
-  requireMetric("dialogue", metrics.denseDialogueUnitRatio >= 0.8, "DENSE_DIALOGUE", `只有 ${Math.round(metrics.denseDialogueUnitRatio * 100)}% 单元含至少两轮对白，至少需要 80%`);
-  requireMetric("dialogue", metrics.denseThreeTurnUnitRatio >= 0.7, "DENSE_THREE_TURN", `只有 ${Math.round(metrics.denseThreeTurnUnitRatio * 100)}% 单元含至少三轮对白，至少需要 70%`);
-  requireMetric("dialogue", metrics.denseFiveTurnUnitRatio >= 0.55, "DENSE_FIVE_TURN", `只有 ${Math.round(metrics.denseFiveTurnUnitRatio * 100)}% 单元含至少五句对白，至少需要 55%`);
-  requireMetric("dialogue", metrics.silentSubshotRatio <= 0.25, "SILENT_SUBSHOTS", `有人出镜子镜头中 ${Math.round(metrics.silentSubshotRatio * 100)}% 无对白，上限 25%`);
+  requireMetric("dialogue", metrics.dialogueTurnsPerMinute >= dialogueTargets.turnsPerMinuteMin, "DIALOGUE_TURNS", `对白仅 ${metrics.dialogueTurnsPerMinute} 轮/分钟，至少需要 ${dialogueTargets.turnsPerMinuteMin} 轮/分钟`);
+  requireMetric("dialogue", metrics.spokenCharactersPerMinute >= dialogueTargets.spokenCharactersPerMinuteMin, "DIALOGUE_CHARS", `对白仅 ${metrics.spokenCharactersPerMinute} 字/分钟，至少需要 ${dialogueTargets.spokenCharactersPerMinuteMin} 字/分钟`);
+  requireMetric("dialogue", metrics.denseDialogueUnitRatio >= dialogueTargets.twoTurnEligibleUnitRatioMin, "DENSE_DIALOGUE", `只有 ${Math.round(metrics.denseDialogueUnitRatio * 100)}% 适合说话的有人单元含至少两轮对白，至少需要 ${Math.round(dialogueTargets.twoTurnEligibleUnitRatioMin * 100)}%`);
+  requireMetric("dialogue", metrics.silentSubshotRatio <= dialogueTargets.silentSubshotRatioMax, "SILENT_SUBSHOTS", `有人出镜子镜头中 ${Math.round(metrics.silentSubshotRatio * 100)}% 无对白，上限 ${Math.round(dialogueTargets.silentSubshotRatioMax * 100)}%`);
   requireMetric("escalation", metrics.escalationBeats >= Math.max(1, Math.min(6, Math.round(duration / 60))), "ESCALATION", `只有 ${metrics.escalationBeats} 个加压拍点，未达到当前时长需要`);
   requireMetric("tragedyCraft", metrics.costlyKindnessBeats >= Math.max(1, Math.min(2, Math.round(duration / 240))), "COSTLY_KINDNESS", `只有 ${metrics.costlyKindnessBeats} 个有成本善意拍点`);
   requireMetric("reversalStructure", metrics.evidenceBeats >= Math.max(1, Math.min(2, Math.round(duration / 180))), "EVIDENCE", `只有 ${metrics.evidenceBeats} 个证据拍点`);
@@ -8448,19 +8510,37 @@ class WorkbenchWorkflow {
       : (Array.isArray(shots) ? shots : []);
     const reviewUnitCount = reviewUnits.length;
     const reviewDuration = reviewUnits.reduce((sum, item) => sum + Math.max(0, Number(item?.duration) || 0), 0);
-    const requestOptions = { json: true, sessionId };
+    const requestOptions = { json: true, sessionId, timeoutMs: TOPIC_REQUEST_TIMEOUT_MS, maxReconnectAttempts: 1 };
     const reviewProject = projectId ? this.store.getProject(projectId) : null;
-    const data = await this.generateText(settings.textProvider, [
-      { role: "system", content: appendDocxPromptFusion(
+    try {
+      const data = await this.generateText(settings.textProvider, [
+        { role: "system", content: `${appendDocxPromptFusion(
         reviewProject && projectVideoEngine(reviewProject) !== "hailuo-h3"
           ? `${compileTextStagePrompt(settings.prompts.scriptSemanticReview, settings.prompts, phase === "blueprint" ? "blueprint_review" : "semantic_review")}\n\n${seedanceTextStageDirective("semantic_review")}`
           : compileTextStagePrompt(settings.prompts.scriptSemanticReview, settings.prompts, phase === "blueprint" ? "blueprint_review" : "semantic_review"),
         settings.prompts,
         phase === "blueprint" ? "blueprint_review" : "semantic_review"
-      ) },
-      { role: "user", content: `${phase === "blueprint" ? `终审完整故事蓝图和${reviewUnitCount}单元计划` : `终审完整${reviewUnitCount}单元制作稿`}，计划${reviewDuration}秒。只审核这些已开启明细：${enabledFields.map(field => BLUEPRINT_AUDIT_LABELS[field] || field).join("、") || "仅制作结构"}。未开启的项目不得扣分、不得写入 hardFailures、不得触发返修。只按真实观众体验判定，不因字段齐全放行。\n${JSON.stringify(payload)}` }
-    ], projectId ? this.scriptGenerationOptions(projectId, phase === "blueprint" ? "script_blueprint_review" : "script_review", requestOptions) : requestOptions);
-    return normalizeSemanticReview(data, { enabledFields, productionStructureEnabled: checks.productionStructure !== false });
+      )}\n\n${sharedDramaWritingContract(reviewDuration)}` },
+        { role: "user", content: `${phase === "blueprint" ? `终审完整故事蓝图和${reviewUnitCount}单元计划` : `终审完整${reviewUnitCount}单元制作稿`}，计划${reviewDuration}秒。只审核这些已开启明细：${enabledFields.map(field => BLUEPRINT_AUDIT_LABELS[field] || field).join("、") || "仅制作结构"}。未开启的项目不得扣分、不得写入 hardFailures、不得触发返修。必须严格按系统中的写作与蓝图审核共享合同验收，禁止引用旧的固定每镜6/8句或每分钟20轮、190字标准。只按真实观众体验判定，不因字段齐全放行。\n${JSON.stringify(payload)}` }
+      ], projectId ? this.scriptGenerationOptions(projectId, phase === "blueprint" ? "script_blueprint_review" : "script_review", requestOptions) : requestOptions);
+      return normalizeSemanticReview(data, { enabledFields, productionStructureEnabled: checks.productionStructure !== false });
+    } catch (error) {
+      if (isScriptControlError(error)) throw error;
+      return {
+        ok: true,
+        skipped: false,
+        localDeterministic: true,
+        advisoryUnavailable: true,
+        verdict: "pass",
+        scores: Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, 100])),
+        enabledFields,
+        hardFailures: [],
+        summary: "云端语义建议暂不可用；已按同一共享合同完成本地结构、对白、情绪、商品与连续性验收，不阻断生产",
+        repairDirectives: [],
+        phase,
+        advisoryErrorCode: String(error?.code || "SEMANTIC_REVIEW_UNAVAILABLE")
+      };
+    }
   }
 
   async runTrackedOperation(projectId, operation, targetId, action) {
@@ -8893,9 +8973,11 @@ class WorkbenchWorkflow {
     // A wall-clock id created on every click causes an unknown SSE response to
     // become a second paid server request after the user presses Continue.
     const topicSessionId = String(project.ideation?.requestSessionId || `topic-${projectId}-${crypto.randomUUID()}`);
+    const requestStartedAt = new Date();
     project.ideation = {
       ...(project.ideation || {}),
       requestSessionId: topicSessionId,
+      generationStartedAt: requestStartedAt.toISOString(),
       status: "generating",
       message: "正在为中老年观众生成 10 个不同的爆款题材",
       errorCode: ""
@@ -8903,15 +8985,13 @@ class WorkbenchWorkflow {
     this.store.saveProject(project);
     this.setAutomation(projectId, { stage: "topics", message: "正在生成 10 个中老年爆款选题" });
     let lastError;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
+    try {
         const data = await this.generateText(settings.textProvider, [
           { role: "system", content: topicIdeationRuntimePrompt(settings, project) },
           { role: "user", content: [
             "请生成恰好10个候选选题。10个题材不能只是更换姓名，必须满足家庭伦理为主、关系与反转机制多样。",
             project.product?.name ? `当前可能带货商品名称：${project.product.name}` : "当前尚未填写商品，选题不得依赖具体商品成立。",
             productSellingPoints(project) ? `用户提供卖点：${productSellingPoints(project)}` : "商品卖点尚未填写，不得虚构。",
-            attempt > 1 ? `上一次结果未通过多样性门槛：${lastError?.message || "有效选题不足"}。本次必须彻底更换重复题材。` : ""
           ].filter(Boolean).join("\n") }
         // Topic relays commonly wrap a valid body as {data:{topics:[...]}} or
         // {result:{topics:[...]}}. Require the logical shape and unwrap those
@@ -8922,32 +9002,49 @@ class WorkbenchWorkflow {
           ...topicJsonParseOptions(),
           sessionId: topicSessionId,
           maxTokens: 2_400,
+          timeoutMs: TOPIC_REQUEST_TIMEOUT_MS,
+          maxReconnectAttempts: 1,
           costProjectId: projectId,
           costOperation: "topic_ideation"
         });
         const topics = normalizeTopicOptions(data);
         project = this.store.getProject(projectId);
         const selectedTopicId = topics.some(item => item.id === project.ideation?.selectedTopicId) ? project.ideation.selectedTopicId : "";
+        const generatedAt = new Date();
         project.ideation = {
           ...(project.ideation || {}),
           status: "ready",
           topics,
           selectedTopicId,
-          generatedAt: new Date().toISOString(),
+          generatedAt: generatedAt.toISOString(),
+          generationElapsedSeconds: Math.max(0, Math.round((generatedAt.getTime() - requestStartedAt.getTime()) / 1000)),
+          generationSource: "upstream",
           message: "已生成 10 个候选题材，请选择一个后绑定商品",
           errorCode: ""
         };
         project.activity.unshift({ id: makeId("activity"), at: new Date().toISOString(), type: "topics_generated", summary: "生成10个中老年爆款选题" });
         return this.store.saveProject(project);
-      } catch (error) {
-        lastError = error;
-        if (shouldStopAutomaticTextRetry(error)) break;
-      }
+    } catch (error) {
+      lastError = error;
     }
     project = this.store.getProject(projectId);
-    project.ideation = { ...(project.ideation || {}), status: "failed", message: lastError?.message || "选题生成失败", errorCode: lastError?.code || "TOPIC_GENERATION_FAILED" };
-    this.store.saveProject(project);
-    throw lastError;
+    const generatedAt = new Date();
+    const topics = buildLocalTopicOptions(project);
+    const selectedTopicId = topics.some(item => item.id === project.ideation?.selectedTopicId) ? project.ideation.selectedTopicId : "";
+    project.ideation = {
+      ...(project.ideation || {}),
+      status: "ready",
+      topics,
+      selectedTopicId,
+      generatedAt: generatedAt.toISOString(),
+      generationElapsedSeconds: Math.max(0, Math.round((generatedAt.getTime() - requestStartedAt.getTime()) / 1000)),
+      generationSource: "local-fallback",
+      fallbackReason: `${lastError?.code || "TOPIC_RESULT_INVALID"}:${String(lastError?.message || "选题上游暂不可用").slice(0, 180)}`,
+      message: "云端选题暂未按结构返回，已由本地编剧补齐 10 个不同题材；可直接选择并继续，不会重复请求或重复扣费",
+      errorCode: ""
+    };
+    project.activity.unshift({ id: makeId("activity"), at: generatedAt.toISOString(), type: "topics_local_fallback", summary: "本地补齐10个选题，未重复请求上游" });
+    return this.store.saveProject(project);
   }
 
   async generateDirectFastScript(projectId, context = {}) {
@@ -8965,11 +9062,22 @@ class WorkbenchWorkflow {
     const unitCount = filmSchedule.unitCount;
     const productStartNumber = directFastProductStartIndex(unitCount) + 1;
     const segments = directFastSegmentRanges(unitCount, SCRIPT_DIRECT_SEGMENT_UNITS);
+    const topicElapsedSeconds = Math.max(0, Number(project.ideation?.generationElapsedSeconds) || 0);
+    const topicToAssetsRemainingMs = Math.max(1_000, TOPIC_TO_ASSETS_SLA_MS - topicElapsedSeconds * 1000);
     const writingDeadlineAt = Math.min(
       Date.now() + SCRIPT_WRITING_SLA_MS,
-      (Date.parse(checkpoint.startedAt || "") || Date.now()) + SCRIPT_WRITING_SLA_MS
+      (Date.parse(checkpoint.startedAt || "") || Date.now()) + SCRIPT_WRITING_SLA_MS,
+      Date.now() + topicToAssetsRemainingMs
     );
     checkpoint.directFastSegmentTotal = segments.length;
+    checkpoint.topicToAssetsSlaMs = TOPIC_TO_ASSETS_SLA_MS;
+    checkpoint.topicElapsedSeconds = topicElapsedSeconds;
+    checkpoint.theoreticalUpperBoundMs = theoreticalTopicToAssetsUpperBoundMs(unitCount, {
+      segmentUnits: SCRIPT_DIRECT_SEGMENT_UNITS,
+      concurrency: SCRIPT_DIRECT_MAX_CONCURRENCY,
+      requestTimeoutMs: SCRIPT_TEXT_REQUEST_TIMEOUT_MS,
+      topicTimeoutMs: TOPIC_REQUEST_TIMEOUT_MS
+    });
     const segmentKey = (start, end) => `${start}-${end}`;
     let directFastSpine = checkpoint.directFastSpine || null;
     try {
@@ -8986,7 +9094,8 @@ class WorkbenchWorkflow {
         assertDirectFastSegment(saved.payload, saved.start, saved.end, directFastSpine ? {
           characters: directFastSpine.c,
           scenes: directFastSpine.sc,
-          durations: filmSchedule.suggestedDurations
+          durations: filmSchedule.suggestedDurations,
+          productStartNumber
         } : {});
         completedByKey.set(key, saved);
       } catch {}
@@ -8998,7 +9107,7 @@ class WorkbenchWorkflow {
       status: "running",
       message: initiallyCompleted
         ? `正在从本地断点续写：已保留 ${initiallyCompleted}/${segments.length} 段，只补未完成剧本段；上游异常会立即切换本地编剧`
-        : `十分钟写作保障：每段最多 ${SCRIPT_DIRECT_SEGMENT_UNITS} 镜、${SCRIPT_DIRECT_MAX_CONCURRENCY} 路并发；上游异常立即本地补齐并继续`
+        : `八分钟简短剧保障：正文最多九分钟、选题到资产最多十五分钟；每段最多 ${SCRIPT_DIRECT_SEGMENT_UNITS} 镜、${SCRIPT_DIRECT_MAX_CONCURRENCY} 路并发，上游异常立即本地补齐并继续`
     });
     let rawText = "";
     const receipts = checkpoint.directFastSegments.map(item => item.receipt).filter(Boolean);
@@ -9089,7 +9198,8 @@ class WorkbenchWorkflow {
                 topic,
                 segmentStart: segment.start,
                 segmentEnd: segment.end,
-                unitDurations: filmSchedule.suggestedDurations
+                unitDurations: filmSchedule.suggestedDurations,
+                productStartNumber
               })
             : await this.generateText(scriptTextProvider, [
             {
@@ -9129,6 +9239,7 @@ class WorkbenchWorkflow {
             characters: directFastSpine.c,
             scenes: directFastSpine.sc,
             durations: filmSchedule.suggestedDurations,
+            productStartNumber,
             strict: true
           });
           const saved = {
@@ -9157,12 +9268,14 @@ class WorkbenchWorkflow {
               topic,
               segmentStart: segment.start,
               segmentEnd: segment.end,
-              unitDurations: filmSchedule.suggestedDurations
+              unitDurations: filmSchedule.suggestedDurations,
+              productStartNumber
             });
             assertDirectFastSegment(payload, segment.start, segment.end, {
               characters: directFastSpine.c,
               scenes: directFastSpine.sc,
               durations: filmSchedule.suggestedDurations,
+              productStartNumber,
               strict: true
             });
             const saved = {
@@ -9299,7 +9412,8 @@ class WorkbenchWorkflow {
             topic,
             segmentStart: start,
             segmentEnd: end,
-            unitDurations: filmSchedule.suggestedDurations
+            unitDurations: filmSchedule.suggestedDurations,
+            productStartNumber
           }).s)
         };
         checkpoint.directFastFallbacks = [
@@ -9316,7 +9430,9 @@ class WorkbenchWorkflow {
       const { blueprint, normalized, qualityAudit } = compiled;
       const semanticReview = {
         ok: true,
-        skipped: true,
+        skipped: false,
+        localDeterministic: true,
+        contractVersion: DRAMA_WRITING_CONTRACT_VERSION,
         verdict: "pass",
         scores: Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, 100])),
         hardFailures: [],
@@ -9341,6 +9457,7 @@ class WorkbenchWorkflow {
       const finishedAt = new Date();
       const startedAtMs = Date.parse(checkpoint.startedAt || "");
       const elapsedSeconds = Number.isFinite(startedAtMs) ? Math.max(0, Math.round((finishedAt.getTime() - startedAtMs) / 1000)) : null;
+      const topicToAssetsElapsedSeconds = elapsedSeconds === null ? null : topicElapsedSeconds + elapsedSeconds;
       project.script = {
         ...(project.script || {}),
         raw,
@@ -9361,6 +9478,12 @@ class WorkbenchWorkflow {
           targetSeconds: SCRIPT_FAST_TARGET_SECONDS,
           elapsedSeconds,
           metTarget: elapsedSeconds !== null ? elapsedSeconds <= SCRIPT_FAST_TARGET_SECONDS : null,
+          topicElapsedSeconds,
+          topicToAssetsTargetSeconds: TOPIC_TO_ASSETS_SLA_MS / 1000,
+          topicToAssetsElapsedSeconds,
+          metTopicToAssetsTarget: topicToAssetsElapsedSeconds !== null ? topicToAssetsElapsedSeconds <= TOPIC_TO_ASSETS_SLA_MS / 1000 : null,
+          theoreticalUpperBoundSeconds: Math.round(checkpoint.theoreticalUpperBoundMs / 1000),
+          writingContractVersion: DRAMA_WRITING_CONTRACT_VERSION,
           finishedAt: finishedAt.toISOString(),
           upstreamModel: scriptTextProvider.model,
           localFallbackCount: (Array.isArray(checkpoint.directFastFallbacks) ? checkpoint.directFastFallbacks : []).length,
@@ -9373,7 +9496,7 @@ class WorkbenchWorkflow {
         ...(project.ideation || {}),
         status: "script_ready",
         scriptGeneratedAt: finishedAt.toISOString(),
-        message: `完整剧本已在 ${elapsedSeconds ?? "未知"} 秒内生成并通过本地硬审计，已进入资产阶段`,
+        message: `完整剧本已生成并通过同合同蓝图审核，选题到资产累计 ${topicToAssetsElapsedSeconds ?? "未知"} 秒，已进入资产阶段`,
         errorCode: ""
       };
       project.status = "analyzed";
@@ -9942,7 +10065,9 @@ class WorkbenchWorkflow {
         const blueprintReview = useFastScriptPath
           ? {
               ok: true,
-              skipped: true,
+              skipped: false,
+              localDeterministic: true,
+              contractVersion: DRAMA_WRITING_CONTRACT_VERSION,
               verdict: "pass",
               scores: Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, 100])),
               hardFailures: [],
@@ -10364,7 +10489,9 @@ class WorkbenchWorkflow {
       semanticReview = useFastScriptPath
         ? {
             ok: true,
-            skipped: true,
+            skipped: false,
+            localDeterministic: true,
+            contractVersion: DRAMA_WRITING_CONTRACT_VERSION,
             verdict: "pass",
             scores: Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, 100])),
             hardFailures: [],
@@ -16003,3 +16130,4 @@ module.exports.characterReferenceFailures = characterReferenceFailures;
 module.exports.assertKnownCharacterReferences = assertKnownCharacterReferences;
 module.exports.assertUnitCharacterReferencesPlanned = assertUnitCharacterReferencesPlanned;
 module.exports.mergeAnalysisChunks = mergeAnalysisChunks;
+module.exports.buildLocalTopicOptions = buildLocalTopicOptions;

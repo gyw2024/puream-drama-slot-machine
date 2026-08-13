@@ -54,7 +54,7 @@ function defaultReferenceParityTemplates() {
 
     referenceParityUnits: `【参考成片倒推·正式制作稿合同】
 1. 每镜只承担一条连续因果动作链，并拆成恰好3个连续覆盖0→duration的可剪辑 subshots；三段时长禁止等分，冲突段优先1.5–3秒短切。整镜 visibleCharacterIds 最多2人；三段的 action/faceAction/bodyAction 必须肉眼不同（说话人近景→听者反应→物件/结果），禁止三段复用同一句动作。
-2. 300秒仅参考80–100个subshots、60–90轮对白；实际按秒数缩放，并保持每分钟至少120个可说汉字。至少70%有人镜含两轮以上交锋。10秒冲突镜通常5–6句短锤（单句4–10字优先），句句改信息/权力/证据/行动；双人交锋同一说话人不得连续超过2轮；禁止说明句与同义复读。
+2. 300秒仅参考80–100个subshots、60–90轮对白；实际按秒数缩放，并保持每分钟至少120个可说汉字。至少70%适合说话的有人镜含两轮以上交锋。10秒双人冲突镜通常3–5句短锤，10秒单人动作/反应镜通常1–3句，商品整体/细节干净镜允许零对白；句句改信息/权力/证据/行动；双人交锋同一说话人不得连续超过2轮；禁止说明句与同义复读。
 3. 每个 subshot 必须写 shotType、具体 cutReason（台词/视线/动作/物件/入场/声音桥，禁止只写硬切）、visibleCharacterIds、speakerIds、speakerFacing、listenerFacing、eyelineDirection；同一 subshot 只允许一个主口型。无对白者闭嘴但保留反应；禁止写 BGM/配乐。
 4. emotionArc 必须写 start→trigger→peak→aftershock；performanceBeats 写 faceAction、bodyAction、voiceDelivery、listenerReaction，使用“下颌绷紧/泪线形成/鼻翼抽动/手背青筋/喉音破裂”等，禁止只写“愤怒、悲伤”。
 5. 人物脸/年龄/体型/发型/服装/持物手别与屏幕方向继承上镜；场景门窗家具与主光继承场景资产。

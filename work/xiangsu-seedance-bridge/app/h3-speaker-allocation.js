@@ -75,6 +75,24 @@ function allocateH3ShotSpeakers(plannedShots = [], characters = [], maxSpeakers 
   const records = characterRecords(characters);
   const limit = Math.max(1, Math.min(2, Math.round(Number(maxSpeakers) || 2)));
   return (Array.isArray(plannedShots) ? plannedShots : []).map(plan => {
+    const plannedVisibleRecords = [
+      ...(Array.isArray(plan?.visibleCharacterIds) ? plan.visibleCharacterIds : []),
+      ...(Array.isArray(plan?.characters) ? plan.characters : [])
+    ].map(value => resolveCharacter(value, records)).filter((item, index, all) => item && all.findIndex(candidate => candidate.id === item.id) === index);
+    const plannedDialogueMode = `${String(plan?.dialogueGoal || "")} ${String(plan?.shotFunction || "")}`;
+    // The blueprint is the source of truth for a declared two-person exchange.
+    // Action prose can describe the listener as stepping back or falling silent
+    // after a line; that reaction must not erase the listener's earlier turn.
+    if (limit >= 2 && plannedVisibleRecords.length >= 2 && /双人|攻防|对话|two[_ -]?shot/i.test(plannedDialogueMode)) {
+      const selected = plannedVisibleRecords.slice(0, limit);
+      return {
+        shotId: String(plan?.id || "").toUpperCase(),
+        allowedSpeakerIds: selected.map(item => item.id),
+        allowedSpeakerNames: selected.map(item => item.name).filter(Boolean),
+        silentCharacterIds: plannedVisibleRecords.slice(limit).map(item => item.id),
+        maxSpeakingCharacters: limit
+      };
+    }
     const sources = [plan?.mainlineBeat, plan?.dialogueGoal, plan?.action].map(value => String(value || "").trim()).filter(Boolean);
     const fallbackMentions = [];
     let decisiveMentions = [];

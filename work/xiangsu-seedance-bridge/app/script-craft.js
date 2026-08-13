@@ -17,6 +17,8 @@ const ESCALATION_VARIABLES = Object.freeze([
   "撕毁善意证据"
 ]);
 
+const { dialogueUnitPrompt, sharedDramaWritingContract } = require("./drama-writing-contract");
+
 function storyDensityTargets(totalSeconds = 300, unitCount = 0) {
   const seconds = Math.max(60, Math.round(Number(totalSeconds) || 300));
   const units = Math.max(6, Math.round(Number(unitCount) || seconds / 10));
@@ -219,11 +221,7 @@ function actBeatGrid(totalSeconds = 300, unitCount = 30) {
 }
 
 function planUnitDialogueGoal(durationSeconds = 10) {
-  const duration = Math.max(5, Math.min(15, Math.round(Number(durationSeconds) || 10)));
-  const sentenceTarget = duration <= 7 ? 4 : (duration <= 12 ? 6 : 8);
-  const charMin = Math.round(duration * 3.6);
-  const charMax = Math.round(duration * 4.4);
-  return `${sentenceTarget}句（轮）、${charMin}–${charMax}个可说汉字；dialogueArc必须写entryCause/speakerGoalA/speakerGoalB/newInformation/exitConsequence；每句按attack/deflect/counter/reveal/decision之一推进，写合并delivery、body、listenerBeat；说话人看听者，末句必须在本镜结束前完整说完并造成可见后果`;
+  return `${dialogueUnitPrompt(durationSeconds)}；dialogueArc必须写entryCause/speakerGoalA/speakerGoalB/newInformation/exitConsequence；每句按attack/deflect/counter/reveal/decision之一推进，写合并delivery、body、listenerBeat；说话人看听者，末句必须在本镜结束前完整说完并造成可见后果`;
 }
 
 function storyCoreCraft() {
@@ -347,7 +345,7 @@ function scriptCraftGuide(options = {}) {
       timeline,
       productWindow,
       "只规划当前批并承接上一项stateAfter；每项给duration、dialogueGoal、dialogueArc、三段构图、声场和因果结果。dialogueArc必须说明首句触发、双方目的、新信息和末句造成的可见后果。scenePresence只管场内连续性，visibleCharacterIds严格0–2人；至少一半单人镜，第三人另开反应/入场镜。前60秒默认双人短句互动或动作-回应-反应，连续两个单元不得由同一人物独白；单人镜最多1–3句且必须伴随可见任务，禁止解释性长独白。填写focus/counterpart、shotFunction、sceneObjective、transitionReason；只输出本批JSON。",
-      "对白容量：5–7秒4轮/18–31字，8–12秒6轮/29–53字，13–15秒8轮/47–66字；必须能完整说完。"
+      sharedDramaWritingContract(totalSeconds)
     ].join("\n\n");
   }
   if (phase === "units") {
@@ -357,7 +355,7 @@ function scriptCraftGuide(options = {}) {
       productWindow,
       "只写当前连续2项并沿用蓝图。先执行dialogueArc，再写逐句dialogueTurns：beat只选attack/deflect/counter/reveal/decision；delivery逐句写情绪起点→峰值、语速、音量/音高、重音和呼吸/哭腔/破音，禁止平声模板；body与listenerBeat写同步可见动作。每项恰好3个subshots；整镜只用蓝图0–2名visibleCharacterIds。顺序优先说话人近景→听者反应/反打→动作/物证/结果；每段只有一个主口型。前60秒不得连续两个单元由同一人物独白；单人镜最多1–3句短锤。",
       "emotionArc和performanceBeats必须从事件和人物立场推导，落到眉眼、下颌、泪线、呼吸、手指、重心与嗓音变化：赶人要气急压迫，受辱要委屈断气或哭腔，知恩后悔要失声→破音→哭着完成短句；情绪按冲突升级，禁止全员一直平静或无差别吼叫。切镜只由台词、视线、动作、物件、入场或声音驱动，尾帧保持微动作。商品按packshot/detail/use/result/reaction拆镜，整体/细节不出现无关人脸。",
-      "容量：5–7秒4轮/18–31字，8–12秒6轮/29–53字，13–15秒8轮/47–66字；0秒附近开口，末句在结束前完整说完，并留约15%给反应与动作。H3英文提示由系统后编译，本阶段不输出hailuoPrompt。"
+      `${sharedDramaWritingContract(totalSeconds)}\n0秒附近开口，末句在结束前完整说完，并留足反应与动作时间。H3英文提示由系统后编译，本阶段不输出hailuoPrompt。`
     ].join("\n\n");
   }
   return [
