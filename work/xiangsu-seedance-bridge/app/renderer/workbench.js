@@ -2256,6 +2256,8 @@ function renderQualityBlueprintToggle() {
   $("#qualityBlueprintToggleLabel").textContent = enabled ? `审核蓝图：${enabledCheckCount}/13` : "审核蓝图：关闭";
   const menu = $("#qualityBlueprintMenu");
   menu?.classList.toggle("is-off", !enabled);
+  if ($("#qualityBlueprintDetailCount")) $("#qualityBlueprintDetailCount").textContent = `${enabledCheckCount}/13 已启用`;
+  if (!enabled) $("#qualityBlueprintDetails")?.removeAttribute("open");
   if ($("#qualityBlueprintMaster")) $("#qualityBlueprintMaster").checked = enabled;
   $$('[data-quality-module]').forEach(input => {
     input.checked = modules[input.dataset.qualityModule] !== false;
@@ -4432,14 +4434,28 @@ async function saveQualityBlueprintSetting(enabled, requestedModules = null, req
     : "审核蓝图已关闭：不审核、不拦截、不回滚、不自动返修");
 }
 
+function setQualityBlueprintMenuOpen(open, { restoreFocus = false } = {}) {
+  const menu = $("#qualityBlueprintMenu");
+  const toggle = $("#qualityBlueprintToggle");
+  if (!menu || !toggle) return;
+  menu.classList.toggle("hidden", !open);
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  if (!open) {
+    $("#qualityBlueprintDetails")?.removeAttribute("open");
+    if (restoreFocus) toggle.focus({ preventScroll: true });
+    return;
+  }
+  requestAnimationFrame(() => menu.focus({ preventScroll: true }));
+}
+
 $("#qualityBlueprintToggle")?.addEventListener("click", event => {
   event.stopPropagation();
   const menu = $("#qualityBlueprintMenu");
-  menu?.classList.toggle("hidden");
-  event.currentTarget.setAttribute("aria-expanded", menu?.classList.contains("hidden") ? "false" : "true");
+  setQualityBlueprintMenuOpen(Boolean(menu?.classList.contains("hidden")));
 });
 
 $("#qualityBlueprintMenu")?.addEventListener("click", event => event.stopPropagation());
+$("#qualityBlueprintClose")?.addEventListener("click", () => setQualityBlueprintMenuOpen(false, { restoreFocus: true }));
 $("#qualityBlueprintMaster")?.addEventListener("change", async event => {
   await saveQualityBlueprintSetting(Boolean(event.currentTarget.checked));
 });
@@ -4463,13 +4479,13 @@ $$('[data-blueprint-bulk]').forEach(button => button.addEventListener("click", a
 }));
 
 document.addEventListener("click", () => {
-  $("#qualityBlueprintMenu")?.classList.add("hidden");
-  $("#qualityBlueprintToggle")?.setAttribute("aria-expanded", "false");
+  setQualityBlueprintMenuOpen(false);
 });
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
-  $("#qualityBlueprintMenu")?.classList.add("hidden");
-  $("#qualityBlueprintToggle")?.setAttribute("aria-expanded", "false");
+  if ($("#qualityBlueprintMenu")?.classList.contains("hidden")) return;
+  event.preventDefault();
+  setQualityBlueprintMenuOpen(false, { restoreFocus: true });
 });
 
 $("#qualityGatesEnabled")?.addEventListener("change", event => {

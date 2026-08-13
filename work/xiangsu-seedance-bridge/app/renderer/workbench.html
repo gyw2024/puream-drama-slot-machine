@@ -28,22 +28,38 @@
         <button id="stopPipeline" class="danger-button" type="button" title="结束当前自动化/抽卡">结束任务</button>
         <div id="bridgeBadge" class="bridge-badge offline"><i></i><b>像塑检测中</b></div>
         <button id="qualityBlueprintToggle" class="review-blueprint-toggle" type="button" aria-pressed="true" aria-expanded="false"><span class="review-blueprint-indicator" aria-hidden="true"></span><span id="qualityBlueprintToggleLabel">审核蓝图：开启</span></button>
-        <div id="qualityBlueprintMenu" class="quality-blueprint-menu hidden" role="dialog" aria-label="审核蓝图模块设置">
-          <label class="quality-blueprint-master"><input id="qualityBlueprintMaster" type="checkbox" checked><span><b>开启审核蓝图</b><small>关闭后不审核、不拦截、不回滚、不自动返修</small></span></label>
-          <div class="quality-blueprint-modules">
-            <label><input type="checkbox" data-quality-module="script" checked><span><b>剧本与对白</b><small>剧情、反转、对白、商品因果</small></span></label>
-            <label><input type="checkbox" data-quality-module="assets" checked><span><b>人物与资产</b><small>人物、场景、音色与素材质量</small></span></label>
-            <label><input type="checkbox" data-quality-module="storyboards" checked><span><b>分镜图</b><small>构图、人物一致性与首尾帧</small></span></label>
-            <label><input type="checkbox" data-quality-module="videos" checked><span><b>分镜视频</b><small>音画、口型、重复画面与表演</small></span></label>
-            <label><input type="checkbox" data-quality-module="delivery" checked><span><b>成片交付</b><small>拼接后的声音、画面与时长验收</small></span></label>
+        <div id="qualityBlueprintMenu" class="quality-blueprint-menu hidden" role="dialog" aria-labelledby="qualityBlueprintMenuTitle" tabindex="-1">
+          <div class="quality-blueprint-menu-head">
+            <span><b id="qualityBlueprintMenuTitle">审核蓝图</b><small>只启用你需要的审核与返修规则</small></span>
+            <button id="qualityBlueprintClose" class="quality-blueprint-close" type="button" aria-label="关闭审核蓝图设置">关闭</button>
           </div>
-          <section class="quality-blueprint-details" aria-label="剧本审核明细">
-            <div class="quality-blueprint-details-head"><span><b>剧本审核明细</b><small>每项都直接控制对应审查与返修</small></span><div><button type="button" data-blueprint-bulk="all">一键全开</button><button type="button" data-blueprint-bulk="none">一键全关</button></div></div>
-            <div class="quality-blueprint-checks">
-              <label><input type="checkbox" data-blueprint-check="productionStructure" checked>制作结构与时长合同</label><label><input type="checkbox" data-blueprint-check="clarity" checked>信息清晰</label><label><input type="checkbox" data-blueprint-check="storyCore" checked>故事核心</label><label><input type="checkbox" data-blueprint-check="causality" checked>因果承接</label><label><input type="checkbox" data-blueprint-check="escalation" checked>冲突加压</label><label><input type="checkbox" data-blueprint-check="reversalStructure" checked>伏笔与反转</label><label><input type="checkbox" data-blueprint-check="tragedyCraft" checked>悲剧代价</label><label><input type="checkbox" data-blueprint-check="faceSlapCraft" checked>打脸清算</label><label><input type="checkbox" data-blueprint-check="dialogue" checked>对白准确</label><label><input type="checkbox" data-blueprint-check="emotionalDelivery" checked>语气表演</label><label><input type="checkbox" data-blueprint-check="productIntegration" checked>商品因果</label><label><input type="checkbox" data-blueprint-check="soundDesign" checked>声音设计</label><label><input type="checkbox" data-blueprint-check="visualVariety" checked>画面差异</label>
-            </div>
-          </section>
-          <p>关闭总开关时仅保留程序读取 JSON 和上游接口必填项，不会因创作规则打回或清空已生成内容。</p>
+          <label class="quality-blueprint-master"><input id="qualityBlueprintMaster" type="checkbox" checked><span><b>开启审核蓝图</b><small>关闭后不审核、不拦截、不回滚、不自动返修</small></span></label>
+          <div class="quality-blueprint-off-note" role="status">
+            <b>审核已关闭</b>
+            <span>仅保留 JSON 解析和上游必填项。勾选上方开关后再显示审核配置。</span>
+          </div>
+          <div class="quality-blueprint-config">
+            <section class="quality-blueprint-module-section" aria-label="审核阶段">
+              <div class="quality-blueprint-section-title"><b>审核阶段</b><small>关闭某阶段后，该阶段不再审核或返修</small></div>
+              <div class="quality-blueprint-modules">
+                <label><input type="checkbox" data-quality-module="script" checked><span><b>剧本与对白</b><small>剧情、反转、对白、商品因果</small></span></label>
+                <label><input type="checkbox" data-quality-module="assets" checked><span><b>人物与资产</b><small>人物、场景、音色与素材质量</small></span></label>
+                <label><input type="checkbox" data-quality-module="storyboards" checked><span><b>分镜图</b><small>构图、人物一致性与首尾帧</small></span></label>
+                <label><input type="checkbox" data-quality-module="videos" checked><span><b>分镜视频</b><small>音画、口型、重复画面与表演</small></span></label>
+                <label><input type="checkbox" data-quality-module="delivery" checked><span><b>成片交付</b><small>拼接后的声音、画面与时长验收</small></span></label>
+              </div>
+            </section>
+            <section class="quality-blueprint-details" aria-label="剧本审核明细">
+              <div class="quality-blueprint-details-head"><span><b>剧本审核明细</b><small id="qualityBlueprintDetailCount">13/13 已启用</small></span><div><button type="button" data-blueprint-bulk="all">一键全开</button><button type="button" data-blueprint-bulk="none">一键全关</button></div></div>
+              <details id="qualityBlueprintDetails">
+                <summary>查看或收起 13 项审核</summary>
+                <div class="quality-blueprint-checks">
+                  <label><input type="checkbox" data-blueprint-check="productionStructure" checked>制作结构与时长合同</label><label><input type="checkbox" data-blueprint-check="clarity" checked>信息清晰</label><label><input type="checkbox" data-blueprint-check="storyCore" checked>故事核心</label><label><input type="checkbox" data-blueprint-check="causality" checked>因果承接</label><label><input type="checkbox" data-blueprint-check="escalation" checked>冲突加压</label><label><input type="checkbox" data-blueprint-check="reversalStructure" checked>伏笔与反转</label><label><input type="checkbox" data-blueprint-check="tragedyCraft" checked>悲剧代价</label><label><input type="checkbox" data-blueprint-check="faceSlapCraft" checked>打脸清算</label><label><input type="checkbox" data-blueprint-check="dialogue" checked>对白准确</label><label><input type="checkbox" data-blueprint-check="emotionalDelivery" checked>语气表演</label><label><input type="checkbox" data-blueprint-check="productIntegration" checked>商品因果</label><label><input type="checkbox" data-blueprint-check="soundDesign" checked>声音设计</label><label><input type="checkbox" data-blueprint-check="visualVariety" checked>画面差异</label>
+                </div>
+              </details>
+            </section>
+            <p>关闭总开关时不会因创作规则打回或清空已生成内容。</p>
+          </div>
         </div>
         <button id="accountSwitchShortcut" class="outline-button" type="button" title="切换像塑账号"><img src="../assets/icons/history.png" alt="">切换账号</button>
         <button id="startBridge" class="outline-button" type="button" title="后台隐藏启动像塑"><img src="../assets/icons/lock.png" alt="">隐藏启动像塑</button>

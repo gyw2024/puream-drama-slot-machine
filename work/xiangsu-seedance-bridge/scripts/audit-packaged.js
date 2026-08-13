@@ -74,14 +74,15 @@ async function main() {
       screenshots.push(screenshotPath);
       return screenshotPath;
     };
-    const layoutMatrix = [];
-    for (const view of [
+    const auditViews = [
       { width: 1024, height: 720, zoom: 1 },
       { width: 1280, height: 800, zoom: 1 },
       { width: 1440, height: 900, zoom: 1 },
       { width: 1920, height: 1080, zoom: 1 },
       { width: 1280, height: 800, zoom: 2 }
-    ]) {
+    ];
+    const layoutMatrix = [];
+    for (const view of auditViews) {
       const viewport = { width: view.width, height: view.height };
       await page.setViewportSize(viewport);
       await electronApp.evaluate(({ BrowserWindow }, size) => {
@@ -118,6 +119,62 @@ async function main() {
       });
       layoutMatrix.push({ ...view, ...layout });
       await captureBackground(`main-window-${viewport.width}x${viewport.height}-zoom${view.zoom * 100}`);
+    }
+    const blueprintPopoverMatrix = [];
+    for (const view of auditViews) {
+      await page.setViewportSize({ width: view.width, height: view.height });
+      await electronApp.evaluate(({ BrowserWindow }, size) => {
+        const win = BrowserWindow.getAllWindows()[0];
+        if (win) { win.setContentSize(size.width, size.height); win.webContents.setZoomFactor(size.zoom); }
+      }, view);
+      await page.waitForTimeout(250);
+      await page.evaluate(() => {
+        document.querySelector("#qualityBlueprintDetails")?.removeAttribute("open");
+        if (!document.querySelector("#qualityBlueprintMenu")?.classList.contains("hidden")) {
+          document.querySelector("#qualityBlueprintClose")?.click();
+        }
+      });
+      await page.click("#qualityBlueprintToggle");
+      await page.waitForTimeout(100);
+      const readPopover = () => page.evaluate(() => {
+        const menu = document.querySelector("#qualityBlueprintMenu");
+        const config = document.querySelector(".quality-blueprint-config");
+        const rect = menu.getBoundingClientRect();
+        const configRect = config.getBoundingClientRect();
+        const style = getComputedStyle(menu);
+        const colorParts = style.backgroundColor.match(/[\d.]+/g)?.map(Number) || [];
+        const alpha = colorParts.length >= 4 ? colorParts[3] : 1;
+        return {
+          viewport: { width: innerWidth, height: innerHeight },
+          rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height },
+          clipped: rect.left < -1 || rect.top < -1 || rect.right > innerWidth + 1 || rect.bottom > innerHeight + 1,
+          horizontalOverflow: menu.scrollWidth > menu.clientWidth + 1 || config.scrollWidth > config.clientWidth + 1,
+          position: style.position,
+          backgroundColor: style.backgroundColor,
+          backgroundOpaque: alpha >= 1,
+          detailsOpen: Boolean(document.querySelector("#qualityBlueprintDetails")?.open),
+          configScrollable: config.scrollHeight > config.clientHeight + 1,
+          closeVisible: document.querySelector("#qualityBlueprintClose")?.getBoundingClientRect().width >= 44,
+          masterVisible: document.querySelector("#qualityBlueprintMaster")?.getBoundingClientRect().width > 0,
+          configRect: { top: configRect.top, bottom: configRect.bottom, height: configRect.height }
+        };
+      });
+      const collapsed = await readPopover();
+      await captureBackground(`blueprint-collapsed-${view.width}x${view.height}-zoom${view.zoom * 100}`);
+      await page.click("#qualityBlueprintDetails > summary");
+      await page.waitForTimeout(100);
+      const expanded = await readPopover();
+      await captureBackground(`blueprint-expanded-top-${view.width}x${view.height}-zoom${view.zoom * 100}`);
+      const bottomReachability = await page.evaluate(() => {
+        const config = document.querySelector(".quality-blueprint-config");
+        config.scrollTop = config.scrollHeight;
+        const last = document.querySelector("#qualityBlueprintMenu [data-blueprint-check='visualVariety']")?.closest("label")?.getBoundingClientRect();
+        const configRect = config.getBoundingClientRect();
+        return Boolean(last && last.top >= configRect.top - 1 && last.bottom <= configRect.bottom + 1);
+      });
+      await captureBackground(`blueprint-expanded-bottom-${view.width}x${view.height}-zoom${view.zoom * 100}`);
+      blueprintPopoverMatrix.push({ ...view, collapsed, expanded, bottomReachability });
+      await page.keyboard.press("Escape");
     }
     await electronApp.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
@@ -191,6 +248,7 @@ async function main() {
       !document.querySelector("#qualityBlueprintMenu")?.classList.contains("hidden")
       && document.querySelector("#qualityBlueprintToggle")?.getAttribute("aria-expanded") === "true"
     ));
+    const blueprintFocusEntered = await page.evaluate(() => document.activeElement?.id === "qualityBlueprintMenu");
     await page.keyboard.press("Escape");
     const blueprintKeyboardClosed = await page.evaluate(() => (
       document.querySelector("#qualityBlueprintMenu")?.classList.contains("hidden")
@@ -199,6 +257,25 @@ async function main() {
     await page.keyboard.press("Tab");
     const keyboardTabMoved = await page.evaluate(() => document.activeElement !== document.body && document.activeElement?.id !== "qualityBlueprintToggle");
     await page.click("#qualityBlueprintToggle");
+    await page.click("#qualityBlueprintMaster");
+    await page.waitForFunction(async () => (await window.dramaSlot.workbench.getSettings()).settings?.generation?.qualityGatesEnabled === false);
+    const blueprintOffState = await page.evaluate(() => {
+      const menu = document.querySelector("#qualityBlueprintMenu");
+      const config = document.querySelector(".quality-blueprint-config");
+      const note = document.querySelector(".quality-blueprint-off-note");
+      const rect = menu.getBoundingClientRect();
+      return {
+        clipped: rect.left < -1 || rect.top < -1 || rect.right > innerWidth + 1 || rect.bottom > innerHeight + 1,
+        height: rect.height,
+        horizontalOverflow: menu.scrollWidth > menu.clientWidth + 1,
+        configHidden: getComputedStyle(config).display === "none",
+        noteVisible: getComputedStyle(note).display !== "none" && note.getBoundingClientRect().height > 0,
+        detailsCollapsed: document.querySelector("#qualityBlueprintDetails")?.open === false
+      };
+    });
+    await captureBackground("blueprint-disabled-compact");
+    await page.click("#qualityBlueprintMaster");
+    await page.waitForFunction(async () => (await window.dramaSlot.workbench.getSettings()).settings?.generation?.qualityGatesEnabled === true);
     await page.click('#qualityBlueprintMenu [data-blueprint-bulk="none"]');
     await page.waitForFunction(async () => {
       const result = await window.dramaSlot.workbench.getSettings();
@@ -224,13 +301,15 @@ async function main() {
         allOnEnabledCount: Object.values(result.settings?.generation?.blueprintAuditChecks || {}).filter(Boolean).length,
         keyboardOpened: true,
         keyboardClosed: true,
-        keyboardTabMoved: true
+        keyboardTabMoved: true,
+        focusEnteredDialog: true
       };
     });
     blueprintControls.allOffEnabledCount = blueprintAllOff;
     blueprintControls.keyboardOpened = blueprintKeyboardOpened;
     blueprintControls.keyboardClosed = blueprintKeyboardClosed;
     blueprintControls.keyboardTabMoved = keyboardTabMoved;
+    blueprintControls.focusEnteredDialog = blueprintFocusEntered;
     await page.keyboard.press("Escape");
     const ossSaved = await page.evaluate(async settingsValue => window.dramaSlot.workbench.saveSettings({
       ...settingsValue,
@@ -454,6 +533,8 @@ async function main() {
     }));
     fs.writeFileSync(path.join(runDir, "preflight.json"), JSON.stringify({
       layoutMatrix,
+      blueprintPopoverMatrix,
+      blueprintOffState,
       stageMatrix,
       dialogMatrix,
       visibilityAudit,
@@ -484,7 +565,8 @@ async function main() {
       allOnEnabledCount: blueprintControls.allOnEnabledCount,
       keyboardOpened: blueprintControls.keyboardOpened,
       keyboardClosed: blueprintControls.keyboardClosed,
-      keyboardTabMoved: blueprintControls.keyboardTabMoved
+      keyboardTabMoved: blueprintControls.keyboardTabMoved,
+      focusEnteredDialog: blueprintControls.focusEnteredDialog
     }, {
       detailControlCount: 26,
       bulkControlCount: 4,
@@ -492,7 +574,8 @@ async function main() {
       allOnEnabledCount: 13,
       keyboardOpened: true,
       keyboardClosed: true,
-      keyboardTabMoved: true
+      keyboardTabMoved: true,
+      focusEnteredDialog: true
     }, "all blueprint details and bulk controls must persist and remain keyboard-operable");
     assert.equal(durationModeUi.manualState.disabled, true, "uploaded-script mode must disable the configured duration field");
     assert.equal(durationModeUi.manualState.required, false, "uploaded-script mode must not require a configured duration");
@@ -522,6 +605,26 @@ async function main() {
     assert.equal(layoutMatrix.some(item => item.mainStageHorizontalOverflow), false, "main stage must reflow without horizontal scrolling in the audited matrix");
     assert.equal(layoutMatrix.some(item => item.topControlOverlaps.length), false, "topbar controls must not overlap in the audited matrix");
     assert.equal(layoutMatrix.some(item => item.visibleStageButtons < 6), false, "all stage navigation entries must remain reachable");
+    assert.equal(blueprintPopoverMatrix.some(item => (
+      item.collapsed.clipped
+      || item.expanded.clipped
+      || item.collapsed.horizontalOverflow
+      || item.expanded.horizontalOverflow
+      || item.collapsed.position !== "fixed"
+      || !item.collapsed.backgroundOpaque
+      || !item.expanded.backgroundOpaque
+      || item.collapsed.detailsOpen
+      || !item.expanded.detailsOpen
+      || !item.collapsed.closeVisible
+      || !item.collapsed.masterVisible
+      || !item.bottomReachability
+    )), false, "blueprint panel must stay opaque, fixed, unclipped, compact by default, and fully reachable at every audited size and zoom");
+    assert.equal(blueprintOffState.clipped, false, "disabled blueprint panel must remain inside the viewport");
+    assert.equal(blueprintOffState.horizontalOverflow, false, "disabled blueprint panel must not horizontally overflow");
+    assert.equal(blueprintOffState.configHidden, true, "disabled blueprint panel must hide inactive configuration");
+    assert.equal(blueprintOffState.noteVisible, true, "disabled blueprint panel must explain the closed state");
+    assert.equal(blueprintOffState.detailsCollapsed, true, "disabled blueprint panel must collapse audit details");
+    assert.ok(blueprintOffState.height <= 280, "disabled blueprint panel must stay compact instead of covering the workbench");
     assert.equal(stageMatrix.some(item => !item.active || item.horizontalOverflow), false, "every production stage must activate without horizontal overflow");
     assert.equal(stageMatrix.some(item => item.undersized.length), false, "visible stage controls must keep a 44px minimum target");
     assert.equal(stageMatrix.some(item => item.seriousAxe.length), false, "production stages must have no serious accessibility violation");
@@ -546,6 +649,8 @@ async function main() {
       deletedProjectRoundTrip: deleted,
       runtime,
       layoutMatrix,
+      blueprintPopoverMatrix,
+      blueprintOffState,
       stageMatrix,
       dialogMatrix,
       axe: {
