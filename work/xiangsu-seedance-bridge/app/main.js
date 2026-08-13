@@ -14,6 +14,7 @@ const { WorkbenchStore, defaultPromptTemplates } = require("./workbench-store");
 const { WorkbenchWorkflow, projectRequiresFaceMesh, hasOssCredentials } = require("./workbench-workflow");
 const { DramaLicenseClient, licenseBypassAllowed, DEFAULT_LICENSE_BASE_URL } = require("./license-gate");
 const { createIntegrityGuard } = require("./integrity-guard");
+const { isActiveVideoJob } = require("./workbench-status");
 const {
   hydratePureamDefaults: applyPureamAuthorization,
   findStoredPureamAuthorization,
@@ -1506,6 +1507,7 @@ ipcMain.handle("workbench:account-switch-status", () => {
   try {
     const { store } = requireWorkbench();
     const state = store.getAccountSwitchState();
+    if (state.status === "idle") return { ok: true, state: { ...state, pendingJobs: [] } };
     return { ok: true, state: { ...state, pendingJobs: publicPendingJobs(store.listActiveVideoJobs()) } };
   } catch (error) { return publicError(error); }
 });
@@ -1516,12 +1518,9 @@ ipcMain.handle("workbench:sync-video-jobs", async () => {
     try {
       const { store, workflow } = requireWorkbench();
       const active = store.listActiveVideoJobs();
-      if (!active.length) {
-        workflow.reconcileDetachedAutomations();
-        return { ok: true, jobs: [] };
-      }
+      if (!active.length) return { ok: true, jobs: [] };
       const jobs = await workflow.reconcileOrphanedVideoJobs();
-      workflow.reconcileDetachedAutomations();
+      for (const projectId of new Set(active.map(item => item.projectId))) workflow.reconcileDetachedAutomations(projectId);
       return { ok: true, jobs: publicPendingJobs(jobs) };
     } catch (error) { return publicError(error); }
     finally { videoJobSyncRequest = null; }
@@ -1649,8 +1648,10 @@ ipcMain.handle("workbench:restore-project", (_event, archiveId) => {
 });
 ipcMain.handle("workbench:get-project", (_event, projectId) => {
   try {
-    const { store } = requireWorkbench();
-    return { ok: true, project: store.getProject(projectId) };
+    // Project selection is read-only. A switch must never arbitrate whether a
+    // background/recovered task is alive; explicit task sync/resume owns that
+    // state transition and has the upstream evidence needed to decide safely.
+    return { ok: true, project: requireWorkbench().store.getProject(projectId) };
   }
   catch (error) { return publicError(error); }
 });
@@ -2215,7 +2216,6 @@ if (!app.requestSingleInstanceLock()) {
       licenseClient: licenseBypassAllowed() ? null : dramaLicense,
       integrityGuard
     });
-    workbenchWorkflow.reconcileDetachedAutomations();
     createWindow();
   });
   app.on("window-all-closed", () => app.quit());

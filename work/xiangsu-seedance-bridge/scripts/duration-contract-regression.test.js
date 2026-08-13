@@ -7,6 +7,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { reconcileUnitDurations } = require("../app/duration-contract");
+const { estimateUploadedScriptDuration } = require("../app/script-duration");
 const { WorkbenchStore } = require("../app/workbench-store");
 const {
   WorkbenchWorkflow,
@@ -61,14 +62,38 @@ test("uploaded structured analysis is retimed exactly without losing the authore
       videoProviderKind: "puream-hailuo-h3",
       targetDurationSeconds: 45,
       shotDuration: 10
-    }
+    },
+    productionPlan: { inputMode: "manual" }
   };
-  const conformed = conformImportedAnalysisToDurationContract(importedAnalysis(3), project);
-  assert.equal(conformed.shots.reduce((sum, shot) => sum + shot.duration, 0), 45);
+  const conformed = conformImportedAnalysisToDurationContract(importedAnalysis(3), project, { adaptiveTargetSeconds: 30 });
+  assert.equal(conformed.shots.reduce((sum, shot) => sum + shot.duration, 0), 30);
   assert.deepEqual(conformed.shots.map(shot => shot.id), ["S01", "S02", "S03"]);
   assert.equal(conformed.shots.at(-1).action.includes("原稿结尾完整落地"), true);
   assert.equal(conformed.shots.every(shot => shot.subshots.at(-1).end === shot.duration), true);
   assert.equal(conformed.durationContract.locked, true);
+  assert.equal(conformed.durationContract.source, "uploaded-script-adaptive");
+});
+
+test("AI generated projects still obey the configured duration exactly", () => {
+  const conformed = conformImportedAnalysisToDurationContract(importedAnalysis(3), {
+    generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", targetDurationSeconds: 45 },
+    productionPlan: { inputMode: "ai" }
+  });
+  assert.equal(conformed.durationContract.targetSeconds, 45);
+  assert.equal(conformed.shots.reduce((sum, shot) => sum + shot.duration, 0), 45);
+  assert.equal(conformed.durationContract.source, "ai-configured-target");
+});
+
+test("uploaded dialogue duration responds to exact speech, punctuation, pace and action beats", () => {
+  const script = "母亲（缓慢地擦泪，停顿）：这些年，我一直没有告诉你……\n女儿（急促）：那张收据到底是谁留下的？";
+  const ledger = require("../app/dialogue-parser").parseSourceDialogueLedger(script);
+  const estimate = estimateUploadedScriptDuration(script, ledger, "puream-hailuo-h3", { engine: "hailuo-h3" });
+  assert.equal(estimate.dialogueTurns, 2);
+  assert.ok(estimate.targetSeconds >= 8);
+  assert.equal(estimate.mode, "uploaded-script-adaptive");
+  const faster = estimateUploadedScriptDuration("母亲（飞快）：这些年我一直没有告诉你", require("../app/dialogue-parser").parseSourceDialogueLedger("母亲（飞快）：这些年我一直没有告诉你"), "puream-hailuo-h3");
+  const slower = estimateUploadedScriptDuration("母亲（缓慢，一字一顿，停顿）：这些年我一直没有告诉你……", require("../app/dialogue-parser").parseSourceDialogueLedger("母亲（缓慢，一字一顿，停顿）：这些年我一直没有告诉你……"), "puream-hailuo-h3");
+  assert.ok(slower.estimatedSeconds > faster.estimatedSeconds);
 });
 
 test("JSON script imports use the same local structured path as markdown imports", () => {
@@ -83,7 +108,7 @@ test("the local uploaded-script workflow reaches assets with one persisted exact
     const settings = store.getSettings();
     settings.generation.qualityGatesEnabled = false;
     store.saveSettings(settings);
-    const created = store.createProject("本地上传剧本", { targetDurationSeconds: 45 });
+    const created = store.createProject("本地上传剧本", { targetDurationSeconds: 45, inputMode: "manual" });
     store.patchProject(created.id, { script: { raw: JSON.stringify(importedAnalysis(3)) } });
     let paidTextCalls = 0;
     const workflow = new WorkbenchWorkflow({
@@ -97,8 +122,10 @@ test("the local uploaded-script workflow reaches assets with one persisted exact
     assert.equal(paidTextCalls, 0);
     assert.equal(analyzed.currentStage, "assets");
     assert.equal(analyzed.generation.durationLocked, true);
-    assert.equal(analyzed.generation.durationContract.targetSeconds, 45);
-    assert.equal(analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0), 45);
+    assert.equal(analyzed.generation.durationContract.targetSeconds, 30);
+    assert.equal(analyzed.generation.targetDurationSeconds, 30);
+    assert.equal(analyzed.generation.durationSource, "uploaded-script-adaptive");
+    assert.equal(analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0), 30);
     assert.match(analyzed.productionRevision, /^revision_/);
     assert.match(analyzed.script.sourceFingerprint, /^[a-f0-9]{64}$/);
   } finally {

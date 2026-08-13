@@ -26,6 +26,14 @@ const {
   reconcileUnitDurations
 } = require("./duration-contract");
 const { licenseBypassAllowed } = require("./license-gate");
+const { estimateUploadedScriptDuration, explicitShotDurationTarget } = require("./script-duration");
+const {
+  BLUEPRINT_AUDIT_LABELS,
+  SEMANTIC_SCORE_FIELDS,
+  blueprintAuditChecks,
+  enabledSemanticScoreFields,
+  normalizeBlueprintAuditChecks
+} = require("./quality-blueprint");
 const { app: electronApp } = (() => {
   try { return require("electron"); } catch { return { app: null }; }
 })();
@@ -517,7 +525,8 @@ function validateStoryBible(data, options = {}) {
     ? ["audienceBelieves", "antagonistMisdirection", "evidence1", "evidence2", "redHerring", "reinterpretation", "costAfterReversal"]
     : ["audienceBelieves", "antagonistMisdirection", "evidence1", "reinterpretation", "costAfterReversal"];
   if (reversalKeys.some(key => Array.isArray(reversalMatrix[key]) ? !reversalMatrix[key].length : !String(reversalMatrix[key] || "").trim())) failures.push(`${storyMechanism}所需的清算证明字段未写完整`);
-  if (failures.length && !options.skipQualityGates) throw Object.assign(new Error(`故事圣经未达标：${failures.join("；")}`), { code: "SCRIPT_STORY_BIBLE_INVALID", failures });
+  const activeFailures = activeBlueprintFailures(failures, options);
+  if (activeFailures.length && !options.skipQualityGates) throw Object.assign(new Error(`故事圣经未达标：${activeFailures.join("；")}`), { code: "SCRIPT_STORY_BIBLE_INVALID", failures: activeFailures });
   return { ...source, storyCore, reversalMatrix, characters, scenes, actPlan: acts };
 }
 
@@ -817,13 +826,15 @@ function validateShotPlanBatch(data, startNumber, expectedCount = SCRIPT_PLAN_BA
   if (startNumber === 1) {
     contractFailures.push(...openingHookContractFailures(normalized, { requireDialogue: false }).map(item => item.message));
   }
-  if (contractFailures.length && !options.bypassProductionContracts) {
-    throw Object.assign(new Error(`分段单元计划违反生产硬合同：${contractFailures.join("；")}`), {
+  const activeContractFailures = activeBlueprintFailures(contractFailures, options);
+  if (activeContractFailures.length && !options.bypassProductionContracts) {
+    throw Object.assign(new Error(`分段单元计划违反生产硬合同：${activeContractFailures.join("；")}`), {
       code: "SCRIPT_PLAN_BATCH_CONTRACT_FAILED",
-      failures: contractFailures
+      failures: activeContractFailures
     });
   }
-  if (failures.length && !options.skipQualityGates) throw Object.assign(new Error(`分段单元计划未达标：${failures.join("；")}`), { code: "SCRIPT_PLAN_BATCH_QUALITY_FAILED", failures });
+  const activeFailures = activeBlueprintFailures(failures, options);
+  if (activeFailures.length && !options.skipQualityGates) throw Object.assign(new Error(`分段单元计划未达标：${activeFailures.join("；")}`), { code: "SCRIPT_PLAN_BATCH_QUALITY_FAILED", failures: activeFailures });
   return normalized;
 }
 
@@ -1619,7 +1630,8 @@ function validateBlueprint(data, productName = "", options = {}) {
       failures: contractFailures
     });
   }
-  if (failures.length && !options.skipQualityGates) throw Object.assign(new Error(`剧本蓝图未达标：${failures.join("；")}`), { code: "SCRIPT_BLUEPRINT_INVALID", failures });
+  const activeFailures = activeBlueprintFailures(failures, options);
+  if (activeFailures.length && !options.skipQualityGates) throw Object.assign(new Error(`剧本蓝图未达标：${activeFailures.join("；")}`), { code: "SCRIPT_BLUEPRINT_INVALID", failures: activeFailures });
   return {
     ...source,
     characters: characters.map((item, index) => ({ ...item, id: `C${String(index + 1).padStart(2, "0")}` })),
@@ -1939,13 +1951,15 @@ function validateShotBatch(data, plannedShots, productName = "", videoEngine = "
   if (String(plannedShots[0]?.id || "").toUpperCase() === "S01") {
     contractFailures.push(...openingHookContractFailures(shots, { requireDialogue: true }));
   }
-  if (contractFailures.length && !options.bypassProductionContracts) {
-    throw Object.assign(new Error(`生成单元违反生产硬合同：${contractFailures.map(item => item.message).join("；")}`), {
+  const activeContractFailures = activeBlueprintFailures(contractFailures, options);
+  if (activeContractFailures.length && !options.bypassProductionContracts) {
+    throw Object.assign(new Error(`生成单元违反生产硬合同：${activeContractFailures.map(item => item.message).join("；")}`), {
       code: "SCRIPT_UNIT_CONTRACT_FAILED",
-      failures: contractFailures
+      failures: activeContractFailures
     });
   }
-  if (failures.length && !options.skipQualityGates) throw Object.assign(new Error(`生成单元批次未达标：${failures.join("；")}`), { code: "SCRIPT_UNIT_BATCH_INVALID", failures });
+  const activeFailures = activeBlueprintFailures(failures, options);
+  if (activeFailures.length && !options.skipQualityGates) throw Object.assign(new Error(`生成单元批次未达标：${activeFailures.join("；")}`), { code: "SCRIPT_UNIT_BATCH_INVALID", failures: activeFailures });
   return shots;
 }
 
@@ -5851,6 +5865,36 @@ function shotDialogueStats(shot) {
   return { turns: dialogueTurns(source), characters: spokenCharacters(source) };
 }
 
+function blueprintCheckForFailure(code = "", message = "") {
+  const source = `${String(code || "").toUpperCase()} ${String(message || "")}`;
+  // Provider limits and parse/sequence integrity are execution requirements,
+  // not optional creative review criteria. They remain under the structural
+  // switch even when a dialogue or visual quality check is disabled.
+  if (/HAILUO_.*(?:LIMIT|REFERENCE|ASSIGNMENT)|STRUCTURE_INVALID|SEQUENCE_INVALID|PARSE|MANAGED_MEDIA|REFERENCE_REQUIRED/.test(source)) return "productionStructure";
+  if (/PRODUCT|商品|产品|卖点|带货/.test(source)) return "productIntegration";
+  if (/DIALOGUE|SPEAKER|LISTENER|台词|对白|说话人|听者/.test(source)) return "dialogue";
+  if (/EMOTION|PERFORMANCE|DELIVERY|语气|情绪|表情|表演/.test(source)) return "emotionalDelivery";
+  if (/AUDIO|SOUND|VOICE|声音|音效|声线/.test(source)) return "soundDesign";
+  if (/REVERSAL|EVIDENCE|反转|证据|伏笔/.test(source)) return "reversalStructure";
+  if (/ESCALATION|PRESSURE|加压|冲突升级|逼迫/.test(source)) return "escalation";
+  if (/TRAGEDY|悲剧|牺牲|代价/.test(source)) return "tragedyCraft";
+  if (/FACE.?SLAP|打脸|清算|奖惩|PAYOFF|回收/.test(source)) return "faceSlapCraft";
+  if (/CAUSAL|STATE_CHANGE|因果|状态变化|承接/.test(source)) return "causality";
+  if (/VISUAL|COMPOSITION|SUBSHOT|FRAME|画面|构图|子镜头|景别|运镜/.test(source)) return "visualVariety";
+  if (/STORY_CORE|MAINLINE|MOTIVE|故事核心|人物动机|主线/.test(source)) return "storyCore";
+  if (/CLARITY|HOOK|清晰|理解|开场钩子/.test(source)) return "clarity";
+  return "productionStructure";
+}
+
+function activeBlueprintFailures(entries = [], options = {}) {
+  const checks = normalizeBlueprintAuditChecks(options.blueprintChecks || {});
+  return (Array.isArray(entries) ? entries : []).filter(entry => {
+    const code = entry && typeof entry === "object" ? entry.code : "";
+    const message = entry && typeof entry === "object" ? entry.message : entry;
+    return checks[blueprintCheckForFailure(code, message)] !== false;
+  });
+}
+
 function auditDramaSpec(normalized, options = {}) {
   const shots = Array.isArray(normalized?.shots) ? normalized.shots : [];
   const characters = Array.isArray(normalized?.characters) ? normalized.characters : [];
@@ -5916,37 +5960,40 @@ function auditDramaSpec(normalized, options = {}) {
     firstProductRatio: Number(firstProductRatio.toFixed(2)),
     reversalUnit: reversalIndex < 0 ? null : reversalIndex + 1
   };
+  const checks = normalizeBlueprintAuditChecks(options.blueprintChecks || {});
   const hardFailures = productionHardContractFailures(normalized, {
     productName,
     requireProduct: Boolean(productName),
     requireHook: true,
     requireHookDialogue: true
-  });
+  }).filter(item => checks[blueprintCheckForFailure(item.code, item.message)] !== false);
   const failures = hardFailures.slice();
-  const requireMetric = (condition, code, message) => { if (!condition) failures.push({ code, message }); };
-  requireMetric(duration >= 240 && duration <= 600, "DURATION", `总时长 ${duration} 秒，不在 240-600 秒动态短剧规格内`);
-  requireMetric(shots.length >= Math.ceil(duration / 15), "SHOT_UNITS", `仅 ${shots.length} 个生成单元；按当前 ${duration} 秒总时长与单镜最多15秒，至少需要 ${Math.ceil(duration / 15)} 个`);
-  requireMetric(subshotCount >= Math.max(72, shots.length * 2.5), "SUBSHOT_DENSITY", `仅 ${subshotCount} 个可剪辑子镜头，至少需要 ${Math.ceil(Math.max(72, shots.length * 2.5))} 个`);
-  requireMetric(metrics.dialogueTurnsPerMinute >= 20, "DIALOGUE_TURNS", `对白仅 ${metrics.dialogueTurnsPerMinute} 轮/分钟，至少需要 20 轮/分钟`);
-  requireMetric(metrics.spokenCharactersPerMinute >= 190, "DIALOGUE_CHARS", `对白仅 ${metrics.spokenCharactersPerMinute} 字/分钟，至少需要 190 字/分钟`);
-  requireMetric(metrics.denseDialogueUnitRatio >= 0.8, "DENSE_DIALOGUE", `只有 ${Math.round(metrics.denseDialogueUnitRatio * 100)}% 单元含至少两轮对白，至少需要 80%`);
-  requireMetric(metrics.denseThreeTurnUnitRatio >= 0.7, "DENSE_THREE_TURN", `只有 ${Math.round(metrics.denseThreeTurnUnitRatio * 100)}% 单元含至少三轮对白，至少需要 70%`);
-  requireMetric(metrics.denseFiveTurnUnitRatio >= 0.55, "DENSE_FIVE_TURN", `只有 ${Math.round(metrics.denseFiveTurnUnitRatio * 100)}% 单元含至少五句对白，至少需要 55%`);
-  requireMetric(metrics.silentSubshotRatio <= 0.25, "SILENT_SUBSHOTS", `有人出镜子镜头中 ${Math.round(metrics.silentSubshotRatio * 100)}% 无对白，上限 25%`);
-  requireMetric(metrics.escalationBeats >= 6, "ESCALATION", `只有 ${metrics.escalationBeats} 个加压拍点，至少需要 6 个`);
-  requireMetric(metrics.costlyKindnessBeats >= 2, "COSTLY_KINDNESS", `只有 ${metrics.costlyKindnessBeats} 个有成本善意拍点，至少需要 2 个`);
-  requireMetric(metrics.evidenceBeats >= 2, "EVIDENCE", `只有 ${metrics.evidenceBeats} 个证据拍点，至少需要 2 个`);
-  requireMetric(metrics.mainReversalBeats >= 1, "MAIN_REVERSAL", "缺少被前置证据支撑的主反转");
-  requireMetric(metrics.payoffBeats >= 2, "PAYOFF", `只有 ${metrics.payoffBeats} 个行动奖惩/回收拍点，至少需要 2 个`);
-  requireMetric(metrics.mainlineCoverage >= 0.9, "MAINLINE", `主线推进字段覆盖率只有 ${Math.round(metrics.mainlineCoverage * 100)}%`);
-  requireMetric(characters.length >= 3 && characters.length <= 7, "CHARACTER_COUNT", `核心角色 ${characters.length} 人，应控制在 3-7 人`);
-  requireMetric(metrics.characterIdentityCoverage === 1 && metrics.distinctIdentitySignatures === characters.length, "CHARACTER_IDENTITY", "所有核心角色都必须有互不重复、不能只靠换衣区分的资产指纹");
-  requireMetric(metrics.stateChangeCoverage >= 0.9, "STATE_CHANGE", `明确起止状态的单元只有 ${Math.round(metrics.stateChangeCoverage * 100)}%`);
-  requireMetric(metrics.causalLinkCoverage >= 0.9, "CAUSAL_LINK", `明确因果承接的单元只有 ${Math.round(metrics.causalLinkCoverage * 100)}%`);
-  requireMetric(metrics.visualBeatCoverage >= 0.9 && metrics.distinctVisualBeatRatio >= 0.85, "VISUAL_BEAT_DIVERSITY", `独占画面拍点覆盖 ${Math.round(metrics.visualBeatCoverage * 100)}%，去重率 ${Math.round(metrics.distinctVisualBeatRatio * 100)}%`);
-  requireMetric(metrics.compositionPlanCoverage >= 0.9, "COMPOSITION_PLAN", `差异构图计划覆盖率只有 ${Math.round(metrics.compositionPlanCoverage * 100)}%`);
-  requireMetric(metrics.audioPlanCoverage >= 0.9, "AUDIO_PLAN", `完整声音计划覆盖率只有 ${Math.round(metrics.audioPlanCoverage * 100)}%`);
-  requireMetric(productShots.length === 0 || metrics.productThemeHitRatio >= 0.5, "PRODUCT_THEME", `商品窗口仅 ${Math.round(metrics.productThemeHitRatio * 100)}% 单元点到卖点/商品，至少需要 50%`);
+  const requireMetric = (check, condition, code, message) => { if (checks[check] !== false && !condition) failures.push({ code, message }); };
+  const adaptiveUploaded = normalized?.durationContract?.source === "uploaded-script-adaptive";
+  const minimumSubshots = Math.ceil(adaptiveUploaded ? shots.length * 2.5 : Math.max(72, shots.length * 2.5));
+  requireMetric("productionStructure", adaptiveUploaded ? duration > 0 && duration <= 3600 : duration >= 240 && duration <= 600, "DURATION", adaptiveUploaded ? `上传剧本自适应总时长 ${duration} 秒无效` : `总时长 ${duration} 秒，不在 240-600 秒动态短剧规格内`);
+  requireMetric("productionStructure", shots.length >= Math.ceil(duration / 15), "SHOT_UNITS", `仅 ${shots.length} 个生成单元；按当前 ${duration} 秒总时长与单镜最多15秒，至少需要 ${Math.ceil(duration / 15)} 个`);
+  requireMetric("visualVariety", subshotCount >= minimumSubshots, "SUBSHOT_DENSITY", `仅 ${subshotCount} 个可剪辑子镜头，至少需要 ${minimumSubshots} 个`);
+  requireMetric("dialogue", metrics.dialogueTurnsPerMinute >= 20, "DIALOGUE_TURNS", `对白仅 ${metrics.dialogueTurnsPerMinute} 轮/分钟，至少需要 20 轮/分钟`);
+  requireMetric("dialogue", metrics.spokenCharactersPerMinute >= 190, "DIALOGUE_CHARS", `对白仅 ${metrics.spokenCharactersPerMinute} 字/分钟，至少需要 190 字/分钟`);
+  requireMetric("dialogue", metrics.denseDialogueUnitRatio >= 0.8, "DENSE_DIALOGUE", `只有 ${Math.round(metrics.denseDialogueUnitRatio * 100)}% 单元含至少两轮对白，至少需要 80%`);
+  requireMetric("dialogue", metrics.denseThreeTurnUnitRatio >= 0.7, "DENSE_THREE_TURN", `只有 ${Math.round(metrics.denseThreeTurnUnitRatio * 100)}% 单元含至少三轮对白，至少需要 70%`);
+  requireMetric("dialogue", metrics.denseFiveTurnUnitRatio >= 0.55, "DENSE_FIVE_TURN", `只有 ${Math.round(metrics.denseFiveTurnUnitRatio * 100)}% 单元含至少五句对白，至少需要 55%`);
+  requireMetric("dialogue", metrics.silentSubshotRatio <= 0.25, "SILENT_SUBSHOTS", `有人出镜子镜头中 ${Math.round(metrics.silentSubshotRatio * 100)}% 无对白，上限 25%`);
+  requireMetric("escalation", metrics.escalationBeats >= Math.max(1, Math.min(6, Math.round(duration / 60))), "ESCALATION", `只有 ${metrics.escalationBeats} 个加压拍点，未达到当前时长需要`);
+  requireMetric("tragedyCraft", metrics.costlyKindnessBeats >= Math.max(1, Math.min(2, Math.round(duration / 240))), "COSTLY_KINDNESS", `只有 ${metrics.costlyKindnessBeats} 个有成本善意拍点`);
+  requireMetric("reversalStructure", metrics.evidenceBeats >= Math.max(1, Math.min(2, Math.round(duration / 180))), "EVIDENCE", `只有 ${metrics.evidenceBeats} 个证据拍点`);
+  requireMetric("reversalStructure", metrics.mainReversalBeats >= 1, "MAIN_REVERSAL", "缺少被前置证据支撑的主反转");
+  requireMetric("faceSlapCraft", metrics.payoffBeats >= Math.max(1, Math.min(2, Math.round(duration / 180))), "PAYOFF", `只有 ${metrics.payoffBeats} 个行动奖惩/回收拍点`);
+  requireMetric("storyCore", metrics.mainlineCoverage >= 0.9, "MAINLINE", `主线推进字段覆盖率只有 ${Math.round(metrics.mainlineCoverage * 100)}%`);
+  requireMetric("productionStructure", characters.length >= (adaptiveUploaded ? 1 : 3) && characters.length <= 7, "CHARACTER_COUNT", `核心角色 ${characters.length} 人，应控制在 ${adaptiveUploaded ? "1" : "3"}-7 人`);
+  requireMetric("productionStructure", metrics.characterIdentityCoverage === 1 && metrics.distinctIdentitySignatures === characters.length, "CHARACTER_IDENTITY", "所有核心角色都必须有互不重复、不能只靠换衣区分的资产指纹");
+  requireMetric("causality", metrics.stateChangeCoverage >= 0.9, "STATE_CHANGE", `明确起止状态的单元只有 ${Math.round(metrics.stateChangeCoverage * 100)}%`);
+  requireMetric("causality", metrics.causalLinkCoverage >= 0.9, "CAUSAL_LINK", `明确因果承接的单元只有 ${Math.round(metrics.causalLinkCoverage * 100)}%`);
+  requireMetric("visualVariety", metrics.visualBeatCoverage >= 0.9 && metrics.distinctVisualBeatRatio >= 0.85, "VISUAL_BEAT_DIVERSITY", `独占画面拍点覆盖 ${Math.round(metrics.visualBeatCoverage * 100)}%，去重率 ${Math.round(metrics.distinctVisualBeatRatio * 100)}%`);
+  requireMetric("visualVariety", metrics.compositionPlanCoverage >= 0.9, "COMPOSITION_PLAN", `差异构图计划覆盖率只有 ${Math.round(metrics.compositionPlanCoverage * 100)}%`);
+  requireMetric("soundDesign", metrics.audioPlanCoverage >= 0.9, "AUDIO_PLAN", `完整声音计划覆盖率只有 ${Math.round(metrics.audioPlanCoverage * 100)}%`);
+  requireMetric("productIntegration", productShots.length === 0 || metrics.productThemeHitRatio >= 0.5, "PRODUCT_THEME", `商品窗口仅 ${Math.round(metrics.productThemeHitRatio * 100)}% 单元点到卖点/商品，至少需要 50%`);
   if (options.skipQualityGates) {
     if (options.bypassProductionContracts) {
       return {
@@ -6449,13 +6496,17 @@ function retimeSubshotsToDuration(subshots, durationSeconds, shot = {}) {
   return result;
 }
 
-function conformImportedAnalysisToDurationContract(data, project) {
+function conformImportedAnalysisToDurationContract(data, project, options = {}) {
   let normalized = normalizeAnalysis(data, project);
   if (!normalized.shots.length) {
     throw Object.assign(new Error("上传剧本没有拆出可生产分镜，请检查原稿内容"), { code: "SCRIPT_ANALYSIS_EMPTY" });
   }
-  const targetSeconds = Math.max(30, Math.min(3600, Math.round(Number(project?.generation?.targetDurationSeconds) || 300)));
   const providerKind = projectVideoProviderKind(project);
+  const adaptive = projectInputMode(project) === "manual";
+  const configuredTarget = Math.max(30, Math.min(3600, Math.round(Number(project?.generation?.targetDurationSeconds) || 300)));
+  const targetSeconds = adaptive
+    ? Math.max(1, Math.min(3600, Math.round(Number(options.adaptiveTargetSeconds) || configuredTarget)))
+    : configuredTarget;
   const durations = reconcileUnitDurations(
     normalized.shots.map(shot => Number(shot.duration) || Number(project?.generation?.shotDuration) || 10),
     targetSeconds,
@@ -6495,25 +6546,27 @@ function conformImportedAnalysisToDurationContract(data, project) {
       plannedSeconds,
       unitCount: shots.length,
       providerKind,
+      source: adaptive ? "uploaded-script-adaptive" : "ai-configured-target",
+      estimate: adaptive && options.durationEstimate ? { ...options.durationEstimate } : null,
       checkedAt: new Date().toISOString()
     }
   };
 }
 
-const SEMANTIC_SCORE_FIELDS = [
-  "clarity",
-  "storyCore",
-  "causality",
-  "escalation",
-  "reversalStructure",
-  "tragedyCraft",
-  "faceSlapCraft",
-  "dialogue",
-  "emotionalDelivery",
-  "productIntegration",
-  "soundDesign",
-  "visualVariety"
-];
+function scriptQualityGateOptions(settings, extra = {}) {
+  const checks = blueprintAuditChecks(settings);
+  const scriptEnabled = isQualityGatesEnabled(settings, "script");
+  const structuralEnabled = scriptEnabled && checks.productionStructure !== false;
+  return {
+    ...extra,
+    blueprintChecks: checks,
+    // The master/module switch skips the full audit. The production-structure
+    // detail only bypasses structural contracts; every other selected detail
+    // must continue to run independently.
+    skipQualityGates: !scriptEnabled,
+    bypassProductionContracts: !structuralEnabled
+  };
+}
 
 const SEMANTIC_SCORE_ALIASES = {
   reversalStructure: ["reversalStructure", "reversal"],
@@ -6670,8 +6723,13 @@ function scriptRepairMarker(error, route, snapshot) {
   };
 }
 
-function normalizeSemanticReview(data) {
+function normalizeSemanticReview(data, options = {}) {
   const source = data && typeof data === "object" ? data : {};
+  const enabledFields = Array.isArray(options.enabledFields) && options.enabledFields.length >= 0
+    ? options.enabledFields.filter(field => SEMANTIC_SCORE_FIELDS.includes(field))
+    : [...SEMANTIC_SCORE_FIELDS];
+  const enabledSet = new Set(enabledFields);
+  const productionStructureEnabled = options.productionStructureEnabled !== false;
   const scores = Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => {
     const aliases = SEMANTIC_SCORE_ALIASES[field] || [field];
     const raw = aliases.map(key => source.scores?.[key]).find(value => value !== undefined && value !== null && value !== "");
@@ -6689,14 +6747,19 @@ function normalizeSemanticReview(data) {
       ...(shotRange ? { shotRange } : {}),
       message: String(item?.message || "终审发现未说明的问题")
     };
+  }).filter(item => {
+    const field = blueprintCheckForFailure(item.code, item.message);
+    return field === "productionStructure" ? productionStructureEnabled : enabledSet.has(field);
   });
   const repairDirectives = (Array.isArray(source.repairDirectives) ? source.repairDirectives : []).map(String).filter(Boolean);
-  const scoreFailures = SEMANTIC_SCORE_FIELDS.filter(field => scores[field] < 80).map(field => ({ code: `SCORE_${field.toUpperCase()}`, shots: [], message: `${field} 仅 ${scores[field]} 分，最低 80 分` }));
+  const scoreFailures = enabledFields.filter(field => scores[field] < 80).map(field => ({ code: `SCORE_${field.toUpperCase()}`, shots: [], message: `${BLUEPRINT_AUDIT_LABELS[field] || field}仅 ${scores[field]} 分，最低 80 分` }));
   const verdict = String(source.verdict || "").toLowerCase();
   return {
     ok: verdict === "pass" && hardFailures.length === 0 && scoreFailures.length === 0,
     verdict: verdict === "pass" ? "pass" : "revise",
     scores,
+    enabledFields,
+    skippedFields: SEMANTIC_SCORE_FIELDS.filter(field => !enabledSet.has(field)),
     hardFailures: [...hardFailures, ...scoreFailures],
     summary: String(source.summary || ""),
     repairDirectives
@@ -7498,6 +7561,22 @@ class WorkbenchWorkflow {
         phase
       };
     }
+    const enabledFields = enabledSemanticScoreFields(settings);
+    const checks = blueprintAuditChecks(settings);
+    if (!enabledFields.length && checks.productionStructure === false) {
+      return {
+        ok: true,
+        skipped: true,
+        verdict: "pass",
+        scores: Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, 100])),
+        enabledFields: [],
+        skippedFields: [...SEMANTIC_SCORE_FIELDS],
+        hardFailures: [],
+        summary: "审核明细已全部关闭，已跳过剧本语义终审",
+        repairDirectives: [],
+        phase
+      };
+    }
     const payload = semanticReviewPayload(blueprint, shots);
     const reviewUnits = phase === "blueprint"
       ? (Array.isArray(blueprint?.shotPlan) ? blueprint.shotPlan : [])
@@ -7514,9 +7593,9 @@ class WorkbenchWorkflow {
         settings.prompts,
         phase === "blueprint" ? "blueprint_review" : "semantic_review"
       ) },
-      { role: "user", content: `${phase === "blueprint" ? `终审完整故事蓝图和${reviewUnitCount}单元计划` : `终审完整${reviewUnitCount}单元制作稿`}，计划${reviewDuration}秒。只按真实观众体验判定，不因字段齐全放行。\n${JSON.stringify(payload)}` }
+      { role: "user", content: `${phase === "blueprint" ? `终审完整故事蓝图和${reviewUnitCount}单元计划` : `终审完整${reviewUnitCount}单元制作稿`}，计划${reviewDuration}秒。只审核这些已开启明细：${enabledFields.map(field => BLUEPRINT_AUDIT_LABELS[field] || field).join("、") || "仅制作结构"}。未开启的项目不得扣分、不得写入 hardFailures、不得触发返修。只按真实观众体验判定，不因字段齐全放行。\n${JSON.stringify(payload)}` }
     ], projectId ? this.scriptGenerationOptions(projectId, phase === "blueprint" ? "script_blueprint_review" : "script_review", requestOptions) : requestOptions);
-    return normalizeSemanticReview(data);
+    return normalizeSemanticReview(data, { enabledFields, productionStructureEnabled: checks.productionStructure !== false });
   }
 
   async runTrackedOperation(projectId, operation, targetId, action) {
@@ -8066,8 +8145,7 @@ class WorkbenchWorkflow {
         filmSchedule
       });
       const gateOptions = {
-        skipQualityGates: !this.qualityGatesEnabled(settings),
-        bypassProductionContracts: !this.qualityGatesEnabled(settings),
+        ...scriptQualityGateOptions(settings),
         targetDurationSeconds: filmSchedule.totalSeconds,
         expectedUnitCount: unitCount
       };
@@ -8082,8 +8160,7 @@ class WorkbenchWorkflow {
         project.product.name,
         projectVideoEngine(project),
         {
-          skipQualityGates: !this.qualityGatesEnabled(settings),
-          bypassProductionContracts: !this.qualityGatesEnabled(settings),
+          ...scriptQualityGateOptions(settings),
           generationMode: projectMode,
           characters: blueprint.characters,
           ...(cloudAutomaticWriting ? {
@@ -8108,8 +8185,7 @@ class WorkbenchWorkflow {
         generation: { ...(project.generation || {}), targetDurationSeconds: filmSchedule.totalSeconds }
       });
       const qualityAudit = auditDramaSpec(normalized, {
-        skipQualityGates: !this.qualityGatesEnabled(settings),
-        bypassProductionContracts: !this.qualityGatesEnabled(settings),
+        ...scriptQualityGateOptions(settings),
         productName: project.product?.name || "",
         sellingPoints: productSellingPoints(project)
       });
@@ -8377,8 +8453,7 @@ class WorkbenchWorkflow {
             timeoutMs: 600_000
           }));
           storyBible = validateStoryBible(storyBibleData, {
-            skipQualityGates: !this.qualityGatesEnabled(settings),
-            bypassProductionContracts: !this.qualityGatesEnabled(settings),
+            ...scriptQualityGateOptions(settings),
             targetDurationSeconds: filmSchedule.totalSeconds,
             expectedUnitCount: unitCount
           });
@@ -8428,7 +8503,7 @@ class WorkbenchWorkflow {
                 onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) receipt = { ...(usage || {}) }; }
               }));
               const batch = validateShotPlanBatch(data, startNumber, batchSize, {
-                skipQualityGates: !this.qualityGatesEnabled(settings),
+                ...scriptQualityGateOptions(settings),
                 // Cross-batch hard contracts are checked once, strictly, after all
                 // parallel batches are joined. Per-batch validation still enforces
                 // shape, sequence, character IDs and opening quality.
@@ -8492,8 +8567,7 @@ class WorkbenchWorkflow {
           let plannedBatch = null;
           let planError = null;
           const planValidationOptions = {
-            skipQualityGates: !this.qualityGatesEnabled(settings),
-            bypassProductionContracts: !this.qualityGatesEnabled(settings),
+            ...scriptQualityGateOptions(settings),
             totalUnitCount: unitCount,
             targetDurationSeconds: filmSchedule.totalSeconds,
             productEntryIndex: filmSchedule.productEntryIndex,
@@ -8720,8 +8794,7 @@ class WorkbenchWorkflow {
         }, project.product.name, {
           expectedUnitCount: unitCount,
           targetDurationSeconds: filmSchedule.totalSeconds,
-          skipQualityGates: !this.qualityGatesEnabled(settings),
-          bypassProductionContracts: !this.qualityGatesEnabled(settings)
+          ...scriptQualityGateOptions(settings)
         });
         this.setAutomation(projectId, { stage: "script_blueprint_review", message: `正在终审完整故事蓝图与${unitCount}单元计划` });
         this.assertOperationActive(projectId);
@@ -8868,8 +8941,7 @@ class WorkbenchWorkflow {
           const hailuoAutomaticWriting = projectVideoEngine(project) === "hailuo-h3";
           const h3SpeakerAssignments = hailuoAutomaticWriting ? allocateH3ShotSpeakers(plannedShots, blueprint.characters, 2) : [];
           const unitValidationOptions = {
-            skipQualityGates: !this.qualityGatesEnabled(settings),
-            bypassProductionContracts: !this.qualityGatesEnabled(settings),
+            ...scriptQualityGateOptions(settings),
             generationMode: projectMode,
             characters: blueprint.characters,
             ...(hailuoAutomaticWriting ? {
@@ -8984,8 +9056,7 @@ class WorkbenchWorkflow {
           ? allocateH3ShotSpeakers(plannedShots, blueprint.characters, 2)
           : [];
         const unitValidationOptions = {
-          skipQualityGates: !this.qualityGatesEnabled(settings),
-          bypassProductionContracts: !this.qualityGatesEnabled(settings),
+          ...scriptQualityGateOptions(settings),
           generationMode: projectMode,
           characters: blueprint.characters,
           ...(hailuoAutomaticWriting ? {
@@ -9241,8 +9312,7 @@ class WorkbenchWorkflow {
       generation: { ...(project.generation || {}), targetDurationSeconds: filmSchedule.totalSeconds }
     });
     const qualityAudit = auditDramaSpec(normalized, {
-      skipQualityGates: !this.qualityGatesEnabled(settings),
-      bypassProductionContracts: !this.qualityGatesEnabled(settings),
+      ...scriptQualityGateOptions(settings),
       productName: project.product?.name || "",
       sellingPoints: productSellingPoints(project)
     });
@@ -9372,8 +9442,7 @@ class WorkbenchWorkflow {
     if (!project.script?.raw?.trim()) throw Object.assign(new Error("请先粘贴完整短剧剧本"), { code: "SCRIPT_REQUIRED" });
     const commitAnalysis = (normalized, analysisMethod, analysisChunks) => {
       const qualityAudit = auditDramaSpec(normalized, {
-        skipQualityGates: !this.qualityGatesEnabled(settings),
-        bypassProductionContracts: !this.qualityGatesEnabled(settings),
+        ...scriptQualityGateOptions(settings),
         productName: project.product?.name || "",
         sellingPoints: productSellingPoints(project)
       });
@@ -9403,6 +9472,10 @@ class WorkbenchWorkflow {
       project.shots = normalized.shots;
       project.generation = {
         ...(project.generation || {}),
+        ...(projectInputMode(project) === "manual" ? {
+          targetDurationSeconds: normalized.durationContract.targetSeconds,
+          durationSource: "uploaded-script-adaptive"
+        } : { durationSource: "ai-configured-target" }),
         durationLocked: true,
         durationContract: normalized.durationContract
       };
@@ -9417,7 +9490,20 @@ class WorkbenchWorkflow {
     const structured = parseStructuredProductionScript(project.script.raw);
     if (structured) {
       try {
-        return commitAnalysis(conformImportedAnalysisToDurationContract(structured, project), "structured-local-duration-contract", 0);
+        const knownNames = (structured.characters || []).map(item => item?.name).filter(Boolean);
+        const parsedLedger = parseSourceDialogueLedger(project.script.raw, knownNames);
+        const sourceDialogueLedger = Array.isArray(structured.sourceDialogueLedger) ? structured.sourceDialogueLedger : [];
+        const durationLedger = sourceDialogueLedger.length ? sourceDialogueLedger : parsedLedger;
+        const providerKind = projectVideoProviderKind(project, settings);
+        const explicit = explicitShotDurationTarget(structured.shots, providerKind, { engine: projectVideoEngine(project) });
+        const durationEstimate = explicit
+          ? { mode: "uploaded-structured-authored", targetSeconds: explicit.targetSeconds, dialogueTurns: durationLedger.length, normalizedDurations: explicit.normalizedDurations }
+          : estimateUploadedScriptDuration(project.script.raw, durationLedger, providerKind, { engine: projectVideoEngine(project) });
+        return commitAnalysis(conformImportedAnalysisToDurationContract(
+          { ...structured, sourceDialogueLedger },
+          project,
+          { adaptiveTargetSeconds: durationEstimate.targetSeconds, durationEstimate }
+        ), "structured-local-adaptive-duration", 0);
       } catch (error) {
         if (error?.code !== "DURATION_TOTAL_UNREPRESENTABLE") throw error;
         // The authored shot count cannot represent the requested total. Keep the
@@ -9432,11 +9518,15 @@ class WorkbenchWorkflow {
       scenes: [{ name: "场景名", description: "空间结构门窗家具机位光线与连续性锚点", time: "时间", atmosphere: "氛围与环境声" }],
       shots: [authoredShotSchema]
     };
-    const targetSeconds = Math.max(30, Math.min(3600, Math.round(Number(project.generation?.targetDurationSeconds) || 300)));
     const providerKind = projectVideoProviderKind(project, settings);
+    const sourceDialogueLedger = parseSourceDialogueLedger(project.script.raw);
+    const durationEstimate = projectInputMode(project) === "manual"
+      ? estimateUploadedScriptDuration(project.script.raw, sourceDialogueLedger, providerKind, { engine: projectVideoEngine(project) })
+      : null;
+    const targetSeconds = durationEstimate?.targetSeconds
+      || Math.max(30, Math.min(3600, Math.round(Number(project.generation?.targetDurationSeconds) || 300)));
     const filmSchedule = planFilmSchedule(targetSeconds, providerKind, { engine: projectVideoEngine(project) });
     const chunks = analysisChunksForSchedule(project.script.raw, filmSchedule.unitCount);
-    const sourceDialogueLedger = parseSourceDialogueLedger(project.script.raw);
     const assignedDialogueIds = new Set();
     const chunkSchedules = analysisChunkSchedules(chunks, filmSchedule).map(chunk => {
       let chunkLedger = sourceDialogueLedger.filter(item => item.sourceStart >= chunk.start && item.sourceStart < chunk.end);
@@ -9489,7 +9579,11 @@ class WorkbenchWorkflow {
       throw lastError;
     });
     const data = mergeAnalysisChunks(partials);
-    return commitAnalysis(conformImportedAnalysisToDurationContract(data, project), "ai-duration-contract-dialogue-ledger-v1", chunks.length);
+    return commitAnalysis(conformImportedAnalysisToDurationContract(
+      data,
+      project,
+      { adaptiveTargetSeconds: filmSchedule.totalSeconds, durationEstimate }
+    ), projectInputMode(project) === "manual" ? "uploaded-script-adaptive-dialogue-ledger-v2" : "ai-duration-contract-dialogue-ledger-v1", chunks.length);
   }
 
   importAsset(projectId, category, sourcePath, name = "") {
@@ -14493,6 +14587,8 @@ ${shotAnchor}
 
 module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, renderProductionScript, ideaSignature, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
 module.exports.reconcileShotSceneCatalog = reconcileShotSceneCatalog;
+module.exports.activeBlueprintFailures = activeBlueprintFailures;
+module.exports.scriptQualityGateOptions = scriptQualityGateOptions;
 module.exports.executeShotVideoBatch = executeShotVideoBatch;
 module.exports.collectCharacterReferenceIds = collectCharacterReferenceIds;
 module.exports.characterReferenceFailures = characterReferenceFailures;

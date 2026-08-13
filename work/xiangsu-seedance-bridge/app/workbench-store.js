@@ -6,6 +6,7 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { PROMPT_LIBRARY_VERSION, defaultPromptTemplates } = require("./prompt-library");
 const { isActiveVideoJob } = require("./workbench-status");
+const { DEFAULT_BLUEPRINT_AUDIT_CHECKS, normalizeBlueprintAuditChecks } = require("./quality-blueprint");
 const { normalizeVideoProvider, normalizeProviderKind, providerEngine } = require("./video-provider-policy");
 const {
   backfillProjectCosts,
@@ -15,7 +16,7 @@ const {
 } = require("./project-costs");
 
 const PROJECT_VERSION = 9;
-const SETTINGS_VERSION = 14;
+const SETTINGS_VERSION = 15;
 const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MAX_SCRIPT_CHARS = 500_000;
 const MAX_MANUAL_PROMPT_CHARS = 60_000;
@@ -777,6 +778,7 @@ function defaultSettings() {
       aspectRatio: "9:16",
       qualityGatesEnabled: true,
       qualityGateModules: { ...DEFAULT_QUALITY_GATE_MODULES },
+      blueprintAuditChecks: { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS },
       visualStyle: "写实真人影视短剧，现代中国生活质感，真实皮肤与布料，表演克制自然，有动机的电影光，清晰主体层次，竖屏安全构图，人物、服装、场景、道具和商品跨镜一致"
     },
     prompts,
@@ -1237,6 +1239,39 @@ function mergeProjectForConcurrentSave(diskProject, memoryProject, baselineProje
   return merged;
 }
 
+function activeVideoJobRecords(project = {}) {
+  const latestByRevisionAndEntity = new Map();
+  for (const job of project.jobs || []) {
+    if (!["shot_video", "character_video"].includes(job.type)) continue;
+    const key = `${job.productionRevision || ""}:${job.type}:${job.entityType || ""}:${job.entityId || job.id || ""}`;
+    const previous = latestByRevisionAndEntity.get(key);
+    if (!previous || String(job.updatedAt || job.createdAt || "").localeCompare(String(previous.updatedAt || previous.createdAt || "")) > 0) {
+      latestByRevisionAndEntity.set(key, job);
+    }
+  }
+  return [...latestByRevisionAndEntity.values()].filter(isActiveVideoJob).map(job => ({
+    projectId: project.id,
+    projectTitle: project.title,
+    jobId: job.id,
+    taskId: job.taskId || "",
+    type: job.type,
+    providerKind: job.providerKind || "",
+    entityType: job.entityType,
+    entityId: job.entityId,
+    status: job.status,
+    message: job.message || "",
+    progress: Number.isFinite(Number(job.progress)) ? Number(job.progress) : null,
+    progressSource: job.progressSource || "",
+    progressDeterminate: job.progressDeterminate === true,
+    upstreamStatusCode: job.upstreamStatusCode ?? null,
+    createdAt: job.createdAt || "",
+    updatedAt: job.updatedAt || job.createdAt || "",
+    ownerInstanceId: job.ownerInstanceId || "",
+    prompt: job.prompt || "",
+    duration: Number(job.duration) || 5
+  }));
+}
+
 class WorkbenchStore {
   constructor(rootDir, secretCodec = {}) {
     this.rootDir = rootDir;
@@ -1252,6 +1287,7 @@ class WorkbenchStore {
     this.reusableAssetLibraryIndexPath = path.join(this.reusableAssetLibraryDir, "index.json");
     this.reusableAssetLibraryFilesDir = path.join(this.reusableAssetLibraryDir, "files");
     this.trashDir = path.join(rootDir, "trash");
+    this.activeVideoJobsCache = null;
     this.encodeSecret = typeof secretCodec.encode === "function" ? secretCodec.encode : value => {
       if (!value) return "";
       throw Object.assign(new Error("未配置系统安全存储，供应商凭据未保存"), { code: "SECRET_STORAGE_UNAVAILABLE" });
@@ -1642,8 +1678,15 @@ class WorkbenchStore {
         validate: value => Array.isArray(value?.projects),
         errorCode: "PROJECT_INDEX_CORRUPTED"
       });
-      const diskProjects = this.scanProjectDirectories();
-      const byId = new Map(parsed.projects.filter(item => item?.id).map(item => [item.id, item]));
+      const diskEntries = fs.existsSync(this.projectsDir)
+        ? fs.readdirSync(this.projectsDir, { withFileTypes: true }).filter(entry => entry.isDirectory() && PROJECT_ID_PATTERN.test(entry.name))
+        : [];
+      const diskIds = new Set(diskEntries.map(entry => entry.name));
+      const known = parsed.projects.filter(item => item?.id && diskIds.has(item.id) && fs.existsSync(this.projectPath(item.id)));
+      const knownIds = new Set(known.map(item => item.id));
+      const unknownIds = diskEntries.map(entry => entry.name).filter(id => !knownIds.has(id));
+      const diskProjects = [...known, ...this.scanProjectDirectories(new Set(unknownIds))];
+      const byId = new Map(known.map(item => [item.id, item]));
       let changed = false;
       for (const summary of diskProjects) {
         const current = byId.get(summary.id);
@@ -1652,7 +1695,7 @@ class WorkbenchStore {
           changed = true;
         }
       }
-      const projects = [...byId.values()].filter(item => diskProjects.some(found => found.id === item.id));
+      const projects = [...byId.values()].filter(item => diskIds.has(item.id));
       if (projects.length !== parsed.projects.length) changed = true;
       const result = { ...parsed, version: 1, projects };
       if (changed) this.writeIndex(result);
@@ -1670,23 +1713,19 @@ class WorkbenchStore {
     }
   }
 
-  scanProjectDirectories() {
+  scanProjectDirectories(onlyIds = null) {
     if (!fs.existsSync(this.projectsDir)) return [];
     const summaries = [];
     for (const entry of fs.readdirSync(this.projectsDir, { withFileTypes: true })) {
       if (!entry.isDirectory() || !PROJECT_ID_PATTERN.test(entry.name)) continue;
+      if (onlyIds instanceof Set && !onlyIds.has(entry.name)) continue;
       const projectPath = path.join(this.projectsDir, entry.name, "project.json");
       try {
         const project = readJsonFile(projectPath, {
           validate: value => value?.id === entry.name,
           errorCode: "PROJECT_FILE_CORRUPTED"
         });
-        summaries.push({
-          id: project.id,
-          title: project.title || project.id,
-          status: project.status || "draft",
-          updatedAt: project.updatedAt || project.createdAt || fs.statSync(projectPath).mtime.toISOString()
-        });
+        summaries.push(this.projectSummary(project, fs.statSync(projectPath).mtime.toISOString()));
       } catch (error) {
         let damagedUpdatedAt = now();
         try {
@@ -1711,6 +1750,17 @@ class WorkbenchStore {
 
   listProjects() {
     return this.readIndex().projects.slice().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  }
+
+  projectSummary(project = {}, fallbackUpdatedAt = now()) {
+    return {
+      id: project.id,
+      title: project.title || project.id,
+      status: project.status || "draft",
+      updatedAt: project.updatedAt || project.createdAt || fallbackUpdatedAt,
+      automationStatus: project.automation?.status || "idle",
+      activeVideoJobs: activeVideoJobRecords(project)
+    };
   }
 
   deleteProject(projectId) {
@@ -1744,6 +1794,7 @@ class WorkbenchStore {
     }
     try {
       this.writeIndex({ ...index, projects: index.projects.filter(item => item.id !== id) });
+      if (Array.isArray(this.activeVideoJobsCache)) this.activeVideoJobsCache = this.activeVideoJobsCache.filter(item => item.projectId !== id);
     } catch (error) {
       if (moved && fs.existsSync(archiveDir) && !fs.existsSync(sourceDir)) fs.renameSync(archiveDir, sourceDir);
       throw error;
@@ -1804,7 +1855,7 @@ class WorkbenchStore {
     fs.renameSync(archiveDir, targetDir);
     try {
       const index = this.readIndex();
-      const summary = { id: project.id, title: project.title || project.id, status: project.status || "draft", updatedAt: now() };
+      const summary = this.projectSummary({ ...project, updatedAt: now() });
       index.projects = [summary, ...index.projects.filter(item => item.id !== project.id)];
       this.writeIndex(index);
       return { ...summary, restored: true };
@@ -1828,8 +1879,9 @@ class WorkbenchStore {
     fs.mkdirSync(this.projectDir(project.id), { recursive: true });
     atomicWriteJson(this.projectPath(project.id), project);
     const index = this.readIndex();
-    index.projects.unshift({ id: project.id, title: project.title, status: project.status, updatedAt: project.updatedAt });
+    index.projects.unshift(this.projectSummary(project));
     this.writeIndex(index);
+    if (Array.isArray(this.activeVideoJobsCache)) this.activeVideoJobsCache = this.activeVideoJobsCache.filter(item => item.projectId !== project.id);
     return attachStoreBaseline(project, project);
   }
 
@@ -1870,7 +1922,9 @@ class WorkbenchStore {
       ...(project.ideation || {}),
       topics: Array.isArray(project.ideation?.topics) ? project.ideation.topics : []
     };
+    project.productionPlan = { ...defaultProductionPlan(), ...(project.productionPlan || {}) };
     const legacyGeneration = project.generation || {};
+    const minimumProjectSeconds = project.productionPlan.inputMode === "manual" ? 1 : 30;
     project.generation = {
       engine: normalizeVideoEngine(legacyGeneration.engine),
       videoProviderKind: legacyGeneration.videoProviderKind
@@ -1881,13 +1935,13 @@ class WorkbenchStore {
       keyframeConcurrency: Math.max(1, Math.min(999, Number(legacyGeneration.keyframeConcurrency) || 2)),
       aspectRatio: legacyGeneration.aspectRatio || "9:16",
       shotDuration: [5, 10, 15].includes(Number(legacyGeneration.shotDuration)) ? Number(legacyGeneration.shotDuration) : 10,
-      targetDurationSeconds: Math.max(30, Math.min(3600, Math.round(Number(legacyGeneration.targetDurationSeconds) || 300))),
+      targetDurationSeconds: Math.max(minimumProjectSeconds, Math.min(3600, Math.round(Number(legacyGeneration.targetDurationSeconds) || 300))),
       durationLocked: legacyGeneration.durationLocked === true,
+      durationSource: String(legacyGeneration.durationSource || ""),
       durationContract: legacyGeneration.durationContract && typeof legacyGeneration.durationContract === "object"
         ? legacyGeneration.durationContract
         : null
     };
-    project.productionPlan = { ...defaultProductionPlan(), ...(project.productionPlan || {}) };
     return attachStoreBaseline(project, storeBaseline);
   }
 
@@ -1913,8 +1967,14 @@ class WorkbenchStore {
     };
     merged.updatedAt = now();
     atomicWriteJson(filePath, merged);
+    if (Array.isArray(this.activeVideoJobsCache)) {
+      this.activeVideoJobsCache = [
+        ...this.activeVideoJobsCache.filter(item => item.projectId !== merged.id),
+        ...activeVideoJobRecords(merged)
+      ];
+    }
     const index = this.readIndex();
-    const summary = { id: merged.id, title: merged.title, status: merged.status, updatedAt: merged.updatedAt };
+    const summary = this.projectSummary(merged);
     const position = index.projects.findIndex(item => item.id === merged.id);
     if (position >= 0) index.projects[position] = summary;
     else index.projects.unshift(summary);
@@ -1985,6 +2045,7 @@ class WorkbenchStore {
     }
     if (Object.prototype.hasOwnProperty.call(patch || {}, "generation")) {
       const requested = { ...(project.generation || {}), ...(patch.generation || {}) };
+      const nextInputMode = String(patch?.productionPlan?.inputMode || project.productionPlan?.inputMode || "ai") === "manual" ? "manual" : "ai";
       project.generation = {
         ...requested,
         engine: normalizeVideoEngine(requested.engine),
@@ -1994,7 +2055,7 @@ class WorkbenchStore {
         keyframeConcurrency: Math.max(1, Math.min(999, Number(requested.keyframeConcurrency) || 2)),
         aspectRatio: requested.aspectRatio || "9:16",
         shotDuration: [5, 10, 15].includes(Number(requested.shotDuration)) ? Number(requested.shotDuration) : 10,
-        targetDurationSeconds: Math.max(30, Math.min(3600, Math.round(Number(requested.targetDurationSeconds) || 300)))
+        targetDurationSeconds: Math.max(nextInputMode === "manual" ? 1 : 30, Math.min(3600, Math.round(Number(requested.targetDurationSeconds) || 300)))
       };
     }
     if (Object.prototype.hasOwnProperty.call(patch || {}, "productionPlan")) {
@@ -2155,47 +2216,19 @@ class WorkbenchStore {
     return job;
   }
 
-  listActiveVideoJobs() {
-    const records = [];
-    for (const summary of this.listProjects()) {
-      let project;
-      try { project = this.getProject(summary.id); }
-      catch { continue; }
-      const latestByRevisionAndEntity = new Map();
-      for (const job of project.jobs || []) {
-        if (!["shot_video", "character_video"].includes(job.type)) continue;
-        const key = `${job.productionRevision || ""}:${job.type}:${job.entityType || ""}:${job.entityId || job.id || ""}`;
-        const previous = latestByRevisionAndEntity.get(key);
-        if (!previous || String(job.updatedAt || job.createdAt || "").localeCompare(String(previous.updatedAt || previous.createdAt || "")) > 0) {
-          latestByRevisionAndEntity.set(key, job);
+  listActiveVideoJobs(projectId = "") {
+    if (!Array.isArray(this.activeVideoJobsCache)) {
+      this.activeVideoJobsCache = [];
+      for (const summary of this.listProjects()) {
+        if (Array.isArray(summary.activeVideoJobs)) {
+          this.activeVideoJobsCache.push(...summary.activeVideoJobs);
+          continue;
         }
-      }
-      for (const job of latestByRevisionAndEntity.values()) {
-        if (!isActiveVideoJob(job)) continue;
-        records.push({
-          projectId: project.id,
-          projectTitle: project.title,
-          jobId: job.id,
-          taskId: job.taskId || "",
-          type: job.type,
-          providerKind: job.providerKind || "",
-          entityType: job.entityType,
-          entityId: job.entityId,
-          status: job.status,
-          message: job.message || "",
-          progress: Number.isFinite(Number(job.progress)) ? Number(job.progress) : null,
-          progressSource: job.progressSource || "",
-          progressDeterminate: job.progressDeterminate === true,
-          upstreamStatusCode: job.upstreamStatusCode ?? null,
-          createdAt: job.createdAt || "",
-          updatedAt: job.updatedAt || job.createdAt || "",
-          ownerInstanceId: job.ownerInstanceId || "",
-          prompt: job.prompt || "",
-          duration: Number(job.duration) || 5
-        });
+        try { this.activeVideoJobsCache.push(...activeVideoJobRecords(this.getProject(summary.id))); }
+        catch { continue; }
       }
     }
-    return records;
+    return this.activeVideoJobsCache.filter(item => !projectId || item.projectId === projectId).map(item => ({ ...item }));
   }
 
   getAccountSwitchState() {
@@ -2534,7 +2567,8 @@ class WorkbenchStore {
           qualityGateModules: {
             ...DEFAULT_QUALITY_GATE_MODULES,
             ...(saved.generation?.qualityGateModules || {})
-          }
+          },
+          blueprintAuditChecks: normalizeBlueprintAuditChecks(saved.generation?.blueprintAuditChecks || {})
         },
         prompts,
         promptModes
@@ -2584,7 +2618,8 @@ class WorkbenchStore {
         qualityGateModules: {
           ...DEFAULT_QUALITY_GATE_MODULES,
           ...(settings?.generation?.qualityGateModules || {})
-        }
+        },
+        blueprintAuditChecks: normalizeBlueprintAuditChecks(settings?.generation?.blueprintAuditChecks || {})
       },
       prompts: { ...defaults.prompts, ...(settings?.prompts || {}) },
       promptModes: normalizePromptModes(defaults.prompts, settings?.prompts || {}, settings?.promptModes || {})

@@ -7,6 +7,8 @@ const os = require("node:os");
 const path = require("node:path");
 
 const { parseSourceDialogueLedger } = require("../app/dialogue-parser");
+const { planFilmSchedule } = require("../app/duration-contract");
+const { estimateUploadedScriptDuration } = require("../app/script-duration");
 const { WorkbenchStore } = require("../app/workbench-store");
 const {
   MATRIX,
@@ -351,7 +353,7 @@ test("parallel analysis chunks cannot collide on local character and scene IDs",
   assert.notEqual(merged.shots[0].sceneId, merged.shots[1].sceneId);
 });
 
-test("natural uploaded script completes the real analysis entry in four parallel model calls", async t => {
+test("natural uploaded script completes the real adaptive-duration analysis in bounded parallel calls", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-dialogue-matrix-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = Array.from({ length: 70 }, (_, index) => {
@@ -361,6 +363,8 @@ test("natural uploaded script completes the real analysis entry in four parallel
     return `${speaker}（${index % 3 === 0 ? "压低声音，眉头紧锁" : "语速加快，目光坚定"}）：${product}第${index + 1}句，${listener}，原稿内容必须完整保留。`;
   }).join("\n");
   const sourceLedger = parseSourceDialogueLedger(source);
+  const estimatedDuration = estimateUploadedScriptDuration(source, sourceLedger, "local-xiangsu", { engine: "seedance" });
+  const expectedCallCount = analysisChunksForSchedule(source, planFilmSchedule(estimatedDuration.targetSeconds, "local-xiangsu", { engine: "seedance" }).unitCount).length;
   const store = new WorkbenchStore(root);
   const settings = store.getSettings();
   settings.generation.qualityGatesEnabled = false;
@@ -433,10 +437,11 @@ test("natural uploaded script completes the real analysis entry in four parallel
     }
   });
   const analyzed = await workflow.analyzeScript(created.id);
-  assert.equal(modelCalls, 4);
+  assert.equal(modelCalls, expectedCallCount);
   assert.equal(analyzed.currentStage, "assets");
   assert.equal(analyzed.script.sourceDialogueLedger.length, sourceLedger.length);
-  assert.equal(analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0), 300);
+  assert.equal(analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0), estimatedDuration.targetSeconds);
+  assert.equal(analyzed.generation.targetDurationSeconds, estimatedDuration.targetSeconds);
   const actualTurns = analyzed.shots.flatMap(shot => shot.dialogueTurns).sort((left, right) => left.sourceDialogueId.localeCompare(right.sourceDialogueId));
   assert.deepEqual(actualTurns.map(turn => turn.text), sourceLedger.map(item => item.text));
   assert.deepEqual(actualTurns.map(turn => turn.sourceTone), sourceLedger.map(item => item.tone));

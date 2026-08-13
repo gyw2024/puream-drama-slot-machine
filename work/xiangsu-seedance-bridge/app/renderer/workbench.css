@@ -55,6 +55,17 @@ button { color: inherit; }
 .quality-blueprint-menu input { accent-color:#f4a31c; flex:0 0 auto; margin-top:2px; }
 .quality-blueprint-menu p { margin:9px 2px 0; color:#b9a487; font-size:10px; line-height:1.5; }
 .quality-blueprint-menu.is-off .quality-blueprint-modules { opacity:.42; }
+.quality-blueprint-details { margin-top:10px; padding-top:10px; border-top:1px solid #3a3023; }
+.quality-blueprint-details-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.quality-blueprint-details-head > span { display:grid; gap:2px; }
+.quality-blueprint-details-head small { color:#9e8a6e; font-size:9px; }
+.quality-blueprint-details-head > div { display:flex; gap:6px; }
+.quality-blueprint-details-head button { min-height:44px; padding:0 11px; border:1px solid #58401f; border-radius:7px; background:#20170d; color:#efbd70; font-size:10px; cursor:pointer; }
+.quality-blueprint-details-head button:hover { border-color:#d98b1d; color:#ffe2ab; }
+.quality-blueprint-checks { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; margin-top:8px; }
+.quality-blueprint-checks label { display:flex; align-items:center; gap:6px; min-width:0; margin:0 !important; padding:7px; border:1px solid #342c21; border-radius:7px; background:#12100d; color:#cbb99e; font-size:10px; line-height:1.3; }
+.quality-blueprint-checks input { width:auto; margin:0; accent-color:#f4a31c; }
+.quality-blueprint-menu.is-off .quality-blueprint-details { opacity:.42; }
 .settings-quality-modules { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:6px; }
 .settings-quality-modules label { display:flex; align-items:center; gap:5px; min-width:0; padding:7px 8px; border:1px solid #3e3426; border-radius:7px; background:#15120e; font-size:11px; white-space:nowrap; }
 .settings-quality-modules input { accent-color:#f4a31c; }
@@ -418,6 +429,9 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
 .settings-note { margin: 11px 0 0; color: #71695f; font-size: 9px; line-height: 1.55; }
 .settings-toggle { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; color: #2f2a24; }
 .settings-toggle input { width: auto; margin: 0; }
+.settings-audit-details { margin-top:10px; padding:10px; border:1px solid #3e3426; border-radius:9px; background:#15120e; }
+.settings-audit-details > summary { color:#d39a45; font-size:11px; font-weight:700; cursor:pointer; }
+.settings-audit-details .quality-blueprint-details-head { margin-top:10px; }
 .provider-subsection { display: grid; gap: 9px; margin-top: 11px; padding: 11px; border: 1px solid rgba(255,173,32,.22); border-radius: 10px; background: rgba(255,167,25,.035); }
 .provider-subsection > b { color: #f6c968; font-size: 10px; letter-spacing: .08em; }
 .oss-settings { display:block; }

@@ -185,6 +185,53 @@ async function main() {
     }));
     const defaults = await page.evaluate(() => window.dramaSlot.defaults());
     const settings = await page.evaluate(() => window.dramaSlot.workbench.getSettings());
+    await page.focus("#qualityBlueprintToggle");
+    await page.keyboard.press("Enter");
+    const blueprintKeyboardOpened = await page.evaluate(() => (
+      !document.querySelector("#qualityBlueprintMenu")?.classList.contains("hidden")
+      && document.querySelector("#qualityBlueprintToggle")?.getAttribute("aria-expanded") === "true"
+    ));
+    await page.keyboard.press("Escape");
+    const blueprintKeyboardClosed = await page.evaluate(() => (
+      document.querySelector("#qualityBlueprintMenu")?.classList.contains("hidden")
+      && document.querySelector("#qualityBlueprintToggle")?.getAttribute("aria-expanded") === "false"
+    ));
+    await page.keyboard.press("Tab");
+    const keyboardTabMoved = await page.evaluate(() => document.activeElement !== document.body && document.activeElement?.id !== "qualityBlueprintToggle");
+    await page.click("#qualityBlueprintToggle");
+    await page.click('#qualityBlueprintMenu [data-blueprint-bulk="none"]');
+    await page.waitForFunction(async () => {
+      const result = await window.dramaSlot.workbench.getSettings();
+      const checks = result.settings?.generation?.blueprintAuditChecks || {};
+      return Object.keys(checks).length === 13 && Object.values(checks).every(value => value === false);
+    });
+    const blueprintAllOff = await page.evaluate(async () => {
+      const result = await window.dramaSlot.workbench.getSettings();
+      return Object.values(result.settings?.generation?.blueprintAuditChecks || {}).filter(Boolean).length;
+    });
+    await page.click('#qualityBlueprintMenu [data-blueprint-bulk="all"]');
+    await page.waitForFunction(async () => {
+      const result = await window.dramaSlot.workbench.getSettings();
+      const checks = result.settings?.generation?.blueprintAuditChecks || {};
+      return Object.keys(checks).length === 13 && Object.values(checks).every(value => value === true);
+    });
+    const blueprintControls = await page.evaluate(async () => {
+      const result = await window.dramaSlot.workbench.getSettings();
+      return {
+        detailControlCount: document.querySelectorAll("[data-blueprint-check]").length,
+        bulkControlCount: document.querySelectorAll("[data-blueprint-bulk]").length,
+        allOffEnabledCount: 0,
+        allOnEnabledCount: Object.values(result.settings?.generation?.blueprintAuditChecks || {}).filter(Boolean).length,
+        keyboardOpened: true,
+        keyboardClosed: true,
+        keyboardTabMoved: true
+      };
+    });
+    blueprintControls.allOffEnabledCount = blueprintAllOff;
+    blueprintControls.keyboardOpened = blueprintKeyboardOpened;
+    blueprintControls.keyboardClosed = blueprintKeyboardClosed;
+    blueprintControls.keyboardTabMoved = keyboardTabMoved;
+    await page.keyboard.press("Escape");
     const ossSaved = await page.evaluate(async settingsValue => window.dramaSlot.workbench.saveSettings({
       ...settingsValue,
       videoProvider: {
@@ -220,6 +267,19 @@ async function main() {
         label: input.closest("label")?.innerText?.trim() || ""
       }))
     }));
+    const durationModeUi = await page.evaluate(() => {
+      const target = document.querySelector("#newTargetDuration");
+      const help = document.querySelector("#newTargetDurationHelp");
+      const manual = document.querySelector('input[name="newInputMode"][value="manual"]');
+      const ai = document.querySelector('input[name="newInputMode"][value="ai"]');
+      manual.checked = true;
+      manual.dispatchEvent(new Event("change", { bubbles: true }));
+      const manualState = { disabled: target.disabled, required: target.required, help: help.textContent.trim() };
+      ai.checked = true;
+      ai.dispatchEvent(new Event("change", { bubbles: true }));
+      const aiState = { disabled: target.disabled, required: target.required, help: help.textContent.trim() };
+      return { manualState, aiState };
+    });
     await page.evaluate(() => document.querySelector("#newProjectDialog")?.close());
     const visibilityAudit = { surfaceLength: 0, forbiddenMatches: [], stages: [] };
     for (const stage of stageNames) {
@@ -417,6 +477,29 @@ async function main() {
     assert.equal(defaultProject?.project?.generation?.videoProviderKind, "puream-hailuo-h3", "fresh project must use PUREAM cloud");
     assert.equal(newProjectDefaults.selectedProvider, "puream-hailuo-h3", "new-project dialog must preselect PUREAM cloud");
     assert.ok(newProjectDefaults.providerOptions.some(item => item.value === "local-xiangsu" && /本地像塑/.test(item.label)), "local Xiangsu must remain selectable");
+    assert.deepEqual({
+      detailControlCount: blueprintControls.detailControlCount,
+      bulkControlCount: blueprintControls.bulkControlCount,
+      allOffEnabledCount: blueprintControls.allOffEnabledCount,
+      allOnEnabledCount: blueprintControls.allOnEnabledCount,
+      keyboardOpened: blueprintControls.keyboardOpened,
+      keyboardClosed: blueprintControls.keyboardClosed,
+      keyboardTabMoved: blueprintControls.keyboardTabMoved
+    }, {
+      detailControlCount: 26,
+      bulkControlCount: 4,
+      allOffEnabledCount: 0,
+      allOnEnabledCount: 13,
+      keyboardOpened: true,
+      keyboardClosed: true,
+      keyboardTabMoved: true
+    }, "all blueprint details and bulk controls must persist and remain keyboard-operable");
+    assert.equal(durationModeUi.manualState.disabled, true, "uploaded-script mode must disable the configured duration field");
+    assert.equal(durationModeUi.manualState.required, false, "uploaded-script mode must not require a configured duration");
+    assert.match(durationModeUi.manualState.help, /自适应/, "uploaded-script mode must explain adaptive duration");
+    assert.equal(durationModeUi.aiState.disabled, false, "AI mode must enable configured duration");
+    assert.equal(durationModeUi.aiState.required, true, "AI mode must require configured duration");
+    assert.match(durationModeUi.aiState.help, /严格/, "AI mode must explain the hard duration contract");
     assert.deepEqual(visibilityAudit.forbiddenMatches, [], "user-visible flow must not expose H3/Hailuo/海螺");
     assert.deepEqual(switched, { ok: true, kind: "local-xiangsu" }, "manual local switch must persist");
     assert.equal(concurrencyUi.selectedProjectId, stateTransitions.secondId, "switching away from a running project must complete");
@@ -454,6 +537,8 @@ async function main() {
       ossPersistence: { ...ossPersistence, secret: "[verified but omitted]", plaintextPersisted: rawOssSettings.includes("packaged-audit-secret-never-plain") },
       defaultProjectProviderKind: defaultProject?.project?.generation?.videoProviderKind || "",
       newProjectDefaults,
+      blueprintControls,
+      durationModeUi,
       visibilityAudit,
       manualSwitch: switched,
       selectedStoryboardMode,

@@ -54,6 +54,22 @@ const DEFAULT_QUALITY_GATE_MODULES = Object.freeze({
   delivery: true
 });
 
+const DEFAULT_BLUEPRINT_AUDIT_CHECKS = Object.freeze({
+  productionStructure: true,
+  clarity: true,
+  storyCore: true,
+  causality: true,
+  escalation: true,
+  reversalStructure: true,
+  tragedyCraft: true,
+  faceSlapCraft: true,
+  dialogue: true,
+  emotionalDelivery: true,
+  productIntegration: true,
+  soundDesign: true,
+  visualVariety: true
+});
+
 const textProviderPresets = Object.freeze({
   "puream-relay": {
     tag: "PUREAM OFFICIAL",
@@ -2230,12 +2246,14 @@ function writeTextProviderForm(config) {
 function renderQualityBlueprintToggle() {
   const enabled = state.settings?.generation?.qualityGatesEnabled !== false;
   const modules = { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings?.generation?.qualityGateModules || {}) };
+  const checks = { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, ...(state.settings?.generation?.blueprintAuditChecks || {}) };
   const enabledCount = Object.values(modules).filter(Boolean).length;
+  const enabledCheckCount = Object.values(checks).filter(Boolean).length;
   const button = $("#qualityBlueprintToggle");
   if (!button) return;
   button.classList.toggle("is-off", !enabled);
   button.setAttribute("aria-pressed", enabled ? "true" : "false");
-  $("#qualityBlueprintToggleLabel").textContent = enabled ? `审核蓝图：${enabledCount}/5` : "审核蓝图：关闭";
+  $("#qualityBlueprintToggleLabel").textContent = enabled ? `审核蓝图：${enabledCheckCount}/13` : "审核蓝图：关闭";
   const menu = $("#qualityBlueprintMenu");
   menu?.classList.toggle("is-off", !enabled);
   if ($("#qualityBlueprintMaster")) $("#qualityBlueprintMaster").checked = enabled;
@@ -2243,6 +2261,11 @@ function renderQualityBlueprintToggle() {
     input.checked = modules[input.dataset.qualityModule] !== false;
     input.disabled = !enabled;
   });
+  $$('[data-blueprint-check]').forEach(input => {
+    input.checked = checks[input.dataset.blueprintCheck] !== false;
+    input.disabled = !enabled || modules.script === false;
+  });
+  $$('[data-blueprint-bulk]').forEach(button => { button.disabled = !enabled || modules.script === false; });
   if ($("#qualityGatesEnabled")) {
     $("#qualityGatesEnabled").checked = enabled;
     $("#qualityGatesEnabled").disabled = false;
@@ -2443,6 +2466,7 @@ function openProjectStrategyDialog(required = false) {
   $$("input[name='projectExecutionMode']").forEach(input => { input.checked = input.value === (project.productionPlan?.executionMode || "step"); });
   $$("input[name='projectInputMode']").forEach(input => { input.checked = input.value === (project.productionPlan?.inputMode || "ai"); });
   if ($("#projectTargetDuration")) $("#projectTargetDuration").value = String(project.generation?.targetDurationSeconds || 300);
+  syncDurationModeControls("project");
   $("#projectStrategyError").textContent = required ? "当前项目来自旧版本，请确认一次视频引擎与生成模式后继续。" : "";
   $("#cancelProjectStrategy").classList.toggle("hidden", required);
   $("#closeProjectStrategyDialog").classList.toggle("hidden", required);
@@ -2450,6 +2474,24 @@ function openProjectStrategyDialog(required = false) {
   const focusSelectedStrategy = () => dialog.querySelector("input:checked")?.focus({ preventScroll: true });
   requestAnimationFrame(focusSelectedStrategy);
   setTimeout(focusSelectedStrategy, 0);
+}
+
+function syncDurationModeControls(scope) {
+  const isProject = scope === "project";
+  const name = isProject ? "projectInputMode" : "newInputMode";
+  const input = $(isProject ? "#projectTargetDuration" : "#newTargetDuration");
+  const help = $(isProject ? "#projectTargetDurationHelp" : "#newTargetDurationHelp");
+  const manual = $(`input[name='${name}']:checked`)?.value === "manual";
+  if (input) {
+    input.disabled = manual;
+    input.required = !manual;
+    input.setAttribute("aria-disabled", manual ? "true" : "false");
+  }
+  if (help) help.textContent = manual
+    ? (isProject && state.project?.generation?.durationSource === "uploaded-script-adaptive"
+      ? `当前显示 ${state.project.generation.targetDurationSeconds} 秒，这是按已上传原稿逐句推算的生产总时长；重新上传并拆镜后会再次自适应。`
+      : "自己输入/上传模式不执行手填秒数；拆镜前会按每句对白、语速、停顿和动作节拍自适应推算，并把结果写入后续分镜、视频与拼接合同。")
+    : "AI 全生成模式严格执行此秒数，全部镜头时长之和会精确对齐。";
 }
 
 function promptForProjectStrategyIfRequired() {
@@ -3275,7 +3317,8 @@ function collectSettings() {
       visualStyle: $("#visualStyle").value.trim(),
       aspectRatio: $("#aspectRatio").value,
       qualityGatesEnabled: $("#qualityGatesEnabled") ? $("#qualityGatesEnabled").checked : true,
-      qualityGateModules: { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings.generation?.qualityGateModules || {}) }
+      qualityGateModules: { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings.generation?.qualityGateModules || {}) },
+      blueprintAuditChecks: { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, ...(state.settings.generation?.blueprintAuditChecks || {}) }
     },
     prompts,
     promptModes: { ...(state.settings.promptModes || {}) }
@@ -4367,15 +4410,17 @@ $("#textProviderKind").addEventListener("change", event => {
   showToast(`已切换到${event.currentTarget.selectedOptions[0]?.textContent || "新的文本供应商"}，保存后全流程生效`);
 });
 
-async function saveQualityBlueprintSetting(enabled, requestedModules = null) {
+async function saveQualityBlueprintSetting(enabled, requestedModules = null, requestedChecks = null) {
   if (!state.settings) return;
   const modules = { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings.generation?.qualityGateModules || {}), ...(requestedModules || {}) };
+  const checks = { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, ...(state.settings.generation?.blueprintAuditChecks || {}), ...(requestedChecks || {}) };
   const next = {
     ...state.settings,
     generation: {
       ...(state.settings.generation || {}),
       qualityGatesEnabled: Boolean(enabled),
-      qualityGateModules: modules
+      qualityGateModules: modules,
+      blueprintAuditChecks: checks
     }
   };
   const result = await api.workbench.saveSettings(next);
@@ -4383,7 +4428,7 @@ async function saveQualityBlueprintSetting(enabled, requestedModules = null) {
   state.settings = result.settings;
   renderQualityBlueprintToggle();
   showToast(enabled
-    ? `审核蓝图已开启：当前启用 ${Object.values(modules).filter(Boolean).length}/5 个模块`
+    ? `审核蓝图已开启：${Object.values(modules).filter(Boolean).length}/5 个模块，剧本明细 ${Object.values(checks).filter(Boolean).length}/13`
     : "审核蓝图已关闭：不审核、不拦截、不回滚、不自动返修");
 }
 
@@ -4405,6 +4450,18 @@ $$('[data-quality-module]').forEach(input => input.addEventListener("change", as
   await saveQualityBlueprintSetting(state.settings?.generation?.qualityGatesEnabled !== false, modules);
 }));
 
+$$('[data-blueprint-check]').forEach(input => input.addEventListener("change", async event => {
+  const checks = { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, ...(state.settings?.generation?.blueprintAuditChecks || {}) };
+  checks[event.currentTarget.dataset.blueprintCheck] = Boolean(event.currentTarget.checked);
+  await saveQualityBlueprintSetting(state.settings?.generation?.qualityGatesEnabled !== false, null, checks);
+}));
+
+$$('[data-blueprint-bulk]').forEach(button => button.addEventListener("click", async event => {
+  const value = event.currentTarget.dataset.blueprintBulk === "all";
+  const checks = Object.fromEntries(Object.keys(DEFAULT_BLUEPRINT_AUDIT_CHECKS).map(key => [key, value]));
+  await saveQualityBlueprintSetting(state.settings?.generation?.qualityGatesEnabled !== false, null, checks);
+}));
+
 document.addEventListener("click", () => {
   $("#qualityBlueprintMenu")?.classList.add("hidden");
   $("#qualityBlueprintToggle")?.setAttribute("aria-expanded", "false");
@@ -4421,7 +4478,8 @@ $("#qualityGatesEnabled")?.addEventListener("change", event => {
     generation: {
       ...(state.settings?.generation || {}),
       qualityGatesEnabled: Boolean(event.currentTarget.checked),
-      qualityGateModules: { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings?.generation?.qualityGateModules || {}) }
+      qualityGateModules: { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings?.generation?.qualityGateModules || {}) },
+      blueprintAuditChecks: { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, ...(state.settings?.generation?.blueprintAuditChecks || {}) }
     }
   };
   renderQualityBlueprintToggle();
@@ -4626,6 +4684,7 @@ $("#newProject").addEventListener("click", () => {
   $$("input[name='newVideoEngine']").forEach(option => { option.checked = false; });
   $$("input[name='newExecutionMode']").forEach(option => { if (option.value === "step") option.checked = true; });
   $$("input[name='newInputMode']").forEach(option => { if (option.value === "ai") option.checked = true; });
+  syncDurationModeControls("new");
   if (!dialog.open) dialog.showModal();
   const focusProjectName = () => { input.focus({ preventScroll: true }); input.select(); };
   requestAnimationFrame(focusProjectName);
@@ -4693,6 +4752,8 @@ $("#newProjectName").addEventListener("input", () => {
   $("#newProjectName").removeAttribute("aria-invalid");
   $("#newProjectError").textContent = "";
 });
+$$("input[name='newInputMode']").forEach(input => input.addEventListener("change", () => syncDurationModeControls("new")));
+$$("input[name='projectInputMode']").forEach(input => input.addEventListener("change", () => syncDurationModeControls("project")));
 $("#cancelNewProject").addEventListener("click", closeNewProjectDialog);
 $("#closeNewProjectDialog").addEventListener("click", closeNewProjectDialog);
 $("#newProjectDialog").addEventListener("cancel", event => {
@@ -4721,11 +4782,15 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
     return;
   }
   const project = requireProject();
-  const targetDurationSeconds = Math.max(30, Math.min(3600, Math.round(Number($("#projectTargetDuration")?.value) || project.generation?.targetDurationSeconds || 300)));
+  const nextInputMode = $("input[name='projectInputMode']:checked")?.value || "ai";
+  const targetDurationSeconds = nextInputMode === "manual"
+    ? Math.max(1, Math.min(3600, Math.round(Number(project.generation?.targetDurationSeconds) || 300)))
+    : Math.max(30, Math.min(3600, Math.round(Number($("#projectTargetDuration")?.value) || project.generation?.targetDurationSeconds || 300)));
   const strategyChanged = (
     mode !== project.generation?.mode
     || engine !== (project.generation?.engine || "seedance")
     || providerKind !== String(project.generation?.videoProviderKind || "")
+    || nextInputMode !== (project.productionPlan?.inputMode || "ai")
     || targetDurationSeconds !== Number(project.generation?.targetDurationSeconds || 300)
   );
   const hasProductionHistory = project.shots?.length || project.candidates?.length || project.jobs?.length || project.finalVideoPath;
@@ -4745,13 +4810,13 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
       },
       productionPlan: {
         executionMode: $("input[name='projectExecutionMode']:checked")?.value || "step",
-        inputMode: $("input[name='projectInputMode']:checked")?.value || "ai"
+        inputMode: nextInputMode
       }
     }, "确认项目视频上游与制作策略");
     $("#projectStrategyDialog").close();
     state.strategyPromptedProjectId = project.id;
     showToast(strategyChanged && state.project?.currentStage === "script"
-      ? `已更新${videoProviderLabel(providerKind)} · ${projectModeLabel(mode)} · ${targetDurationSeconds}秒；请重新拆镜后再生成资产`
+      ? `已更新${videoProviderLabel(providerKind)} · ${projectModeLabel(mode)} · ${nextInputMode === "manual" ? "上传剧本按原稿自适应时长" : `${targetDurationSeconds}秒`}；请重新拆镜后再生成资产`
       : `已确认${videoProviderLabel(providerKind)} · ${projectModeLabel(mode)}；单步与一键入口均已解锁`);
   } catch (error) {
     $("#projectStrategyError").textContent = error.message || "制作策略保存失败";
@@ -4895,26 +4960,32 @@ async function bootstrap() {
     ? `纯梦中转与图片链路已复用管理员授权 ${auth.masked}；其他厂商密钥不会覆盖它。`
     : "未找到纯梦大助手管理员授权；仍可选择外部文本供应商，但 PUREAM 图片链路需要单独授权。";
   await loadProjects();
-  await loadVoiceLibrary(false);
   renderSettings();
-  await refreshAccountSwitch(false);
-  await refreshHealth(!appDefaults?.captureMode);
-  if (!appDefaults?.captureMode) {
-    await api.workbench.syncVideoJobs();
-    if (state.project) await loadProject(state.project.id, false);
+}
+
+async function startBackgroundServices() {
+  await loadVoiceLibrary(false).catch(error => console.error("voice library preload failed", error));
+  await refreshAccountSwitch(false).catch(error => console.error("account state preload failed", error));
+  await refreshHealth(!state.appDefaults?.captureMode).catch(error => console.error("health preload failed", error));
+  if (!state.appDefaults?.captureMode) {
+    const syncResult = await api.workbench.syncVideoJobs().catch(error => ({ ok: false, message: error?.message || String(error) }));
+    const currentHasActiveJob = Array.isArray(syncResult?.jobs) && syncResult.jobs.some(job => job.projectId === state.project?.id);
+    if (currentHasActiveJob && state.project) await loadProject(state.project.id, false).catch(() => {});
   }
   state.pollTimer = setInterval(async () => {
     if (state.polling) return;
     state.polling = true;
     try {
       await refreshHealth(false);
-      await api.workbench.syncVideoJobs();
+      const syncResult = await api.workbench.syncVideoJobs();
       if (state.accountSwitch?.status === "draining") await refreshAccountSwitch(true);
       else {
         await refreshAccountSwitch(false);
         if (state.accountSwitch?.status === "awaiting_login") await verifyCurrentAccountSwitch(true);
       }
-      if (state.project) {
+      const projectRunning = ["running", "pausing", "stopping", "paused_account"].includes(state.project?.automation?.status);
+      const currentHasActiveJob = Array.isArray(syncResult?.jobs) && syncResult.jobs.some(job => job.projectId === state.project?.id);
+      if (state.project && (projectRunning || currentHasActiveJob)) {
         const previousOperationStatus = state.project.automation?.status;
         const projectChanged = await loadProject(state.project.id, false);
         if (projectChanged && state.stage === "script") renderScript();
@@ -4933,7 +5004,7 @@ async function bootstrap() {
     } finally {
       state.polling = false;
     }
-  }, 4000);
+  }, 6000);
 }
 
 function applyCaptureScenario(scenario) {
@@ -4984,4 +5055,5 @@ bootstrap().then(async () => {
   if (captureStage) await switchStage(captureStage);
   applyCaptureScenario(captureScenario);
   document.body.dataset.workbenchReady = "true";
+  setTimeout(() => startBackgroundServices().catch(error => console.error("background services failed", error)), 50);
 }).catch(error => showToast(error.message || "工作台初始化失败", "error"));
