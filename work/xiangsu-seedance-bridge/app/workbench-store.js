@@ -2371,18 +2371,40 @@ class WorkbenchStore {
 
   confirmCandidate(projectId, candidateId, discardOthers = true) {
     const project = this.getProject(projectId);
+    const settings = this.getSettings();
     const selected = project.candidates.find(item => item.id === candidateId);
     if (!selected) throw Object.assign(new Error("抽卡候选不存在"), { code: "CANDIDATE_NOT_FOUND" });
     const selectedRevision = selected.productionRevision || "";
     if (selectedRevision !== (project.productionRevision || "")) {
       throw Object.assign(new Error("旧制作版本只能回看，不能覆盖当前版本的已选资产"), { code: "CANDIDATE_REVISION_ARCHIVED" });
     }
-    if (selected.qualityAudit?.ok === false) {
+    const moduleName = selected.stage === "shot_video"
+      ? "videos"
+      : selected.stage.startsWith("storyboard_")
+        ? "storyboards"
+        : selected.stage === "final"
+          ? "delivery"
+          : "assets";
+    const masterEnabled = settings?.generation?.qualityGatesEnabled !== false;
+    const moduleEnabled = settings?.generation?.qualityGateModules?.[moduleName] !== false;
+    const qualityRequired = masterEnabled && moduleEnabled;
+    if (qualityRequired && selected.qualityAudit?.ok === false) {
       throw Object.assign(new Error("该候选未通过资产质检，不能确认为成片资产"), { code: "CANDIDATE_QUALITY_FAILED" });
     }
-    if (["shot_video", "character_video"].includes(selected.stage) && selected.qualityAudit?.ok !== true) {
+    if (qualityRequired && ["shot_video", "character_video"].includes(selected.stage) && selected.qualityAudit?.ok !== true) {
       const isShot = selected.stage === "shot_video";
       throw Object.assign(new Error(isShot ? "分镜视频尚未完成音画与首帧资产质检，不能确认" : "人物视频尚未完成声音与首帧资产质检，不能确认"), { code: isShot ? "SHOT_VIDEO_QUALITY_REQUIRED" : "CHARACTER_VIDEO_QUALITY_REQUIRED" });
+    }
+    if (!qualityRequired && selected.qualityAudit?.ok !== true) {
+      selected.qualityAudit = {
+        ok: true,
+        skipped: true,
+        mode: "disabled",
+        type: selected.stage,
+        checkedAt: now(),
+        failures: [],
+        note: "审核蓝图已关闭，用户已选择此候选"
+      };
     }
     const siblings = project.candidates.filter(item => item.entityType === selected.entityType && item.entityId === selected.entityId && item.stage === selected.stage && (item.productionRevision || "") === selectedRevision);
     const explicitBefore = siblings.find(item => item.selected === true) || null;

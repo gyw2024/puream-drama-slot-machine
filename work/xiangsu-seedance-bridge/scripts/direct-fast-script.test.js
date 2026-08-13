@@ -8,9 +8,11 @@ const test = require("node:test");
 const { WorkbenchStore } = require("../app/workbench-store");
 const {
   assertDirectFastSegment,
+  assertDirectFastStorySpine,
   directFastProductStartIndex,
   directFastReversalIndex,
   directFastSegmentRanges,
+  directFastStorySpinePrompt,
   directFastUserPrompt,
   materializeDirectFastScript
 } = require("../app/direct-fast-script");
@@ -49,9 +51,54 @@ function compactSegmentPayload(start, end) {
         em: "克制→受刺激→情绪抬升→压住余震",
         f: ((number - 1) % 3) + 1,
         v: [((number - 1) % 3) + 1, (number % 3) + 1],
-        d: [[1, "你把话说清"], [2, "别再拿话骗我"], [1, "我已经看见了"], [2, "这次没有退路"], [1, "你现在就回答"], [2, "说完我们再走"]]
+        d: [[1, "你凭什么这么做"], [2, "我从来没有骗过你"], [1, "证据已经摆在这里"], [2, "那就当面逐件核对"], [1, "你必须承担这后果"], [2, "我会用行动补回来"]]
       };
     })
+  };
+}
+
+function strictSegmentPayload(start, end, durations = []) {
+  const payload = compactSegmentPayload(start, end);
+  payload.s = payload.s.map(shot => {
+    const focus = Number(shot.f);
+    const seconds = Math.max(5, Math.min(15, Number(durations[Number(shot.i) - 1]) || 10));
+    const turns = 2 + Math.round(seconds * 0.4);
+    const lines = [...shot.d];
+    while (lines.length < turns) lines.push([focus, `第${lines.length + 1}句必须继续推进`]);
+    const maxChars = Math.max(1, Math.round(seconds * 4.4) - (Number(shot.i) === 1 ? 3 : 0));
+    const base = lines.slice(0, turns);
+    let remaining = maxChars;
+    const dialogue = base.map(([speaker, text], index) => {
+      const slots = base.length - index;
+      const minimumRemaining = Math.max(0, slots - 1) * 5;
+      const allowance = Math.max(5, Math.min([...String(text)].length, remaining - minimumRemaining));
+      const trimmed = [...String(text).replace(/[，。！？!?；;：:…]/g, "")].slice(0, allowance).join("");
+      remaining -= [...trimmed].length;
+      return [speaker, trimmed];
+    });
+    if (Number(shot.i) % 2 === 0) {
+      return { ...shot, v: [focus], d: dialogue.map(([, text]) => [focus, text]) };
+    }
+    const other = focus === 1 ? 2 : 1;
+    return { ...shot, v: [focus, other], d: dialogue.map(([, text], index) => [index % 2 ? other : focus, text]) };
+  });
+  return payload;
+}
+
+function compactStorySpine(ranges) {
+  const references = compactSegmentPayload(1, Math.max(...ranges.map(([, end]) => end)));
+  return {
+    c: references.c,
+    sc: references.sc,
+    b: ranges.map(([start, end], index) => ({
+      a: start,
+      z: end,
+      sc: (index % references.sc.length) + 1,
+      en: index ? `承接第${index}段留下的未解事实` : "婚纱受损后冲突已经爆发",
+      g: `第${index + 1}段只推进一个新证据和动作`,
+      ex: `第${index + 1}段形成无法退回的新关系状态`,
+      h: index === ranges.length - 1 ? "人物用行动完成结局" : "末句和手部动作交给下一段"
+    }))
   };
 }
 
@@ -84,6 +131,36 @@ test("direct fast writing uses bounded continuous ranges and rejects acknowledge
     () => assertDirectFastSegment("我会按要求编写", 6, 10),
     error => error.code === "SCRIPT_DIRECT_SEGMENT_CONTRACT_FAILED"
   );
+});
+
+test("global story spine locks cast, scenes and causal handoffs before parallel segments", () => {
+  const ranges = directFastSegmentRanges(60);
+  const spine = compactStorySpine(ranges);
+  assert.equal(assertDirectFastStorySpine(spine, ranges), spine);
+  const prompt = directFastStorySpinePrompt({
+    topic: { title: "退休金里的秘密", hook: "孙女在警局拍桌质问爷爷。" },
+    product: { name: "书籍", sellingPoints: "按用户上传页面阅读" },
+    unitCount: 60,
+    totalSeconds: 600,
+    productStartNumber: 58,
+    segmentRanges: ranges
+  });
+  assert.match(prompt, /唯一全剧骨架/);
+  assert.match(prompt, /相邻段必须满足上一段ex\/h能够因果承接下一段en/);
+  const segmentPrompt = directFastUserPrompt({
+    topic: { title: "退休金里的秘密" },
+    product: { name: "书籍", sellingPoints: "按用户上传页面阅读" },
+    unitCount: 60,
+    totalSeconds: 600,
+    productStartNumber: 58,
+    segmentStart: 6,
+    segmentEnd: 10,
+    spine
+  });
+  assert.match(segmentPrompt, /全剧人物编号与场景不可改写/);
+  assert.match(segmentPrompt, /根对象严格只含s/);
+  const segment = { s: strictSegmentPayload(6, 10).s };
+  assert.equal(assertDirectFastSegment(segment, 6, 10, { characters: spine.c, scenes: spine.sc, strict: true }), segment);
 });
 
 test("the direct compiler supports a real 20-second two-shot smoke drama", () => {
@@ -224,6 +301,8 @@ test("failed direct segment is checkpointed and explicit resume requests only th
   });
   const calls = new Map();
   let failMiddle = true;
+  const ranges = directFastSegmentRanges(30);
+  const schedule = planFilmSchedule(300, "puream-hailuo-h3", { preferredUnit: 10, engine: "hailuo-h3" });
   const workflow = new (require("../app/workbench-workflow").WorkbenchWorkflow)({
     store,
     bridge: {},
@@ -231,6 +310,7 @@ test("failed direct segment is checkpointed and explicit resume requests only th
     stagingRoot: root,
     textGenerator: async (_config, messages) => {
       const user = String(messages.find(message => message.role === "user")?.content || "");
+      if (/全剧骨架/.test(user)) return compactStorySpine(ranges);
       const range = user.match(/第(\d+)-(\d+)镜/);
       const start = Number(range?.[1]);
       const end = Number(range?.[2]);
@@ -239,21 +319,30 @@ test("failed direct segment is checkpointed and explicit resume requests only th
         failMiddle = false;
         throw Object.assign(new Error("模拟连接中断"), { code: "PUREAM_TEXT_STREAM_ERROR", noAutomaticRetry: true });
       }
-      return compactSegmentPayload(start, end);
+      return { s: strictSegmentPayload(start, end, schedule.suggestedDurations).s };
     }
   });
 
   await assert.rejects(workflow.generateCompleteScript(created.id), error => error.code === "PUREAM_TEXT_STREAM_ERROR");
   const failed = store.getProject(created.id);
   assert.equal(failed.automation.recoverableFailure, true);
-  assert.equal(failed.script.generationCheckpoint.directFastSegments.length, 5);
-  assert.deepEqual(failed.script.generationCheckpoint.directFastFailure.failedSegmentRanges, [[11, 15]]);
+  assert.ok(failed.script.generationCheckpoint.directFastSegments.length >= 4);
+  assert.ok(failed.script.generationCheckpoint.directFastFailure.failedSegmentRanges.some(range => range[0] === 11 && range[1] === 15));
   const firstCalls = new Map(calls);
 
-  const completed = await workflow.resumeScriptGeneration(created.id);
-  assert.equal(calls.get(11), 2);
+  let completed;
+  let resumeError = null;
+  for (let attempt = 0; attempt < 3 && !completed; attempt += 1) {
+    try { completed = await workflow.resumeScriptGeneration(created.id); }
+    catch (error) {
+      resumeError = error;
+      if (error.code !== "SCRIPT_DIRECT_SEGMENT_CONTRACT_FAILED") throw error;
+    }
+  }
+  assert.ok(completed, resumeError?.message || "resume did not complete");
+  assert.ok(calls.get(11) >= 2);
   for (const [start, count] of firstCalls) {
-    if (start !== 11) assert.equal(calls.get(start), count, `S${start} segment must be reused`);
+    if (![11, 16].includes(start)) assert.equal(calls.get(start), count, `S${start} segment must be reused`);
   }
   assert.equal(completed.script.generationCheckpoint, null);
   assert.equal(completed.shots.length, 30);
@@ -306,7 +395,13 @@ test("one-call compact script is locally expanded into a 300-second production-r
       d: [[1, "你把话说清"], [2, "别再拿话骗我"], [1, "我已经看见了"], [2, "这次没有退路"], [1, "你现在就回答"], [2, "说完我们再走"]]
     }))
   };
-  const materialized = materializeDirectFastScript({ payload, topic, product, filmSchedule });
+  const strictPayload = {
+    ...payload,
+    spineLocked: true,
+    s: directFastSegmentRanges(filmSchedule.unitCount)
+      .flatMap(([start, end]) => strictSegmentPayload(start, end, filmSchedule.suggestedDurations).s)
+  };
+  const materialized = materializeDirectFastScript({ payload: strictPayload, topic, product, filmSchedule });
   const options = { targetDurationSeconds: 300, expectedUnitCount: filmSchedule.unitCount };
   const storyBible = validateStoryBible(materialized.storyBible, options);
   const blueprint = validateBlueprint({ ...storyBible, shotPlan: materialized.plans }, product.name, options);

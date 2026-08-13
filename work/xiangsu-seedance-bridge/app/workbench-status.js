@@ -82,7 +82,12 @@ function isActiveVideoJob(job) {
     return job?.message || status || "等待任务状态";
   }
 
-  function shotVideoCandidate(project, shot) {
+  function qualityGatesEnabled(settings) {
+    return settings?.generation?.qualityGatesEnabled !== false
+      && settings?.generation?.qualityGateModules?.videos !== false;
+  }
+
+  function shotVideoCandidate(project, shot, settings = null) {
     const activeRevision = project?.productionRevision || "";
     const matches = (project?.candidates || []).filter(item =>
       item.entityType === "shot"
@@ -90,12 +95,13 @@ function isActiveVideoJob(job) {
       && item.stage === "shot_video"
       && item.filePath
       && (item.productionRevision || "") === activeRevision
-      && item.qualityAudit?.ok === true
+      && (!qualityGatesEnabled(settings) || item.qualityAudit?.ok === true)
     );
     return matches.find(item => item.selected) || newest(matches);
   }
 
-  function failedShotVideoCandidate(project, shot) {
+  function failedShotVideoCandidate(project, shot, settings = null) {
+    if (!qualityGatesEnabled(settings)) return null;
     const activeRevision = project?.productionRevision || "";
     return newest((project?.candidates || []).filter(item =>
       item.entityType === "shot"
@@ -107,7 +113,8 @@ function isActiveVideoJob(job) {
     ));
   }
 
-  function unverifiedShotVideoCandidate(project, shot) {
+  function unverifiedShotVideoCandidate(project, shot, settings = null) {
+    if (!qualityGatesEnabled(settings)) return null;
     const activeRevision = project?.productionRevision || "";
     return newest((project?.candidates || []).filter(item =>
       item.entityType === "shot"
@@ -130,10 +137,10 @@ function isActiveVideoJob(job) {
     ));
   }
 
-  function shotVideoState(project, shot) {
-    const candidate = shotVideoCandidate(project, shot);
-    const failedCandidate = failedShotVideoCandidate(project, shot);
-    const unverifiedCandidate = unverifiedShotVideoCandidate(project, shot);
+  function shotVideoState(project, shot, settings = null) {
+    const candidate = shotVideoCandidate(project, shot, settings);
+    const failedCandidate = failedShotVideoCandidate(project, shot, settings);
+    const unverifiedCandidate = unverifiedShotVideoCandidate(project, shot, settings);
     const job = shotVideoJob(project, shot);
     const activeJob = isActiveVideoJob(job) ? job : null;
     if (candidate) {
@@ -199,8 +206,8 @@ function isActiveVideoJob(job) {
     return { key: "missing", label: "缺视频", candidate: null, job, activeJob: null, progress: videoJobProgress(null), detail: "该镜头尚无可用视频" };
   }
 
-  function summarizeShotVideos(project) {
-    const states = (project?.shots || []).map(shot => ({ shot, ...shotVideoState(project, shot) }));
+  function summarizeShotVideos(project, settings = null) {
+    const states = (project?.shots || []).map(shot => ({ shot, ...shotVideoState(project, shot, settings) }));
     const summary = {
       total: states.length,
       ready: 0,

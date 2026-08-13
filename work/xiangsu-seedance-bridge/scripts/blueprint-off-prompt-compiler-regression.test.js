@@ -54,8 +54,8 @@ test("blueprint master off never enters the cloud prompt recompile loop", async 
     stagingRoot: root,
     textGenerator: async () => {
       compileCalls += 1;
-      // Deliberately violates the English quality contract. With the master
-      // off this is normalized and used once, never sent through attempts 2/4.
+      // This must never run: master-off prompt assembly is local, so a text
+      // provider outage cannot turn a disabled audit into a workflow blocker.
       return {
         styleEn: "中文写实风格",
         summaryEn: "门开后证据落桌",
@@ -74,10 +74,10 @@ test("blueprint master off never enters the cloud prompt recompile loop", async 
   });
 
   const spec = await workflow.ensureHailuoPromptSpec(created.id, "S01", "keyframe", store.getSettings());
-  assert.equal(compileCalls, 1);
+  assert.equal(compileCalls, 0);
   assert.equal(spec.subshots.length, 3);
   const second = await workflow.ensureHailuoPromptSpec(created.id, "S01", "keyframe", store.getSettings());
-  assert.equal(compileCalls, 1, "stored ungated spec must not be recompiled");
+  assert.equal(compileCalls, 0, "stored ungated spec must not be recompiled");
   assert.equal(second.fingerprint, spec.fingerprint);
 
   const project = store.getProject(created.id);

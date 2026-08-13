@@ -44,35 +44,36 @@ function safeSentence(value, fallback, maxChars = 10) {
   return `${chars.slice(0, Math.max(2, maxChars)).join("")}。`;
 }
 
+function openingSentenceFromSource(value) {
+  const text = compact(value, "", 30).replace(/[，。！？!?；;：:…]+$/g, "");
+  const chars = [...text];
+  const hasPunch = /凭什么|还敢|住手|滚|你也配|谁让|别碰|放开|跪下/.test(text);
+  if (chars.length >= 6 && hasPunch) return `${chars.slice(0, 12).join("")}！`;
+  return "住手！你凭什么这么做？";
+}
+
 function fitDialogueLines(source, opening = false, duration = 10) {
   const seconds = Math.max(5, Math.min(15, Number(duration) || 10));
   const targetTurns = 2 + Math.round(seconds * 0.4);
-  const minimumCharacters = Math.round(seconds * 3.6);
   const maximumCharacters = Math.round(seconds * 4.4);
   let lines = sourceArray(source).map(item => Array.isArray(item) ? item : [item?.s, item?.x || item?.text])
-    .map(([speaker, text]) => ({ speaker: Math.max(1, Number(speaker) || 1), text: safeSentence(text, "", 9) }))
+    .map(([speaker, text]) => ({ speaker: Math.max(1, Number(speaker) || 1), text: safeSentence(text, "", 12) }))
     .filter(item => spokenLength(item.text) >= 2)
     .slice(0, targetTurns);
   while (lines.length < targetTurns) {
-    lines.push({ speaker: lines.length % 2 ? 2 : 1, text: safeSentence(FALLBACK_LINES[lines.length], FALLBACK_LINES[lines.length], 8) });
+    const fallback = FALLBACK_LINES[lines.length % FALLBACK_LINES.length];
+    lines.push({ speaker: lines.length % 2 ? 2 : 1, text: safeSentence(fallback, fallback, 10) });
   }
-  if (opening) lines[0].text = "别碰我的婚纱！";
+  if (opening) lines[0].text = openingSentenceFromSource(lines[0]?.text);
   let total = lines.reduce((sum, item) => sum + spokenLength(item.text), 0);
-  if (total < minimumCharacters) {
-    const fillers = ["现在", "当面", "今天", "马上", "亲口", "认真"];
-    for (let index = 0; total < minimumCharacters && index < lines.length * 4; index += 1) {
-      const target = lines[index % lines.length];
-      const punctuation = /[。！？]$/.test(target.text) ? target.text.slice(-1) : "。";
-      target.text = `${target.text.replace(/[。！？]$/g, "")}${fillers[index % fillers.length]}${punctuation}`;
-      total = lines.reduce((sum, item) => sum + spokenLength(item.text), 0);
-    }
-  }
   if (total > maximumCharacters) {
     const budget = maximumCharacters;
     let remaining = budget;
     lines = lines.map((item, index) => {
       const slots = lines.length - index;
-      const allowance = Math.max(5, Math.floor(remaining / slots));
+      const minimumRemaining = Math.max(0, slots - 1) * 5;
+      const desired = spokenLength(item.text);
+      const allowance = Math.max(5, Math.min(desired, remaining - minimumRemaining));
       const punctuation = index === 0 && opening ? "！" : "。";
       const text = [...item.text.replace(/[，。！？!?；;：:…]/g, "")].slice(0, allowance).join("");
       remaining -= spokenLength(text);
@@ -110,22 +111,49 @@ function directFastSegmentRanges(unitCount, segmentSize = 5) {
   return ranges;
 }
 
-function assertDirectFastSegment(payload, segmentStart, segmentEnd) {
-  const start = Math.max(1, Math.floor(Number(segmentStart) || 1));
-  const end = Math.max(start, Math.floor(Number(segmentEnd) || start));
-  const expected = Array.from({ length: end - start + 1 }, (_, index) => start + index);
-  const actual = sourceArray(payload?.s).map(item => Math.floor(Number(item?.i) || 0));
-  const hasReferenceData = sourceArray(payload?.c).length >= 3 && sourceArray(payload?.sc).length >= 1;
-  const exactRange = actual.length === expected.length && actual.every((number, index) => number === expected[index]);
-  if (!hasReferenceData || !exactRange) {
-    throw Object.assign(new Error(
-      `剧本 S${String(start).padStart(2, "0")}–S${String(end).padStart(2, "0")} 未返回完整连续结构`
-    ), {
-      code: "SCRIPT_DIRECT_SEGMENT_CONTRACT_FAILED",
-      segmentStart: start,
-      segmentEnd: end,
-      expectedShotNumbers: expected,
-      actualShotNumbers: actual,
+function directFastStorySpineSchema() {
+  return {
+    c: [{ n: "姓名", a: "年龄段", r: "身份、关系与本剧立场", d: "外貌体态" }],
+    sc: [{ n: "场景名", d: "空间与全剧剧情任务" }],
+    b: [{ a: 1, z: 5, sc: 1, en: "本段进入时已成立的事实", g: "本段唯一新增事实与行动目标", ex: "本段结束时不可逆的新状态", h: "交给下一段的动作或悬念" }]
+  };
+}
+
+function directFastStorySpinePrompt({ topic, product, unitCount, totalSeconds, productStartNumber, segmentRanges = [] }) {
+  const density = storyDensityTargets(totalSeconds, unitCount);
+  return [
+    `先为一部${totalSeconds}秒、共${unitCount}镜的现实主义竖屏短剧建立唯一全剧骨架。`,
+    `题材：${JSON.stringify(topic)}`,
+    `商品：${product.name}；只允许使用这些事实：${product.sellingPoints || product.description || "用户未提供额外卖点"}。`,
+    `只输出紧凑JSON，根对象严格只含c/sc/b。c写3-5名全剧固定人物；sc写${density.sceneMin}-${density.sceneMax}个有不同剧情任务的固定场景；b恰好${segmentRanges.length}项并按顺序覆盖${JSON.stringify(segmentRanges)}。`,
+    "人物编号全剧不变：1=主角，2=核心冲突方，3=关键见证人；每人身份、关系、立场和外貌必须具体，人物不能跨段改名或互换身份。",
+    `每个b只含a/z/sc/en/g/ex/h。en是本段进入时已成立的事实；g是本段唯一新增事实和可见行动；ex是不可逆结果；h是下一段第一镜可直接承接的动作、物件、末句或悬念。相邻段必须满足上一段ex/h能够因果承接下一段en，禁止重复争吵和同义复述。`,
+    `唯一主反转固定在约72%位置；${product.name}及任何俗称在S${String(productStartNumber).padStart(2, "0")}之前不得出现，之后只用真实需求→自然操作→可见合规结果→人物决定完成植入。`,
+    "最高优先级是观众能看懂、愿意看进去：每段必须推进新信息、新行动或新关系后果；对白的说话人、听者、语气和表情要有明确剧情依据。",
+    "回复首字符必须是{，末字符必须是}；不要解释、Markdown、分镜正文、画面提示词、模型名称或任何确认语。",
+    `结构示例：${JSON.stringify(directFastStorySpineSchema())}`
+  ].join("\n");
+}
+
+function assertDirectFastStorySpine(payload, ranges) {
+  const expected = sourceArray(ranges);
+  const characters = sourceArray(payload?.c);
+  const scenes = sourceArray(payload?.sc);
+  const beats = sourceArray(payload?.b);
+  const validBeats = beats.length === expected.length && expected.every(([start, end], index) => {
+    const beat = beats[index] || {};
+    return Number(beat.a) === Number(start)
+      && Number(beat.z) === Number(end)
+      && Number(beat.sc) >= 1
+      && Number(beat.sc) <= scenes.length
+      && compact(beat.en, "", 200).length >= 4
+      && compact(beat.g, "", 200).length >= 4
+      && compact(beat.ex, "", 200).length >= 4
+      && compact(beat.h, "", 200).length >= 2;
+  });
+  if (characters.length < 3 || characters.length > 5 || scenes.length < 1 || !validBeats) {
+    throw Object.assign(new Error("全剧人物、场景与分段因果骨架不完整"), {
+      code: "SCRIPT_DIRECT_SPINE_CONTRACT_FAILED",
       noAutomaticRetry: true,
       retryRequiresExplicitResume: true
     });
@@ -133,23 +161,131 @@ function assertDirectFastSegment(payload, segmentStart, segmentEnd) {
   return payload;
 }
 
-function directFastUserPrompt({ topic, product, unitCount, totalSeconds, productStartNumber, segmentStart = 1, segmentEnd = unitCount, scriptFormatDirective = "" }) {
+function directFastBeatForRange(spine, segmentStart, segmentEnd) {
+  const start = Number(segmentStart);
+  const end = Number(segmentEnd);
+  return sourceArray(spine?.b).find(item => Number(item?.a) === start && Number(item?.z) === end) || null;
+}
+
+function directFastSpineFromLegacyPayload(payload, ranges, topic = {}) {
+  const characters = sourceArray(payload?.c).slice(0, 5);
+  const scenes = sourceArray(payload?.sc).slice(0, 8);
+  if (characters.length < 3 || scenes.length < 1) return null;
+  const shots = sourceArray(payload?.s);
+  const beats = sourceArray(ranges).map(([start, end], index) => {
+    const segmentShots = shots.filter(item => Number(item?.i) >= Number(start) && Number(item?.i) <= Number(end));
+    const first = segmentShots[0] || {};
+    const last = segmentShots.at(-1) || {};
+    const ratio = index / Math.max(1, sourceArray(ranges).length - 1);
+    const goal = ratio < 0.2
+      ? topic.hook
+      : ratio < 0.65
+        ? topic.proofChain || topic.logline
+        : ratio < 0.8
+          ? topic.reversal
+          : topic.emotionalPayoff || topic.logline;
+    return {
+      a: Number(start),
+      z: Number(end),
+      sc: (index % scenes.length) + 1,
+      en: compact(first.bf, index ? `承接上一段留下的动作与未解决事实` : topic.hook || "伤害动作已经发生", 120),
+      g: compact(first.a || goal, `推进第${index + 1}段唯一新事实和行动`, 120),
+      ex: compact(last.af, `第${index + 1}段形成不可逆的新状态`, 120),
+      h: compact(last.a, index === sourceArray(ranges).length - 1 ? "人物用行动完成结局" : "末句与手部动作交给下一段", 80)
+    };
+  });
+  return { c: characters, sc: scenes, b: beats };
+}
+
+function assertDirectFastSegment(payload, segmentStart, segmentEnd, options = {}) {
+  const start = Math.max(1, Math.floor(Number(segmentStart) || 1));
+  const end = Math.max(start, Math.floor(Number(segmentEnd) || start));
+  const expected = Array.from({ length: end - start + 1 }, (_, index) => start + index);
+  const shots = sourceArray(payload?.s);
+  const actual = shots.map(item => Math.floor(Number(item?.i) || 0));
+  const characters = sourceArray(options.characters).length ? sourceArray(options.characters) : sourceArray(payload?.c);
+  const scenes = sourceArray(options.scenes).length ? sourceArray(options.scenes) : sourceArray(payload?.sc);
+  const hasReferenceData = characters.length >= 3 && scenes.length >= 1;
+  const exactRange = actual.length === expected.length && actual.every((number, index) => number === expected[index]);
+  const strictFailures = [];
+  const strictShape = options.strict !== true || shots.every(item => {
+    const dialogue = sourceArray(item?.d);
+    const visible = sourceArray(item?.v).map(Number);
+    const focus = Number(item?.f);
+    const duration = Math.max(5, Math.min(15, Number(options.durations?.[Number(item?.i) - 1]) || 10));
+    const requiredTurns = 2 + Math.round(duration * 0.4);
+    const dialogueSpeakers = dialogue.map(line => Number(Array.isArray(line) ? line[0] : 0));
+    const spoken = dialogue.map(line => Array.isArray(line)
+      ? String(line[1] || "").replace(/[\s，。！？!?、；;：:…]/g, "")
+      : "");
+    const totalSpoken = spoken.reduce((sum, value) => sum + spokenLength(value), 0);
+    const firstSpoken = String(dialogue[0]?.[1] || "");
+    const firstSpokenLength = spokenLength(firstSpoken);
+    const checks = {
+      title: compact(item?.t, "", 80).length >= 2,
+      action: compact(item?.a, "", 160).length >= 4,
+      before: compact(item?.bf, "", 160).length >= 4,
+      after: compact(item?.af, "", 160).length >= 4,
+      emotion: compact(item?.em, "", 120).split("→").length >= 3,
+      focus: focus >= 1 && focus <= characters.length,
+      visible: visible.length >= 1 && visible.length <= 2 && visible.every(value => value >= 1 && value <= characters.length),
+      turns: dialogue.length === requiredTurns,
+      dialogue: dialogue.every(line => Array.isArray(line) && Number(line[0]) >= 1 && Number(line[0]) <= characters.length && spokenLength(line[1]) >= 3),
+      dialogueBudget: totalSpoken >= Math.round(duration * 3.6) && totalSpoken <= Math.round(duration * 4.4),
+      speakers: dialogueSpeakers.every(value => Number(item?.i) % 2 === 0 ? value === focus : visible.includes(value)),
+      unique: new Set(spoken).size >= Math.max(4, dialogue.length - 1),
+      opening: Number(item?.i) !== 1 || (firstSpokenLength >= 6 && firstSpokenLength <= 12 && /[？?!！]|凭什么|还敢|住手|滚|你也配|谁让|别碰|放开|跪下/.test(firstSpoken))
+    };
+    const passed = Object.values(checks).every(Boolean);
+    if (!passed) strictFailures.push({ shot: Number(item?.i) || 0, failed: Object.entries(checks).filter(([, ok]) => !ok).map(([key]) => key) });
+    return passed;
+  });
+  if (!hasReferenceData || !exactRange || !strictShape) {
+    throw Object.assign(new Error(
+      `剧本 S${String(start).padStart(2, "0")}–S${String(end).padStart(2, "0")} 未返回完整连续、可表演的对白结构`
+    ), {
+      code: "SCRIPT_DIRECT_SEGMENT_CONTRACT_FAILED",
+      segmentStart: start,
+      segmentEnd: end,
+      expectedShotNumbers: expected,
+      actualShotNumbers: actual,
+      strictFailures,
+      noAutomaticRetry: true,
+      retryRequiresExplicitResume: true
+    });
+  }
+  return payload;
+}
+
+function directFastUserPrompt({ topic, product, unitCount, totalSeconds, productStartNumber, segmentStart = 1, segmentEnd = unitCount, scriptFormatDirective = "", spine = null, segmentRanges = [], unitDurations = [], anchor = false }) {
   const start = Math.max(1, Math.min(unitCount, Number(segmentStart) || 1));
   const end = Math.max(start, Math.min(unitCount, Number(segmentEnd) || unitCount));
   const segmentCount = end - start + 1;
+  const durationContract = Array.from({ length: segmentCount }, (_, offset) => {
+    const number = start + offset;
+    const seconds = Math.max(5, Math.min(15, Number(unitDurations[number - 1]) || Math.round(totalSeconds / unitCount) || 10));
+    return `S${String(number).padStart(2, "0")}=${seconds}秒/${2 + Math.round(seconds * 0.4)}句/${Math.round(seconds * 3.6)}-${Math.round(seconds * 4.4)}字`;
+  }).join("；");
+  const beat = directFastBeatForRange(spine, start, end);
+  const rootContract = anchor
+    ? `根对象严格为c/sc/b/s。c和sc是全剧唯一人物表与场景表；b必须按顺序覆盖这些分段：${JSON.stringify(segmentRanges)}；s只写本次第${start}-${end}镜。`
+    : spine
+      ? `根对象严格只含s；全剧人物编号与场景不可改写。固定人物：${JSON.stringify(spine.c)}；固定场景：${JSON.stringify(spine.sc)}；本段因果任务：${JSON.stringify(beat)}。`
+      : "根对象严格为c/sc/s。";
   return [
     `请写一部${totalSeconds}秒竖屏短剧的紧凑剧情母稿第${start}-${end}镜，共${segmentCount}镜；全剧总计${unitCount}镜。`,
     `题材：${JSON.stringify(topic)}`,
     `商品：${product.name}；卖点：${product.sellingPoints || product.description || "只按用户提供事实"}。`,
-    `只输出JSON，根对象严格为c/sc/s。c为3-5名核心人物，序号固定：1=承担牺牲的主角，2=误解主角的亲属或对手，3=关键见证人；sc只写本段实际使用的1-3个场景及各自剧情任务，系统会跨段合并长剧场景；s必须恰好${segmentCount}项，i从${start}连续到${end}，不得输出区间外镜头。`,
+    `只输出JSON，${rootContract} 人物序号固定：1=主角，2=与主角发生核心冲突的人，3=关键见证人；s必须恰好${segmentCount}项，i从${start}连续到${end}，不得输出区间外镜头。`,
+    anchor ? "b的每一段必须承接上一段ex：en写进入事实，g只写本段新增事实和动作，ex写不可逆结果，h写下一段能直接接拍的动作或悬念；不得重复争吵、重复误会或提前泄露主反转。" : "本段第一镜bf必须承接因果任务en，最后一镜af必须落实ex，末句和末动作必须交出h；不得另起故事、改名、换关系或重复上一段信息。",
     "每个s只允许t/a/bf/af/em/f/v/d字段：f和v使用c的1起始序号；v最多2人。奇数镜优先双人攻防，偶数镜必须单人近景且d的6句全部由f说，保证至少一半镜头为单人。",
-    "每镜d必须恰好6句，每句5-9个可说汉字，台词不能同义复述；双人镜严格轮流攻防。em必须写清起始情绪、触发、峰值和余震。a必须是能拍到的独占动作结果，不能写心理说明。",
+    `每镜d严格按本镜时长写自然可演对白：${durationContract}。每句约4-12个可说汉字，必须说完整，不能同义复述；双人镜严格轮流攻防。em必须写清起始情绪、触发、峰值和余震。a必须是能拍到的独占动作结果，不能写心理说明。`,
     "S01前2秒必须由伤害动作直接开场，第一句必须是6-12字的质问或制止；前60秒不得连续同一人念词，必须有说话人和听者反应交替。",
     `唯一主反转固定在约72%位置。${product.name}及任何俗称在S${String(productStartNumber).padStart(2, "0")}之前绝对禁止出现；S${String(productStartNumber).padStart(2, "0")}-S${String(Math.min(unitCount, productStartNumber + 2)).padStart(2, "0")}才用3镜完成真实需求→自然使用→可见合规体验→人物决定，不写治疗、治愈或医疗承诺。最后一镜回到人物行动结局。`,
     scriptFormatDirective,
     "总JSON尽量紧凑，不要解释，不要Markdown，不要输出画面提示词、声音提示词或模型名称。",
     "回复的第一个字符必须是{，最后一个字符必须是}。禁止先说‘我会按要求编写’或任何确认、计划、说明；直接给完整JSON。",
-    `结构示例：${JSON.stringify(directFastResponseSchema())}`
+    `结构示例：${JSON.stringify(anchor ? { ...directFastStorySpineSchema(), s: directFastResponseSchema().s } : spine ? { s: directFastResponseSchema().s } : directFastResponseSchema())}`
   ].join("\n");
 }
 
@@ -268,7 +404,11 @@ function directFastProductStartIndex(unitCount) {
   )));
 }
 
-function sceneFor(index, unitCount, scenes) {
+function sceneFor(index, unitCount, scenes, payload = {}) {
+  const shotNumber = index + 1;
+  const beat = sourceArray(payload?.b).find(item => Number(item?.a) <= shotNumber && Number(item?.z) >= shotNumber);
+  const authoredScene = Number(beat?.sc);
+  if (authoredScene >= 1 && authoredScene <= scenes.length) return scenes[authoredScene - 1];
   const bucket = Math.min(scenes.length - 1, Math.floor(index / Math.ceil(unitCount / scenes.length)));
   return scenes[bucket] || scenes.at(-1);
 }
@@ -365,20 +505,37 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
     const id = `S${String(index + 1).padStart(2, "0")}`;
     const stage = index === reversalIndex ? "main_reversal" : stageFor(index, unitCount);
     const duration = Number(filmSchedule.suggestedDurations?.[index]) || Math.round(totalSeconds / unitCount);
-    const scene = sceneFor(index, unitCount, scenes);
+    const scene = sceneFor(index, unitCount, scenes, payload);
     const authoredFocus = Math.max(1, Math.min(characters.length, Number(source.f) || ((index % characters.length) + 1)));
     const authoredVisible = sourceArray(source.v).map(Number).filter(Number.isFinite).map(value => Math.max(1, Math.min(characters.length, value)));
+    const authoredSpeakers = sourceArray(source.d).map(item => Number(Array.isArray(item) ? item[0] : item?.s)).filter(Number.isFinite)
+      .map(value => Math.max(1, Math.min(characters.length, value)));
     const visibleIndexes = index > 0 && index % 2 === 1
       ? [authoredFocus]
-      : [...new Set([authoredFocus, ...authoredVisible])].slice(0, 2);
+      : [...new Set([authoredFocus, ...authoredVisible, ...authoredSpeakers])].slice(0, 2);
     const productMention = index >= productStartIndex && index < productStartIndex + 3;
     const productRole = productMention ? ["product_packshot", "product_use", "product_result"][index - productStartIndex] : "none";
     const visibleCharacterIds = visibleIndexes.map(value => characters[value - 1]?.id).filter(Boolean);
     const focus = characters[authoredFocus - 1] || characters[0];
     const counterpart = visibleCharacterIds.length > 1 ? characters.find(item => item.id === visibleCharacterIds[1]) : null;
-    let dialogueSource = fitDialogueLines(source.d, index === 0, duration);
+    const authoredDialogueRequired = 2 + Math.round(Math.max(5, Math.min(15, duration)) * 0.4);
+    const authoredDialogue = sourceArray(source.d);
+    // New spine-based responses are validated against the exact per-shot
+    // duration and arrive ready to perform. Legacy payloads are still fitted
+    // locally so old paused tasks remain resumable without rewriting them.
+    let dialogueSource = authoredDialogue.length === authoredDialogueRequired && payload?.spineLocked === true
+      ? authoredDialogue.map(item => Array.isArray(item) ? item : [item?.s, item?.x || item?.text])
+        .map(([speaker, text]) => ({ speaker: Math.max(1, Number(speaker) || 1), text: safeSentence(text, "", 14) }))
+        .filter(item => spokenLength(item.text) >= 2)
+      : fitDialogueLines(authoredDialogue, index === 0, duration);
+    if (index === 0 && dialogueSource.length && payload?.spineLocked !== true) {
+      dialogueSource[0].text = openingSentenceFromSource(dialogueSource[0].text);
+    }
     if (visibleCharacterIds.length === 1 || productMention) dialogueSource = dialogueSource.map(item => ({ ...item, speaker: authoredFocus }));
-    else dialogueSource = dialogueSource.map((item, turnIndex) => ({ ...item, speaker: visibleIndexes[turnIndex % visibleIndexes.length] }));
+    else dialogueSource = dialogueSource.map((item, turnIndex) => ({
+      ...item,
+      speaker: visibleIndexes.includes(item.speaker) ? item.speaker : visibleIndexes[turnIndex % visibleIndexes.length]
+    }));
     const dialogueVisibleIds = productMention ? visibleCharacterIds.slice(0, 1) : visibleCharacterIds;
     const action = index === 0
       ? compact(topic.hook, "对方踢开跪地劳作的人，婚纱裙摆从手中滑落", 88)
@@ -595,10 +752,15 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
 
 module.exports = {
   assertDirectFastSegment,
+  assertDirectFastStorySpine,
+  directFastBeatForRange,
   directFastResponseSchema,
+  directFastStorySpineSchema,
+  directFastStorySpinePrompt,
   directFastProductStartIndex,
   directFastReversalIndex,
   directFastSegmentRanges,
+  directFastSpineFromLegacyPayload,
   directFastUserPrompt,
   fitDialogueLines,
   materializeDirectFastScript

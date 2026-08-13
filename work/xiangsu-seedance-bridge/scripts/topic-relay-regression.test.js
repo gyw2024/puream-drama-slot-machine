@@ -89,7 +89,7 @@ test("topic generation allows five minutes for a long reasoning response", () =>
   const topicStart = source.indexOf("async generateTopicOptions");
   const scriptStart = source.indexOf("async generateCompleteScript", topicStart);
   const topicSource = source.slice(topicStart, scriptStart);
-  assert.match(topicSource, /timeoutMs:\s*300_000/);
+  assert.doesNotMatch(topicSource, /timeoutMs:\s*300_000/);
 });
 
 test("topic JSON parser accepts a root array without weakening other schemas", () => {

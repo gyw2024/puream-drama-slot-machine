@@ -2254,7 +2254,7 @@ ipcMain.handle("workbench:list-projects-overview", () => {
       try { return store.getProject(summary.id); }
       catch { return summary; }
     });
-    return { ok: true, projects: listProjectsOverview(projects) };
+    return { ok: true, projects: listProjectsOverview(projects, store.getSettings()) };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-library-asset", async (_event, projectId, libraryType, assetId) => {

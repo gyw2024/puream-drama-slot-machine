@@ -813,12 +813,18 @@ function assetActionAttributes(candidate, title, kind = "", aspectRatio = "") {
 
 function assetStageTile(candidate, title, kind = "image", aspectRatio = "") {
   const resolvedKind = candidate?.filePath ? mediaKind(candidate.filePath, kind) : kind;
-  const invalid = candidate?.qualityAudit?.ok === false;
-  const gatedUnverified = ["character_video", "shot_video"].includes(candidate?.stage) && candidate?.qualityAudit?.ok !== true;
+  const moduleName = candidate?.stage === "shot_video"
+    ? "videos"
+    : String(candidate?.stage || "").startsWith("storyboard_")
+      ? "storyboards"
+      : "assets";
+  const qualityRequired = qualityBlueprintModuleEnabled(moduleName);
+  const invalid = qualityRequired && candidate?.qualityAudit?.ok === false;
+  const gatedUnverified = qualityRequired && ["character_video", "shot_video"].includes(candidate?.stage) && candidate?.qualityAudit?.ok !== true;
   const preview = candidate?.filePath && resolvedKind === "image"
     ? `<img src="${escapeHtml(candidate.fileUrl || fileUrl(candidate.filePath))}" alt="">`
     : `<img class="asset-stage-icon" src="../assets/icons/${resolvedKind === "audio" ? "audio" : resolvedKind === "video" ? "video" : "image"}.png" alt="">`;
-  const meshRequired = projectRequiresFaceMeshUi() && candidate?.entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(candidate?.stage);
+  const meshRequired = qualityBlueprintModuleEnabled("assets") && projectRequiresFaceMeshUi() && candidate?.entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(candidate?.stage);
   const meshMissing = meshRequired && candidate?.faceMesh?.applied !== true;
     const status = invalid ? "质检失败 · 点击查看" : meshMissing ? "原图待一致性检查 · 云端算力不可用" : gatedUnverified ? "待质检 · 仅可查看" : candidate?.filePath ? "点击打开" : "尚未生成";
   return `<button class="asset-stage-tile ${candidate?.filePath ? "ready" : "missing"}${invalid || gatedUnverified || meshMissing ? " quality-invalid" : ""}" ${assetActionAttributes(candidate, title, resolvedKind, aspectRatio)}>${preview}<span>${escapeHtml(title)}${candidate?.faceMesh?.applied ? '<b class="mesh-badge">全脸网格</b>' : ""}</span><small>${status}</small></button>`;
@@ -848,7 +854,7 @@ function candidates(entityType, entityId, stage) {
 
 function chosenCandidate(entityType, entityId, stage) {
   const allMatches = candidates(entityType, entityId, stage);
-  const meshRequired = projectRequiresFaceMeshUi() && entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(stage);
+  const meshRequired = qualityBlueprintModuleEnabled("assets") && projectRequiresFaceMeshUi() && entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(stage);
   const currentMatches = allMatches.filter(item => item.stale !== true);
   const meshed = meshRequired ? currentMatches.filter(item => item.faceMesh?.applied === true) : currentMatches;
   const matches = meshed.length ? meshed : currentMatches;
@@ -1050,7 +1056,7 @@ function setPipelineStepStatus(stage, status, description) {
   button.title = description;
 }
 
-function renderPipelineVideoStatus(summary = videoStatusApi.summarizeShotVideos(state.project)) {
+function renderPipelineVideoStatus(summary = videoStatusApi.summarizeShotVideos(state.project, state.settings)) {
   if (!summary.total) {
     setPipelineStepStatus("videos", "pending", "尚未拆出分镜");
     setPipelineStepStatus("final", "pending", "等待分镜视频");
@@ -1260,7 +1266,7 @@ function setBusy(busy, message = "", projectId = state.project?.id || "") {
     const button = $(selector);
     if (!button) return;
     if (selector === "#stitchVideo") {
-      const summary = state.project ? videoStatusApi.summarizeShotVideos(state.project) : { allReady: false };
+      const summary = state.project ? videoStatusApi.summarizeShotVideos(state.project, state.settings) : { allReady: false };
       button.disabled = state.busy || !summary.allReady;
       return;
     }
@@ -1925,7 +1931,7 @@ function renderShots() {
     const end = chosenCandidate("shot", shot.id, "storyboard_end");
     const sheet = chosenCandidate("shot", shot.id, "storyboard_sheet");
     const frame = (candidate, stage, label) => {
-      const invalid = candidate?.qualityAudit?.ok === false;
+      const invalid = qualityBlueprintModuleEnabled("storyboards") && candidate?.qualityAudit?.ok === false;
       const batchStatus = batchFrameStatus(stage, shot.id);
       const drawing = isStageDrawing(stage, shot.id);
       const queued = batchStatus === "queued";
@@ -2011,7 +2017,7 @@ function renderJobs() {
 }
 
 function videoCardView(project, shot) {
-  const videoState = videoStatusApi.shotVideoState(project, shot);
+  const videoState = videoStatusApi.shotVideoState(project, shot, state.settings);
   const video = videoState.candidate || chosenCandidate("shot", shot.id, "shot_video");
   const taskJob = videoState.activeJob || (videoState.key === "failed" ? videoState.job : null);
   const ratio = normalizedAspectRatio(project.generation?.aspectRatio || "9:16");
@@ -2195,18 +2201,19 @@ function renderQualityGate(project) {
 function renderFinal() {
   const project = requireProject();
   const duration = project.shots.reduce((sum,item) => sum + Number(item.duration || 0), 0);
-  const summary = videoStatusApi.summarizeShotVideos(project);
+  const summary = videoStatusApi.summarizeShotVideos(project, state.settings);
   $("#timelineDuration").textContent = `${summary.ready}/${summary.total} 已就绪 · ${duration} 秒`;
   $("#timeline").innerHTML = project.shots.slice().sort((a,b)=>a.number-b.number).map(shot => {
-    const videoState = videoStatusApi.shotVideoState(project, shot);
+    const videoState = videoStatusApi.shotVideoState(project, shot, state.settings);
     return `<div class="timeline-item status-${videoState.key}" title="${escapeHtml(videoState.detail)}"><em>${String(shot.number).padStart(2,"0")}</em><span>${escapeHtml(shot.title)}</span><b class="timeline-status"><i aria-hidden="true"></i>${escapeHtml(videoState.label)}</b></div>`;
   }).join("") || `<div class="empty-hint">暂无时间线</div>`;
   const hasFinal = Boolean(project.finalVideoPath);
   const finalPassed = project.finalQualityAudit?.ok === true;
   const finalIsManual = project.finalQualityAudit?.mode === "manual";
-  const hasKnownFailure = project.mediaQualityAudit?.ok === false || project.finalQualityAudit?.ok === false;
+  const hasKnownFailure = (qualityBlueprintModuleEnabled("delivery") && project.mediaQualityAudit?.ok === false)
+    || (qualityBlueprintModuleEnabled("delivery") && project.finalQualityAudit?.ok === false);
   const stitchButton = $("#stitchVideo");
-  const knownMediaFailure = project.mediaQualityAudit?.ok === false;
+  const knownMediaFailure = qualityBlueprintModuleEnabled("delivery") && project.mediaQualityAudit?.ok === false;
   stitchButton.disabled = state.busy || !summary.allReady || knownMediaFailure;
   stitchButton.title = summary.allReady ? "按镜号拼接完整短剧" : summary.total ? `还缺 ${summary.remaining} 个分镜视频，暂不能拼接` : "请先拆解剧本并生成分镜视频";
   stitchButton.innerHTML = `<img src="../assets/icons/play.png" alt="">${summary.allReady ? "拼接完整短剧" : summary.total ? `还缺 ${summary.remaining} 镜` : "等待分镜"}`;
@@ -2809,7 +2816,7 @@ function renderOverview() {
   const project = state.project;
   if (!project) return;
   const selectedCount = project.candidates.filter(item => item.selected && (item.productionRevision || "") === (project.productionRevision || "")).length;
-  const videoSummary = videoStatusApi.summarizeShotVideos(project);
+  const videoSummary = videoStatusApi.summarizeShotVideos(project, state.settings);
   const summary = project.costLedger?.summary || {};
   $("#projectStatus").textContent = ({
     draft:"草稿",

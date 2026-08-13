@@ -1,6 +1,9 @@
 node_modules/
 media-tools/
 dist*/
+.e2e-real/
+release-artifacts/
+.tmp-*.js
 *.log
 .DS_Store
 Thumbs.db

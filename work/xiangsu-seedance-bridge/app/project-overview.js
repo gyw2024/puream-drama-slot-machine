@@ -21,20 +21,22 @@ function latestCandidateIncludingStale(project, entityType, entityId, stage) {
   })();
 }
 
-function hasFile(candidate) {
-  return Boolean(candidate?.filePath) && candidate.qualityAudit?.ok !== false;
+function hasFile(candidate, settings = null, moduleName = "assets") {
+  const qualityRequired = settings?.generation?.qualityGatesEnabled !== false
+    && settings?.generation?.qualityGateModules?.[moduleName] !== false;
+  return Boolean(candidate?.filePath) && (!qualityRequired || candidate.qualityAudit?.ok !== false);
 }
 
-function stageCounts(project = {}) {
+function stageCounts(project = {}, settings = null) {
   const shots = Array.isArray(project.shots) ? project.shots : [];
   const characters = Array.isArray(project.characters) ? project.characters : [];
   const scenes = Array.isArray(project.scenes) ? project.scenes : [];
   const wardrobes = Array.isArray(project.assetLibraries?.wardrobes) ? project.assetLibraries.wardrobes : [];
   const props = Array.isArray(project.assetLibraries?.props) ? project.assetLibraries.props : [];
-  const videoReady = shots.filter(shot => hasFile(latestCandidate(project, "shot", shot.id, "shot_video"))).length;
+  const videoReady = shots.filter(shot => hasFile(latestCandidate(project, "shot", shot.id, "shot_video"), settings, "videos")).length;
   const mode = ["keyframe", "smart", "storyboard_sheet"].includes(project.generation?.mode) ? project.generation.mode : "continuation";
   const storyboardReady = shots.filter(shot => {
-    if (mode === "storyboard_sheet") return hasFile(latestCandidate(project, "shot", shot.id, "storyboard_sheet"));
+    if (mode === "storyboard_sheet") return hasFile(latestCandidate(project, "shot", shot.id, "storyboard_sheet"), settings, "storyboards");
     let stages = ["storyboard_start", "storyboard_end"];
     if (mode === "continuation" && Number(shot.number) > 1) stages = ["storyboard_end"];
     if (mode === "smart" && Number(shot.number) > 1) {
@@ -43,15 +45,15 @@ function stageCounts(project = {}) {
       const curKey = String(shot.sceneId || "").trim() || (shot.sceneName ? `name:${shot.sceneName}` : "");
       if (previous && prevKey && curKey && prevKey === curKey) stages = ["storyboard_end"];
     }
-    return stages.every(stage => hasFile(latestCandidate(project, "shot", shot.id, stage)));
+    return stages.every(stage => hasFile(latestCandidate(project, "shot", shot.id, stage), settings, "storyboards"));
   }).length;
   const characterReady = characters.filter(character =>
-    hasFile(latestCandidate(project, "character", character.id, "character_sheet"))
-    || hasFile(latestCandidate(project, "character", character.id, "character_three_view"))
+    hasFile(latestCandidate(project, "character", character.id, "character_sheet"), settings, "assets")
+    || hasFile(latestCandidate(project, "character", character.id, "character_three_view"), settings, "assets")
   ).length;
-  const sceneReady = scenes.filter(scene => hasFile(latestCandidate(project, "scene", scene.id, "scene_asset"))).length;
-  const wardrobeReady = wardrobes.filter(item => hasFile(latestCandidate(project, "library", item.id, "wardrobe_asset"))).length;
-  const propReady = props.filter(item => hasFile(latestCandidate(project, "library", item.id, "prop_asset"))).length;
+  const sceneReady = scenes.filter(scene => hasFile(latestCandidate(project, "scene", scene.id, "scene_asset"), settings, "assets")).length;
+  const wardrobeReady = wardrobes.filter(item => hasFile(latestCandidate(project, "library", item.id, "wardrobe_asset"), settings, "assets")).length;
+  const propReady = props.filter(item => hasFile(latestCandidate(project, "library", item.id, "prop_asset"), settings, "assets")).length;
   return {
     characters: { ready: characterReady, total: characters.length },
     scenes: { ready: sceneReady, total: scenes.length },
@@ -101,8 +103,8 @@ function automationTone(status = "") {
   return "idle";
 }
 
-function summarizeProjectOverview(project = {}) {
-  const counts = stageCounts(project);
+function summarizeProjectOverview(project = {}, settings = null) {
+  const counts = stageCounts(project, settings);
   const nextStage = inferNextStage(project, counts);
   const jobs = Array.isArray(project.jobs) ? project.jobs : [];
   const activeJobs = jobs.filter(job => ["queued", "pending", "submitted", "running", "processing", "uploading", "waiting", "remote_pending", "download_pending"].includes(String(job.status || "").toLowerCase())).length;
@@ -139,9 +141,9 @@ function summarizeProjectOverview(project = {}) {
   };
 }
 
-function listProjectsOverview(projects = []) {
+function listProjectsOverview(projects = [], settings = null) {
   return (Array.isArray(projects) ? projects : [])
-    .map(summarizeProjectOverview)
+    .map(project => summarizeProjectOverview(project, settings))
     .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
 }
 

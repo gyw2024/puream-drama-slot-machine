@@ -148,7 +148,7 @@ test("text, image and video generation have no cumulative client deadline", () =
   const provider = source("app/ai-provider.js");
   const bridge = source("app/bridge-client.js");
   assert.doesNotMatch(workflow, /SCRIPT_FAST_DEADLINE_REACHED/);
-  assert.match(workflow, /function scriptFastRequestBudgetMs\(\) \{[\s\S]*return 0;/);
+  assert.doesNotMatch(workflow, /scriptFastRequestBudgetMs/);
   assert.doesNotMatch(workflow, /const maxAttempts = providerLabel\(\)/);
   assert.match(provider, /function providerTimeout\(options = \{\}\) \{[\s\S]*return 0;/);
   assert.doesNotMatch(provider, /Date\.now\(\) - startedAt < 600_000/);
