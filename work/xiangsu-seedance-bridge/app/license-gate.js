@@ -14,6 +14,7 @@ const LEGACY_LICENSE_BASE_URL = "https://drama.puream.cn";
 // separate device slot and never reads or writes the AI Creation Platform slot.
 const PUREAM_WEBSITE_DESKTOP_LOGIN_URL = "https://puream.cn/api/drama/auth/login";
 const WEBSITE_SESSION_AUTHORITY = "puream-website";
+const ADMIN_CONCURRENCY_AUTHORITY = "drama-admin";
 const APP_ID = "puream-drama-slot-stats";
 const OFFLINE_GRACE_MS = 72 * 60 * 60 * 1000;
 const AUTO_RELOGIN_COOLDOWN_MS = 60 * 1000;
@@ -200,6 +201,9 @@ class DramaLicenseClient {
     this.pendingCostKeys = new Set(this.pendingCosts.map(item => this.pendingCostKey(item)));
     this.autoReloginPromise = null;
     this.lastAutoReloginAt = 0;
+    this.leaseRetrySleep = typeof options.leaseRetrySleep === "function"
+      ? options.leaseRetrySleep
+      : ms => new Promise(resolve => setTimeout(resolve, ms));
   }
 
   machineId() {
@@ -222,6 +226,7 @@ class DramaLicenseClient {
       distributorId: this.state.distributorId || "",
       entitlementProduct: this.state.entitlementProduct || APP_ID,
       sessionAuthority: this.state.sessionAuthority || "drama-admin",
+      concurrencyAuthority: this.state.concurrencyAuthority || "",
       appId: APP_ID,
       baseUrl: this.baseUrl,
       offlineGrace: Boolean(this.state.offlineGrace),
@@ -273,7 +278,9 @@ class DramaLicenseClient {
     this.lastAutoReloginAt = Date.now();
     const attempt = (async () => {
       try {
-        return await this.login(code);
+        return this.state.sessionAuthority === WEBSITE_SESSION_AUTHORITY
+          ? await this.loginWithPureamWebsite(code)
+          : await this.login(code);
       } catch (error) {
         const block = ["INVALID_CODE", "DEVICE_BOUND", "USER_DISABLED"].includes(String(error?.code || ""));
         try {
@@ -358,24 +365,46 @@ class DramaLicenseClient {
     if (!canonicalCode) {
       throw Object.assign(new Error("纯梦官网返回了无效的授权码"), { code: "INVALID_SERVER_CODE" });
     }
+    let concurrencySession;
+    try {
+      // The website owns membership and device binding, while the short-drama
+      // admin service is the sole authority for per-account image/video leases.
+      // Never create a local proof token here: every generation path must hold a
+      // real server-issued lease that reflects the current admin values.
+      concurrencySession = await this.request("/api/auth/login", {
+        method: "POST",
+        body: { activationCode: canonicalCode, machineId: getMachineId() }
+      });
+    } catch (error) {
+      if (error?.code === "LICENSE_OFFLINE") {
+        throw Object.assign(
+          new Error("用户并发控制服务暂时不可用，已停止新的生图和视频任务，请稍后重试"),
+          { code: "CONCURRENCY_AUTHORITY_OFFLINE", cause: error }
+        );
+      }
+      throw error;
+    }
+    const imageConcurrency = Math.floor(Number(concurrencySession.imageConcurrency));
+    const videoConcurrency = Math.floor(Number(concurrencySession.videoConcurrency));
+    if (!concurrencySession.token || imageConcurrency < 1 || videoConcurrency < 1) {
+      throw Object.assign(
+        new Error("管理后台没有返回有效的用户并发额度，已停止新的生成任务"),
+        { code: "CONCURRENCY_AUTHORITY_INVALID" }
+      );
+    }
     const now = new Date().toISOString();
-    // The provider endpoints apply the account's real cloud concurrency and billing.
-    // This token is only a local proof marker; the authorization code itself is kept
-    // encrypted by writeLicenseState and is revalidated with the website on startup.
-    const proof = crypto.createHash("sha256")
-      .update(`${canonicalCode}|${getMachineId()}|${WEBSITE_SESSION_AUTHORITY}`)
-      .digest("hex");
     this.saveState({
-      token: `website:${proof}`,
+      token: concurrencySession.token,
       activationCode: canonicalCode,
       machineId: getMachineId(),
-      phone: data.phone || data.account?.phone || "",
-      name: data.name || data.account?.name || "",
-      imageConcurrency: 0,
-      videoConcurrency: 0,
+      phone: concurrencySession.phone || data.phone || data.account?.phone || "",
+      name: concurrencySession.name || data.name || data.account?.name || "",
+      imageConcurrency,
+      videoConcurrency,
       distributorId: data.distributorId || data.referrerId || data.referralId || "",
       entitlementProduct: data.entitlementProduct || data.planId || "puream-website",
       sessionAuthority: WEBSITE_SESSION_AUTHORITY,
+      concurrencyAuthority: ADMIN_CONCURRENCY_AUTHORITY,
       activatedAt: now,
       lastHeartbeatOkAt: now,
       offlineGrace: false,
@@ -411,16 +440,27 @@ class DramaLicenseClient {
     if (!canonicalCode) {
       throw Object.assign(new Error("授权服务器返回了无效的纯梦授权码"), { code: "INVALID_SERVER_CODE" });
     }
+    const imageConcurrency = Math.floor(Number(data.imageConcurrency));
+    const videoConcurrency = Math.floor(Number(data.videoConcurrency));
+    if (!data.token || imageConcurrency < 1 || videoConcurrency < 1) {
+      throw Object.assign(
+        new Error("管理后台没有返回有效的用户并发额度，已停止新的生成任务"),
+        { code: "CONCURRENCY_AUTHORITY_INVALID" }
+      );
+    }
+    const websiteAccount = String(data.credentialSource || "").toUpperCase() === "PUREAM_WEBSITE";
     this.saveState({
       token: data.token,
       activationCode: canonicalCode,
       machineId: getMachineId(),
       phone: data.phone || "",
       name: data.name || "",
-      imageConcurrency: data.imageConcurrency,
-      videoConcurrency: data.videoConcurrency,
+      imageConcurrency,
+      videoConcurrency,
       distributorId: data.distributorId || data.referrerId || data.referralId || "",
       entitlementProduct: data.entitlementProduct || APP_ID,
+      sessionAuthority: websiteAccount ? WEBSITE_SESSION_AUTHORITY : ADMIN_CONCURRENCY_AUTHORITY,
+      concurrencyAuthority: ADMIN_CONCURRENCY_AUTHORITY,
       activatedAt: new Date().toISOString(),
       lastHeartbeatOkAt: new Date().toISOString(),
       offlineGrace: false,
@@ -446,6 +486,13 @@ class DramaLicenseClient {
       throw error;
     }
     if (this.state.sessionAuthority === WEBSITE_SESSION_AUTHORITY) {
+      const hasRealConcurrencySession = !String(this.state.token || "").startsWith("website:")
+        && this.state.concurrencyAuthority === ADMIN_CONCURRENCY_AUTHORITY
+        && Number(this.state.imageConcurrency) >= 1
+        && Number(this.state.videoConcurrency) >= 1;
+      if (!hasRealConcurrencySession) {
+        return this.loginWithPureamWebsite(this.storedActivationCode());
+      }
       const lastOk = Date.parse(this.state.lastHeartbeatOkAt || 0);
       if (Number.isFinite(lastOk) && Date.now() - lastOk < 4 * 60_000) {
         this.startHeartbeat();
@@ -538,21 +585,15 @@ class DramaLicenseClient {
     if (!["image", "video"].includes(normalizedKind)) {
       throw Object.assign(new Error("kind 必须是 image 或 video"), { code: "BAD_KIND" });
     }
-    if (this.state.sessionAuthority === WEBSITE_SESSION_AUTHORITY) {
-      await this.ensureSession();
-      return {
-        leaseId: `website-${normalizedKind}-${crypto.randomUUID()}`,
-        taskId,
-        kind: normalizedKind,
-        meta,
-        authority: WEBSITE_SESSION_AUTHORITY,
-        upstreamManagedConcurrency: true
-      };
+    const session = await this.ensureSession();
+    if (session.offlineGrace) {
+      throw Object.assign(
+        new Error("管理后台并发控制服务离线，已停止新的生图和视频任务，请联网后重试"),
+        { code: "CONCURRENCY_AUTHORITY_OFFLINE" }
+      );
     }
-    const cached = this.validOfflineGraceSnapshot(normalizedKind);
-    const session = cached || await this.ensureSession();
-    if (session.offlineGrace) return this.acquireOfflineLease(normalizedKind, taskId, meta);
     const started = Date.now();
+    let transportFailures = 0;
     while (Date.now() - started < 30 * 60_000) {
       try {
         const data = await this.request("/api/lease/acquire", {
@@ -568,49 +609,39 @@ class DramaLicenseClient {
         return data;
       } catch (error) {
         if (error.code === "LICENSE_OFFLINE") {
-          this.enterOfflineGrace(error);
-          return this.acquireOfflineLease(normalizedKind, taskId, meta);
+          transportFailures += 1;
+          if (transportFailures <= 3) {
+            await this.leaseRetrySleep(transportFailures * 1000);
+            continue;
+          }
+          throw Object.assign(
+            new Error("管理后台并发控制服务暂时不可用，已停止新的生成任务，请稍后重试"),
+            { code: "CONCURRENCY_AUTHORITY_OFFLINE", cause: error }
+          );
+        }
+        if (["SESSION_EXPIRED", "UNAUTHORIZED"].includes(String(error.code || ""))) {
+          await this.autoRelogin(error);
+          transportFailures = 0;
+          continue;
         }
         if (error.code !== "QUEUE" && error.status !== 429) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 2500));
+        await this.leaseRetrySleep(2500);
       }
     }
     throw Object.assign(new Error("排队等待超时，请稍后重试"), { code: "QUEUE_TIMEOUT" });
   }
 
   async acquireOfflineLease(kind, taskId, meta = {}) {
-    const started = Date.now();
-    while (Date.now() - started < 30 * 60_000) {
-      const snapshot = this.validOfflineGraceSnapshot(kind);
-      if (!snapshot) {
-        throw Object.assign(new Error("本地离线宽限或缓存权益无效，请联网后重试。"), { code: "LICENSE_OFFLINE_EXPIRED" });
-      }
-      const limit = Math.floor(Number(kind === "image" ? snapshot.imageConcurrency : snapshot.videoConcurrency));
-      const running = [...this.offlineLeases.values()].filter(item => item.kind === kind).length;
-      if (running < limit) {
-        const leaseId = `offline-${kind}-${crypto.randomUUID()}`;
-        const lease = {
-          leaseId,
-          taskId,
-          kind,
-          meta,
-          offlineGrace: true,
-          cachedEntitlement: true,
-          running: running + 1,
-          limit
-        };
-        this.offlineLeases.set(leaseId, lease);
-        return lease;
-      }
-      await new Promise(resolve => setTimeout(resolve, 250));
-    }
-    throw Object.assign(new Error("排队等待超时，请稍后重试"), { code: "QUEUE_TIMEOUT" });
+    void kind;
+    void taskId;
+    void meta;
+    throw Object.assign(
+      new Error("管理后台并发控制服务离线，已停止新的生图和视频任务，请联网后重试"),
+      { code: "CONCURRENCY_AUTHORITY_OFFLINE" }
+    );
   }
 
   async releaseLease(leaseId, taskId) {
-    if (String(leaseId || "").startsWith("website-")) {
-      return { released: true, leaseId, taskId, authority: WEBSITE_SESSION_AUTHORITY };
-    }
     if (leaseId && this.offlineLeases.has(leaseId)) {
       this.offlineLeases.delete(leaseId);
       return { released: true, leaseId, taskId, offlineGrace: true };
@@ -721,5 +752,6 @@ module.exports = {
   DEFAULT_LICENSE_BASE_URL,
   PUREAM_WEBSITE_DESKTOP_LOGIN_URL,
   WEBSITE_SESSION_AUTHORITY,
+  ADMIN_CONCURRENCY_AUTHORITY,
   OFFLINE_GRACE_MS
 };

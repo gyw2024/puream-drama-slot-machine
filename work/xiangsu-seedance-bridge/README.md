@@ -1,4 +1,4 @@
-# 纯梦短剧老虎机 0.13.21
+# 纯梦短剧老虎机 0.13.22
 
 Windows 桌面短剧生产工作台。支持从 AI 选题与完整剧本一路生成资产、分镜图、分镜视频和成片，也支持在每个环节使用用户自己的文件。
 
@@ -35,7 +35,7 @@ npm.cmd run build:installer
 
 `prepare:build-assets` 从固定的 FFmpeg 7.1 Release 下载构建资产，并在复制前后校验目标二进制的大小与 SHA-256；详细清单见 [BUILD_ASSETS.md](BUILD_ASSETS.md)。
 
-安装包输出到 `dist-fixed-0.13.21`。`audit:packaged` 在隔离用户数据目录中后台启动打包态应用，审查多尺寸布局、生产阶段、主要弹窗、默认云端配置、手动切换、敏感模型名可见性和 WCAG 严重问题；不会提交任何生成任务。
+安装包输出到 `dist-fixed-0.13.22`。`audit:packaged` 在隔离用户数据目录中后台启动打包态应用，审查多尺寸布局、生产阶段、主要弹窗、默认云端配置、手动切换、敏感模型名可见性和 WCAG 严重问题；不会提交任何生成任务。
 
 ## 数据与安全
 
@@ -51,4 +51,4 @@ npm.cmd run build:installer
 - `plugin/`：本地像塑桥接插件源码。
 - `scripts/`：回归、构建资产校验和安装包审查脚本。
 
-本版本变更与验证范围见 [RELEASE_NOTES_0.13.21.md](RELEASE_NOTES_0.13.21.md)，第三方二进制声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本版本变更与验证范围见 [RELEASE_NOTES_0.13.22.md](RELEASE_NOTES_0.13.22.md)，第三方二进制声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
@@ -1360,6 +1361,8 @@ ipcMain.handle("app:defaults", () => {
 });
 ipcMain.handle("video:submit", async (_event, payload) => {
   let staged;
+  let lease;
+  let leaseTaskId = "";
   try {
     workbenchStore?.assertVideoSubmissionsAllowed?.();
     staged = stageSubmissionMedia({
@@ -1368,10 +1371,22 @@ ipcMain.handle("video:submit", async (_event, payload) => {
       hailuoApiMode: bridge.config.kind === "puream-hailuo-h3" ? (payload?.hailuoApiMode || bridge.config.hailuoApiMode || "auto") : "",
       outputDir: payload?.outputDir || path.join(app.getPath("videos"), "纯梦短剧老虎机")
     }, path.join(process.env.LOCALAPPDATA || app.getPath("temp"), "PureamDramaSlot", "staging"));
+    leaseTaskId = `video:legacy:${String(staged.payload?.clientRequestId || crypto.createHash("sha256")
+      .update(JSON.stringify({ prompt: staged.payload?.prompt || "", duration: staged.payload?.duration || 0 }))
+      .digest("hex").slice(0, 32))}`;
+    if (!licenseBypassAllowed()) {
+      lease = await dramaLicense.acquireLease("video", leaseTaskId, {
+        entry: "legacy-video-submit",
+        providerKind: bridge.config.kind || ""
+      });
+    }
     return await bridge.submit(staged.payload);
   } catch (error) {
     return publicError(error);
   } finally {
+    if (lease && !licenseBypassAllowed()) {
+      await dramaLicense.releaseLease(lease.leaseId, leaseTaskId);
+    }
     if (staged?.requestDir) fs.rmSync(staged.requestDir, { recursive: true, force: true });
   }
 });

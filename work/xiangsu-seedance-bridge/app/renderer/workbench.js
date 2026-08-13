@@ -2410,7 +2410,7 @@ function renderProjectStrategy() {
       shotsBanner.innerHTML = `<b>视频上游不匹配</b><span>项目已锁定${engine}，但系统设置当前是 ${videoProviderLabel(settingsKind)}。分步制作仍可先生成分镜图；进入视频阶段前请切换到对应供应商。</span>`;
     } else {
       shotsBanner.classList.remove("danger");
-      shotsBanner.innerHTML = `<b>v0.13.21 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
+      shotsBanner.innerHTML = `<b>v0.13.22 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
     }
   }
   const strategyLocked = !confirmed;
