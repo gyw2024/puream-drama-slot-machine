@@ -226,13 +226,13 @@ test("replacing a product image retires product-dependent storyboard and video a
   assert.match(replaced.finalVideoStaleReason, /商品参考图已替换/);
 });
 
-test("five minute script path fans out planning and formal units without extra review calls", () => {
+test("five minute script path fans out bounded planning while serializing long direct streams", () => {
   const workflow = source("app/workbench-workflow.js");
   assert.match(workflow, /const SCRIPT_FAST_TARGET_SECONDS = 300/);
   assert.match(workflow, /const SCRIPT_FAST_CONCURRENCY = 8/);
   assert.match(workflow, /const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol"/);
   assert.match(workflow, /const SCRIPT_DIRECT_SEGMENT_UNITS = 5/);
-  assert.match(workflow, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 3/);
+  assert.match(workflow, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 1/);
   assert.match(workflow, /model: SCRIPT_FAST_PUREAM_MODEL/);
   assert.match(workflow, /directFastSegmentRanges\(unitCount, SCRIPT_DIRECT_SEGMENT_UNITS\)/);
   assert.match(workflow, /mapWithConcurrency\(pending, SCRIPT_DIRECT_MAX_CONCURRENCY/);

@@ -59,25 +59,55 @@ test("desktop parser preserves a server stream error code", () => {
   assert.match(parsed.streamError, /连接失败/);
 });
 
-test("a transport interruption performs exactly one provider request", async () => {
+test("a pre-response transport interruption resumes under one logical request id", async () => {
   const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (_url, init = {}) => {
+    calls.push({ headers: init.headers, body: JSON.parse(init.body) });
+    if (calls.length === 1) {
+      const error = new Error("net::ERR_EMPTY_RESPONSE");
+      error.code = "ERR_EMPTY_RESPONSE";
+      throw error;
+    }
+    return new Response([
+      'event: delta\ndata: {"text":"recovered"}',
+      'event: done\ndata: {"sessionId":"server-session","charge_cents":0,"billing_status":"charged"}',
+      ""
+    ].join("\n\n"), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    const text = await generateText({
+      kind: "puream-relay",
+      baseUrl: "https://puream.invalid",
+      apiKey: "test-only",
+      model: "claude-opus-5"
+    }, [{ role: "user", content: "test" }], { sessionId: "topic-logical-request" });
+    assert.equal(text, "recovered");
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.headers["idempotency-key"] === "topic-logical-request"));
+    assert.ok(calls.every(call => call.body.clientRequestId === "topic-logical-request"));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("user cancellation interrupts text recovery without another provider request", async () => {
+  const originalFetch = global.fetch;
+  const controller = new AbortController();
   let calls = 0;
   global.fetch = async () => {
     calls += 1;
-    const error = new Error("net::ERR_EMPTY_RESPONSE");
-    error.code = "ERR_EMPTY_RESPONSE";
-    throw error;
+    throw Object.assign(new Error("fetch failed"), { code: "UND_ERR_SOCKET" });
   };
   try {
-    await assert.rejects(
-      generateText({
-        kind: "puream-relay",
-        baseUrl: "https://puream.invalid",
-        apiKey: "test-only",
-        model: "claude-opus-5"
-      }, [{ role: "user", content: "test" }], { timeoutMs: 30_000 }),
-      error => error?.code === "PUREAM_TRANSPORT_INTERRUPTED" && error?.noAutomaticRetry === true
-    );
+    const pending = generateText({
+      kind: "puream-relay",
+      baseUrl: "https://puream.invalid",
+      apiKey: "test-only",
+      model: "claude-opus-5"
+    }, [{ role: "user", content: "test" }], { sessionId: "cancel-logical-request", signal: controller.signal });
+    setTimeout(() => controller.abort(Object.assign(new Error("用户已暂停"), { code: "PROVIDER_REQUEST_ABORTED" })), 25);
+    await assert.rejects(pending, error => error?.code === "PROVIDER_REQUEST_ABORTED");
     assert.equal(calls, 1);
   } finally {
     global.fetch = originalFetch;

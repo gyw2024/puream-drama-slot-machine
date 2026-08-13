@@ -276,7 +276,10 @@ function promptExampleForKey(key) {
 }
 
 function downloadTextFile(filename, content) {
-  const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+  const contentType = String(filename || "").toLowerCase().endsWith(".txt")
+    ? "text/plain;charset=utf-8"
+    : "application/json;charset=utf-8";
+  const blob = new Blob([content], { type: contentType });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -289,7 +292,9 @@ function openPromptExample(key) {
   const dialog = $("#promptExampleDialog");
   if (!dialog) return;
   dialog.dataset.promptKey = key;
+  delete dialog.dataset.downloadFilename;
   $("#promptExampleDialogTitle").textContent = `${promptLabels[key] || key} · 示例`;
+  $("#promptExampleMeta").textContent = "这是可下载、可复制的最小示例，不会覆盖当前模板。";
   $("#promptExampleText").value = maskSpecificModelText(promptExampleForKey(key));
   if (!dialog.open) dialog.showModal();
 }
@@ -2659,6 +2664,19 @@ function downloadScriptFormatExample(format) {
   const normalized = ["production", "dialogue", "timed_storyboard"].includes(format) ? format : "production";
   const names = { production: "完整制作稿", dialogue: "简易对白稿", timed_storyboard: "秒级分镜成片稿" };
   downloadTextFile(`纯梦老虎机-${names[normalized]}-示例.txt`, scriptFormatExamples[normalized]);
+}
+
+function previewScriptFormatExample(format) {
+  const normalized = ["production", "dialogue", "timed_storyboard"].includes(format) ? format : "production";
+  const names = { production: "完整制作稿", dialogue: "简易对白稿", timed_storyboard: "秒级分镜成片稿" };
+  const dialog = $("#promptExampleDialog");
+  if (!dialog) return;
+  dialog.dataset.promptKey = `script-format-${normalized}`;
+  dialog.dataset.downloadFilename = `纯梦老虎机-${names[normalized]}-示例.txt`;
+  $("#promptExampleDialogTitle").textContent = `${names[normalized]} · 完整示例`;
+  $("#promptExampleMeta").textContent = "可直接复制或下载 TXT 参考；不会写入或覆盖当前项目。";
+  $("#promptExampleText").value = scriptFormatExamples[normalized];
+  if (!dialog.open) dialog.showModal();
 }
 
 async function importPromptBatchForScope(scope = "all") {
@@ -5355,8 +5373,8 @@ async function createRecharge(event) {
   const errorEl = $("#rechargeError");
   errorEl.textContent = "";
   const amountYuan = Number($("#rechargeAmount").value);
-  if (!Number.isFinite(amountYuan) || amountYuan < 30) {
-    errorEl.textContent = "充值金额最低 30 元";
+  if (!Number.isFinite(amountYuan) || amountYuan < 50) {
+    errorEl.textContent = "软件内充值金额最低 50 元；官网充值仍为 30 元起";
     return;
   }
   button.disabled = true;
@@ -5480,8 +5498,9 @@ function bindProductSurfaceEvents() {
   $("#promptExampleClose")?.addEventListener("click", closeExample);
   $("#downloadPromptExample")?.addEventListener("click", () => {
     const dialog = $("#promptExampleDialog");
-    downloadTextFile(`${dialog?.dataset.promptKey || "prompt"}-example.json`, $("#promptExampleText")?.value || "{}");
+    downloadTextFile(dialog?.dataset.downloadFilename || `${dialog?.dataset.promptKey || "prompt"}-example.json`, $("#promptExampleText")?.value || "{}");
   });
+  $$('[data-script-format-preview]').forEach(button => button.addEventListener("click", () => previewScriptFormatExample(button.dataset.scriptFormatPreview)));
   applyProductSurfaceLabels();
   $("#walletShortcut")?.addEventListener("click", () => openRechargeDialog().catch(error => showToast(error.message || "余额读取失败", "error")));
   $("#rechargeForm")?.addEventListener("submit", createRecharge);

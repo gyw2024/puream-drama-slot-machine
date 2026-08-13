@@ -239,6 +239,105 @@ async function main() {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.evaluate(() => document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close()));
 
+    const persistentScriptExampleMatrix = [];
+    for (const view of auditViews) {
+      await page.setViewportSize({ width: view.width, height: view.height });
+      await electronApp.evaluate(({ BrowserWindow }, size) => {
+        const win = BrowserWindow.getAllWindows()[0];
+        if (win) { win.setContentSize(size.width, size.height); win.webContents.setZoomFactor(size.zoom); }
+      }, view);
+      await page.evaluate(() => {
+        document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
+        document.querySelector('.stage-button[data-stage="script"]')?.click();
+        document.querySelector("#scriptExampleLibrary")?.scrollIntoView({ block: "start" });
+      });
+      await page.waitForTimeout(180);
+      const snapshot = await page.evaluate(() => {
+        const library = document.querySelector("#scriptExampleLibrary");
+        const rect = library?.getBoundingClientRect();
+        const buttons = [...(library?.querySelectorAll("button") || [])];
+        return {
+          visible: Boolean(library && rect && rect.width > 0 && rect.height > 0),
+          previewCount: library?.querySelectorAll("[data-script-format-preview]").length || 0,
+          downloadCount: library?.querySelectorAll("[data-script-format-example]").length || 0,
+          horizontalOverflow: Boolean(library && library.scrollWidth > library.clientWidth + 1),
+          clippedHorizontally: Boolean(rect && (rect.left < -1 || rect.right > innerWidth + 1)),
+          undersizedButtons: buttons.map(button => ({
+            label: button.textContent.trim(),
+            width: Math.round(button.getBoundingClientRect().width),
+            height: Math.round(button.getBoundingClientRect().height)
+          })).filter(item => item.width < 44 || item.height < 44)
+        };
+      });
+      persistentScriptExampleMatrix.push({ ...view, ...snapshot });
+      await captureBackground(`script-example-library-${view.width}x${view.height}-zoom${view.zoom * 100}`);
+    }
+
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win) { win.setContentSize(1440, 900); win.webContents.setZoomFactor(1); }
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => {
+      document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
+      document.querySelector('.stage-button[data-stage="script"]')?.click();
+    });
+    const scriptExamplePreviews = [];
+    for (const format of ["production", "dialogue", "timed_storyboard"]) {
+      await page.click(`#scriptExampleLibrary [data-script-format-preview="${format}"]`);
+      await page.waitForTimeout(80);
+      const snapshot = await page.evaluate(currentFormat => {
+        const dialog = document.querySelector("#promptExampleDialog");
+        const body = document.querySelector("#promptExampleText")?.value || "";
+        const expected = {
+          production: ["完整制作稿示例", "【商品节点】"],
+          dialogue: ["简易对白稿示例", "对周远说"],
+          timed_storyboard: ["秒级分镜成片稿示例", "## S01"]
+        }[currentFormat];
+        return {
+          format: currentFormat,
+          open: Boolean(dialog?.open),
+          title: document.querySelector("#promptExampleDialogTitle")?.textContent?.trim() || "",
+          filename: dialog?.dataset.downloadFilename || "",
+          bodyLength: body.length,
+          expectedContentPresent: expected.every(fragment => body.includes(fragment))
+        };
+      }, format);
+      scriptExamplePreviews.push(snapshot);
+      await captureBackground(`script-example-preview-${format}`);
+      await page.evaluate(() => document.querySelector("#promptExampleDialog")?.close());
+    }
+    const scriptExampleDownloads = await page.evaluate(async () => {
+      const captured = [];
+      const blobs = new Map();
+      const originalCreateObjectUrl = URL.createObjectURL.bind(URL);
+      const originalAnchorClick = HTMLAnchorElement.prototype.click;
+      URL.createObjectURL = blob => {
+        const url = originalCreateObjectUrl(blob);
+        blobs.set(url, blob);
+        return url;
+      };
+      HTMLAnchorElement.prototype.click = function auditExampleDownload() {
+        const blob = blobs.get(this.href);
+        if (this.download && blob) {
+          captured.push(blob.text().then(content => ({
+            filename: this.download,
+            bodyLength: content.length,
+            startsWithHeading: content.startsWith("# ")
+          })));
+          return;
+        }
+        return originalAnchorClick.call(this);
+      };
+      try {
+        document.querySelectorAll("#scriptExampleLibrary [data-script-format-example]").forEach(button => button.click());
+        return await Promise.all(captured);
+      } finally {
+        URL.createObjectURL = originalCreateObjectUrl;
+        HTMLAnchorElement.prototype.click = originalAnchorClick;
+      }
+    });
+
     const stageMatrix = [];
     const stageNames = ["console", "script", "assets", "shots", "videos", "final", "settings"];
     for (const stage of stageNames) {
@@ -269,7 +368,7 @@ async function main() {
     }
 
     const dialogMatrix = [];
-    for (const dialogId of ["newProjectDialog", "projectStrategyDialog", "scriptFormatDialog", "reusableAssetDialog", "candidateLibraryDialog", "restoreProjectDialog"]) {
+    for (const dialogId of ["newProjectDialog", "projectStrategyDialog", "scriptFormatDialog", "rechargeDialog", "reusableAssetDialog", "candidateLibraryDialog", "restoreProjectDialog"]) {
       await page.evaluate(id => {
         document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
         document.getElementById(id)?.showModal();
@@ -291,6 +390,22 @@ async function main() {
       await captureBackground(`dialog-${dialogId}`);
       await page.evaluate(id => document.getElementById(id)?.close(), dialogId);
     }
+
+    await page.evaluate(() => {
+      document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
+      document.querySelector("#rechargeDialog")?.showModal();
+      document.querySelector("#rechargeAmount").value = "49";
+      document.querySelector("#rechargeForm")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await page.waitForTimeout(80);
+    const rechargePolicy = await page.evaluate(() => ({
+      inputMin: Number(document.querySelector("#rechargeAmount")?.min || 0),
+      help: document.querySelector("#rechargeAmountHelp")?.textContent?.trim() || "",
+      invalidAmountError: document.querySelector("#rechargeError")?.textContent?.trim() || "",
+      orderPanelHidden: document.querySelector("#rechargeOrderPanel")?.classList.contains("hidden") === true
+    }));
+    await captureBackground("dialog-recharge-policy-49");
+    await page.evaluate(() => document.querySelector("#rechargeDialog")?.close());
 
     await page.evaluate(() => document.querySelector('.stage-button[data-stage="script"]')?.click());
     const axe = await page.evaluate(async () => window.axe.run(document, {
@@ -606,6 +721,10 @@ async function main() {
       layoutMatrix,
       blueprintPopoverMatrix,
       scriptFormatDialogMatrix,
+      persistentScriptExampleMatrix,
+      scriptExamplePreviews,
+      scriptExampleDownloads,
+      rechargePolicy,
       blueprintOffState,
       stageMatrix,
       dialogMatrix,
@@ -699,6 +818,14 @@ async function main() {
       || !item.bottomReachability
     )), false, "blueprint panel must stay opaque, fixed, unclipped, compact by default, and fully reachable at every audited size and zoom");
     assert.equal(scriptFormatDialogMatrix.some(item => item.optionCount !== 3 || item.clipped || item.horizontalOverflow || !item.confirmReachable), false, "all three script formats and the confirm action must remain reachable at every audited size and zoom");
+    assert.equal(persistentScriptExampleMatrix.some(item => !item.visible || item.previewCount !== 3 || item.downloadCount !== 3 || item.horizontalOverflow || item.clippedHorizontally || item.undersizedButtons.length), false, "all three script examples must stay visible, previewable, downloadable, and touch-safe on the script page");
+    assert.equal(scriptExamplePreviews.some(item => !item.open || !item.filename.endsWith(".txt") || item.bodyLength < 100 || !item.expectedContentPresent), false, "every script example preview must expose a complete matching TXT example");
+    assert.equal(scriptExampleDownloads.length, 3, "all three persistent script example downloads must be wired");
+    assert.equal(scriptExampleDownloads.some(item => !item.filename.endsWith(".txt") || item.bodyLength < 100 || !item.startsWithHeading), false, "all script example downloads must contain non-empty TXT scripts");
+    assert.equal(rechargePolicy.inputMin, 50, "desktop recharge dialog must start at 50 yuan");
+    assert.match(rechargePolicy.help, /软件内.*50.*官网.*30/, "desktop recharge help must distinguish the 50 yuan app rule from the 30 yuan website rule");
+    assert.match(rechargePolicy.invalidAmountError, /最低 50 元/, "49 yuan must be rejected locally before any order request");
+    assert.equal(rechargePolicy.orderPanelHidden, true, "an invalid desktop recharge amount must not create or expose an order");
     assert.equal(blueprintOffState.clipped, false, "disabled blueprint panel must remain inside the viewport");
     assert.equal(blueprintOffState.horizontalOverflow, false, "disabled blueprint panel must not horizontally overflow");
     assert.equal(blueprintOffState.configHidden, true, "disabled blueprint panel must hide inactive configuration");
@@ -732,6 +859,10 @@ async function main() {
       layoutMatrix,
       blueprintPopoverMatrix,
       scriptFormatDialogMatrix,
+      persistentScriptExampleMatrix,
+      scriptExamplePreviews,
+      scriptExampleDownloads,
+      rechargePolicy,
       blueprintOffState,
       stageMatrix,
       dialogMatrix,

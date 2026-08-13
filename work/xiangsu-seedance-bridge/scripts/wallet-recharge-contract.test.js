@@ -30,3 +30,15 @@ test("balance and recharge controls are globally available in the top bar", () =
   assert.match(renderer, /rechargeOrderStatus/);
   assert.match(renderer, /order\.status === "PAID"/);
 });
+
+test("desktop recharge starts at 50 yuan while explicitly preserving the website 30-yuan policy", () => {
+  const license = read("app/license-gate.js");
+  const html = read("app/renderer/workbench.html");
+  const renderer = read("app/renderer/workbench.js");
+  assert.match(license, /rechargeCents < 5000/);
+  assert.match(license, /软件内充值金额最低 50 元；官网充值仍为 30 元起/);
+  assert.match(html, /id="rechargeAmount"[^>]+min="50"/);
+  assert.match(html, /软件内最低充值 50 元；纯梦官网充值仍为 30 元起/);
+  assert.match(renderer, /amountYuan < 50/);
+  assert.doesNotMatch(renderer, /amountYuan < 30/);
+});

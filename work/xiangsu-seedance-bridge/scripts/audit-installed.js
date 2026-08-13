@@ -47,6 +47,25 @@ async function main() {
     const result = await page.evaluate(async () => {
       const api = window.dramaSlot.workbench;
       const defaults = await window.dramaSlot.defaults();
+      document.querySelector('.stage-button[data-stage="script"]')?.click();
+      const scriptExampleLibrary = document.querySelector("#scriptExampleLibrary");
+      document.querySelector('#scriptExampleLibrary [data-script-format-preview="dialogue"]')?.click();
+      const dialogueExample = {
+        dialogOpen: document.querySelector("#promptExampleDialog")?.open === true,
+        filename: document.querySelector("#promptExampleDialog")?.dataset.downloadFilename || "",
+        body: document.querySelector("#promptExampleText")?.value || ""
+      };
+      document.querySelector("#promptExampleDialog")?.close();
+      document.querySelector("#rechargeDialog")?.showModal();
+      document.querySelector("#rechargeAmount").value = "49";
+      document.querySelector("#rechargeForm")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      const rechargePolicy = {
+        inputMin: Number(document.querySelector("#rechargeAmount")?.min || 0),
+        help: document.querySelector("#rechargeAmountHelp")?.textContent?.trim() || "",
+        invalidAmountError: document.querySelector("#rechargeError")?.textContent?.trim() || "",
+        orderPanelHidden: document.querySelector("#rechargeOrderPanel")?.classList.contains("hidden") === true
+      };
+      document.querySelector("#rechargeDialog")?.close();
       const projects = await api.listProjects();
       const projectStates = [];
       for (const summary of projects.projects || []) {
@@ -60,6 +79,13 @@ async function main() {
         paidJobCount: projectStates.reduce((sum, project) => sum + (project.jobs || []).length, 0),
         runningAutomationCount: projectStates.filter(project => ["running", "pausing", "stopping"].includes(project.automation?.status)).length,
         title: document.title,
+        scriptExamples: {
+          present: Boolean(scriptExampleLibrary),
+          previewCount: scriptExampleLibrary?.querySelectorAll("[data-script-format-preview]").length || 0,
+          downloadCount: scriptExampleLibrary?.querySelectorAll("[data-script-format-example]").length || 0,
+          dialogueExample
+        },
+        rechargePolicy,
         manualButtons: [
           "#importScriptFile",
           "#importStoryboardBatch",
@@ -92,6 +118,18 @@ async function main() {
     assert.deepEqual(new Set(result.businessLibraryKinds), new Set(["characters", "voices", "props", "scenes", "products"]));
     assert.deepEqual(new Set(result.reusableImportKinds), new Set(["character", "scene", "image", "video", "audio"]));
     assert.deepEqual(result.ossSettingsFields.filter(item => !item.present), [], "installed app must expose the optional direct OSS controls");
+    assert.deepEqual({
+      present: result.scriptExamples.present,
+      previewCount: result.scriptExamples.previewCount,
+      downloadCount: result.scriptExamples.downloadCount,
+      dialogueOpen: result.scriptExamples.dialogueExample.dialogOpen
+    }, { present: true, previewCount: 3, downloadCount: 3, dialogueOpen: true }, "installed script page must expose all three persistent examples");
+    assert.match(result.scriptExamples.dialogueExample.filename, /简易对白稿.*\.txt$/);
+    assert.match(result.scriptExamples.dialogueExample.body, /简易对白稿示例/);
+    assert.equal(result.rechargePolicy.inputMin, 50, "installed desktop recharge must start at 50 yuan");
+    assert.match(result.rechargePolicy.help, /软件内.*50.*官网.*30/);
+    assert.match(result.rechargePolicy.invalidAmountError, /最低 50 元/);
+    assert.equal(result.rechargePolicy.orderPanelHidden, true, "invalid installed recharge must not expose an order");
     assert.equal(result.pageHorizontalOverflow, false, "installed main page must not horizontally overflow");
     assert.deepEqual(result.visibleInternalModelNames, [], "installed user-visible system text must mask internal model names");
 

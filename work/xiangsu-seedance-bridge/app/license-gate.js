@@ -372,8 +372,8 @@ class DramaLicenseClient {
 
   async createRechargeOrder(amountYuan) {
     const rechargeCents = Math.round(Number(amountYuan) * 100);
-    if (!Number.isFinite(rechargeCents) || rechargeCents < 3000) {
-      throw Object.assign(new Error("充值金额最低 30 元"), { code: "RECHARGE_AMOUNT_INVALID" });
+    if (!Number.isFinite(rechargeCents) || rechargeCents < 5000) {
+      throw Object.assign(new Error("软件内充值金额最低 50 元；官网充值仍为 30 元起"), { code: "RECHARGE_AMOUNT_INVALID" });
     }
     return this.websiteRequest("/api/desktop/payments/create", { method: "POST", body: { rechargeCents } });
   }

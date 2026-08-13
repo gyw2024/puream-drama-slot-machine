@@ -139,6 +139,14 @@
           <div><span>MANUAL INPUT</span><b>剧本与本阶段提示词都可从 0 上传</b><small>可上传自己的剧本；也可先批量上传写作/拆镜提示词，等流程执行时自动使用。系统建议仅供下载参考，不会覆盖用户提示词。</small></div>
           <div class="manual-entry-actions"><button id="importScriptFile" class="outline-button manual-button" type="button">上传自己的剧本</button><button class="outline-button manual-button" type="button" data-action="import-prompt-batch" data-prompt-scope="script">批量上传剧本提示词</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="script">下载系统建议</button></div>
         </div>
+        <section id="scriptExampleLibrary" class="script-example-library" aria-labelledby="scriptExampleLibraryTitle">
+          <div class="script-example-library-copy"><span>WRITING EXAMPLES</span><b id="scriptExampleLibraryTitle">三种剧本模式示例</b><small>新项目、历史项目和上传剧本模式都可随时查看。示例只说明推荐结构，不会覆盖当前剧本。</small></div>
+          <div class="script-example-library-actions" role="group" aria-label="查看或下载三种剧本模式示例">
+            <div><b>完整制作稿</b><span>人物、场景、动作、对白与承接</span><button type="button" data-script-format-preview="production">查看示例</button><button type="button" data-script-format-example="production">下载 TXT</button></div>
+            <div><b>简易对白稿</b><span>背景、说话人、听者、语气与原句</span><button type="button" data-script-format-preview="dialogue">查看示例</button><button type="button" data-script-format-example="dialogue">下载 TXT</button></div>
+            <div><b>秒级分镜成片稿</b><span>逐秒动作、表演、对白与声音</span><button type="button" data-script-format-preview="timed_storyboard">查看示例</button><button type="button" data-script-format-example="timed_storyboard">下载 TXT</button></div>
+          </div>
+        </section>
         <div id="scriptBootstrapBanner" class="build-banner" role="status" hidden></div>
         <section class="idea-machine panel-card" aria-labelledby="ideaMachineTitle">
           <div class="idea-machine-head">
@@ -518,7 +526,8 @@
     <form id="rechargeForm" class="dialog-panel" novalidate>
       <div class="dialog-head"><div><span class="step-tag">PUREAM WALLET</span><h2 id="rechargeDialogTitle">余额与充值</h2></div><button id="closeRechargeDialog" class="dialog-close" type="button" aria-label="关闭充值窗口">×</button></div>
       <div class="wallet-summary"><span>当前可用余额</span><b id="rechargeCurrentBalance">¥--</b><small id="rechargeFrozenBalance">冻结 ¥0.00</small></div>
-      <label>充值金额（元）<input id="rechargeAmount" type="number" min="30" step="1" value="100" inputmode="decimal"></label>
+      <label>充值金额（元）<input id="rechargeAmount" type="number" min="50" step="1" value="100" inputmode="decimal" aria-describedby="rechargeAmountHelp"></label>
+      <p id="rechargeAmountHelp" class="dialog-description recharge-help">软件内最低充值 50 元；纯梦官网充值仍为 30 元起。</p>
       <div id="rechargeOrderPanel" class="recharge-order hidden" aria-live="polite"><img id="rechargeQr" alt="微信充值二维码"><div><b id="rechargeOrderState">请扫码支付</b><span id="rechargeOrderMeta"></span><button id="openRechargePage" class="outline-button" type="button">打开支付页面</button></div></div>
       <p id="rechargeError" class="field-error" role="alert" aria-live="polite"></p>
       <div class="dialog-actions"><button id="cancelRecharge" class="outline-button" type="button">关闭</button><button id="createRecharge" class="primary-button" type="submit">生成充值二维码</button></div>

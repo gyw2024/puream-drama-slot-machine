@@ -143,6 +143,21 @@ test("renderer wires the modal into every empty AI-writing entry and packaged UI
   assert.match(audit, /scriptFormatDialog/);
 });
 
+test("all projects expose three persistent script examples with preview and TXT download", () => {
+  const html = source("app/renderer/workbench.html");
+  const renderer = source("app/renderer/workbench.js");
+  assert.match(html, /id="scriptExampleLibrary"/);
+  for (const format of ["production", "dialogue", "timed_storyboard"]) {
+    assert.match(html, new RegExp(`data-script-format-preview=["']${format}["']`));
+    assert.match(html, new RegExp(`data-script-format-example=["']${format}["']`));
+  }
+  for (const phrase of ["# 完整制作稿示例", "# 简易对白稿示例", "# 秒级分镜成片稿示例", "说话人", "听者", "语气", "商品"]) {
+    assert.match(renderer, new RegExp(phrase));
+  }
+  assert.match(renderer, /previewScriptFormatExample/);
+  assert.match(renderer, /纯梦老虎机-\$\{names\[normalized\]\}-示例\.txt/);
+});
+
 test("text, image and video generation have no cumulative client deadline", () => {
   const workflow = source("app/workbench-workflow.js");
   const provider = source("app/ai-provider.js");

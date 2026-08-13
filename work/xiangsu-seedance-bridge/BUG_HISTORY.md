@@ -18,6 +18,8 @@
 | BUG-012 | 文本阶段显示上游原始 JSON/额度错误 | 服务端原始异常未经公开错误映射 | 0.13.28 | `topic-relay-regression.test.js` | 已验证 |
 | BUG-013 | 充值后写剧本仍在约 5 分钟处显示连接失败 | 同项目同时发出 3 个大文本流；网络中断被标记为禁止重试且整阶段失败 | 0.13.29 | `text-recovery-regression.test.js`、`manual-entry-fast-script.test.js`、安装包审计、官网 r79 文本接口公网探针 | 已验证 |
 | BUG-014 | 软件内无法查看官网余额或直接充值 | 桌面端未接入官网统一钱包与微信充值订单 | 0.13.29 | `wallet-recharge-contract.test.js`、官网钱包专项 4/4、官网 r79 余额接口公网探针、安装包审计 | 已验证 |
+| BUG-015 | 已准备三种剧本示例，但历史项目和上传剧本用户看不到 | 示例入口只存在于首次 AI 写作格式弹窗，弹窗确认后不再出现 | 0.13.30 | `script-format-no-deadline-regression.test.js`、打包态与安装态审计 | 已验证 |
+| BUG-016 | 软件内充值门槛与运营要求不一致 | 桌面端直接沿用了官网 30 元最低充值规则 | 0.13.30 | `wallet-recharge-contract.test.js`、充值弹窗打包态与安装态审计 | 已验证 |
 
 ## 维护规则
 
