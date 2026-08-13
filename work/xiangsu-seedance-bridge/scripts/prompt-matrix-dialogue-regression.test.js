@@ -281,6 +281,26 @@ test("long uploaded dialogue scripts keep every source line intact across fast p
   assert.deepEqual(schedules.flatMap(item => item.durations), Array(30).fill(10));
 });
 
+test("thirty-minute uploaded scripts remain line-safe in bounded analysis requests", () => {
+  const sourceLines = Array.from({ length: 240 }, (_, index) => {
+    const speaker = index % 2 === 0 ? "林娜" : "秦添";
+    const listener = index % 2 === 0 ? "秦添" : "林娜";
+    return `${speaker}（克制地看向${listener}）：第${index + 1}句原稿对白必须完整保留，不能换人、改字或从标点中间拆开。`;
+  });
+  const source = sourceLines.join("\n");
+  const ledger = parseSourceDialogueLedger(source);
+  const schedule = planFilmSchedule(1800, "puream-hailuo-h3", { preferredUnit: 10, engine: "hailuo-h3" });
+  const chunks = analysisChunksForSchedule(source, schedule.unitCount);
+  const schedules = analysisChunkSchedules(chunks, schedule);
+  assert.equal(ledger.length, sourceLines.length);
+  assert.equal(schedules.reduce((sum, item) => sum + item.unitCount, 0), 180);
+  assert.ok(Math.max(...schedules.map(item => item.unitCount)) <= 5);
+  assert.ok(Math.max(...chunks.map(item => item.text.length)) <= 5000);
+  for (const item of ledger) {
+    assert.equal(chunks.filter(chunk => chunk.text.includes(item.text)).length, 1, item.id);
+  }
+});
+
 test("generic reading actions do not falsely insert an uploaded book product", () => {
   const project = projectFixture();
   const normalized = {

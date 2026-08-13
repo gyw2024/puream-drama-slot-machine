@@ -231,7 +231,13 @@ test("five minute script path fans out planning and formal units without extra r
   assert.match(workflow, /const SCRIPT_FAST_TARGET_SECONDS = 300/);
   assert.match(workflow, /const SCRIPT_FAST_CONCURRENCY = 8/);
   assert.match(workflow, /const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol"/);
+  assert.match(workflow, /const SCRIPT_DIRECT_SEGMENT_UNITS = 5/);
+  assert.match(workflow, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 3/);
   assert.match(workflow, /model: SCRIPT_FAST_PUREAM_MODEL/);
+  assert.match(workflow, /directFastSegmentRanges\(unitCount, SCRIPT_DIRECT_SEGMENT_UNITS\)/);
+  assert.match(workflow, /mapWithConcurrency\(pending, SCRIPT_DIRECT_MAX_CONCURRENCY/);
+  assert.match(workflow, /directFastSegments:/);
+  assert.match(workflow, /只补这些失败段/);
   assert.match(workflow, /mapWithConcurrency\(planTasks, SCRIPT_FAST_CONCURRENCY/);
   assert.match(workflow, /mapWithConcurrency\(unitTasks, SCRIPT_FAST_CONCURRENCY/);
   assert.match(workflow, /useFastScriptPath\s*\?\s*\{/);

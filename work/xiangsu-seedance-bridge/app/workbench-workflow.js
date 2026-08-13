@@ -12,7 +12,13 @@ const { processFaceGrid } = require("./face-grid-processor");
 const { stageSubmissionMedia } = require("./media-staging");
 const { parseCompiledDialogueSegments, parseSourceDialogueLedger } = require("./dialogue-parser");
 const { allocateH3ShotSpeakers, h3AllowedSpeakersByShot } = require("./h3-speaker-allocation");
-const { directFastUserPrompt, materializeDirectFastScript } = require("./direct-fast-script");
+const {
+  assertDirectFastSegment,
+  directFastProductStartIndex,
+  directFastSegmentRanges,
+  directFastUserPrompt,
+  materializeDirectFastScript
+} = require("./direct-fast-script");
 const { makeId, defaultAssetLibraries } = require("./workbench-store");
 const { promptIntakeText } = require("./prompt-intake");
 const { normalizeCloudVideoResolution, normalizeHailuoApiMode, providerEngine } = require("./video-provider-policy");
@@ -115,6 +121,8 @@ const UPLOADED_ANALYSIS_MAX_CONCURRENCY = 3;
 const SCRIPT_FAST_CONCURRENCY = 8;
 const SCRIPT_FAST_TARGET_SECONDS = 300;
 const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol";
+const SCRIPT_DIRECT_SEGMENT_UNITS = 5;
+const SCRIPT_DIRECT_MAX_CONCURRENCY = 3;
 const IMAGE_BATCH_MAX_CONCURRENCY = 6;
 const VIDEO_BATCH_MAX_CONCURRENCY = 4;
 
@@ -4681,7 +4689,8 @@ function hasRecoverableScriptCheckpoint(project = {}) {
   const checkpoint = project?.script?.generationCheckpoint || {};
   const analysisCheckpoint = project?.script?.analysisCheckpoint || {};
   return Boolean(
-    checkpoint.planContractFailure?.retryRequiresExplicitResume === true
+    checkpoint.directFastFailure?.retryRequiresExplicitResume === true
+    || checkpoint.planContractFailure?.retryRequiresExplicitResume === true
     || checkpoint.unitContractFailure?.retryRequiresExplicitResume === true
     || checkpoint.scriptRepair?.retryRequiresExplicitResume === true
     || (analysisCheckpoint.signature && Array.isArray(analysisCheckpoint.chunks))
@@ -6263,7 +6272,7 @@ function auditDramaSpec(normalized, options = {}) {
   const requireMetric = (check, condition, code, message) => { if (checks[check] !== false && !condition) failures.push({ code, message }); };
   const adaptiveUploaded = normalized?.durationContract?.source === "uploaded-script-adaptive";
   const minimumSubshots = Math.ceil(adaptiveUploaded ? shots.length * 2.5 : Math.max(72, shots.length * 2.5));
-  requireMetric("productionStructure", adaptiveUploaded ? duration > 0 && duration <= 3600 : duration >= 240 && duration <= 600, "DURATION", adaptiveUploaded ? `上传剧本自适应总时长 ${duration} 秒无效` : `总时长 ${duration} 秒，不在 240-600 秒动态短剧规格内`);
+  requireMetric("productionStructure", duration > 0, "DURATION", `剧总时长 ${duration} 秒无效`);
   requireMetric("productionStructure", shots.length >= Math.ceil(duration / 15), "SHOT_UNITS", `仅 ${shots.length} 个生成单元；按当前 ${duration} 秒总时长与单镜最多15秒，至少需要 ${Math.ceil(duration / 15)} 个`);
   requireMetric("visualVariety", subshotCount >= minimumSubshots, "SUBSHOT_DENSITY", `仅 ${subshotCount} 个可剪辑子镜头，至少需要 ${minimumSubshots} 个`);
   requireMetric("dialogue", metrics.dialogueTurnsPerMinute >= 20, "DIALOGUE_TURNS", `对白仅 ${metrics.dialogueTurnsPerMinute} 轮/分钟，至少需要 20 轮/分钟`);
@@ -7180,9 +7189,9 @@ function conformImportedAnalysisToDurationContract(data, project, options = {}) 
   }
   const providerKind = projectVideoProviderKind(project);
   const adaptive = projectInputMode(project) === "manual";
-  const configuredTarget = Math.max(30, Math.min(3600, Math.round(Number(project?.generation?.targetDurationSeconds) || 300)));
+  const configuredTarget = Math.max(30, Math.round(Number(project?.generation?.targetDurationSeconds) || 300));
   const targetSeconds = adaptive
-    ? Math.max(1, Math.min(3600, Math.round(Number(options.adaptiveTargetSeconds) || configuredTarget)))
+    ? Math.max(1, Math.round(Number(options.adaptiveTargetSeconds) || configuredTarget))
     : configuredTarget;
   const durations = reconcileUnitDurations(
     normalized.shots.map(shot => Number(shot.duration) || Number(project?.generation?.shotDuration) || 10),
@@ -8186,7 +8195,9 @@ class WorkbenchWorkflow {
     const resumableWriterCheckpoint = Boolean(planCheckpoint)
       && !(Array.isArray(project.shots) && project.shots.length > 0)
       && Boolean(
-        (Array.isArray(planCheckpoint.shotPlan) && planCheckpoint.shotPlan.length > 0)
+        planCheckpoint.directFastFailure?.retryRequiresExplicitResume === true
+        || (Array.isArray(planCheckpoint.directFastSegments) && planCheckpoint.directFastSegments.length > 0)
+        || (Array.isArray(planCheckpoint.shotPlan) && planCheckpoint.shotPlan.length > 0)
         || (Array.isArray(planCheckpoint.shots) && planCheckpoint.shots.length > 0)
         || planCheckpoint.storyBible
         || planCheckpoint.blueprint
@@ -8792,68 +8803,133 @@ class WorkbenchWorkflow {
   async generateDirectFastScript(projectId, context = {}) {
     const { settings, topic, filmSchedule, scriptTextProvider } = context;
     let project = this.store.getProject(projectId);
-    const checkpoint = {
+    let checkpoint = {
       ...(context.checkpoint || {}),
       fastGeneration: true,
       directFastGeneration: true,
+      directFastFailure: null,
+      directFastSegments: Array.isArray(context.checkpoint?.directFastSegments) ? context.checkpoint.directFastSegments : [],
       startedAt: context.checkpoint?.startedAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
     const unitCount = filmSchedule.unitCount;
-    const productStartNumber = Math.max(Math.floor(unitCount * 0.65) + 2, unitCount - 3);
+    const productStartNumber = directFastProductStartIndex(unitCount) + 1;
+    const segments = directFastSegmentRanges(unitCount, SCRIPT_DIRECT_SEGMENT_UNITS);
+    checkpoint.directFastSegmentTotal = segments.length;
+    const segmentKey = (start, end) => `${start}-${end}`;
+    const completedByKey = new Map();
+    for (const saved of checkpoint.directFastSegments) {
+      const key = segmentKey(saved?.start, saved?.end);
+      if (!segments.some(([start, end]) => segmentKey(start, end) === key)) continue;
+      try {
+        assertDirectFastSegment(saved.payload, saved.start, saved.end);
+        completedByKey.set(key, saved);
+      } catch {}
+    }
+    checkpoint.directFastSegments = [...completedByKey.values()];
+    const initiallyCompleted = completedByKey.size;
     this.setAutomation(projectId, {
       stage: "script_direct",
       status: "running",
-      message: `优先加速写作：正在并行生成 ${filmSchedule.totalSeconds} 秒剧本前后两段并本地合并生产字段；不设总耗时截止线`
+      message: initiallyCompleted
+        ? `正在从本地断点续写：已保留 ${initiallyCompleted}/${segments.length} 段，只补未完成剧本段；不设总耗时截止线`
+        : `优先加速写作：正在以每段最多 ${SCRIPT_DIRECT_SEGMENT_UNITS} 镜、最多 ${SCRIPT_DIRECT_MAX_CONCURRENCY} 路并发生成 ${filmSchedule.totalSeconds} 秒剧本；每段完成即保存`
     });
     let rawText = "";
-    const receipts = [];
+    const receipts = checkpoint.directFastSegments.map(item => item.receipt).filter(Boolean);
     let directData;
     try {
       this.assertOperationActive(projectId);
       const directTimeoutMs = scriptFastRequestBudgetMs(checkpoint.startedAt);
-      const splitAt = Math.ceil(unitCount / 2);
-      const segments = [[1, splitAt], [splitAt + 1, unitCount]];
-      const rawParts = ["", ""];
-      const segmentResults = await Promise.allSettled(segments.map(([segmentStart, segmentEnd], segmentIndex) => this.generateText(scriptTextProvider, [
-        {
-          role: "system",
-          content: `你是中国现实主义竖屏短剧总编剧。只输出严格紧凑JSON；对白必须口语化、有明确情绪语气、音量速度和听者反应所需的剧情依据；禁止解释、Markdown、背景音乐、模型名称和医疗功效承诺。\n${viewerComprehensionPriorityDirective()}\n${scriptFormatDirective(project)}`
-        },
-        {
-          role: "user",
-          content: directFastUserPrompt({
-            topic,
-            product: {
-              name: project.product.name,
-              description: project.product.description,
-              sellingPoints: productSellingPoints(project)
+      const pending = segments
+        .map(([start, end], segmentIndex) => ({ start, end, segmentIndex, key: segmentKey(start, end) }))
+        .filter(item => !completedByKey.has(item.key));
+      const rawParts = new Map();
+      const segmentResults = await mapWithConcurrency(pending, SCRIPT_DIRECT_MAX_CONCURRENCY, async segment => {
+        let receipt = null;
+        try {
+          const payload = await this.generateText(scriptTextProvider, [
+            {
+              role: "system",
+              content: `你是中国现实主义竖屏短剧总编剧。只输出严格紧凑JSON；对白必须口语化、有明确情绪语气、音量速度和听者反应所需的剧情依据；禁止解释、Markdown、背景音乐、模型名称和医疗功效承诺。\n${viewerComprehensionPriorityDirective()}\n${scriptFormatDirective(project)}`
             },
-            unitCount,
-            totalSeconds: filmSchedule.totalSeconds,
-            productStartNumber,
-            segmentStart,
-            segmentEnd,
-            scriptFormatDirective: scriptFormatDirective(project)
-          })
+            {
+              role: "user",
+              content: directFastUserPrompt({
+                topic,
+                product: {
+                  name: project.product.name,
+                  description: project.product.description,
+                  sellingPoints: productSellingPoints(project)
+                },
+                unitCount,
+                totalSeconds: filmSchedule.totalSeconds,
+                productStartNumber,
+                segmentStart: segment.start,
+                segmentEnd: segment.end,
+                scriptFormatDirective: scriptFormatDirective(project)
+              })
+            }
+          ], this.scriptGenerationOptions(projectId, `script_direct_S${String(segment.start).padStart(2, "0")}_S${String(segment.end).padStart(2, "0")}`, {
+            json: true,
+            requiredKeys: ["c", "sc", "s"],
+            unwrapKeys: ["data", "result", "payload", "content"],
+            maxTokens: 7_168,
+            timeoutMs: directTimeoutMs,
+            sessionId: `${checkpoint.sessionId}-direct-fast-v5-${segment.key}`,
+            onDelta: text => { rawParts.set(segment.key, String(text || "")); },
+            onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) receipt = { ...(usage || {}) }; }
+          }));
+          assertDirectFastSegment(payload, segment.start, segment.end);
+          const saved = {
+            key: segment.key,
+            start: segment.start,
+            end: segment.end,
+            payload,
+            receipt,
+            completedAt: new Date().toISOString()
+          };
+          completedByKey.set(segment.key, saved);
+          checkpoint = this.saveScriptCheckpoint(projectId, {
+            ...checkpoint,
+            directFastSegments: segments
+              .map(([start, end]) => completedByKey.get(segmentKey(start, end)))
+              .filter(Boolean),
+            directFastFailure: null
+          }, topic, "script_direct", `已完成并保存 ${completedByKey.size}/${segments.length} 个剧本段，继续生成剩余段`);
+          if (receipt) receipts.push(receipt);
+          return { status: "fulfilled", segment };
+        } catch (error) {
+          return { status: "rejected", segment, error };
         }
-      ], this.scriptGenerationOptions(projectId, `script_direct_${segmentIndex + 1}`, {
-        json: true,
-        requiredKeys: ["c", "sc", "s"],
-        unwrapKeys: ["data", "result", "payload", "content"],
-        maxTokens: 7_168,
-        timeoutMs: directTimeoutMs,
-        sessionId: `${checkpoint.sessionId}-direct-fast-v4-${segmentIndex + 1}`,
-        onDelta: text => { rawParts[segmentIndex] = String(text || ""); },
-        onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) receipts[segmentIndex] = { ...(usage || {}) }; }
-      }))));
-      rawText = rawParts.join("\n");
-      const failedSegment = segmentResults.find(item => item.status === "rejected");
-      if (failedSegment) throw failedSegment.reason;
-      const payloads = segmentResults.map(item => item.value);
+      });
+      rawText = [...rawParts.values()].join("\n");
+      const failedSegments = segmentResults.filter(item => item.status === "rejected");
+      if (failedSegments.length) {
+        const ranges = failedSegments.map(item => `S${String(item.segment.start).padStart(2, "0")}–S${String(item.segment.end).padStart(2, "0")}`).join("、");
+        const firstError = failedSegments[0].error || {};
+        throw Object.assign(new Error(
+          `剧本已保存 ${completedByKey.size}/${segments.length} 段；${ranges} 暂未完整返回。点击“继续任务”只补这些失败段，不会重写已完成内容`
+        ), {
+          code: firstError.code || "SCRIPT_DIRECT_SEGMENT_FAILED",
+          causeCode: firstError.code || "",
+          rawText: firstError.rawText,
+          rawTextLength: firstError.rawTextLength,
+          rawTextSha256: firstError.rawTextSha256,
+          rawTextTruncated: firstError.rawTextTruncated,
+          upstreamDone: firstError.upstreamDone,
+          upstreamReceipt: firstError.upstreamReceipt,
+          sessionId: firstError.sessionId,
+          attempt: firstError.attempt,
+          failedSegmentRanges: failedSegments.map(item => [item.segment.start, item.segment.end]),
+          retryRequiresExplicitResume: true,
+          noAutomaticRetry: true
+        });
+      }
+      const payloads = segments.map(([start, end]) => completedByKey.get(segmentKey(start, end))?.payload);
       directData = {
-        c: payloads[0]?.c || payloads[1]?.c || [],
-        sc: payloads[0]?.sc || payloads[1]?.sc || [],
+        c: payloads.find(item => Array.isArray(item?.c) && item.c.length)?.c || [],
+        sc: payloads.flatMap(item => Array.isArray(item?.sc) ? item.sc : []),
         s: payloads.flatMap(item => Array.isArray(item?.s) ? item.s : [])
           .sort((left, right) => (Number(left?.i) || 0) - (Number(right?.i) || 0))
       };
@@ -8946,7 +9022,7 @@ class WorkbenchWorkflow {
         raw,
         analysis: blueprint.story,
         analysisChunks: 0,
-        analysisMethod: "parallel-two-segment-compact-local-compile-v4",
+        analysisMethod: "resumable-five-shot-segments-local-compile-v5",
         qualityAudit,
         semanticReview,
         promptLibraryVersion: settings.promptLibraryVersion || "",
@@ -8957,7 +9033,7 @@ class WorkbenchWorkflow {
         sourceFingerprint: crypto.createHash("sha256").update(raw).digest("hex"),
         durationContract: normalized.durationContract,
         generationPerformance: {
-          path: "parallel-two-segment-fast-v4",
+          path: "resumable-bounded-segments-fast-v5",
           targetSeconds: SCRIPT_FAST_TARGET_SECONDS,
           elapsedSeconds,
           metTarget: elapsedSeconds !== null ? elapsedSeconds <= SCRIPT_FAST_TARGET_SECONDS : null,
@@ -8981,7 +9057,7 @@ class WorkbenchWorkflow {
         id: makeId("activity"),
         at: finishedAt.toISOString(),
         type: "script_generated",
-        summary: `并行两段生成并本地编译《${topic.title}》完整 ${filmSchedule.totalSeconds} 秒剧本`
+        summary: `分段并发生成、逐段保存并本地编译《${topic.title}》完整 ${filmSchedule.totalSeconds} 秒剧本`
       });
       this.store.saveProject(project);
       this.syncReferenceLibraries(projectId, { props: normalized.props || [] });
@@ -8996,6 +9072,7 @@ class WorkbenchWorkflow {
         retryRequiresExplicitResume: true,
         rawTextLength: rawText.length,
         rawTextSha256: rawText ? crypto.createHash("sha256").update(rawText, "utf8").digest("hex") : "",
+        failedSegmentRanges: Array.isArray(error.failedSegmentRanges) ? error.failedSegmentRanges : [],
         upstreamReceipts: receipts.filter(Boolean),
         failedAt: new Date().toISOString()
       };
@@ -9063,13 +9140,21 @@ class WorkbenchWorkflow {
       shots: [],
       semanticReview: null
     };
-    if (canResume && (checkpoint.planContractFailure?.retryRequiresExplicitResume
+    if (canResume && (checkpoint.directFastFailure?.retryRequiresExplicitResume
+      || checkpoint.planContractFailure?.retryRequiresExplicitResume
       || checkpoint.unitContractFailure?.retryRequiresExplicitResume
       || checkpoint.scriptRepair?.retryRequiresExplicitResume)) {
       const previousSessionId = String(checkpoint.sessionId || "");
       checkpoint = {
         ...checkpoint,
         sessionId: `script-${projectId}-${Date.now()}`,
+        ...(checkpoint.directFastFailure ? {
+          directFastFailure: {
+            ...checkpoint.directFastFailure,
+            resumedAt: new Date().toISOString(),
+            resumedFromSessionId: previousSessionId
+          }
+        } : {}),
         ...(checkpoint.planContractFailure ? {
           planContractFailure: {
             ...checkpoint.planContractFailure,
@@ -9105,10 +9190,12 @@ class WorkbenchWorkflow {
       : settings.textProvider;
     const topicPayload = JSON.stringify(topic);
     const productFacts = `商品名称：${project.product.name}\n用户提供卖点：${productSellingPoints(project)}\n商品外观只由用户上传图片锁定；禁止虚构价格、规格、赠品、品牌承诺或功效；禁止 AI 凭空生成商品图。`;
+    const requestedFilmSeconds = Math.max(30, Math.round(Number(project.generation?.targetDurationSeconds) || 300));
+    const preferredScriptUnitSeconds = requestedFilmSeconds < 60 ? 5 : (Number(project.generation?.shotDuration) || 10);
     const filmSchedule = planFilmSchedule(
-      project.generation?.targetDurationSeconds || 300,
+      requestedFilmSeconds,
       project.generation?.engine === "hailuo-h3" ? "puream-hailuo-h3" : (settings.videoProvider?.kind || "puream-seedance"),
-      { preferredUnit: Number(project.generation?.shotDuration) || 10, engine: project.generation?.engine }
+      { preferredUnit: preferredScriptUnitSeconds, engine: project.generation?.engine }
     );
     const unitCount = filmSchedule.unitCount;
     if (canResume) {
@@ -9133,7 +9220,7 @@ class WorkbenchWorkflow {
       productName: project.product.name,
       productEntryIndex: filmSchedule.productEntryIndex
     };
-    if (useFastScriptPath && !canResume && options.directFast !== false) {
+    if (useFastScriptPath && (!canResume || checkpoint.directFastGeneration === true) && options.directFast !== false) {
       return this.generateDirectFastScript(projectId, {
         project,
         settings,
@@ -10314,7 +10401,7 @@ class WorkbenchWorkflow {
       ? estimateUploadedScriptDuration(project.script.raw, sourceDialogueLedger, providerKind, { engine: projectVideoEngine(project) })
       : null;
     const targetSeconds = durationEstimate?.targetSeconds
-      || Math.max(30, Math.min(3600, Math.round(Number(project.generation?.targetDurationSeconds) || 300)));
+      || Math.max(30, Math.round(Number(project.generation?.targetDurationSeconds) || 300));
     const filmSchedule = planFilmSchedule(targetSeconds, providerKind, { engine: projectVideoEngine(project) });
     const chunks = analysisChunksForSchedule(project.script.raw, filmSchedule.unitCount);
     const assignedDialogueIds = new Set();

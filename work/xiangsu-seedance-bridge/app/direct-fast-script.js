@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { storyDensityTargets } = require("./script-craft");
 
 const STAGES = Object.freeze([
   "hook", "hook",
@@ -99,6 +100,39 @@ function directFastResponseSchema() {
   };
 }
 
+function directFastSegmentRanges(unitCount, segmentSize = 5) {
+  const count = Math.max(1, Math.floor(Number(unitCount) || 1));
+  const size = Math.max(1, Math.min(count, Math.floor(Number(segmentSize) || 5)));
+  const ranges = [];
+  for (let start = 1; start <= count; start += size) {
+    ranges.push([start, Math.min(count, start + size - 1)]);
+  }
+  return ranges;
+}
+
+function assertDirectFastSegment(payload, segmentStart, segmentEnd) {
+  const start = Math.max(1, Math.floor(Number(segmentStart) || 1));
+  const end = Math.max(start, Math.floor(Number(segmentEnd) || start));
+  const expected = Array.from({ length: end - start + 1 }, (_, index) => start + index);
+  const actual = sourceArray(payload?.s).map(item => Math.floor(Number(item?.i) || 0));
+  const hasReferenceData = sourceArray(payload?.c).length >= 3 && sourceArray(payload?.sc).length >= 1;
+  const exactRange = actual.length === expected.length && actual.every((number, index) => number === expected[index]);
+  if (!hasReferenceData || !exactRange) {
+    throw Object.assign(new Error(
+      `剧本 S${String(start).padStart(2, "0")}–S${String(end).padStart(2, "0")} 未返回完整连续结构`
+    ), {
+      code: "SCRIPT_DIRECT_SEGMENT_CONTRACT_FAILED",
+      segmentStart: start,
+      segmentEnd: end,
+      expectedShotNumbers: expected,
+      actualShotNumbers: actual,
+      noAutomaticRetry: true,
+      retryRequiresExplicitResume: true
+    });
+  }
+  return payload;
+}
+
 function directFastUserPrompt({ topic, product, unitCount, totalSeconds, productStartNumber, segmentStart = 1, segmentEnd = unitCount, scriptFormatDirective = "" }) {
   const start = Math.max(1, Math.min(unitCount, Number(segmentStart) || 1));
   const end = Math.max(start, Math.min(unitCount, Number(segmentEnd) || unitCount));
@@ -107,13 +141,14 @@ function directFastUserPrompt({ topic, product, unitCount, totalSeconds, product
     `请写一部${totalSeconds}秒竖屏短剧的紧凑剧情母稿第${start}-${end}镜，共${segmentCount}镜；全剧总计${unitCount}镜。`,
     `题材：${JSON.stringify(topic)}`,
     `商品：${product.name}；卖点：${product.sellingPoints || product.description || "只按用户提供事实"}。`,
-    `只输出JSON，根对象严格为c/sc/s。c为3-5名核心人物，序号固定：1=承担牺牲的主角，2=误解主角的亲属或对手，3=关键见证人；sc为3-5个承担不同任务的场景；s必须恰好${segmentCount}项，i从${start}连续到${end}，不得输出区间外镜头。`,
+    `只输出JSON，根对象严格为c/sc/s。c为3-5名核心人物，序号固定：1=承担牺牲的主角，2=误解主角的亲属或对手，3=关键见证人；sc只写本段实际使用的1-3个场景及各自剧情任务，系统会跨段合并长剧场景；s必须恰好${segmentCount}项，i从${start}连续到${end}，不得输出区间外镜头。`,
     "每个s只允许t/a/bf/af/em/f/v/d字段：f和v使用c的1起始序号；v最多2人。奇数镜优先双人攻防，偶数镜必须单人近景且d的6句全部由f说，保证至少一半镜头为单人。",
     "每镜d必须恰好6句，每句5-9个可说汉字，台词不能同义复述；双人镜严格轮流攻防。em必须写清起始情绪、触发、峰值和余震。a必须是能拍到的独占动作结果，不能写心理说明。",
     "S01前2秒必须由伤害动作直接开场，第一句必须是6-12字的质问或制止；前60秒不得连续同一人念词，必须有说话人和听者反应交替。",
     `唯一主反转固定在约72%位置。${product.name}及任何俗称在S${String(productStartNumber).padStart(2, "0")}之前绝对禁止出现；S${String(productStartNumber).padStart(2, "0")}-S${String(Math.min(unitCount, productStartNumber + 2)).padStart(2, "0")}才用3镜完成真实需求→自然使用→可见合规体验→人物决定，不写治疗、治愈或医疗承诺。最后一镜回到人物行动结局。`,
     scriptFormatDirective,
     "总JSON尽量紧凑，不要解释，不要Markdown，不要输出画面提示词、声音提示词或模型名称。",
+    "回复的第一个字符必须是{，最后一个字符必须是}。禁止先说‘我会按要求编写’或任何确认、计划、说明；直接给完整JSON。",
     `结构示例：${JSON.stringify(directFastResponseSchema())}`
   ].join("\n");
 }
@@ -157,16 +192,32 @@ function materializeCharacters(payload, topic) {
   });
 }
 
-function materializeScenes(payload) {
-  const authored = sourceArray(payload?.sc).slice(0, 5);
+function materializeScenes(payload, totalSeconds = 300, unitCount = 30) {
+  const authoredByName = new Map();
+  for (const item of sourceArray(payload?.sc)) {
+    const source = item && typeof item === "object" ? item : {};
+    const name = compact(source.n || source.name, "", 18);
+    if (name && !authoredByName.has(name)) authoredByName.set(name, source);
+  }
+  const authored = [...authoredByName.values()];
+  const density = storyDensityTargets(totalSeconds, unitCount);
+  const targetCount = Math.max(density.sceneMin, Math.min(density.sceneMax, authored.length || density.sceneMin));
   const fallbacks = [
     { n: "旧家缝纫间", d: "旧木桌、缝纫机、窗边工作区，承担伤害钩子与牺牲行动" },
     { n: "婚礼后厅与旧物房", d: "衣架、纸箱、桌面物证区，承担证据递进和主反转" },
     { n: "社区缝纫工作室", d: "裁剪台、低柜、通道与工作垫，承担行动回收和商品自然使用" }
   ];
   const merged = [...authored];
-  while (merged.length < 3) merged.push(fallbacks[merged.length]);
-  return merged.slice(0, 5).map((item, index) => {
+  while (merged.length < targetCount) {
+    const index = merged.length;
+    const base = fallbacks[index % fallbacks.length];
+    const chapter = Math.floor(index / fallbacks.length) + 1;
+    merged.push({
+      n: chapter === 1 ? base.n : `${base.n}·阶段${chapter}`,
+      d: `${base.d}；承担第${index + 1}个独立剧情任务并产生新的因果结果`
+    });
+  }
+  return merged.slice(0, targetCount).map((item, index) => {
     const source = item && typeof item === "object" ? item : {};
     const fallback = fallbacks[index] || fallbacks.at(-1);
     const name = compact(source.n || source.name, fallback.n, 18);
@@ -190,12 +241,31 @@ function materializeScenes(payload) {
 
 function stageFor(index, unitCount) {
   if (unitCount === 30) return STAGES[index];
-  const reversal = Math.min(unitCount - 3, Math.max(1, Math.round(unitCount * 0.72 - 0.5)));
+  const reversal = directFastReversalIndex(unitCount);
   if (index === reversal) return "main_reversal";
-  if (index < 2) return "hook";
-  if (index < Math.round(unitCount * 0.5)) return index % Math.max(3, Math.round(unitCount / 12)) === 0 ? "cost_kindness" : "pressure";
+  if (index === 0) return "hook";
+  const costlyTarget = Math.max(1, Math.round(unitCount / 15));
+  const costlyStep = Math.max(3, Math.floor(reversal / (costlyTarget + 1)));
+  if (index < reversal && index % costlyStep === 0) return "cost_kindness";
+  if (index < Math.round(unitCount * 0.5)) return "pressure";
   if (index < reversal) return "evidence";
   return index === unitCount - 1 ? "ending" : "payoff";
+}
+
+function directFastReversalIndex(unitCount) {
+  const count = Math.max(1, Math.floor(Number(unitCount) || 1));
+  return count <= 2
+    ? Math.max(0, count - 1)
+    : Math.min(count - 2, Math.max(1, Math.round(count * 0.72 - 0.5)));
+}
+
+function directFastProductStartIndex(unitCount) {
+  const count = Math.max(1, Math.floor(Number(unitCount) || 1));
+  return Math.max(0, Math.min(count - 1, Math.max(
+    count - Math.min(3, count),
+    directFastReversalIndex(count) + 1,
+    Math.floor(count * 0.65) + 1
+  )));
 }
 
 function sceneFor(index, unitCount, scenes) {
@@ -213,24 +283,80 @@ function deliveryFor(emotion, index) {
   return `${compact(emotion, "克制→受刺激→情绪抬升→压住余震", 45)}；${high ? "中高音量" : "中低音量"}；${index % 3 === 0 ? "先慢后快" : "语速中等"}；重咬动作词；句尾留半拍气口`;
 }
 
-function productBridge(productName, character, index) {
+function productCategoryProfile(product = {}) {
+  const name = compact(product.name, "用户商品", 32);
+  const facts = `${name} ${product.description || ""} ${product.sellingPoints || ""}`;
+  if (/书|读物|图册|绘本|教材|手册|指南|小说|诗集|文集/.test(facts)) {
+    return {
+      need: characterName => `${characterName}需要从已有文字资料里确认与当前处境直接相关的信息`,
+      action: characterName => `${characterName}拿起${name}，翻到已标记的一页并逐行核对其中内容`,
+      outcome: "书页、标记和人物随后执行的整理动作都清晰可见；只呈现阅读与信息核对，不虚构书中结论",
+      decision: characterName => `${characterName}决定保留这本书，并按读到的真实信息整理下一步行动`
+    };
+  }
+  if (/茶|咖啡|饮料|饮品|水|奶|果汁|酒|食品|零食|饼|糕|粉|粥|汤|米|面|油|酱|糖|坚果/.test(facts)) {
+    return {
+      need: characterName => `${characterName}在连续处理事情的间隙需要按包装真实信息取用日常食品或饮品`,
+      action: characterName => `${characterName}查看${name}包装后按正常方式打开、倒出或取用`,
+      outcome: "包装状态、实际取用和人物继续行动都清晰可见；不虚构口感、营养或健康功效",
+      decision: characterName => `${characterName}决定把${name}按真实用途留在日常安排里`
+    };
+  }
+  if (/衣|裤|裙|鞋|袜|帽|围巾|手套|眼镜|首饰|项链|手链|包|箱/.test(facts)) {
+    return {
+      need: characterName => `${characterName}需要为接下来的真实场合整理合适的随身或穿戴物品`,
+      action: characterName => `${characterName}检查${name}的外观与细节，并按品类正常穿戴、携带或收纳`,
+      outcome: "穿戴或携带前后的状态变化清晰可见；不虚构材质、尺码或性能",
+      decision: characterName => `${characterName}决定在接下来的行动中继续使用或携带${name}`
+    };
+  }
+  if (/护膝|护腰|护腕|护踝|支撑|绑带|垫|枕|坐垫/.test(facts)) {
+    return {
+      need: characterName => `${characterName}在长时间完成日常动作前需要按商品真实用途做好支撑准备`,
+      action: characterName => `${characterName}坐下整理${name}，按对应身体部位与商品结构自然佩戴`,
+      outcome: "佩戴、弯曲、起身与走动过程清晰可见；只呈现日常使用体验，不作治疗承诺",
+      decision: characterName => `${characterName}决定在需要完成同类日常动作时按真实用途使用${name}`
+    };
+  }
+  if (/锅|杯|壶|刀|剪|灯|机|器|刷|清洁|收纳|桌|椅|床|柜|家居|工具/.test(facts)) {
+    return {
+      need: characterName => `${characterName}需要用合适的日常工具完成眼前具体任务`,
+      action: characterName => `${characterName}检查${name}后，按其真实品类完成一次可见操作`,
+      outcome: "操作步骤、商品状态和任务结果清晰可见；不虚构规格、效率或耐用性",
+      decision: characterName => `${characterName}决定把${name}用于之后同类日常任务`
+    };
+  }
+  return {
+    need: characterName => `${characterName}需要用用户提供的${name}完成眼前具体任务`,
+    action: characterName => `${characterName}先核对${name}的外观与真实信息，再按该品类常规方式使用`,
+    outcome: "商品、实际操作和操作后的可见状态都清晰呈现；不补写用户未提供的功能、规格或承诺",
+    decision: characterName => `${characterName}根据实际使用结果决定在后续行动中保留${name}`
+  };
+}
+
+function resolveProductProfileText(value, characterName) {
+  return typeof value === "function" ? value(characterName) : String(value || "");
+}
+
+function productBridge(product, character, index) {
+  const profile = productCategoryProfile(product);
   const role = index % 3;
   return {
-    situationNeed: role === 0 ? `${character.name}在长时间跪地量裁前需要稳定贴合的日常支撑` : "连续工作后仍需保持自然起身和转身动作",
-    whyNow: role === 0 ? "新的工作任务马上开始，人物主动为自己做准备" : "上一镜已经完成真实使用动作，需要观察并作出决定",
-    action: role === 0 ? `${character.name}坐下整理${productName}并按膝部轮廓自然戴好` : `${character.name}使用${productName}完成跪地量裁后扶桌起身`,
-    observableOutcome: "绑带保持贴合，弯曲、起身与走动过程未见滑移；只呈现日常使用体验",
-    relationOrDecisionShift: `${character.id}${character.name}决定继续使用并把照顾自己写进工作安排`
+    situationNeed: resolveProductProfileText(profile.need, character.name),
+    whyNow: role === 0 ? "新的具体任务马上开始，人物主动按真实需求做准备" : "上一镜已经完成真实操作，需要观察结果并作出决定",
+    action: resolveProductProfileText(profile.action, character.name),
+    observableOutcome: resolveProductProfileText(profile.outcome, character.name),
+    relationOrDecisionShift: `${character.id}${resolveProductProfileText(profile.decision, character.name)}`
   };
 }
 
 function materializeDirectFastScript({ payload, topic, product, filmSchedule }) {
-  const unitCount = Math.max(6, Number(filmSchedule.unitCount) || 30);
-  const totalSeconds = Math.max(60, Number(filmSchedule.totalSeconds) || 300);
+  const unitCount = Math.max(1, Number(filmSchedule.unitCount) || 30);
+  const totalSeconds = Math.max(5, Number(filmSchedule.totalSeconds) || 300);
   const characters = materializeCharacters(payload, topic);
-  const scenes = materializeScenes(payload);
-  const productStartIndex = Math.max(Math.floor(unitCount * 0.65) + 1, unitCount - 4);
-  const reversalIndex = Math.min(unitCount - 3, Math.max(1, Math.round(unitCount * 0.72 - 0.5)));
+  const scenes = materializeScenes(payload, totalSeconds, unitCount);
+  const reversalIndex = directFastReversalIndex(unitCount);
+  const productStartIndex = directFastProductStartIndex(unitCount);
   const plans = [];
   const rawShots = [];
 
@@ -257,9 +383,9 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
     const action = index === 0
       ? compact(topic.hook, "对方踢开跪地劳作的人，婚纱裙摆从手中滑落", 88)
       : productRole === "product_packshot"
-        ? `${product.name}整体与贴合结构在干净承载面上清晰可见，不出现人物脸部`
+        ? `${product.name}整体、包装与用户图片中可见的真实外观细节在干净承载面上清晰呈现，不出现人物脸部`
       : productMention
-        ? productBridge(product.name, focus, index).action
+        ? productBridge(product, focus, index).action
         : compact(source.a || source.action, `${focus.name}完成第${index + 1}个不可逆动作，现场关系随之改变`, 88);
     const before = compact(source.bf, `上一镜结果压到${focus.name}面前`, 65);
     const after = compact(source.af, `${focus.name}用可见动作把关系推进到无法退回的状态`, 65);
@@ -280,7 +406,7 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
       };
     });
     const planVisibleIds = productRole === "product_packshot" ? [] : productMention ? visibleCharacterIds.slice(0, 1) : visibleCharacterIds;
-    const bridge = productMention ? productBridge(product.name, focus, index) : { situationNeed: "", whyNow: "", action: "", observableOutcome: "", relationOrDecisionShift: "" };
+    const bridge = productMention ? productBridge(product, focus, index) : { situationNeed: "", whyNow: "", action: "", observableOutcome: "", relationOrDecisionShift: "" };
     if (productRole === "product_packshot") bridge.relationOrDecisionShift = "";
     const visualBeat = `${id}独占动作：${action}`;
     const mainlineBeat = stage === "main_reversal"
@@ -367,7 +493,7 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
         cutReason: subIndex === 0 ? plan.transitionReason : subIndex === 1 ? "上一句落点后切听者或物件反应" : "手部动作匹配切到结果",
         framing: cleanProduct ? "无脸商品干净特写" : subIndex === 0 ? "说话人中近景" : subIndex === 1 ? "听者反应近景" : "手部与表情结果特写",
         camera: subIndex === 1 ? "轻微推进" : "稳定机位",
-        action: cleanProduct ? `${product.name}整体与贴合结构在干净承载面上清晰可见` : `${action}；第${subIndex + 1}段完成可见状态变化`,
+        action: cleanProduct ? `${product.name}整体与用户图片中可见的真实外观细节在干净承载面上清晰呈现` : `${action}；第${subIndex + 1}段完成可见状态变化`,
         dialogueTurns: turns,
         sound: `连续室内环境底噪；${subIndex === 0 ? "衣料摩擦" : subIndex === 1 ? "脚步与急促呼吸" : "纸张或器物轻响"}动作特效声`,
         transition: subIndex === 2 ? "以末句和动作结果桥接下一镜" : "台词与视线接力",
@@ -442,11 +568,11 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
       synopsis: compact(`${topic.logline || ""}；${highlights.join("；")}；${topic.emotionalPayoff || ""}`, "亲情误判经由证据和行动完成反转与回收。", 560),
       hook: compact(topic.hook, plans[0]?.action, 100),
       conflict: compact(topic.logline, "亲情牺牲被误解，伤害者拒绝面对现实代价。", 120),
-      escalation: plans.filter(item => item.mainlineStage === "pressure").slice(0, 7).map(item => item.action),
-      evidence: plans.filter(item => item.mainlineStage === "evidence").slice(0, 4).map(item => item.mainlineBeat),
+      escalation: plans.filter(item => item.mainlineStage === "pressure").map(item => item.action),
+      evidence: plans.filter(item => item.mainlineStage === "evidence").map(item => item.mainlineBeat),
       costlyKindness: plans.filter(item => item.mainlineStage === "cost_kindness").map(item => item.action),
       mainReversal: plans[reversalIndex]?.mainlineBeat,
-      payoff: plans.filter(item => item.mainlineStage === "payoff").slice(-4).map(item => item.action),
+      payoff: plans.filter(item => item.mainlineStage === "payoff").map(item => item.action),
       ending: plans.at(-1)?.action
     },
     characters,
@@ -468,7 +594,11 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
 }
 
 module.exports = {
+  assertDirectFastSegment,
   directFastResponseSchema,
+  directFastProductStartIndex,
+  directFastReversalIndex,
+  directFastSegmentRanges,
   directFastUserPrompt,
   fitDialogueLines,
   materializeDirectFastScript

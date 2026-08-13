@@ -1091,14 +1091,17 @@ function scriptWorkflowState(project = state.project) {
   const checkpoint = project?.script?.generationCheckpoint || {};
   const checkpointPlanCount = Array.isArray(checkpoint.shotPlan) ? checkpoint.shotPlan.length : 0;
   const checkpointShotCount = Array.isArray(checkpoint.shots) ? checkpoint.shots.length : 0;
+  const checkpointDirectSegmentCount = Array.isArray(checkpoint.directFastSegments) ? checkpoint.directFastSegments.length : 0;
+  const checkpointDirectSegmentTotal = Number(checkpoint.directFastSegmentTotal) || 0;
   const writerCheckpoint = Boolean(project?.script?.generationCheckpoint)
     && !(Array.isArray(project?.shots) && project.shots.length > 0)
-    && Boolean(checkpointPlanCount || checkpointShotCount || checkpoint.storyBible || checkpoint.blueprint);
+    && Boolean(checkpointDirectSegmentCount || checkpoint.directFastFailure || checkpointPlanCount || checkpointShotCount || checkpoint.storyBible || checkpoint.blueprint);
   const analysisCheckpointReady = Boolean(analysisCheckpoint.signature)
     && Array.isArray(analysisCheckpoint.chunks)
     && !(Array.isArray(project?.shots) && project.shots.length > 0);
   const hasRecoverableCheckpoint = Boolean(
-    checkpoint.planContractFailure?.retryRequiresExplicitResume === true
+    checkpoint.directFastFailure?.retryRequiresExplicitResume === true
+    || checkpoint.planContractFailure?.retryRequiresExplicitResume === true
     || checkpoint.unitContractFailure?.retryRequiresExplicitResume === true
     || checkpoint.scriptRepair?.retryRequiresExplicitResume === true
   );
@@ -1110,15 +1113,17 @@ function scriptWorkflowState(project = state.project) {
       || Boolean(automation.recoverableFailure)
       || ["SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED", "SCRIPT_SEMANTIC_REVIEW_FAILED"].includes(String(automation.errorCode || ""))
       || hasLegacyQualityReport));
-  const recoveryKind = checkpoint.planContractFailure?.retryRequiresExplicitResume === true
-    ? "plan"
+  const recoveryKind = checkpoint.directFastFailure?.retryRequiresExplicitResume === true
+    ? "direct"
+    : checkpoint.planContractFailure?.retryRequiresExplicitResume === true
+      ? "plan"
     : checkpoint.unitContractFailure?.retryRequiresExplicitResume === true
       ? "unit"
       : checkpoint.scriptRepair?.retryRequiresExplicitResume === true
         || ["SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED", "SCRIPT_SEMANTIC_REVIEW_FAILED"].includes(String(automation.errorCode || ""))
         ? "review"
         : analysisCheckpointReady ? "analysis" : writerCheckpoint ? "generation" : "";
-  return { automation, operation, stage, status, active, paused, recoverableFailure, recoveryKind, writerCheckpoint, analysisCheckpointReady, checkpointPlanCount, checkpointShotCount, managed: active || paused };
+  return { automation, operation, stage, status, active, paused, recoverableFailure, recoveryKind, writerCheckpoint, analysisCheckpointReady, checkpointPlanCount, checkpointShotCount, checkpointDirectSegmentCount, checkpointDirectSegmentTotal, managed: active || paused };
 }
 
 function renderScriptTask() {
@@ -1151,7 +1156,7 @@ function renderScriptTask() {
   $("#pauseScriptGeneration").classList.toggle("hidden", !task.active || task.status !== "running");
   $("#resumeScriptGeneration").classList.toggle("hidden", !task.paused && !task.recoverableFailure);
   $("#resumeScriptGeneration").textContent = task.recoverableFailure
-    ? (task.recoveryKind === "plan" ? "重写失败批次" : task.recoveryKind === "unit" ? "复用失败批次并继续" : task.recoveryKind === "analysis" ? "从拆镜断点继续" : "按终审报告继续修订")
+    ? (task.recoveryKind === "direct" ? "只补失败剧本段" : task.recoveryKind === "plan" ? "重写失败批次" : task.recoveryKind === "unit" ? "复用失败批次并继续" : task.recoveryKind === "analysis" ? "从拆镜断点继续" : "按终审报告继续修订")
     : "继续写作";
   if (task.recoveryKind === "generation") $("#resumeScriptGeneration").textContent = `从 S${String(task.checkpointPlanCount + 1).padStart(2, "0")} 继续写作`;
   $("#stopScriptGeneration").classList.toggle("hidden", !task.active && !task.paused);
@@ -1160,7 +1165,9 @@ function renderScriptTask() {
   $("#stopScriptGeneration").disabled = state.scriptControlBusy || ["pausing", "stopping"].includes(task.status);
   $("#scriptText").readOnly = task.managed;
   $("#scriptEditHint").textContent = task.recoverableFailure
-    ? (task.recoveryKind === "plan"
+    ? (task.recoveryKind === "direct"
+      ? `已完成 ${task.checkpointDirectSegmentCount}/${task.checkpointDirectSegmentTotal || "?"} 段并保存；继续时只请求失败段，不重写成功段。`
+      : task.recoveryKind === "plan"
       ? "前面合格批次与已付费证据已保留；点击后只重写当前失败批次，不会整剧重写。"
       : task.recoveryKind === "analysis"
         ? "已经成功拆出的片段已保存在本地；继续时只请求未完成片段，不会整部剧本重跑。"
@@ -2490,7 +2497,7 @@ function renderProjectStrategy() {
       shotsBanner.innerHTML = `<b>视频上游不匹配</b><span>项目已锁定${engine}，但系统设置当前是 ${videoProviderLabel(settingsKind)}。分步制作仍可先生成分镜图；进入视频阶段前请切换到对应供应商。</span>`;
     } else {
       shotsBanner.classList.remove("danger");
-      shotsBanner.innerHTML = `<b>v0.13.26 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
+      shotsBanner.innerHTML = `<b>v0.13.27 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
     }
   }
   const strategyLocked = !confirmed;
@@ -3252,7 +3259,7 @@ function renderAutomationQueue(project = state.project) {
                   ? "已完成"
                   : resumable ? "待继续" : "空闲";
   const resumeScriptButton = canResumeScript
-    ? `<button class="mini-button accent" id="queueResumeScriptBtn" type="button">${scriptTask.recoveryKind === "plan" ? "重写失败批次" : scriptTask.recoveryKind === "unit" ? "复用失败批次并继续" : scriptTask.recoveryKind === "analysis" ? "从拆镜断点继续" : "按报告继续修订"}</button>`
+    ? `<button class="mini-button accent" id="queueResumeScriptBtn" type="button">${scriptTask.recoveryKind === "direct" ? "只补失败剧本段" : scriptTask.recoveryKind === "plan" ? "重写失败批次" : scriptTask.recoveryKind === "unit" ? "复用失败批次并继续" : scriptTask.recoveryKind === "analysis" ? "从拆镜断点继续" : "按报告继续修订"}</button>`
     : "";
   const resumePipelineButton = resumable && !canResumeScript
     ? `<button class="mini-button accent" id="queueResumePipelineBtn" type="button">继续任务</button>`
@@ -3273,7 +3280,9 @@ function renderAutomationQueue(project = state.project) {
   </div>`;
   $("#queueResumeScriptBtn")?.addEventListener("click", () => {
     const operation = project.automation?.operation || "idea_script";
-    runScriptLong(scriptTask.recoveryKind === "plan"
+    runScriptLong(scriptTask.recoveryKind === "direct"
+      ? "正在复用已完成剧本段，只补失败段…"
+      : scriptTask.recoveryKind === "plan"
       ? "正在保留合格断点并只重写失败批次…"
       : scriptTask.recoveryKind === "analysis"
         ? "正在复用已完成片段并继续拆镜…"
@@ -4244,7 +4253,9 @@ $("#stopScriptGeneration").addEventListener("click", () => controlScriptGenerati
 $("#resumeScriptGeneration").addEventListener("click", () => {
   const operation = state.project?.automation?.operation || "idea_script";
   const task = scriptWorkflowState();
-  runScriptLong(task.recoveryKind === "plan"
+  runScriptLong(task.recoveryKind === "direct"
+    ? "正在复用已完成剧本段，只补失败段…"
+    : task.recoveryKind === "plan"
     ? "正在保留合格断点并只重写失败批次…"
     : task.recoveryKind === "analysis"
       ? "正在复用已完成片段并继续拆镜…"
@@ -4969,7 +4980,7 @@ $("#newProjectForm").addEventListener("submit", async event => {
       modeConfirmed: true,
       executionMode: $("input[name='newExecutionMode']:checked")?.value || "step",
       inputMode: $("input[name='newInputMode']:checked")?.value || "ai",
-      targetDurationSeconds: Math.max(30, Math.min(3600, Math.round(Number($("#newTargetDuration")?.value) || 300)))
+      targetDurationSeconds: Math.max(30, Math.round(Number($("#newTargetDuration")?.value) || 300))
     });
     if (!result.ok) throw new Error(result.message || "项目创建失败");
     if (result.settings) state.settings = result.settings;
@@ -5023,8 +5034,8 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
   const project = requireProject();
   const nextInputMode = $("input[name='projectInputMode']:checked")?.value || "ai";
   const targetDurationSeconds = nextInputMode === "manual"
-    ? Math.max(1, Math.min(3600, Math.round(Number(project.generation?.targetDurationSeconds) || 300)))
-    : Math.max(30, Math.min(3600, Math.round(Number($("#projectTargetDuration")?.value) || project.generation?.targetDurationSeconds || 300)));
+    ? Math.max(1, Math.round(Number(project.generation?.targetDurationSeconds) || 300))
+    : Math.max(30, Math.round(Number($("#projectTargetDuration")?.value) || project.generation?.targetDurationSeconds || 300));
   const strategyChanged = (
     mode !== project.generation?.mode
     || engine !== (project.generation?.engine || "seedance")

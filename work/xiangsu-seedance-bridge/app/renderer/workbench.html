@@ -227,7 +227,7 @@
           <div><span>AI / MANUAL</span><b>分镜图提示词与分镜图都可从 0 批量上传</b><small>提示词可用 S01-start / S01-end / S01-sheet 对应；尚未拆镜也会先保存，后续自动匹配。系统建议会说明如何读取场景四视图。</small></div>
           <div class="manual-entry-actions"><button class="outline-button manual-button" type="button" data-action="import-prompt-batch" data-prompt-scope="storyboards">批量上传分镜提示词</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="storyboards">下载系统建议</button><button id="importStoryboardBatch" class="outline-button manual-button" type="button">批量上传分镜图</button><button class="outline-button" type="button" data-action="open-independent-library">打开独立资产库</button></div>
         </div>
-        <div class="build-banner" role="status"><b>v0.13.26 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span></div>
+        <div class="build-banner" role="status"><b>v0.13.27 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span></div>
         <div id="shotList" class="shot-list"></div>
       </section>
 
@@ -374,7 +374,7 @@
       </div></fieldset>
       <div class="strategy-field-row"><fieldset class="strategy-fieldset"><legend>执行方式</legend><label class="compact-choice"><input type="radio" name="newExecutionMode" value="step" checked> 分步制作</label><label class="compact-choice"><input type="radio" name="newExecutionMode" value="full"> AI 一键制作</label></fieldset><fieldset class="strategy-fieldset"><legend>起步内容</legend><label class="compact-choice"><input type="radio" name="newInputMode" value="ai" checked> AI 生成</label><label class="compact-choice"><input type="radio" name="newInputMode" value="manual"> 自己输入/上传</label></fieldset></div>
       <label for="newTargetDuration">剧总时长（秒）<span class="required-mark">必填</span></label>
-      <input id="newTargetDuration" name="targetDurationSeconds" type="number" min="30" max="3600" step="1" value="300" aria-describedby="newTargetDurationHelp" required>
+      <input id="newTargetDuration" name="targetDurationSeconds" type="number" min="30" step="1" value="300" aria-describedby="newTargetDurationHelp" required>
       <p id="newTargetDurationHelp" class="settings-note">AI 生成会严格按此秒数规划完整故事；选择自己输入/上传后，本项自动停用，并按原稿逐句对白、语速、停顿和动作节拍自适应。</p>
       <p class="settings-note">单元时长由剧情节拍和分镜动作自动决定，不设固定默认值。</p>
       <p id="newProjectError" class="field-error" role="alert" aria-live="polite"></p>
@@ -417,7 +417,7 @@
       </div></fieldset>
       <div class="strategy-field-row"><fieldset class="strategy-fieldset"><legend>执行方式</legend><label class="compact-choice"><input type="radio" name="projectExecutionMode" value="step"> 分步制作</label><label class="compact-choice"><input type="radio" name="projectExecutionMode" value="full"> AI 一键制作</label></fieldset><fieldset class="strategy-fieldset"><legend>起步内容</legend><label class="compact-choice"><input type="radio" name="projectInputMode" value="ai"> AI 生成</label><label class="compact-choice"><input type="radio" name="projectInputMode" value="manual"> 自己输入/上传</label></fieldset></div>
       <label for="projectTargetDuration">剧总时长（秒）</label>
-      <input id="projectTargetDuration" name="targetDurationSeconds" type="number" min="30" max="3600" step="1" value="300">
+      <input id="projectTargetDuration" name="targetDurationSeconds" type="number" min="30" step="1" value="300">
       <p id="projectTargetDurationHelp" class="settings-note">AI 生成严格执行此秒数；自己输入/上传剧本会停用此设置，并在拆镜后显示按原稿推算的实际总时长。</p>
       <p id="projectStrategyError" class="field-error" role="alert" aria-live="polite"></p>
       <div class="dialog-actions"><button id="cancelProjectStrategy" class="outline-button" type="button">暂不修改</button><button id="confirmProjectStrategy" class="primary-button" type="submit">确认并应用</button></div>

@@ -37,6 +37,11 @@ function durationBounds(providerKind, options = {}) {
   return Object.freeze({ min: contract.min, max: contract.max, preferred: contract.preferred, fixed: contract.fixed });
 }
 
+function normalizeFilmTotalSeconds(value, fallback, minimum) {
+  const raw = Math.round(Number(value));
+  return Math.max(minimum, Number.isFinite(raw) && raw > 0 ? raw : fallback);
+}
+
 function normalizeTargetDurationSeconds(value, providerKind = "", options = {}) {
   const contract = typeof providerKind === "object" && providerKind
     ? providerKind
@@ -125,7 +130,7 @@ function reconcileUnitDurations(requested = [], targetTotalSeconds, providerKind
   const max = Number(contract.max) || 15;
   const preferred = Number(contract.preferred) || 10;
   const count = Math.max(1, (Array.isArray(requested) ? requested : []).length || Number(options.unitCount) || 1);
-  const totalSeconds = Math.max(min, Math.min(3600, Math.round(Number(targetTotalSeconds) || count * preferred)));
+  const totalSeconds = normalizeFilmTotalSeconds(targetTotalSeconds, count * preferred, min);
   const values = Array.from({ length: count }, (_, index) => {
     const raw = Number(requested?.[index]);
     return normalizeTargetDurationSeconds(Number.isFinite(raw) && raw > 0 ? raw : preferred, contract);
@@ -211,8 +216,7 @@ function planFilmSchedule(targetTotalSeconds, providerKind = "", options = {}) {
   const max = Number(contract.max) || 15;
   const preferredRaw = Number(options.preferredUnit) || contract.preferred || 10;
   const preferred = Math.max(min, Math.min(max, preferredRaw));
-  const rawTotal = Math.round(Number(targetTotalSeconds) || 300);
-  const totalSeconds = Math.max(min, Math.min(3600, rawTotal));
+  const totalSeconds = normalizeFilmTotalSeconds(targetTotalSeconds, 300, min);
   let unitCount = Math.max(1, Math.round(totalSeconds / preferred));
   if (Array.isArray(contract.allowed) && contract.allowed.length) {
     const minCount = Math.max(1, Math.ceil(totalSeconds / max));

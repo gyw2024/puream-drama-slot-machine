@@ -53,13 +53,17 @@ function estimateFallbackNarrationSeconds(script = "") {
 function representableTargetSeconds(rawSeconds, providerKind = "", options = {}) {
   const contract = durationContract(providerKind, options);
   const min = Number(contract.min) || 5;
-  const maxTotal = 3600;
-  let target = Math.max(min, Math.min(maxTotal, Math.round(Number(rawSeconds) || min)));
+  let target = Math.max(min, Math.round(Number(rawSeconds) || min));
   if (Array.isArray(contract.allowed) && contract.allowed.length) {
     const allowed = [...new Set(contract.allowed.map(Number).filter(Number.isFinite))];
     const candidates = [];
-    const maxCount = Math.ceil(maxTotal / Math.min(...allowed));
-    for (let count = 1; count <= maxCount; count += 1) {
+    const allowedMin = Math.min(...allowed);
+    const allowedMax = Math.max(...allowed);
+    // Search only counts whose possible sums are close to the requested total.
+    // This remains bounded per request even when the uploaded script is hours long.
+    const minCount = Math.max(1, Math.floor((target - allowedMax) / allowedMax));
+    const maxCount = Math.max(minCount, Math.ceil((target + allowedMax) / allowedMin));
+    for (let count = minCount; count <= maxCount; count += 1) {
       const low = Math.min(...allowed) * count;
       const high = Math.max(...allowed) * count;
       if (target >= low && target <= high) {
@@ -67,7 +71,7 @@ function representableTargetSeconds(rawSeconds, providerKind = "", options = {})
           if (value % 2 === 0 || allowed.some(item => item % 2 !== 0)) candidates.push(value);
         }
       }
-      if (low > target + Math.max(...allowed)) break;
+      if (low > target + allowedMax) break;
     }
     if (candidates.length) target = candidates.sort((left, right) => Math.abs(left - target) - Math.abs(right - target) || left - right)[0];
     else target = normalizeTargetDurationSeconds(target, contract);

@@ -23,7 +23,9 @@ function storyDensityTargets(totalSeconds = 300, unitCount = 0) {
   const sceneMin = seconds < 180 ? 2 : Math.max(3, Math.ceil(seconds / 120));
   return {
     sceneMin,
-    sceneMax: Math.min(8, sceneMin + (seconds >= 600 ? 3 : 2)),
+    // Total film duration is intentionally unbounded. Scene capacity grows with
+    // the story instead of becoming impossible once sceneMin exceeds a fixed cap.
+    sceneMax: sceneMin + Math.max(2, Math.ceil(seconds / 200)),
     escalationMin: Math.max(4, Math.floor(units / 5)),
     costlyKindnessMin: Math.max(1, Math.round(units / 15)),
     payoffMin: Math.max(2, Math.round(units / 20))

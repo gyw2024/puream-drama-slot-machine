@@ -855,7 +855,7 @@ function defaultProject(title = "未命名漫剧", options = {}) {
       keyframeConcurrency: 2,
       aspectRatio: "9:16",
       shotDuration: [5, 10, 15].includes(Number(options.shotDuration)) ? Number(options.shotDuration) : 10,
-      targetDurationSeconds: Math.max(30, Math.min(3600, Math.round(Number(options.targetDurationSeconds) || 300))),
+      targetDurationSeconds: Math.max(30, Math.round(Number(options.targetDurationSeconds) || 300)),
       durationLocked: false,
       durationContract: null
     },
@@ -903,8 +903,8 @@ function productionInputChangeReasons(project = {}, patch = {}) {
   if (Object.prototype.hasOwnProperty.call(patch || {}, "generation")) {
     const current = project.generation || {};
     const requested = { ...current, ...(patch.generation || {}) };
-    const nextTarget = Math.max(30, Math.min(3600, Math.round(Number(requested.targetDurationSeconds) || 300)));
-    if (nextTarget !== Math.max(30, Math.min(3600, Math.round(Number(current.targetDurationSeconds) || 300)))) reasons.push("目标时长");
+    const nextTarget = Math.max(30, Math.round(Number(requested.targetDurationSeconds) || 300));
+    if (nextTarget !== Math.max(30, Math.round(Number(current.targetDurationSeconds) || 300))) reasons.push("目标时长");
     if (normalizeVideoEngine(requested.engine) !== normalizeVideoEngine(current.engine)) reasons.push("视频引擎");
     if (normalizeGenerationMode(requested.mode) !== normalizeGenerationMode(current.mode)) reasons.push("生成模式");
     if (String(requested.videoProviderKind || "") !== String(current.videoProviderKind || "")) reasons.push("视频上游");
@@ -1977,7 +1977,7 @@ class WorkbenchStore {
       keyframeConcurrency: Math.max(1, Math.min(999, Number(legacyGeneration.keyframeConcurrency) || 2)),
       aspectRatio: legacyGeneration.aspectRatio || "9:16",
       shotDuration: [5, 10, 15].includes(Number(legacyGeneration.shotDuration)) ? Number(legacyGeneration.shotDuration) : 10,
-      targetDurationSeconds: Math.max(minimumProjectSeconds, Math.min(3600, Math.round(Number(legacyGeneration.targetDurationSeconds) || 300))),
+      targetDurationSeconds: Math.max(minimumProjectSeconds, Math.round(Number(legacyGeneration.targetDurationSeconds) || 300)),
       durationLocked: legacyGeneration.durationLocked === true,
       durationSource: String(legacyGeneration.durationSource || ""),
       durationContract: legacyGeneration.durationContract && typeof legacyGeneration.durationContract === "object"
@@ -2100,7 +2100,7 @@ class WorkbenchStore {
         keyframeConcurrency: Math.max(1, Math.min(999, Number(requested.keyframeConcurrency) || 2)),
         aspectRatio: requested.aspectRatio || "9:16",
         shotDuration: [5, 10, 15].includes(Number(requested.shotDuration)) ? Number(requested.shotDuration) : 10,
-        targetDurationSeconds: Math.max(nextInputMode === "manual" ? 1 : 30, Math.min(3600, Math.round(Number(requested.targetDurationSeconds) || 300)))
+        targetDurationSeconds: Math.max(nextInputMode === "manual" ? 1 : 30, Math.round(Number(requested.targetDurationSeconds) || 300))
       };
     }
     if (Object.prototype.hasOwnProperty.call(patch || {}, "productionPlan")) {
