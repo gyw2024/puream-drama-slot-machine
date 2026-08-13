@@ -16,8 +16,8 @@ const SEMANTIC_SCORE_FIELDS = Object.freeze([
 ]);
 
 const DEFAULT_BLUEPRINT_AUDIT_CHECKS = Object.freeze({
-  productionStructure: true,
-  ...Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, true]))
+  productionStructure: false,
+  ...Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, false]))
 });
 
 const BLUEPRINT_AUDIT_LABELS = Object.freeze({
@@ -37,7 +37,7 @@ const BLUEPRINT_AUDIT_LABELS = Object.freeze({
 });
 
 function normalizeBlueprintAuditChecks(value = {}) {
-  return Object.fromEntries(Object.keys(DEFAULT_BLUEPRINT_AUDIT_CHECKS).map(key => [key, value?.[key] !== false]));
+  return Object.fromEntries(Object.keys(DEFAULT_BLUEPRINT_AUDIT_CHECKS).map(key => [key, value?.[key] === true]));
 }
 
 function blueprintAuditChecks(settings = {}) {
@@ -46,7 +46,7 @@ function blueprintAuditChecks(settings = {}) {
 
 function enabledSemanticScoreFields(settings = {}) {
   const checks = blueprintAuditChecks(settings);
-  return SEMANTIC_SCORE_FIELDS.filter(field => checks[field] !== false);
+  return SEMANTIC_SCORE_FIELDS.filter(field => checks[field] === true);
 }
 
 module.exports = {

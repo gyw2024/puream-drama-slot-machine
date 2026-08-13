@@ -58,27 +58,27 @@ const state = {
 };
 
 const DEFAULT_QUALITY_GATE_MODULES = Object.freeze({
-  script: true,
-  assets: true,
-  storyboards: true,
-  videos: true,
-  delivery: true
+  script: false,
+  assets: false,
+  storyboards: false,
+  videos: false,
+  delivery: false
 });
 
 const DEFAULT_BLUEPRINT_AUDIT_CHECKS = Object.freeze({
-  productionStructure: true,
-  clarity: true,
-  storyCore: true,
-  causality: true,
-  escalation: true,
-  reversalStructure: true,
-  tragedyCraft: true,
-  faceSlapCraft: true,
-  dialogue: true,
-  emotionalDelivery: true,
-  productIntegration: true,
-  soundDesign: true,
-  visualVariety: true
+  productionStructure: false,
+  clarity: false,
+  storyCore: false,
+  causality: false,
+  escalation: false,
+  reversalStructure: false,
+  tragedyCraft: false,
+  faceSlapCraft: false,
+  dialogue: false,
+  emotionalDelivery: false,
+  productIntegration: false,
+  soundDesign: false,
+  visualVariety: false
 });
 
 const textProviderPresets = Object.freeze({
@@ -2318,7 +2318,7 @@ function writeTextProviderForm(config) {
 }
 
 function renderQualityBlueprintToggle() {
-  const enabled = state.settings?.generation?.qualityGatesEnabled !== false;
+  const enabled = state.settings?.generation?.qualityGatesEnabled === true;
   const modules = { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings?.generation?.qualityGateModules || {}) };
   const checks = { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, ...(state.settings?.generation?.blueprintAuditChecks || {}) };
   const enabledCount = Object.values(modules).filter(Boolean).length;
@@ -2334,11 +2334,11 @@ function renderQualityBlueprintToggle() {
   if (!enabled) $("#qualityBlueprintDetails")?.removeAttribute("open");
   if ($("#qualityBlueprintMaster")) $("#qualityBlueprintMaster").checked = enabled;
   $$('[data-quality-module]').forEach(input => {
-    input.checked = modules[input.dataset.qualityModule] !== false;
+    input.checked = modules[input.dataset.qualityModule] === true;
     input.disabled = !enabled;
   });
   $$('[data-blueprint-check]').forEach(input => {
-    input.checked = checks[input.dataset.blueprintCheck] !== false;
+    input.checked = checks[input.dataset.blueprintCheck] === true;
     input.disabled = !enabled || modules.script === false;
   });
   $$('[data-blueprint-bulk]').forEach(button => { button.disabled = !enabled || modules.script === false; });
@@ -2349,9 +2349,9 @@ function renderQualityBlueprintToggle() {
 }
 
 function qualityBlueprintModuleEnabled(moduleName = "script") {
-  if (state.settings?.generation?.qualityGatesEnabled === false) return false;
+  if (state.settings?.generation?.qualityGatesEnabled !== true) return false;
   const modules = { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings?.generation?.qualityGateModules || {}) };
-  return modules[moduleName] !== false;
+  return modules[moduleName] === true;
 }
 
 function renderOssStatus() {
@@ -2475,10 +2475,11 @@ function renderVideoProviderPolicy() {
 function renderProjectStrategy() {
   const project = state.project;
   if (!project) return;
-  const confirmed = project.generation?.modeConfirmed === true;
+  const plan = project.productionPlan || {};
+  const scriptFormatReady = plan.inputMode === "manual" || plan.scriptFormatConfirmed === true;
+  const confirmed = project.generation?.modeConfirmed === true && scriptFormatReady;
   const mode = projectModeLabel(project.generation?.mode || "continuation");
   const engine = currentVideoEngineName(project);
-  const plan = project.productionPlan || {};
   const stepExecution = projectUsesStepExecution(project);
   const bar = $("#projectStrategyBar");
   bar.classList.toggle("requires-confirmation", !confirmed);
@@ -2494,12 +2495,12 @@ function renderProjectStrategy() {
     ? (project.script?.detectedFormat === "timed_storyboard" ? "按上传秒级分镜稿" : "按上传原稿")
     : plan.scriptFormatConfirmed === true
       ? (plan.scriptFormat === "dialogue" ? "简易对白稿" : plan.scriptFormat === "timed_storyboard" ? "秒级分镜成片稿" : "完整制作稿")
-      : "写剧本时选择";
+      : "请在制作策略中选择";
   const targetSeconds = Number(project.generation?.targetDurationSeconds) || 300;
   const plannedSeconds = (project.shots || []).reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
   $("#projectStrategyHelp").textContent = confirmed
     ? `剧总时长合同 ${targetSeconds} 秒${plannedSeconds ? ` · 当前分镜合计 ${plannedSeconds} 秒` : ""}。${projectRequiresFaceMeshUi(project) ? "云端算力：人物资产会先做一致性检查。" : "本地像塑：不需要全脸网格。"}`
-    : "请先确认视频引擎、生成模式与剧总时长；分镜视频与一键制作暂时锁定。";
+    : "请先在制作策略确认视频引擎、生成模式、剧本模式与剧总时长；一键制作暂时锁定。";
   const settingsKind = state.settings?.videoProvider?.kind || "local-xiangsu";
   const providerMismatch = Boolean(project) && !videoProviderMatchesProject(settingsKind);
   const continuationLabel = stepExecution ? "运行当前阶段" : "从此环节继续全流程";
@@ -2546,9 +2547,13 @@ function openProjectStrategyDialog(required = false) {
   $$("input[name='projectVideoMode']").forEach(input => { input.checked = input.value === project.generation?.mode; });
   $$("input[name='projectExecutionMode']").forEach(input => { input.checked = input.value === (project.productionPlan?.executionMode || "step"); });
   $$("input[name='projectInputMode']").forEach(input => { input.checked = input.value === (project.productionPlan?.inputMode || "ai"); });
+  $$("input[name='projectScriptFormat']").forEach(input => {
+    input.checked = project.productionPlan?.scriptFormatConfirmed === true
+      && input.value === (project.productionPlan?.scriptFormat || "production");
+  });
   if ($("#projectTargetDuration")) $("#projectTargetDuration").value = String(project.generation?.targetDurationSeconds || 300);
   syncDurationModeControls("project");
-  $("#projectStrategyError").textContent = required ? "当前项目来自旧版本，请确认一次视频引擎与生成模式后继续。" : "";
+  $("#projectStrategyError").textContent = required ? "请确认视频引擎、生成模式；AI 生成项目还必须选择剧本模式。" : "";
   $("#cancelProjectStrategy").classList.toggle("hidden", required);
   $("#closeProjectStrategyDialog").classList.toggle("hidden", required);
   if (!dialog.open) dialog.showModal();
@@ -2576,7 +2581,11 @@ function syncDurationModeControls(scope) {
 }
 
 function promptForProjectStrategyIfRequired() {
-  if (!state.project || state.project.generation?.modeConfirmed === true || state.strategyPromptedProjectId === state.project.id) return;
+  if (!state.project || state.strategyPromptedProjectId === state.project.id) return;
+  const plan = state.project.productionPlan || {};
+  const ready = state.project.generation?.modeConfirmed === true
+    && (plan.inputMode === "manual" || plan.scriptFormatConfirmed === true);
+  if (ready) return;
   state.strategyPromptedProjectId = state.project.id;
   setTimeout(() => openProjectStrategyDialog(true), 0);
 }
@@ -2799,7 +2808,7 @@ function renderPipelineLiveStatus(project = state.project) {
   const automation = project.automation || {};
   const status = String(automation.status || "idle");
   const active = ["running", "pausing", "stopping"].includes(status);
-  const visible = active || ["failed", "paused_user", "cancelled", "completed"].includes(status);
+  const visible = active || ["failed", "paused_user", "paused_remote", "paused_account", "cancelled", "completed"].includes(status);
   panel.hidden = !visible;
   if (!visible) {
     panel.innerHTML = "";
@@ -2816,6 +2825,8 @@ function renderPipelineLiveStatus(project = state.project) {
     pausing: "正在安全暂停",
     stopping: "正在安全结束",
     paused_user: "已暂停",
+    paused_remote: "远端待恢复",
+    paused_account: "账号待恢复",
     failed: "运行失败",
     cancelled: "已结束",
     completed: "全流程完成"
@@ -3293,7 +3304,11 @@ function renderAutomationQueue(project = state.project) {
         ? "结束中"
           : active
             ? "任务运行中"
-            : automation.status === "failed"
+            : automation.status === "paused_remote"
+              ? "远端待恢复 · 可继续"
+              : automation.status === "paused_account"
+                ? "账号待恢复 · 可继续"
+                : automation.status === "failed"
               ? "已停止 · 可继续"
               : automation.status === "paused"
                 ? "已暂停 · 可继续"
@@ -3566,7 +3581,7 @@ function collectSettings() {
       ...state.settings.generation,
       visualStyle: $("#visualStyle").value.trim(),
       aspectRatio: $("#aspectRatio").value,
-      qualityGatesEnabled: $("#qualityGatesEnabled") ? $("#qualityGatesEnabled").checked : true,
+      qualityGatesEnabled: $("#qualityGatesEnabled") ? $("#qualityGatesEnabled").checked : false,
       qualityGateModules: { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings.generation?.qualityGateModules || {}) },
       blueprintAuditChecks: { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, ...(state.settings.generation?.blueprintAuditChecks || {}) }
     },
@@ -4733,25 +4748,40 @@ $("#qualityBlueprintToggle")?.addEventListener("click", event => {
 $("#qualityBlueprintMenu")?.addEventListener("click", event => event.stopPropagation());
 $("#qualityBlueprintClose")?.addEventListener("click", () => setQualityBlueprintMenuOpen(false, { restoreFocus: true }));
 $("#qualityBlueprintMaster")?.addEventListener("change", async event => {
-  await saveQualityBlueprintSetting(Boolean(event.currentTarget.checked));
+  const enabled = Boolean(event.currentTarget.checked);
+  const currentModules = { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings?.generation?.qualityGateModules || {}) };
+  const currentChecks = { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, ...(state.settings?.generation?.blueprintAuditChecks || {}) };
+  // A fresh install starts fully off. The first explicit master-on action is
+  // the promised one-click enable: bootstrap all modules/details exactly once.
+  // Later custom selections remain durable across master off/on cycles.
+  const firstExplicitEnable = enabled
+    && !Object.values(currentModules).some(Boolean)
+    && !Object.values(currentChecks).some(Boolean);
+  const modules = firstExplicitEnable
+    ? Object.fromEntries(Object.keys(DEFAULT_QUALITY_GATE_MODULES).map(key => [key, true]))
+    : null;
+  const checks = firstExplicitEnable
+    ? Object.fromEntries(Object.keys(DEFAULT_BLUEPRINT_AUDIT_CHECKS).map(key => [key, true]))
+    : null;
+  await saveQualityBlueprintSetting(enabled, modules, checks);
 });
 
 $$('[data-quality-module]').forEach(input => input.addEventListener("change", async event => {
   const modules = { ...DEFAULT_QUALITY_GATE_MODULES, ...(state.settings?.generation?.qualityGateModules || {}) };
   modules[event.currentTarget.dataset.qualityModule] = Boolean(event.currentTarget.checked);
-  await saveQualityBlueprintSetting(state.settings?.generation?.qualityGatesEnabled !== false, modules);
+  await saveQualityBlueprintSetting(state.settings?.generation?.qualityGatesEnabled === true, modules);
 }));
 
 $$('[data-blueprint-check]').forEach(input => input.addEventListener("change", async event => {
   const checks = { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, ...(state.settings?.generation?.blueprintAuditChecks || {}) };
   checks[event.currentTarget.dataset.blueprintCheck] = Boolean(event.currentTarget.checked);
-  await saveQualityBlueprintSetting(state.settings?.generation?.qualityGatesEnabled !== false, null, checks);
+  await saveQualityBlueprintSetting(state.settings?.generation?.qualityGatesEnabled === true, null, checks);
 }));
 
 $$('[data-blueprint-bulk]').forEach(button => button.addEventListener("click", async event => {
   const value = event.currentTarget.dataset.blueprintBulk === "all";
   const checks = Object.fromEntries(Object.keys(DEFAULT_BLUEPRINT_AUDIT_CHECKS).map(key => [key, value]));
-  await saveQualityBlueprintSetting(state.settings?.generation?.qualityGatesEnabled !== false, null, checks);
+  await saveQualityBlueprintSetting(state.settings?.generation?.qualityGatesEnabled === true, null, checks);
 }));
 
 document.addEventListener("click", () => {
@@ -4976,6 +5006,7 @@ $("#newProject").addEventListener("click", () => {
   $$("input[name='newVideoEngine']").forEach(option => { option.checked = false; });
   $$("input[name='newExecutionMode']").forEach(option => { if (option.value === "step") option.checked = true; });
   $$("input[name='newInputMode']").forEach(option => { if (option.value === "ai") option.checked = true; });
+  $$("input[name='newScriptFormat']").forEach(option => { option.checked = false; });
   syncDurationModeControls("new");
   if (!dialog.open) dialog.showModal();
   const focusProjectName = () => { input.focus({ preventScroll: true }); input.select(); };
@@ -4993,6 +5024,8 @@ $("#newProjectForm").addEventListener("submit", async event => {
   const providerKind = $("input[name='newVideoProvider']:checked")?.value || "";
   const engine = providerKind === "puream-hailuo-h3" ? "hailuo-h3" : "seedance";
   const mode = $("input[name='newVideoMode']:checked")?.value || "";
+  const inputMode = $("input[name='newInputMode']:checked")?.value || "ai";
+  const scriptFormat = $("input[name='newScriptFormat']:checked")?.value || "";
   if (!title) {
     input.setAttribute("aria-invalid", "true");
     error.textContent = "请输入项目名称后再创建。";
@@ -5009,6 +5042,11 @@ $("#newProjectForm").addEventListener("submit", async event => {
     $("input[name='newVideoMode']")?.focus();
     return;
   }
+  if (inputMode === "ai" && !scriptFormat) {
+    error.textContent = "AI 生成项目请先选择：完整制作稿 / 简易对白稿 / 秒级分镜成片稿。";
+    $("input[name='newScriptFormat']")?.focus();
+    return;
+  }
   input.removeAttribute("aria-invalid");
   error.textContent = "";
   state.newProjectCreating = true;
@@ -5021,7 +5059,9 @@ $("#newProjectForm").addEventListener("submit", async event => {
       mode,
       modeConfirmed: true,
       executionMode: $("input[name='newExecutionMode']:checked")?.value || "step",
-      inputMode: $("input[name='newInputMode']:checked")?.value || "ai",
+      inputMode,
+      scriptFormat: scriptFormat || "production",
+      scriptFormatConfirmed: inputMode === "ai",
       targetDurationSeconds: Math.max(30, Math.round(Number($("#newTargetDuration")?.value) || 300))
     });
     if (!result.ok) throw new Error(result.message || "项目创建失败");
@@ -5075,6 +5115,12 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
   }
   const project = requireProject();
   const nextInputMode = $("input[name='projectInputMode']:checked")?.value || "ai";
+  const nextScriptFormat = $("input[name='projectScriptFormat']:checked")?.value || "";
+  if (nextInputMode === "ai" && !nextScriptFormat) {
+    $("#projectStrategyError").textContent = "AI 生成项目请先选择一种剧本模式。";
+    $("input[name='projectScriptFormat']")?.focus();
+    return;
+  }
   const targetDurationSeconds = nextInputMode === "manual"
     ? Math.max(1, Math.round(Number(project.generation?.targetDurationSeconds) || 300))
     : Math.max(30, Math.round(Number($("#projectTargetDuration")?.value) || project.generation?.targetDurationSeconds || 300));
@@ -5083,6 +5129,7 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
     || engine !== (project.generation?.engine || "seedance")
     || providerKind !== String(project.generation?.videoProviderKind || "")
     || nextInputMode !== (project.productionPlan?.inputMode || "ai")
+    || (nextInputMode === "ai" && nextScriptFormat !== (project.productionPlan?.scriptFormat || "production"))
     || targetDurationSeconds !== Number(project.generation?.targetDurationSeconds || 300)
   );
   const hasProductionHistory = project.shots?.length || project.candidates?.length || project.jobs?.length || project.finalVideoPath;
@@ -5103,7 +5150,9 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
       productionPlan: {
         ...(project.productionPlan || {}),
         executionMode: $("input[name='projectExecutionMode']:checked")?.value || "step",
-        inputMode: nextInputMode
+        inputMode: nextInputMode,
+        scriptFormat: nextInputMode === "ai" ? nextScriptFormat : (project.productionPlan?.scriptFormat || "production"),
+        scriptFormatConfirmed: nextInputMode === "ai"
       }
     }, "确认项目视频上游与制作策略");
     $("#projectStrategyDialog").close();
@@ -5440,7 +5489,7 @@ async function startBackgroundServices() {
         await refreshAccountSwitch(false);
         if (state.accountSwitch?.status === "awaiting_login") await verifyCurrentAccountSwitch(true);
       }
-      const projectRunning = ["running", "pausing", "stopping", "paused_account"].includes(state.project?.automation?.status);
+      const projectRunning = ["running", "pausing", "stopping", "paused_account", "paused_remote"].includes(state.project?.automation?.status);
       const currentHasActiveJob = Array.isArray(syncResult?.jobs) && syncResult.jobs.some(job => job.projectId === state.project?.id);
       if (state.project && (projectRunning || currentHasActiveJob)) {
         const previousOperationStatus = state.project.automation?.status;

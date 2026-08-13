@@ -4,6 +4,7 @@
 .trae/
 downloads/
 outputs/
+release/
 
 # Local browser inspection evidence; source lives beside this folder.
 work/video-request-monitor/

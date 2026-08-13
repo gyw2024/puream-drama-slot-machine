@@ -27,11 +27,11 @@ const MAX_MANUAL_PROMPT_CHARS = 60_000;
 const MAX_SETTINGS_PROMPT_CHARS = 100_000;
 const PUREAM_TEXT_MODELS = Object.freeze(["claude-opus-5", "gpt-5-6-sol"]);
 const DEFAULT_QUALITY_GATE_MODULES = Object.freeze({
-  script: true,
-  assets: true,
-  storyboards: true,
-  videos: true,
-  delivery: true
+  script: false,
+  assets: false,
+  storyboards: false,
+  videos: false,
+  delivery: false
 });
 
 function assertTextLimit(value, maximum, label, code) {
@@ -783,7 +783,7 @@ function defaultSettings() {
       maxVideoConcurrency: 4,
       shotDuration: 5,
       aspectRatio: "9:16",
-      qualityGatesEnabled: true,
+      qualityGatesEnabled: false,
       qualityGateModules: { ...DEFAULT_QUALITY_GATE_MODULES },
       blueprintAuditChecks: { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS },
       visualStyle: "写实真人影视短剧，现代中国生活质感，真实皮肤与布料，表演克制自然，有动机的电影光，清晰主体层次，竖屏安全构图，人物、服装、场景、道具和商品跨镜一致"
@@ -2385,8 +2385,8 @@ class WorkbenchStore {
         : selected.stage === "final"
           ? "delivery"
           : "assets";
-    const masterEnabled = settings?.generation?.qualityGatesEnabled !== false;
-    const moduleEnabled = settings?.generation?.qualityGateModules?.[moduleName] !== false;
+    const masterEnabled = settings?.generation?.qualityGatesEnabled === true;
+    const moduleEnabled = settings?.generation?.qualityGateModules?.[moduleName] === true;
     const qualityRequired = masterEnabled && moduleEnabled;
     if (qualityRequired && selected.qualityAudit?.ok === false) {
       throw Object.assign(new Error("该候选未通过资产质检，不能确认为成片资产"), { code: "CANDIDATE_QUALITY_FAILED" });

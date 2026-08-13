@@ -1,4 +1,4 @@
 # 无限画布 / 纯梦短剧老虎机
 
-规范源码位于 `work/xiangsu-seedance-bridge`。安装包、成片、研究语料和用户项目不进入Git历史，分别通过发布资产和加密云备份保存。
+正式项目源码位于 `D:\Backup\Documents\无限画布\纯梦短剧老虎机\work\xiangsu-seedance-bridge`。安装包存放在 `release`，成片、研究语料和用户项目不进入 Git 历史，分别通过发布资产和加密云备份保存。
 

@@ -23,6 +23,10 @@
 | BUG-017 | 写文案运行一小时后提示“应拆成 4 个生成单元，实际返回 0 个” | 文本请求没有截止时间；上传剧本拆镜并发超过官网两路上限；解析未兼容常见包裹层；上游返回说明文字时客户端重复请求后仍整阶段失败 | 0.13.31 | `direct-fast-script.test.js`、`uploaded-analysis-resume-regression.test.js`、`uploaded-script-local-fallback.test.js`、全量测试、打包态与安装态审计 | 已验证 |
 | BUG-018 | 5–10 分钟 AI 剧本写作无法稳定在 10 分钟内完成 | 全剧骨架后只以单路顺序写 5 镜小段，单个异常段会阻断全剧，缺少本地生产合同保底 | 0.13.31 | 5/10 分钟全剧本地编译、H3 双说话人、商品后置及参考片硬审计回归 | 已验证 |
 | BUG-019 | 8 分钟简短模式写作慢、蓝图全开会与生成提示互相冲突，异常时仍可能停在失败页 | 生成、参考片、蓝图和本地审计存在四套冲突对白指标；选题会二次请求且无本地候选；完整短句曾被按字符截断；海螺说话人分配会把双人攻防的听者误判为静默人物 | 0.13.32 | `eight-minute-simple-sla.test.js`、`direct-fast-script.test.js`、`quality-blueprint-details.test.js`、全量 120 项、打包态与安装态审计 | 已验证 |
+| BUG-020 | 最新版看不到多种剧本模式，点击 AI 写剧本也没有弹出选择 | 剧本模式只在写作入口的临时弹窗确认，没有纳入项目制作策略；历史项目还可能沿用未确认状态 | 0.13.33 | `mode-strategy-audit-and-provider-regression.test.js`、打包态与安装态 UI 审计 | 已验证 |
+| BUG-021 | 没有设置审核蓝图时仍出现审核拦截或启动瞬间显示开启 | 后端默认配置、历史配置归一化和 HTML 初始勾选值不是同一套显式启用语义 | 0.13.33 | `quality-blueprint-gate.test.js`、`mode-strategy-audit-and-provider-regression.test.js`、打包态与安装态 UI 审计 | 已验证 |
+| BUG-022 | 人物视频提示缺少正脸并整条资产链失败；AutoDL 隔离后其余资产和分镜也被阻断 | 人物视频依赖没有按本地像塑/云端 H3 模式分层；独立人物图缺失时直接终止；远端暂停被误记为整批失败 | 0.13.33 | `mode-strategy-audit-and-provider-regression.test.js`、视频供应商矩阵、20 秒最短链路矩阵 | 已验证 |
+| BUG-023 | 官网与余额正常，但桌面偶发“文本模型连接失败” | Electron 在收到 HTTP 响应前会偶发抛出 `net::ERR_FAILED`，旧恢复器只识别 `ERR_EMPTY_RESPONSE`，没有按同一幂等号切换网络栈恢复 | 0.13.33 | `text-recovery-regression.test.js`、生产余额双网络栈探针、生产文本最小探针 | 已验证 |
 
 ## 维护规则
 

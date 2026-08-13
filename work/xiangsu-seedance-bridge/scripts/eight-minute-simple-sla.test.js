@@ -18,6 +18,11 @@ test("eight-minute simple mode reaches assets under the fifteen-minute contract 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-eight-minute-sla-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
+  const enabledSettings = store.getSettings();
+  enabledSettings.generation.qualityGatesEnabled = true;
+  enabledSettings.generation.qualityGateModules = { script: true, assets: true, storyboards: true, videos: true, delivery: true };
+  enabledSettings.generation.blueprintAuditChecks = Object.fromEntries(Object.keys(enabledSettings.generation.blueprintAuditChecks).map(key => [key, true]));
+  store.saveSettings(enabledSettings);
   const imagePath = path.join(root, "product.png");
   fs.writeFileSync(imagePath, Buffer.from("test product image"));
   const created = store.createProject("八分钟简短模式", {

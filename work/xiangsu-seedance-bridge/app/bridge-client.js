@@ -580,9 +580,10 @@ class BridgeClient {
       });
     } catch (error) {
       const status = Number(error?.status) || 0;
+      const explicitProviderCode = String(error?.code || "").trim();
       const responseUnknown = error?.name === "AbortError"
         || !status
-        || [502, 503, 504].includes(status);
+        || ([502, 503, 504].includes(status) && ["", "BRIDGE_HTTP_ERROR", "SERVER_ERROR"].includes(explicitProviderCode));
       if (responseUnknown) {
         error.code = "VIDEO_SUBMISSION_RESPONSE_UNKNOWN";
         error.remoteSubmissionUnknown = true;

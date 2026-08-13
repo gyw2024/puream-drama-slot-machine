@@ -33,6 +33,34 @@ test("PUREAM text reconnects rejected pre-response requests using one logical id
   }
 });
 
+test("PUREAM text recognizes Electron net::ERR_FAILED as a pre-response interruption", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (_url, init = {}) => {
+    calls.push({ headers: init.headers, body: JSON.parse(init.body) });
+    if (calls.length === 1) throw Object.assign(new Error("net::ERR_FAILED"), { code: "ERR_FAILED" });
+    return new Response([
+      'event: delta\ndata: {"text":"连接恢复"}',
+      'event: done\ndata: {"sessionId":"server-session","usage":{"input_tokens":4,"output_tokens":4},"charge_cents":0,"billing_status":"charged"}',
+      ""
+    ].join("\n\n"), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    const result = await generateText({
+      kind: "puream-relay",
+      baseUrl: "https://puream.cn",
+      apiKey: "TEST-AUTH-CODE",
+      model: "gpt-5-6-sol",
+      maxTokens: 512
+    }, [{ role: "user", content: "测试" }], { sessionId: "logical-text-err-failed" });
+    assert.equal(result, "连接恢复");
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.headers["idempotency-key"] === "logical-text-err-failed"));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("PUREAM text does not replay a stream that already returned content", async () => {
   const originalFetch = global.fetch;
   let calls = 0;

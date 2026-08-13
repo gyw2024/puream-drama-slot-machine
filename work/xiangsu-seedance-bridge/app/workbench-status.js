@@ -83,8 +83,8 @@ function isActiveVideoJob(job) {
   }
 
   function qualityGatesEnabled(settings) {
-    return settings?.generation?.qualityGatesEnabled !== false
-      && settings?.generation?.qualityGateModules?.videos !== false;
+    return settings?.generation?.qualityGatesEnabled === true
+      && settings?.generation?.qualityGateModules?.videos === true;
   }
 
   function shotVideoCandidate(project, shot, settings = null) {

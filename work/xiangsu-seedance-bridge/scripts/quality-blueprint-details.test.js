@@ -13,17 +13,21 @@ const {
 } = require("../app/quality-blueprint");
 const { activeBlueprintFailures, auditDramaSpec, normalizeSemanticReview, scriptQualityGateOptions } = require("../app/workbench-workflow");
 
-test("all thirteen blueprint details default on and persist independent user choices", () => {
+test("all thirteen blueprint details require explicit opt-in and persist independent user choices", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-blueprint-details-"));
   try {
     const store = new WorkbenchStore(root);
     const settings = store.getSettings();
     assert.equal(Object.keys(settings.generation.blueprintAuditChecks).length, 13);
-    assert.equal(Object.values(settings.generation.blueprintAuditChecks).every(Boolean), true);
-    settings.generation.blueprintAuditChecks = Object.fromEntries(Object.keys(DEFAULT_BLUEPRINT_AUDIT_CHECKS).map(key => [key, false]));
+    assert.equal(settings.generation.qualityGatesEnabled, false);
+    assert.equal(Object.values(settings.generation.qualityGateModules).some(Boolean), false);
+    assert.equal(Object.values(settings.generation.blueprintAuditChecks).some(Boolean), false);
+    settings.generation.qualityGatesEnabled = true;
+    settings.generation.qualityGateModules = { script: true, assets: true, storyboards: true, videos: true, delivery: true };
+    settings.generation.blueprintAuditChecks = Object.fromEntries(Object.keys(DEFAULT_BLUEPRINT_AUDIT_CHECKS).map(key => [key, true]));
     store.saveSettings(settings);
     const restored = new WorkbenchStore(root).getSettings();
-    assert.equal(Object.values(restored.generation.blueprintAuditChecks).some(Boolean), false);
+    assert.equal(Object.values(restored.generation.blueprintAuditChecks).every(Boolean), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -54,8 +58,8 @@ test("one-click all-off semantics produce no creative audit blocker", () => {
   assert.deepEqual(audit.failures, []);
 });
 
-test("every legacy validator failure respects its mapped detail without hiding provider limits", () => {
-  const checks = { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, escalation: false, dialogue: false };
+test("every enabled legacy validator respects its mapped detail without hiding selected provider limits", () => {
+  const checks = { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS, productionStructure: true, productIntegration: true, escalation: false, dialogue: false };
   const active = activeBlueprintFailures([
     { code: "ESCALATION_MISSING", message: "conflict pressure is missing" },
     { code: "DIALOGUE_SPEAKER_WRONG", message: "speaker is wrong" },
@@ -95,5 +99,5 @@ test("renderer exposes per-item controls and one-click enable or disable actions
   assert.equal((html.match(/data-blueprint-check=/g) || []).length, 26);
   assert.match(html, /data-blueprint-bulk="all"/);
   assert.match(html, /data-blueprint-bulk="none"/);
-  assert.match(renderer, /saveQualityBlueprintSetting\(state\.settings\?\.generation\?\.qualityGatesEnabled !== false, null, checks\)/);
+  assert.match(renderer, /saveQualityBlueprintSetting\(state\.settings\?\.generation\?\.qualityGatesEnabled === true, null, checks\)/);
 });

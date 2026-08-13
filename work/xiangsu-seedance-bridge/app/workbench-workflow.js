@@ -2890,10 +2890,10 @@ function isQualityGatesEnabled(settings, moduleName = "script") {
   // may block, roll back or rewrite user work. Machine-readable JSON shape and
   // provider-required request fields are validated separately.
   const value = settings?.generation?.qualityGatesEnabled;
-  const globallyEnabled = !(value === false || value === 0 || value === "false" || value === "0" || value === "off");
+  const globallyEnabled = value === true || value === 1 || value === "true" || value === "1" || value === "on";
   if (!globallyEnabled) return false;
   const moduleValue = settings?.generation?.qualityGateModules?.[moduleName];
-  return !(moduleValue === false || moduleValue === 0 || moduleValue === "false" || moduleValue === "0" || moduleValue === "off");
+  return moduleValue === true || moduleValue === 1 || moduleValue === "true" || moduleValue === "1" || moduleValue === "on";
 }
 
 function qualityModuleForStage(stage = "") {
@@ -3107,7 +3107,7 @@ async function videoSubmissionFingerprint(project, providerKind, entityType, ent
 function isRecoverableVideoBatchError(error) {
   return error?.remoteSubmissionUnknown === true
     || error?.remoteGenerationPending === true
-    || ["VIDEO_SUBMISSION_RESPONSE_UNKNOWN", "VIDEO_REMOTE_PENDING", "VIDEO_POLL_TIMEOUT"].includes(String(error?.code || ""));
+    || ["VIDEO_SUBMISSION_RESPONSE_UNKNOWN", "VIDEO_REMOTE_PENDING", "VIDEO_POLL_TIMEOUT", "AUTODL_QUARANTINED", "AUTODL_ISOLATED", "PROVIDER_QUARANTINED"].includes(String(error?.code || ""));
 }
 
 async function executeShotVideoBatch(shots, runShot) {
@@ -3442,7 +3442,20 @@ function archiveCurrentFinalVideo(project, reason = "replaced") {
 }
 
 function isResumableVideoPause(error) {
-  return ["SEEDANCE_DAILY_QUOTA_EXHAUSTED", "ACCOUNT_SWITCH_IN_PROGRESS"].includes(error?.code);
+  return [
+    "SEEDANCE_DAILY_QUOTA_EXHAUSTED",
+    "ACCOUNT_SWITCH_IN_PROGRESS",
+    "AUTODL_QUARANTINED",
+    "AUTODL_ISOLATED",
+    "PROVIDER_QUARANTINED",
+    "VIDEO_SUBMISSION_RESPONSE_UNKNOWN",
+    "VIDEO_REMOTE_PENDING",
+    "VIDEO_POLL_TIMEOUT",
+    "SHOT_VIDEO_BATCH_REMOTE_PENDING",
+    "ASSET_VIDEO_DEPENDENCIES_PENDING",
+    "SHOT_SPEAKER_VOICE_REQUIRED",
+    "HAILUO_SPEAKER_VOICE_REQUIRED"
+  ].includes(error?.code);
 }
 
 function isOperationControlError(error) {
@@ -6396,7 +6409,7 @@ function activeBlueprintFailures(entries = [], options = {}) {
   return (Array.isArray(entries) ? entries : []).filter(entry => {
     const code = entry && typeof entry === "object" ? entry.code : "";
     const message = entry && typeof entry === "object" ? entry.message : entry;
-    return checks[blueprintCheckForFailure(code, message)] !== false;
+    return checks[blueprintCheckForFailure(code, message)] === true;
   });
 }
 
@@ -8092,7 +8105,7 @@ class WorkbenchWorkflow {
   }
 
   videoBridgeForProject(projectId, job = null) {
-    const project = this.store.getProject(projectId);
+    let project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
     const projectConfig = projectVideoProviderConfig(project, settings);
     const kind = String(job?.providerKind || projectConfig.kind || "local-xiangsu");
@@ -8618,6 +8631,7 @@ class WorkbenchWorkflow {
         throw error;
       }
       const resumable = isResumableVideoPause(error);
+      const accountResume = ["SEEDANCE_DAILY_QUOTA_EXHAUSTED", "ACCOUNT_SWITCH_IN_PROGRESS"].includes(error?.code);
       const failedProject = this.store.getProject(projectId);
       const failedOperation = String(failedProject.automation?.operation || "");
       const scriptOperation = ["analyze_script", "idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(failedOperation)
@@ -8627,9 +8641,9 @@ class WorkbenchWorkflow {
         || hasRecoverableScriptCheckpoint(failedProject)
       );
       this.setAutomation(projectId, {
-        status: resumable ? "paused_account" : "failed",
-        message: resumable ? "等待切换像塑账号后从断点续做" : error.message,
-        resumeAfterAccountSwitch: resumable,
+        status: resumable ? (accountResume ? "paused_account" : "paused_remote") : "failed",
+        message: resumable ? (error.message || "远端服务暂不可用；本地断点与幂等任务键均已保留") : error.message,
+        resumeAfterAccountSwitch: accountResume,
         errorCode: error.code || "OPERATION_FAILED",
         recoverableFailure: recoverableScriptFailure
       });
@@ -11368,7 +11382,7 @@ ${shotAnchor}
   }
 
   previewCharacterVideoPrompt(projectId, characterId) {
-    const project = this.store.getProject(projectId);
+    let project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
     const character = project.characters.find(item => item.id === characterId);
     if (!character) throw Object.assign(new Error("角色不存在"), { code: "CHARACTER_NOT_FOUND" });
@@ -12327,7 +12341,9 @@ ${shotAnchor}
     let lastAudit = null;
     let existing = candidateReady(this.store.getProject(projectId), "character", characterId, "character_intro", settings);
     if (existing) {
-      lastAudit = existing.qualityAudit || await this.auditCharacterIntroCandidate(projectId, characterId, existing.id);
+      lastAudit = this.qualityGatesEnabled(settings, "assets")
+        ? (existing.qualityAudit || await this.auditCharacterIntroCandidate(projectId, characterId, existing.id))
+        : skippedQualityAudit("character_intro");
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
     }
     const maxAttempts = this.qualityGatesEnabled(settings, "assets") ? 3 : 1;
@@ -12441,7 +12457,9 @@ ${shotAnchor}
     let lastAudit = null;
     let existing = candidateReady(this.store.getProject(projectId), "shot", shotId, stage, settings);
     if (existing) {
-      lastAudit = existing.qualityAudit || await this.auditStoryboardCandidate(projectId, shotId, existing.id);
+      lastAudit = this.qualityGatesEnabled(settings, "storyboards")
+        ? (existing.qualityAudit || await this.auditStoryboardCandidate(projectId, shotId, existing.id))
+        : skippedQualityAudit(stage);
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
     }
     const maxAttempts = this.qualityGatesEnabled(settings, "storyboards") ? 3 : 1;
@@ -12971,8 +12989,14 @@ ${shotAnchor}
     const settings = this.store.getSettings();
     const character = project.characters.find(item => item.id === characterId);
     if (!character) throw Object.assign(new Error("角色不存在"), { code: "CHARACTER_NOT_FOUND" });
-    const portrait = characterVideoIdentityCandidate(project, characterId, settings);
-    if (!portrait?.filePath) throw Object.assign(new Error(projectRequiresFaceMesh(project, settings) ? "请先为角色生成通过全脸网格要求的独立正脸人物介绍图；人物合板/三视图禁止直接作为视频首帧" : "请先为角色生成独立正脸人物介绍图；人物合板/三视图禁止直接作为视频首帧"), { code: "CHARACTER_INTRO_REQUIRED" });
+    let portrait = characterVideoIdentityCandidate(project, characterId, settings);
+    if (!portrait?.filePath) {
+      this.setAutomation(projectId, { message: `角色“${character.name}”尚无独立人物介绍图，正在自动补齐后继续生成人物视频` });
+      await this.ensureCharacterIntroCandidate(projectId, characterId);
+      project = this.store.getProject(projectId);
+      portrait = characterVideoIdentityCandidate(project, characterId, settings);
+    }
+    if (!portrait?.filePath) throw Object.assign(new Error(projectRequiresFaceMesh(project, settings) ? "角色人物介绍图尚未就绪；系统已保留任务，补齐云端 Seedance 全脸网格后可直接续跑" : "角色人物介绍图尚未就绪；系统已保留任务，补齐后可直接续跑"), { code: "ASSET_VIDEO_DEPENDENCIES_PENDING" });
     const engine = projectVideoEngine(project);
     const stageProvider = characterVideoStageProvider(settings);
     const characterVideoDuration = characterVideoShortestDuration(stageProvider, settings, engine);
@@ -13185,13 +13209,18 @@ ${shotAnchor}
     let existing = candidateReady(project, "character", characterId, "character_video", settings);
     let lastAudit = null;
     if (existing) {
-      lastAudit = existing.qualityAudit || await this.auditCharacterVideoCandidate(projectId, characterId, existing.id);
+      lastAudit = this.qualityGatesEnabled(settings, "assets")
+        ? (existing.qualityAudit || await this.auditCharacterVideoCandidate(projectId, characterId, existing.id))
+        : skippedQualityAudit("character_video");
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
     }
     const maxAttempts = this.qualityGatesEnabled(settings, "assets") ? 3 : 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const candidate = await this.generateCharacterVideo(projectId, characterId, "", { track: false, audit: false, qualityRepair: lastAudit?.repairDirective || "" });
-      lastAudit = await this.auditCharacterVideoCandidate(projectId, characterId, candidate.id);
+      lastAudit = this.qualityGatesEnabled(settings, "assets")
+        ? await this.auditCharacterVideoCandidate(projectId, characterId, candidate.id)
+        : skippedQualityAudit("character_video");
+      if (!this.qualityGatesEnabled(settings, "assets")) this.store.updateCandidate(projectId, candidate.id, { qualityAudit: lastAudit });
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
     throw Object.assign(new Error(`人物视频连续3次未通过声音与素材板质检：${(lastAudit?.failures || []).map(item => item.message).join("；")}`), { code: "CHARACTER_VIDEO_QUALITY_RETRY_EXHAUSTED", characterId, audit: lastAudit });
@@ -14947,6 +14976,7 @@ ${shotAnchor}
     });
     const results = [];
     const failures = [];
+    const deferred = [];
     const runItem = async item => {
       this.assertOperationActive(projectId);
       if (item.status === "completed" || item.status === "skipped") return;
@@ -14974,19 +15004,34 @@ ${shotAnchor}
           }
           if (lastError) throw lastError;
         }
-        else if (item.kind === "character_voice") result = await this.ensureCharacterVoice(projectId, item.entityId, { track: false });
+        else if (item.kind === "character_voice") {
+          const current = this.store.getProject(projectId);
+          const video = candidateReady(current, "character", item.entityId, "character_video", settings);
+          const reusable = this.findReusableVoice((current.characters || []).find(character => character.id === item.entityId));
+          if (!video?.filePath && !reusable?.entry?.filePath) {
+            deferred.push({ key: item.key, kind: item.kind, entityId: item.entityId, label: item.label, code: "ASSET_WAITING_FOR_CHARACTER_VIDEO", message: "等待同角色人物视频恢复后自动提取音色" });
+            this.updateAssetBatchProgress(projectId, item.key, { status: "queued", errorCode: "ASSET_WAITING_FOR_CHARACTER_VIDEO", message: "等待人物视频，不阻断图片资产与分镜图" });
+            return;
+          }
+          result = await this.ensureCharacterVoice(projectId, item.entityId, { track: false });
+        }
         else if (item.kind === "scene_asset") result = await this.ensureSceneAssetCandidate(projectId, item.entityId);
         else if (item.kind === "prop_asset" || item.kind === "wardrobe_asset") result = await this.generateLibraryAssetImage(projectId, item.libraryType, item.entityId, { track: false });
         else result = null;
         if (result) results.push(result);
         this.updateAssetBatchProgress(projectId, item.key, { status: "completed", message: "已生成" });
       } catch (error) {
-        const interrupted = isOperationControlError(error) || isResumableVideoPause(error);
-        if (interrupted) {
+        if (isOperationControlError(error)) {
           this.updateAssetBatchProgress(projectId, item.key, { status: "queued", message: error.message || "等待恢复" });
           throw error;
         }
-        failures.push({ key: item.key, label: item.label, code: error?.code || "ASSET_GENERATION_FAILED", message: error?.message || "资产生成失败" });
+        const record = { key: item.key, kind: item.kind, entityId: item.entityId, label: item.label, code: error?.code || "ASSET_GENERATION_FAILED", message: error?.message || "资产生成失败" };
+        if (isResumableVideoPause(error) || isRecoverableVideoBatchError(error) || ["character_video", "character_voice"].includes(item.kind)) {
+          deferred.push(record);
+          this.updateAssetBatchProgress(projectId, item.key, { status: "queued", errorCode: record.code, message: `${record.message}；其余图片资产与分镜图继续` });
+          return;
+        }
+        failures.push(record);
         this.updateAssetBatchProgress(projectId, item.key, { status: "failed", errorCode: error?.code || "ASSET_GENERATION_FAILED", message: error?.message || "资产生成失败" });
       }
     };
@@ -15012,39 +15057,11 @@ ${shotAnchor}
       this.assertOperationActive(projectId);
       const pending = wave.items.filter(item => item.status !== "completed" && item.status !== "skipped");
       if (!pending.length) continue;
-      const failureStart = failures.length;
       const waveConcurrency = Math.max(1, Math.min(concurrency, pending.length));
       this.setAutomation(projectId, {
         message: `${wave.label}：已提交 ${pending.length} 项；实际并发由账号后台额度控制`
       });
       await mapWithConcurrency(pending, waveConcurrency, item => runItem(item));
-      const waveFailures = failures.slice(failureStart);
-      if (waveFailures.length) {
-        const blocked = waves
-          .slice(waveIndex + 1)
-          .flatMap(nextWave => nextWave.items)
-          .filter(item => item.status !== "completed" && item.status !== "skipped")
-          .map(item => ({
-            key: item.key,
-            kind: item.kind,
-            entityId: item.entityId,
-            label: item.label,
-            blockedByWave: wave.id
-          }));
-        for (const item of blocked) {
-          this.updateAssetBatchProgress(projectId, item.key, {
-            status: "queued",
-            errorCode: "ASSET_BLOCKED_BY_PARENT",
-            message: `${wave.label}失败，父依赖未就绪，未启动`
-          });
-        }
-        throw Object.assign(new Error(`${wave.label}有 ${waveFailures.length} 项失败；已阻止后续 ${blocked.length} 项资产及分镜任务启动。`), {
-          code: "ASSET_WAVE_DEPENDENCY_FAILED",
-          failedWave: wave.id,
-          failures: waveFailures,
-          blocked
-        });
-      }
     }
     this.assertOperationActive(projectId);
     const assetsProject = this.store.getProject(projectId);
@@ -15053,18 +15070,17 @@ ${shotAnchor}
       const candidate = selectedOrLatest(assetsProject, "character", characterId, "character_voice");
       return !candidate?.filePath || !fs.existsSync(candidate.filePath);
     });
-    if (missingVoiceIds.length) {
-      const labels = missingVoiceIds.map(id => assetsProject.characters?.find(item => item.id === id)?.name || id);
-      throw Object.assign(new Error(`对白音色硬前置未满足：${labels.join("、")}缺少可用音色；已停止在任何付费分镜视频提交前，不会生成无声或串音分镜`), {
-        code: "DIALOGUE_VOICE_ASSETS_REQUIRED",
-        characterIds: missingVoiceIds,
-        failures
-      });
-    }
     if (failures.length) {
       throw Object.assign(new Error(`资产批次已完成，但有 ${failures.length} 项失败；连续性资产不得因关闭质检而静默缺失。`), {
         code: "ASSET_BATCH_PARTIAL_FAILED",
         failures
+      });
+    }
+    if (missingVoiceIds.length || deferred.length) {
+      const labels = missingVoiceIds.map(id => assetsProject.characters?.find(item => item.id === id)?.name || id);
+      this.setAutomation(projectId, {
+        message: `图片资产已完成；${labels.length ? `${labels.join("、")}的人物视频/音色待远端恢复，` : ""}可继续生成分镜图，进入分镜视频前再补齐`,
+        assetVideoDependenciesPending: deferred
       });
     }
     return results;
@@ -15427,6 +15443,7 @@ ${shotAnchor}
         updatedAt: new Date().toISOString()
       });
     };
+    const needsCharacterVoiceAssets = projectVideoEngine(project) === "hailuo-h3";
     for (const character of project.characters || []) {
       const identityReady = Boolean(candidateReady(project, "character", character.id, "character_sheet", settings));
       items.push({
@@ -15441,8 +15458,10 @@ ${shotAnchor}
         updatedAt: new Date().toISOString()
       });
       add("character_intro", character.id, `${character.name} · 独立正脸介绍图`);
-      add("character_video", character.id, `${character.name} · 人物视频`);
-      add("character_voice", character.id, `${character.name} · 音色`);
+      if (needsCharacterVoiceAssets) {
+        add("character_video", character.id, `${character.name} · 人物视频`);
+        add("character_voice", character.id, `${character.name} · 音色`);
+      }
     }
     for (const scene of project.scenes || []) add("scene_asset", scene.id, `${scene.name} · 场景四视图`);
     for (const prop of project.assetLibraries?.props || []) {

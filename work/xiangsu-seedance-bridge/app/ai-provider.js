@@ -47,14 +47,29 @@ function endpoint(baseUrl, suffix) {
 // the relay before its first event (`UND_ERR_SOCKET`), while Chromium fetch is
 // the same transport used by the signed-in desktop application.  Keep the
 // global fetch path for Node tests and non-Electron callers.
-function desktopRelayFetch(url, init) {
+async function desktopRelayFetch(url, init) {
+  let electron = null;
   try {
-    const electron = require("electron");
-    if (electron?.net && typeof electron.net.fetch === "function") {
-      return electron.net.fetch(url, init);
-    }
+    electron = require("electron");
   } catch {}
-  return fetch(url, init);
+  if (!electron?.net || typeof electron.net.fetch !== "function") return fetch(url, init);
+  try {
+    return await electron.net.fetch(url, init);
+  } catch (error) {
+    // Some Windows Electron sessions intermittently reject a request before
+    // receiving any HTTP response as `net::ERR_FAILED`.  The official relay
+    // is idempotent on the request headers/body supplied below, so replay the
+    // same logical request through Node's transport instead of surfacing a
+    // false generation failure. Never replay a user-aborted request.
+    const code = String(error?.code || error?.cause?.code || "").toUpperCase();
+    const message = `${error?.message || ""} ${error?.cause?.message || ""}`.toLowerCase();
+    const preResponseTransportFailure = ["ERR_FAILED", "ERR_EMPTY_RESPONSE", "UND_ERR_SOCKET"].includes(code)
+      || /net::err_failed|err_empty_response|fetch failed|socket closed|other side closed/.test(message);
+    if (!init?.signal?.aborted && preResponseTransportFailure && typeof globalThis.fetch === "function") {
+      return globalThis.fetch(url, init);
+    }
+    throw error;
+  }
 }
 
 async function providerFetch(url, options, timeoutMs = 180_000) {
@@ -734,11 +749,11 @@ async function generatePureamText(config, messages, options = {}) {
     const code = String(error?.code || error?.cause?.code || "").toUpperCase();
     const upstreamCode = String(error?.upstreamCode || "").toUpperCase();
     const text = `${error?.message || ""} ${error?.cause?.message || ""}`.toLowerCase();
-    return ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED", "EAI_AGAIN", "ENOTFOUND", "ERR_EMPTY_RESPONSE", "PUREAM_TRANSPORT_INTERRUPTED"].includes(code)
+    return ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED", "EAI_AGAIN", "ENOTFOUND", "ERR_FAILED", "ERR_EMPTY_RESPONSE", "PUREAM_TRANSPORT_INTERRUPTED"].includes(code)
       || ["UPSTREAM_NETWORK_ERROR", "UPSTREAM_CAPACITY_BUSY", "UPSTREAM_429", "UPSTREAM_502", "UPSTREAM_503", "UPSTREAM_504"].includes(upstreamCode)
       || (code === "PUREAM_TEXT_STREAM_ERROR" && /连接失败|网络|繁忙|稍后重试/.test(text))
       || (code === "PUREAM_TEXT_HTTP_ERROR" && [408, 425, 429, 500, 502, 503, 504].includes(Number(error?.status)))
-      || /fetch failed|socket closed|socket hang up|connection reset|other side closed|err_empty_response|empty response|upstream_network_error/.test(text);
+      || /fetch failed|socket closed|socket hang up|connection reset|other side closed|net::err_failed|err_empty_response|empty response|upstream_network_error/.test(text);
   };
   const waitForRetry = ms => new Promise((resolve, reject) => {
     const signal = options.signal;

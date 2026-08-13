@@ -162,6 +162,11 @@ async function main() {
       });
       await page.click("#qualityBlueprintToggle");
       await page.waitForTimeout(100);
+      const masterChecked = await page.isChecked("#qualityBlueprintMaster");
+      if (!masterChecked) {
+        await page.click("#qualityBlueprintMaster");
+        await page.waitForTimeout(100);
+      }
       const readPopover = () => page.evaluate(() => {
         const menu = document.querySelector("#qualityBlueprintMenu");
         const config = document.querySelector(".quality-blueprint-config");
@@ -576,7 +581,13 @@ async function main() {
       };
       const firstPatch = await api.patchProject(firstProject.id, {
         generation: confirmedGeneration,
-        productionPlan: { ...(firstProject.productionPlan || {}), executionMode: "step", inputMode: "ai" },
+        productionPlan: {
+          ...(firstProject.productionPlan || {}),
+          executionMode: "step",
+          inputMode: "ai",
+          scriptFormat: "production",
+          scriptFormatConfirmed: true
+        },
         automation: {
           ...(firstProject.automation || {}),
           status: "running",
