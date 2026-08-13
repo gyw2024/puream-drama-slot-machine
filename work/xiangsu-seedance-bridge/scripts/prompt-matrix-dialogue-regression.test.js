@@ -271,13 +271,13 @@ test("long uploaded dialogue scripts keep every source line intact across fast p
   const ledger = parseSourceDialogueLedger(source);
   assert.equal(ledger.length, sourceLines.length);
   const chunks = analysisChunksForSchedule(source, 30);
-  assert.equal(chunks.length, 4);
+  assert.equal(chunks.length, 6);
   for (const item of ledger) {
     assert.equal(chunks.filter(chunk => chunk.text.includes(item.text)).length, 1, item.id);
   }
   const schedules = analysisChunkSchedules(chunks, { unitDurations: Array(30).fill(10) });
   assert.equal(schedules.reduce((sum, item) => sum + item.unitCount, 0), 30);
-  assert.ok(Math.max(...schedules.map(item => item.unitCount)) <= 8);
+  assert.ok(Math.max(...schedules.map(item => item.unitCount)) <= 5);
   assert.deepEqual(schedules.flatMap(item => item.durations), Array(30).fill(10));
 });
 
@@ -377,6 +377,10 @@ test("natural uploaded script completes the real adaptive-duration analysis in b
     script: { raw: source }
   });
   let modelCalls = 0;
+  let activeCalls = 0;
+  let maxActiveCalls = 0;
+  let maxRequestChars = 0;
+  let maxRequestedUnits = 0;
   const workflow = new WorkbenchWorkflow({
     store,
     bridge: {},
@@ -384,13 +388,18 @@ test("natural uploaded script completes the real adaptive-duration analysis in b
     stagingRoot: root,
     textGenerator: async (_config, messages) => {
       modelCalls += 1;
+      activeCalls += 1;
+      maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
+      maxRequestChars = Math.max(maxRequestChars, JSON.stringify(messages).length);
+      await new Promise(resolve => setTimeout(resolve, 3));
       const system = String(messages.find(message => message.role === "system")?.content || "");
       const ledgerText = system.split("【上传剧本逐句事实账本·最高优先级】\n")[1]?.split("\n每个ID必须")[0] || "[]";
       const ledger = JSON.parse(ledgerText);
       const contract = system.match(/当前片段必须恰好输出 (\d+) 个 shots，duration 依次严格写为 ([^\n]+) 秒/);
       const count = Number(contract?.[1]) || 1;
+      maxRequestedUnits = Math.max(maxRequestedUnits, count);
       const durations = String(contract?.[2] || "10").split("、").map(Number);
-      return {
+      const result = {
         story: { premise: "林娜与秦添围绕一本沟通训练书化解长期误会", ending: "两人按书中步骤把真话说完" },
         characters: [
           { id: "C01", name: "林娜", description: "三十多岁女性，短发，神情敏锐", identitySignature: "细长眼、左眉小痣、利落短发", voiceDescription: "女中音，急时破音", signatureLine: "你现在说清楚" },
@@ -434,11 +443,18 @@ test("natural uploaded script completes the real adaptive-duration analysis in b
           };
         })
       };
+      activeCalls -= 1;
+      return result;
     }
   });
   const analyzed = await workflow.analyzeScript(created.id);
   assert.equal(modelCalls, expectedCallCount);
+  assert.ok(maxActiveCalls <= 3);
+  assert.ok(maxActiveCalls >= 2);
+  assert.ok(maxRequestedUnits <= 5);
+  assert.ok(maxRequestChars < 60_000);
   assert.equal(analyzed.currentStage, "assets");
+  assert.equal(analyzed.script.analysisCheckpoint, null);
   assert.equal(analyzed.script.sourceDialogueLedger.length, sourceLedger.length);
   assert.equal(analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0), estimatedDuration.targetSeconds);
   assert.equal(analyzed.generation.targetDurationSeconds, estimatedDuration.targetSeconds);

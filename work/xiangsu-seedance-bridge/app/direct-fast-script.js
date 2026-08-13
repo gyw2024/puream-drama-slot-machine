@@ -99,7 +99,7 @@ function directFastResponseSchema() {
   };
 }
 
-function directFastUserPrompt({ topic, product, unitCount, totalSeconds, productStartNumber, segmentStart = 1, segmentEnd = unitCount }) {
+function directFastUserPrompt({ topic, product, unitCount, totalSeconds, productStartNumber, segmentStart = 1, segmentEnd = unitCount, scriptFormatDirective = "" }) {
   const start = Math.max(1, Math.min(unitCount, Number(segmentStart) || 1));
   const end = Math.max(start, Math.min(unitCount, Number(segmentEnd) || unitCount));
   const segmentCount = end - start + 1;
@@ -112,6 +112,7 @@ function directFastUserPrompt({ topic, product, unitCount, totalSeconds, product
     "每镜d必须恰好6句，每句5-9个可说汉字，台词不能同义复述；双人镜严格轮流攻防。em必须写清起始情绪、触发、峰值和余震。a必须是能拍到的独占动作结果，不能写心理说明。",
     "S01前2秒必须由伤害动作直接开场，第一句必须是6-12字的质问或制止；前60秒不得连续同一人念词，必须有说话人和听者反应交替。",
     `唯一主反转固定在约72%位置。${product.name}及任何俗称在S${String(productStartNumber).padStart(2, "0")}之前绝对禁止出现；S${String(productStartNumber).padStart(2, "0")}-S${String(Math.min(unitCount, productStartNumber + 2)).padStart(2, "0")}才用3镜完成真实需求→自然使用→可见合规体验→人物决定，不写治疗、治愈或医疗承诺。最后一镜回到人物行动结局。`,
+    scriptFormatDirective,
     "总JSON尽量紧凑，不要解释，不要Markdown，不要输出画面提示词、声音提示词或模型名称。",
     `结构示例：${JSON.stringify(directFastResponseSchema())}`
   ].join("\n");

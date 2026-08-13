@@ -9,13 +9,17 @@ const { isActiveVideoJob } = require("./workbench-status");
 const { DEFAULT_BLUEPRINT_AUDIT_CHECKS, normalizeBlueprintAuditChecks } = require("./quality-blueprint");
 const { normalizeVideoProvider, normalizeProviderKind, providerEngine } = require("./video-provider-policy");
 const {
+  normalizePromptIntake,
+  applyPromptIntakeToMaterializedEntities
+} = require("./prompt-intake");
+const {
   backfillProjectCosts,
   defaultCostLedger,
   normalizeCostEntry,
   normalizeCostLedger
 } = require("./project-costs");
 
-const PROJECT_VERSION = 9;
+const PROJECT_VERSION = 11;
 const SETTINGS_VERSION = 15;
 const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MAX_SCRIPT_CHARS = 500_000;
@@ -47,6 +51,9 @@ function assertPromptOverrideLimits(entity, label) {
 
 function assertProjectTextLimits(project) {
   assertTextLimit(project?.script?.raw, MAX_SCRIPT_CHARS, "剧本正文", "SCRIPT_TOO_LARGE");
+  for (const entry of normalizePromptIntake(project?.promptIntake).entries) {
+    assertTextLimit(entry.prompt, MAX_MANUAL_PROMPT_CHARS, `${entry.stage}批量提示词`, "MANUAL_PROMPT_TOO_LARGE");
+  }
   for (const shot of project?.shots || []) {
     const label = `镜头 ${shot.number || shot.id || ""}`;
     assertTextLimit(shot?.manualVideoPrompt, MAX_MANUAL_PROMPT_CHARS, `${label}视频手工提示词`, "MANUAL_PROMPT_TOO_LARGE");
@@ -797,10 +804,17 @@ function normalizeVideoEngine(value) {
   return value === "hailuo-h3" ? "hailuo-h3" : "seedance";
 }
 
+function normalizeScriptFormat(value) {
+  if (value === "timed_storyboard") return "timed_storyboard";
+  return value === "dialogue" ? "dialogue" : "production";
+}
+
 function defaultProductionPlan(options = {}) {
   return {
     executionMode: options.executionMode === "full" ? "full" : "step",
-    inputMode: options.inputMode === "manual" ? "manual" : "ai"
+    inputMode: options.inputMode === "manual" ? "manual" : "ai",
+    scriptFormat: normalizeScriptFormat(options.scriptFormat),
+    scriptFormatConfirmed: options.scriptFormatConfirmed === true
   };
 }
 
@@ -822,6 +836,7 @@ function defaultProject(title = "未命名漫剧", options = {}) {
       analyzedAt: null,
       manualShotPrompts: false,
       generationCheckpoint: null,
+      analysisCheckpoint: null,
       generationLive: null
     },
     ideation: defaultIdeation(),
@@ -845,6 +860,7 @@ function defaultProject(title = "未命名漫剧", options = {}) {
       durationContract: null
     },
     productionPlan: defaultProductionPlan(options),
+    promptIntake: normalizePromptIntake(),
     characters: [],
     scenes: [],
     shots: [],
@@ -871,6 +887,7 @@ function hasMaterializedProduction(project = {}) {
     || (project.scenes || []).length
     || project.script?.analyzedAt
     || project.script?.generationCheckpoint
+    || project.script?.analysisCheckpoint
     || project.script?.generationLive
     || project.finalVideoPath
     || (project.candidates || []).some(item => (item.productionRevision || "") === revision && item.stale !== true)
@@ -901,6 +918,12 @@ function productionInputChangeReasons(project = {}, patch = {}) {
     for (const [key, label] of [["name", "商品名称"], ["description", "商品说明"], ["sellingPoints", "商品卖点"], ["imagePath", "商品图片"]]) {
       if (String(requested[key] || "") !== String(current[key] || "")) reasons.push(label);
     }
+  }
+  if (Object.prototype.hasOwnProperty.call(patch || {}, "productionPlan")
+    && Object.prototype.hasOwnProperty.call(patch.productionPlan || {}, "scriptFormat")) {
+    const currentFormat = normalizeScriptFormat(project.productionPlan?.scriptFormat);
+    const requestedFormat = normalizeScriptFormat(patch.productionPlan?.scriptFormat);
+    if (requestedFormat !== currentFormat) reasons.push("剧本格式");
   }
   return [...new Set(reasons)];
 }
@@ -943,7 +966,7 @@ function invalidateProjectProductionPlan(project, reasons = []) {
   project.scenes = [];
   project.shots = [];
   project.script = { ...(project.script || {}) };
-  for (const key of ["analysis", "analysisChunks", "analysisMethod", "qualityAudit", "promptLibraryVersion", "analyzedAt", "sourceFingerprint", "durationContract", "generationCheckpoint", "generationLive"]) {
+  for (const key of ["analysis", "analysisChunks", "analysisMethod", "modeSynopsis", "detectedFormat", "qualityAudit", "promptLibraryVersion", "analyzedAt", "sourceFingerprint", "durationContract", "generationCheckpoint", "analysisCheckpoint", "generationLive"]) {
     delete project.script[key];
   }
   project.generation = { ...(project.generation || {}), durationLocked: false, durationContract: null };
@@ -1537,7 +1560,7 @@ class WorkbenchStore {
     const isCharacter = candidate.entityType === "character" && characterStages.has(candidate.stage);
     const isScene = candidate.entityType === "scene" && candidate.stage === "scene_asset";
     if (!isCharacter && !isScene) {
-      throw Object.assign(new Error("只有人物形象图和场景空间锚图可以进入跨项目资产库"), { code: "REUSABLE_ASSET_KIND_INVALID" });
+      throw Object.assign(new Error("只有人物形象图和场景四视图可以进入跨项目资产库"), { code: "REUSABLE_ASSET_KIND_INVALID" });
     }
     if (!candidate.filePath || !fs.existsSync(candidate.filePath)) {
       throw Object.assign(new Error("资产文件不存在，无法进入跨项目资产库"), { code: "REUSABLE_ASSET_FILE_MISSING" });
@@ -1903,6 +1926,7 @@ class WorkbenchStore {
     project.jobs = Array.isArray(project.jobs) ? project.jobs : [];
     project.activity = Array.isArray(project.activity) ? project.activity : [];
     project.finalVideoHistory = Array.isArray(project.finalVideoHistory) ? project.finalVideoHistory : [];
+    project.promptIntake = normalizePromptIntake(project.promptIntake);
     project.assetLibraries = {
       ...defaultAssetLibraries(),
       ...(project.assetLibraries || {}),
@@ -1914,7 +1938,7 @@ class WorkbenchStore {
     project.costLedger = backfillProjectCosts(project, {
       textPricing: this.getSettings()?.textPricing || {}
     });
-    project.script = { raw: "", analyzedAt: null, manualShotPrompts: false, ...(project.script || {}) };
+    project.script = { raw: "", analyzedAt: null, manualShotPrompts: false, generationCheckpoint: null, analysisCheckpoint: null, generationLive: null, ...(project.script || {}) };
     project.product = { name: "", description: "", sellingPoints: "", imagePath: "", publicUrl: "", ...(project.product || {}) };
     if (!project.product.sellingPoints && project.product.description) project.product.sellingPoints = project.product.description;
     project.ideation = {
@@ -1922,7 +1946,25 @@ class WorkbenchStore {
       ...(project.ideation || {}),
       topics: Array.isArray(project.ideation?.topics) ? project.ideation.topics : []
     };
-    project.productionPlan = { ...defaultProductionPlan(), ...(project.productionPlan || {}) };
+    const legacyProductionPlan = project.productionPlan && typeof project.productionPlan === "object"
+      ? project.productionPlan
+      : {};
+    const hadScriptFormatContract = Object.prototype.hasOwnProperty.call(legacyProductionPlan, "scriptFormat");
+    project.productionPlan = defaultProductionPlan(legacyProductionPlan);
+    if (!hadScriptFormatContract) {
+      const legacyHasWrittenScript = Boolean(
+        String(project.script?.raw || "").trim()
+        || project.script?.generationCheckpoint
+        || project.script?.analysisCheckpoint
+        || project.script?.generationLive
+        || project.script?.analyzedAt
+        || project.shots.length
+        || project.characters.length
+        || project.scenes.length
+      );
+      project.productionPlan.scriptFormat = "production";
+      project.productionPlan.scriptFormatConfirmed = legacyHasWrittenScript;
+    }
     const legacyGeneration = project.generation || {};
     const minimumProjectSeconds = project.productionPlan.inputMode === "manual" ? 1 : 30;
     project.generation = {
@@ -1942,11 +1984,14 @@ class WorkbenchStore {
         ? legacyGeneration.durationContract
         : null
     };
+    applyPromptIntakeToMaterializedEntities(project);
     return attachStoreBaseline(project, storeBaseline);
   }
 
   saveProject(project) {
     if (!project?.id) throw Object.assign(new Error("漫剧项目数据无效"), { code: "PROJECT_INVALID" });
+    project.promptIntake = normalizePromptIntake(project.promptIntake);
+    applyPromptIntakeToMaterializedEntities(project);
     const filePath = this.projectPath(project.id);
     let diskProject = null;
     if (fs.existsSync(filePath)) {
@@ -2036,10 +2081,10 @@ class WorkbenchStore {
     }
     const shouldInvalidatePlan = inputChangeReasons.length > 0 && hasMaterializedProduction(project);
     let activitySummary = String(patch?.activitySummary || "项目已更新");
-    const allowed = ["title", "status", "currentStage", "script", "ideation", "product", "generation", "productionPlan", "characters", "scenes", "shots", "automation", "finalVideoPath", "finalVideoHistory"];
+    const allowed = ["title", "status", "currentStage", "script", "ideation", "product", "generation", "productionPlan", "promptIntake", "characters", "scenes", "shots", "automation", "finalVideoPath", "finalVideoHistory"];
     for (const key of allowed) {
       if (!Object.prototype.hasOwnProperty.call(patch || {}, key)) continue;
-      project[key] = ["script", "product", "generation", "productionPlan", "automation"].includes(key)
+      project[key] = ["script", "product", "generation", "productionPlan", "promptIntake", "automation"].includes(key)
         ? { ...(project[key] || {}), ...(patch[key] || {}) }
         : patch[key];
     }
@@ -2059,7 +2104,11 @@ class WorkbenchStore {
       };
     }
     if (Object.prototype.hasOwnProperty.call(patch || {}, "productionPlan")) {
-      project.productionPlan = { ...defaultProductionPlan(), ...(patch.productionPlan || {}) };
+      project.productionPlan = defaultProductionPlan(project.productionPlan);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch || {}, "promptIntake")) {
+      project.promptIntake = normalizePromptIntake(project.promptIntake);
+      applyPromptIntakeToMaterializedEntities(project);
     }
     if (shouldInvalidatePlan) {
       invalidateProjectProductionPlan(project, inputChangeReasons);
@@ -2679,6 +2728,8 @@ module.exports = {
   WorkbenchStore,
   atomicWriteJson,
   defaultProject,
+  defaultProductionPlan,
+  normalizeScriptFormat,
   defaultSettings,
   defaultTextProviderProfiles,
   defaultPromptTemplates,

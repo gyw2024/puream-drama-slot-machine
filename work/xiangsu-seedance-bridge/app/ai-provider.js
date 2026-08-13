@@ -66,7 +66,10 @@ async function providerFetch(url, options, timeoutMs = 180_000) {
     ? externalSignal.reason
     : Object.assign(new Error("供应商请求已取消"), { code: "PROVIDER_REQUEST_ABORTED" });
   externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  const effectiveTimeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 0;
+  const timer = effectiveTimeoutMs
+    ? setTimeout(() => { timedOut = true; controller.abort(); }, effectiveTimeoutMs)
+    : null;
   try {
     const response = await fetch(url, { ...options, signal: controller.signal });
     const text = await response.text();
@@ -100,7 +103,7 @@ async function providerFetch(url, options, timeoutMs = 180_000) {
     if (error?.name === "AbortError" && timedOut) throw Object.assign(new Error("供应商请求超时"), { code: "PROVIDER_TIMEOUT" });
     throw error;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }
@@ -440,17 +443,32 @@ function parsePureamSse(sse) {
   const mergeUsage = payload => {
     if (!payload || typeof payload !== "object") return;
     const rawUsage = payload.usage && typeof payload.usage === "object" ? payload.usage : {};
+    const billing = payload.billing && typeof payload.billing === "object" ? payload.billing : {};
+    const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt : {};
+    const usageBilling = rawUsage.billing && typeof rawUsage.billing === "object" ? rawUsage.billing : {};
     const inputTokens = finiteValue(rawUsage.inputTokens, rawUsage.input_tokens, rawUsage.prompt_tokens, payload.inputTokens, payload.input_tokens);
     const outputTokens = finiteValue(rawUsage.outputTokens, rawUsage.output_tokens, rawUsage.completion_tokens, payload.outputTokens, payload.output_tokens);
     const totalTokens = finiteValue(rawUsage.totalTokens, rawUsage.total_tokens, payload.totalTokens, payload.total_tokens);
     const chargeCents = finiteValue(
       rawUsage.chargeCents, rawUsage.charge_cents, rawUsage.totalChargeCents,
-      payload.chargeCents, payload.charge_cents, payload.totalChargeCents
+      payload.chargeCents, payload.charge_cents, payload.totalChargeCents,
+      billing.chargeCents, billing.charge_cents, billing.totalChargeCents,
+      receipt.chargeCents, receipt.charge_cents, receipt.totalChargeCents,
+      usageBilling.chargeCents, usageBilling.charge_cents, usageBilling.totalChargeCents
     );
-    const explicitYuan = finiteValue(rawUsage.chargeYuan, rawUsage.charge_yuan, payload.chargeYuan, payload.charge_yuan);
+    const explicitYuan = finiteValue(
+      rawUsage.chargeYuan, rawUsage.charge_yuan, rawUsage.costYuan, rawUsage.cost_yuan,
+      payload.chargeYuan, payload.charge_yuan, payload.costYuan, payload.cost_yuan,
+      billing.chargeYuan, billing.charge_yuan, billing.costYuan, billing.cost_yuan, billing.amountYuan, billing.amount_yuan,
+      receipt.chargeYuan, receipt.charge_yuan, receipt.costYuan, receipt.cost_yuan, receipt.amountYuan, receipt.amount_yuan,
+      usageBilling.chargeYuan, usageBilling.charge_yuan, usageBilling.costYuan, usageBilling.cost_yuan, usageBilling.amountYuan, usageBilling.amount_yuan
+    );
     const chargeYuan = explicitYuan !== null ? explicitYuan : (chargeCents !== null ? Number((chargeCents / 100).toFixed(6)) : null);
     const billingStatus = String(
-      rawUsage.billingStatus || rawUsage.billing_status || payload.billingStatus || payload.billing_status || ""
+      rawUsage.billingStatus || rawUsage.billing_status || payload.billingStatus || payload.billing_status
+      || billing.billingStatus || billing.billing_status || billing.status
+      || receipt.billingStatus || receipt.billing_status || receipt.status
+      || usageBilling.billingStatus || usageBilling.billing_status || usageBilling.status || ""
     ).trim();
     const model = String(payload.modelSlug || payload.model || rawUsage.model || "").trim();
     usage = {
@@ -486,7 +504,7 @@ function parsePureamSse(sse) {
       streamErrorCode = String(payload?.error?.code || payload?.code || "").trim();
     }
     if (payload?.sessionId) sessionId = String(payload.sessionId);
-    if (currentEvent === "done" || payload?.usage || payload?.charge_cents != null || payload?.charge_yuan != null || payload?.totalChargeCents != null) mergeUsage(payload);
+    if (currentEvent === "done" || payload?.usage || payload?.billing || payload?.receipt || payload?.charge_cents != null || payload?.charge_yuan != null || payload?.totalChargeCents != null) mergeUsage(payload);
     events.push({ event: currentEvent || "data", keys: payload && typeof payload === "object" ? Object.keys(payload) : [], textLength: typeof chunk === "string" ? chunk.length : 0, outputTokens: Number(payload?.outputTokens) || 0 });
   }
   return { text, streamError, streamErrorCode, events, sessionId, usage };
@@ -527,7 +545,10 @@ async function generatePureamTextOnce(config, messages, options = {}) {
   });
   const controller = new AbortController();
   const externalSignal = options.signal;
-  const timeoutMs = Math.max(30_000, Math.min(900_000, Number(options.timeoutMs) || 300_000));
+  // Text generation has no total-duration deadline. The external signal still
+  // supports the user's explicit pause/stop action, and transport failures are
+  // surfaced without silently issuing another billable request.
+  const timeoutMs = 0;
   let timedOut = false;
   const abortFromExternal = () => controller.abort(externalSignal?.reason);
   if (externalSignal?.aborted) throw externalSignal.reason instanceof Error
@@ -539,11 +560,11 @@ async function generatePureamTextOnce(config, messages, options = {}) {
   // forever; recovery retains this same logical request id.
   let timeoutReject;
   const timeoutPromise = new Promise((_, reject) => { timeoutReject = reject; });
-  const timer = setTimeout(() => {
+  const timer = timeoutMs > 0 ? setTimeout(() => {
     timedOut = true;
     controller.abort();
     timeoutReject(Object.assign(new Error("纯梦文本中转请求超时"), { code: "PROVIDER_TIMEOUT" }));
-  }, timeoutMs);
+  }, timeoutMs) : null;
   try {
     const clientRequestId = String(options.sessionId || "").trim().slice(0, 180);
     const fetchPromise = desktopRelayFetch(endpoint(config.baseUrl, "/api/desktop/chat/complete"), {
@@ -664,7 +685,7 @@ async function generatePureamTextOnce(config, messages, options = {}) {
     }
     throw error;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }
@@ -714,7 +735,8 @@ async function generatePureamText(config, messages, options = {}) {
 }
 
 function providerTimeout(options = {}) {
-  return Math.max(30_000, Math.min(900_000, Number(options.timeoutMs) || 300_000));
+  void options;
+  return 0;
 }
 
 function normalizedMaxTokens(config, fallback = 16384) {
@@ -1044,8 +1066,9 @@ async function generatePureamImage(config, prompt, targetPath, options = {}) {
   let payload = await providerFetch(endpoint(config.baseUrl, "/api/ai/gpt-image-2/v1/images/generations"), {
     method: "POST",
     headers: pureamApiHeaders(config),
-    body: JSON.stringify(body)
-  }, 300_000);
+    body: JSON.stringify(body),
+    signal: options.signal
+  }, 0);
   let charge = qingboCharge(payload);
   const taskId = taskIdOf(payload);
   let resultUrl = "";
@@ -1061,13 +1084,18 @@ async function generatePureamImage(config, prompt, targetPath, options = {}) {
     });
   }
   if (!urls.length) {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < 600_000) {
-      await new Promise(resolve => setTimeout(resolve, 2_000));
-      payload = await providerFetch(endpoint(config.baseUrl, `/api/ai/gpt-image-2/v1/tasks/${encodeURIComponent(taskId)}`), {
-        method: "GET",
-        headers: pureamApiHeaders(config)
-      }, 60_000);
+    while (true) {
+      await waitForRetry(2_000, options.signal);
+      try {
+        payload = await providerFetch(endpoint(config.baseUrl, `/api/ai/gpt-image-2/v1/tasks/${encodeURIComponent(taskId)}`), {
+          method: "GET",
+          headers: pureamApiHeaders(config),
+          signal: options.signal
+        }, 60_000);
+      } catch (error) {
+        if (isQingboTransientError(error)) continue;
+        throw Object.assign(error, { taskId, remoteGenerationPending: true });
+      }
       charge = mergeQingboCharge(charge, payload);
       discoveredUrls = collectImageUrls(payload);
       rejectedPlaceholderUrls = [...new Set([...rejectedPlaceholderUrls, ...discoveredUrls.filter(isProviderPlaceholderImageUrl)])];
@@ -1086,11 +1114,6 @@ async function generatePureamImage(config, prompt, targetPath, options = {}) {
       }
     }
   }
-  if (!urls.length) throw Object.assign(new Error("纯梦 GPT Image 2 生成超时"), {
-    code: "IMAGE_GENERATION_TIMEOUT",
-    taskId,
-    rejectedPlaceholderUrls
-  });
   resultUrl = urls[0];
   await downloadImage(resultUrl, targetPath);
   return {
@@ -1312,7 +1335,7 @@ async function generatePureamVideo(config, prompt, targetPath, options = {}) {
           headers: request.headers,
           body: JSON.stringify(request.body),
           signal: options.signal
-        }, 300_000);
+        }, 0);
         break;
       } catch (error) {
         if (attempt === 4 || !isQingboTransientError(error)) throw error;
@@ -1331,11 +1354,9 @@ async function generatePureamVideo(config, prompt, targetPath, options = {}) {
   }
   if (!urls.length && !taskId) throw Object.assign(new Error("纯梦清波中转没有返回任务编号或视频链接"), { code: "VIDEO_RESULT_EMPTY" });
   if (!urls.length) {
-    const startedAt = Date.now();
-    const maxPollMs = Number.isFinite(Number(options.maxPollMs)) ? Math.max(1, Number(options.maxPollMs)) : 900_000;
     const basePollDelayMs = Number.isFinite(Number(options.pollIntervalMs)) ? Math.max(0, Number(options.pollIntervalMs)) : 5_000;
     let pollDelayMs = basePollDelayMs;
-    while (Date.now() - startedAt < maxPollMs) {
+    while (true) {
       const queryUrl = assertPureamCloudRequestUrl(endpoint(new URL(request.createUrl).origin, request.queryPath(taskId)));
       try {
         await waitForRetry(pollDelayMs, options.signal);
@@ -1364,7 +1385,6 @@ async function generatePureamVideo(config, prompt, targetPath, options = {}) {
       }
     }
   }
-  if (!urls.length) throw Object.assign(new Error(`纯梦清波视频等待超时，任务仍可继续查询：${taskId}`), { code: "VIDEO_GENERATION_TIMEOUT", taskId, remoteGenerationPending: true, upstream: payload });
   const charge = qingboCharge(payload);
   let videoUrl = "";
   try {
@@ -1438,7 +1458,7 @@ async function generateImage(config, prompt, targetPath, options = {}) {
     }
     const headers = {};
     if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
-    data = await providerFetch(endpoint(config.baseUrl, "/images/edits"), { method: "POST", headers, body: form }, 300_000);
+    data = await providerFetch(endpoint(config.baseUrl, "/images/edits"), { method: "POST", headers, body: form, signal: options.signal }, 0);
   } else {
     const body = {
       model: config.model,
@@ -1450,8 +1470,9 @@ async function generateImage(config, prompt, targetPath, options = {}) {
     data = await providerFetch(endpoint(config.baseUrl, "/images/generations"), {
       method: "POST",
       headers: authHeaders(config),
-      body: JSON.stringify(body)
-    }, 300_000);
+      body: JSON.stringify(body),
+      signal: options.signal
+    }, 0);
   }
   const image = data?.data?.[0];
   if (typeof image?.b64_json === "string" && image.b64_json) {

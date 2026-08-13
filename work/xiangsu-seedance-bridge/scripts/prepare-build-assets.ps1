@@ -1,5 +1,6 @@
 param(
-  [string]$Destination
+  [string]$Destination,
+  [string]$Source
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +20,19 @@ function Test-ExpectedFfmpeg([string]$FilePath) {
 
 if (Test-ExpectedFfmpeg $Destination) {
   Write-Host "FFmpeg 7.1 build asset is already present and verified."
+  exit 0
+}
+
+# Release workspaces can reuse a previously verified pinned binary. This keeps
+# packaging deterministic even when GitHub's large-file download is slow; the
+# same exact size and SHA-256 gate still applies before and after the copy.
+if ($Source) {
+  if (-not (Test-ExpectedFfmpeg $Source)) { throw "The supplied FFmpeg source does not match the pinned size or SHA-256" }
+  $destinationDirectory = Split-Path -Parent $Destination
+  New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+  Copy-Item -LiteralPath $Source -Destination $Destination -Force
+  if (-not (Test-ExpectedFfmpeg $Destination)) { throw "FFmpeg verification failed after copying the supplied source" }
+  Write-Host "FFmpeg 7.1 build asset was restored from a verified local source: $Destination"
   exit 0
 }
 

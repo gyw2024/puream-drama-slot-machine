@@ -22,6 +22,8 @@ function providerFamilyFor(project = {}, settings = null) {
 
 const COMMON_DIALOGUE_LOCK = "剧本原稿台词是唯一事实源：每句原文必须完整保留、只出现一次、不得改写或合并；说话人、听者、语气、表情、身体动作和口型必须逐句绑定，听者不得抢口型。";
 const COMMON_PRODUCT_LOCK = "商品只在剧本语义触发的镜头出现；名称、包装、颜色、Logo、外形和卖点只取用户上传商品信息与商品图，禁止虚构品牌、功效或把商品硬塞进无关镜头。";
+const COMMON_SCENE_LOCK = "场景资产固定为一张2×2四角度参考板；分镜和视频只选与当前机位匹配的一格锁门窗家具、轴线、时段和光向，最终剧情画面禁止出现四宫格、边框、序号或参考板。";
+const CLOUD_SCENE_LOCK = "The scene asset is one 2-by-2 four-angle board of the same space. Use only the panel matching the current camera axis to lock doors, windows, furniture, time of day and key-light direction; never render the board, gutters, labels or panel numbers in the final shot.";
 const COMMON_FLOW_LOCK = "一键制作和分阶段制作共用本合同；入口不同不得改变帧需求、台词、商品绑定、提示词编译或提交顺序。";
 
 const MATRIX = Object.freeze({
@@ -125,6 +127,7 @@ function matrixGlobalPrompt(providerFamily, mode) {
     `视频提示：${entry.videoPolicy}`,
     `台词合同：${COMMON_DIALOGUE_LOCK}`,
     `商品合同：${COMMON_PRODUCT_LOCK}`,
+    `场景合同：${COMMON_SCENE_LOCK}`,
     `入口合同：${COMMON_FLOW_LOCK}`
   ].join("\n");
 }
@@ -136,14 +139,16 @@ function matrixGlobalPromptForProject(project = {}, settings = null, modeOverrid
 
 function matrixRuntimeVideoPromptForProject(project = {}, settings = null, modeOverride = "") {
   const entry = matrixEntryForProject(project, settings, modeOverride);
-  if (entry.providerFamily === "cloud") return CLOUD_H3_RUNTIME_PROMPTS[entry.mode];
-  return `【八模式视频提交·${entry.label}·${entry.key}】${entry.videoPolicy} ${COMMON_DIALOGUE_LOCK} ${COMMON_PRODUCT_LOCK}`;
+  if (entry.providerFamily === "cloud") return `${CLOUD_H3_RUNTIME_PROMPTS[entry.mode]} ${CLOUD_SCENE_LOCK}`;
+  return `【八模式视频提交·${entry.label}·${entry.key}】${entry.videoPolicy} ${COMMON_DIALOGUE_LOCK} ${COMMON_PRODUCT_LOCK} ${COMMON_SCENE_LOCK}`;
 }
 
 module.exports = {
   COMMON_DIALOGUE_LOCK,
+  CLOUD_SCENE_LOCK,
   COMMON_FLOW_LOCK,
   COMMON_PRODUCT_LOCK,
+  COMMON_SCENE_LOCK,
   MATRIX,
   matrixEntry,
   matrixEntryForProject,

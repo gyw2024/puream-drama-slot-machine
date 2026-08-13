@@ -149,6 +149,12 @@ button { color: inherit; }
 .strategy-field-row { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
 .compact-choice { margin: 0 14px 0 0 !important; display: inline-flex; align-items: center; gap: 7px; color: #b8aa97 !important; font-size: 10px; cursor: pointer; }
 .strategy-dialog { width: min(680px,calc(100vw - 32px)); }
+.script-format-dialog { width:min(720px,calc(100vw - 32px)); }
+.script-format-options .strategy-option { min-height:118px; }
+.script-format-options .strategy-option:last-child { grid-column:1 / -1; min-height:96px; }
+.script-format-guarantee { margin-top:13px; padding:12px 14px; display:flex; align-items:flex-start; gap:10px; border:1px solid rgba(72,244,138,.34); border-radius:10px; background:rgba(18,74,40,.2); }
+.script-format-guarantee b { flex:0 0 auto; color:#91f2b5; font-size:11px; }
+.script-format-guarantee span { color:#b7c8bb; font-size:10px; line-height:1.6; }
 
 .pipeline-nav { grid-column: 1; grid-row: 2; min-height: 0; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #4d3920 #0c0b09; padding: 17px 12px; border-right: 1px solid #27231d; background: linear-gradient(180deg,#0d0d0c,#090908); }
 .pipeline-title { padding: 3px 10px 15px; }
@@ -180,7 +186,7 @@ button { color: inherit; }
 .local-note p { margin: 5px 0 0; color: #655f57; font-size: 10px; line-height: 1.5; }
 
 .main-stage { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; overflow: auto; padding: 22px; scrollbar-color: #4d3920 #0c0b09; }
-.project-strategy-bar { position: relative; z-index: 1; min-height: 56px; margin-bottom: 16px; padding: 10px 12px; display: grid; grid-template-columns: minmax(150px,.85fr) repeat(3,minmax(110px,.58fr)) minmax(240px,1.45fr) auto; gap: 12px; align-items: center; border-color: #4a3a24; background: linear-gradient(90deg,rgba(31,24,14,.98),rgba(13,13,11,.98)); backdrop-filter: blur(9px); }
+.project-strategy-bar { position: relative; z-index: 1; min-height: 56px; margin-bottom: 16px; padding: 10px 12px; display: grid; grid-template-columns: minmax(140px,.78fr) repeat(4,minmax(96px,.52fr)) minmax(210px,1.25fr) auto; gap: 12px; align-items: center; border-color: #4a3a24; background: linear-gradient(90deg,rgba(31,24,14,.98),rgba(13,13,11,.98)); backdrop-filter: blur(9px); }
 .strategy-identity span { display: block; color: #a97734; font: 8px Consolas,monospace; letter-spacing: 1.4px; }
 .strategy-identity b { display: block; margin-top: 4px; color: #f3d4a2; font-size: 11px; }
 .strategy-item { min-width: 0; padding-left: 10px; border-left: 1px solid #3b3022; }
@@ -798,6 +804,9 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
   .top-status .bridge-badge { display:none; }
   .shot-card { grid-template-columns: 52px 168px minmax(220px,1fr); }
   .topic-grid { grid-template-columns: 1fr; }
+  .project-strategy-bar { grid-template-columns: minmax(110px,.7fr) repeat(4,minmax(72px,.5fr)) auto; gap:8px; }
+  .project-strategy-bar > p { display:none; }
+  .project-strategy-bar .outline-button { min-width:108px; }
 }
 
 @media (max-width: 1280px) {
@@ -805,7 +814,7 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
   .top-status #pausePipeline::before { content: "Ⅱ"; font-size: 13px; line-height: 1; }
   .bridge-badge { display:none; }
   .review-blueprint-toggle { width:96px; min-width:96px; padding:0 22px 0 9px; }
-  .project-strategy-bar { grid-template-columns: minmax(130px,.8fr) repeat(3,minmax(90px,.5fr)) auto; }
+  .project-strategy-bar { grid-template-columns: minmax(120px,.7fr) repeat(4,minmax(82px,.5fr)) auto; }
   .project-strategy-bar > p { display: none; }
 }
 
@@ -826,7 +835,7 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
   .stage-button > img { width: 25px; height: 25px; }
   .main-stage { grid-column: 2; padding: 14px; }
   .inspector { display: none; }
-  .project-strategy-bar { position: relative; top: 0; grid-template-columns: repeat(3,minmax(0,1fr)) auto; }
+  .project-strategy-bar { position: relative; top: 0; grid-template-columns: repeat(4,minmax(0,1fr)) auto; }
   .strategy-identity { grid-column: 1 / -1; }
   .strategy-item { padding-left: 0; border-left: 0; }
   .stage-head { align-items: flex-start; flex-direction: column; }

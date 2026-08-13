@@ -176,6 +176,36 @@ async function main() {
       blueprintPopoverMatrix.push({ ...view, collapsed, expanded, bottomReachability });
       await page.keyboard.press("Escape");
     }
+    const scriptFormatDialogMatrix = [];
+    for (const view of auditViews) {
+      await page.setViewportSize({ width: view.width, height: view.height });
+      await electronApp.evaluate(({ BrowserWindow }, size) => {
+        const win = BrowserWindow.getAllWindows()[0];
+        if (win) { win.setContentSize(size.width, size.height); win.webContents.setZoomFactor(size.zoom); }
+      }, view);
+      await page.evaluate(() => {
+        document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
+        document.querySelector("#scriptFormatDialog")?.showModal();
+      });
+      await page.waitForTimeout(120);
+      const snapshot = await page.evaluate(() => {
+        const dialog = document.querySelector("#scriptFormatDialog");
+        const rect = dialog.getBoundingClientRect();
+        dialog.scrollTop = dialog.scrollHeight;
+        const confirmRect = document.querySelector("#confirmScriptFormat")?.getBoundingClientRect();
+        return {
+          viewport: { width: innerWidth, height: innerHeight },
+          optionCount: dialog.querySelectorAll('input[name="scriptFormat"]').length,
+          clipped: rect.left < -1 || rect.top < -1 || rect.right > innerWidth + 1 || rect.bottom > innerHeight + 1,
+          horizontalOverflow: dialog.scrollWidth > dialog.clientWidth + 1,
+          verticalScrollable: dialog.scrollHeight > dialog.clientHeight + 1,
+          confirmReachable: Boolean(confirmRect && confirmRect.top >= rect.top - 1 && confirmRect.bottom <= rect.bottom + 1)
+        };
+      });
+      scriptFormatDialogMatrix.push({ ...view, ...snapshot });
+      await captureBackground(`script-format-dialog-${view.width}x${view.height}-zoom${view.zoom * 100}`);
+      await page.evaluate(() => document.querySelector("#scriptFormatDialog")?.close());
+    }
     await electronApp.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
       if (win) { win.setContentSize(1440, 900); win.webContents.setZoomFactor(1); }
@@ -213,7 +243,7 @@ async function main() {
     }
 
     const dialogMatrix = [];
-    for (const dialogId of ["newProjectDialog", "projectStrategyDialog", "reusableAssetDialog", "candidateLibraryDialog", "restoreProjectDialog"]) {
+    for (const dialogId of ["newProjectDialog", "projectStrategyDialog", "scriptFormatDialog", "reusableAssetDialog", "candidateLibraryDialog", "restoreProjectDialog"]) {
       await page.evaluate(id => {
         document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
         document.getElementById(id)?.showModal();
@@ -534,6 +564,7 @@ async function main() {
     fs.writeFileSync(path.join(runDir, "preflight.json"), JSON.stringify({
       layoutMatrix,
       blueprintPopoverMatrix,
+      scriptFormatDialogMatrix,
       blueprintOffState,
       stageMatrix,
       dialogMatrix,
@@ -619,6 +650,7 @@ async function main() {
       || !item.collapsed.masterVisible
       || !item.bottomReachability
     )), false, "blueprint panel must stay opaque, fixed, unclipped, compact by default, and fully reachable at every audited size and zoom");
+    assert.equal(scriptFormatDialogMatrix.some(item => item.optionCount !== 3 || item.clipped || item.horizontalOverflow || !item.confirmReachable), false, "all three script formats and the confirm action must remain reachable at every audited size and zoom");
     assert.equal(blueprintOffState.clipped, false, "disabled blueprint panel must remain inside the viewport");
     assert.equal(blueprintOffState.horizontalOverflow, false, "disabled blueprint panel must not horizontally overflow");
     assert.equal(blueprintOffState.configHidden, true, "disabled blueprint panel must hide inactive configuration");
@@ -650,6 +682,7 @@ async function main() {
       runtime,
       layoutMatrix,
       blueprintPopoverMatrix,
+      scriptFormatDialogMatrix,
       blueprintOffState,
       stageMatrix,
       dialogMatrix,

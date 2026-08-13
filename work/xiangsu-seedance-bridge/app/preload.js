@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     chooseProduct: projectId => ipcRenderer.invoke("workbench:choose-product", projectId),
     importCandidate: (projectId, entityType, entityId, stage) => ipcRenderer.invoke("workbench:import-candidate", projectId, entityType, entityId, stage),
     importBatchMedia: (projectId, kind) => ipcRenderer.invoke("workbench:import-batch-media", projectId, kind),
+    importPromptBatch: (projectId, scope) => ipcRenderer.invoke("workbench:import-prompt-batch", projectId, scope),
     importShotPrompts: projectId => ipcRenderer.invoke("workbench:import-shot-prompts", projectId),
     importFinalVideo: projectId => ipcRenderer.invoke("workbench:import-final-video", projectId),
     analyzeScript: projectId => ipcRenderer.invoke("workbench:analyze-script", projectId),

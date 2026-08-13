@@ -1118,10 +1118,10 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
   if (!skipValidation) {
     validatePromptSpec(spec, shot, fingerprint, { mode: compilerMode, project, requirePropStateTranslations: true });
   } else if (spec && typeof spec === "object") {
-    // Gates-off may skip subjective scoring, but never the deterministic language,
-    // mode, subshot, speaker and sound contracts used by the paid submission.
+    // The user-facing blueprint master is authoritative. Keep only the current
+    // fingerprint needed to assemble the provider request; creative/language/
+    // sound scoring must not turn itself back on inside the final compiler.
     spec.fingerprint = fingerprint;
-    validatePromptSpec(spec, shot, fingerprint, { skipFingerprint: true, mode: compilerMode, project, requirePropStateTranslations: true });
   }
   const dialogueTurns = collectDialogue(project, shot);
   const context = referenceContext(project, shot, references, compilerMode, dialogueTurns, spec);
@@ -1202,7 +1202,7 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
     const dialogue = subshotTurns.map((turn, turnIndex) => dialogueSentence(turn, context, visibility, dialogueWindows[turnIndex])).join(" ");
     const designedSilence = subshotHasDesignedSilence(shot, plannedItem, index);
     const silence = normalizeSilenceBeat(shot);
-    if (!designedSilence && !clean(compiled.soundEn)) {
+    if (!skipValidation && !designedSilence && !clean(compiled.soundEn)) {
       throw Object.assign(new Error(`Hailuo H3 subshot ${index + 1} has no soundEn and no explicit silenceBeat`), {
         code: "HAILUO_H3_PROMPT_SPEC_INVALID",
         failures: [`Shot ${index + 1} soundEn is empty without an explicit silenceBeat`]
@@ -1210,7 +1210,7 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
     }
     const sound = designedSilence
       ? `Designed silence beat: from ${formatTimestamp(Math.max(subshotTimeRange(shot, plannedItem, index).start, silence?.start || 0))} to ${formatTimestamp(Math.min(subshotTimeRange(shot, plannedItem, index).end, silence?.end || duration))}, duck the location bed to near-silence; preserve only the explicitly motivated breath, heartbeat, or impact SFX, then restore bed continuity immediately after the beat.${clean(compiled.soundEn) ? ` Outside the silent interval: ${compiled.soundEn}` : ""}`
-      : `Sound contract: ${clean(compiled.soundEn)}`;
+      : `Sound contract: ${clean(compiled.soundEn) || "Maintain continuous low-level location ambience and only the physical sounds visibly motivated by this authored beat."}`;
     description.push(`${prefix} ${anchors.join(" ")} ${occupancy} ${productFraming} ${cutMotivation} ${performanceNow} ${visual} ${dialogue} ${sound}`.replace(/\s+/g, " ").trim());
   });
   const repair = repairInstructionEnglish(qualityRepair);

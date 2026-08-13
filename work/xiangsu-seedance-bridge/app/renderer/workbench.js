@@ -29,6 +29,9 @@ const state = {
   newProjectCreating: false,
   strategySaving: false,
   strategyPromptedProjectId: "",
+  scriptFormatSaving: false,
+  scriptFormatResolve: null,
+  scriptFormatProjectId: "",
   requestedProjectId: "",
   assetViewerPath: "",
   videoGridProjectId: "",
@@ -151,7 +154,7 @@ const stageLabels = {
   storyboard_sheet: "逐秒分镜合图",
   character_video: "人物视频",
   character_voice: "人物音色",
-  scene_asset: "场景空间锚图",
+  scene_asset: "场景四视图",
   wardrobe_asset: "服装资产图",
   prop_asset: "道具资产图",
   storyboard_start: "分镜首帧",
@@ -176,7 +179,7 @@ const promptLabels = {
   characterVideo: "单人数字资产视频",
   hailuoCharacterVideo: "云端算力单人数字资产视频",
   hailuoPromptCompiler: "云端算力镜头编译器",
-  sceneAsset: "写实空场景空间锚图",
+  sceneAsset: "写实空场景四视图",
   productAsset: "商品一致性资产",
   wardrobeAsset: "服装一致性资产",
   propAsset: "道具一致性资产",
@@ -693,9 +696,7 @@ function escapeHtml(value) {
 }
 
 function currentAssetLabel(value) {
-  // Historical queued jobs may still carry the pre-upgrade label. Only rename
-  // their presentation; persisted task identity and resume semantics stay intact.
-  return String(value ?? "").replace(/场景四视图/g, "场景空间锚图");
+  return String(value ?? "");
 }
 
 function fileUrl(filePath) {
@@ -1076,24 +1077,29 @@ function scriptWorkflowState(project = state.project) {
   const operation = String(automation.operation || "");
   const stage = String(automation.stage || "");
   const status = String(automation.status || "idle");
-  const scriptOperation = ["idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(operation)
+  const scriptOperation = ["analyze_script", "idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(operation)
     || (operation === "pipeline_from_stage" && String(automation.targetId || "") === "script");
-  const inScriptStage = stage.startsWith("script") || ["idea_to_full_pipeline", "full_pipeline"].includes(stage);
+  const inScriptStage = stage.startsWith("script") || ["analyze_script", "idea_to_full_pipeline", "full_pipeline"].includes(stage);
   const active = scriptOperation && inScriptStage && ["running", "pausing", "stopping"].includes(status);
-  const paused = scriptOperation && status === "paused_user" && Boolean(project?.script?.generationCheckpoint);
+  const analysisCheckpoint = project?.script?.analysisCheckpoint || {};
+  const paused = scriptOperation && status === "paused_user"
+    && Boolean(project?.script?.generationCheckpoint || analysisCheckpoint.signature);
   const checkpoint = project?.script?.generationCheckpoint || {};
   const checkpointPlanCount = Array.isArray(checkpoint.shotPlan) ? checkpoint.shotPlan.length : 0;
   const checkpointShotCount = Array.isArray(checkpoint.shots) ? checkpoint.shots.length : 0;
   const writerCheckpoint = Boolean(project?.script?.generationCheckpoint)
     && !(Array.isArray(project?.shots) && project.shots.length > 0)
     && Boolean(checkpointPlanCount || checkpointShotCount || checkpoint.storyBible || checkpoint.blueprint);
+  const analysisCheckpointReady = Boolean(analysisCheckpoint.signature)
+    && Array.isArray(analysisCheckpoint.chunks)
+    && !(Array.isArray(project?.shots) && project.shots.length > 0);
   const hasRecoverableCheckpoint = Boolean(
     checkpoint.planContractFailure?.retryRequiresExplicitResume === true
     || checkpoint.unitContractFailure?.retryRequiresExplicitResume === true
     || checkpoint.scriptRepair?.retryRequiresExplicitResume === true
   );
   const hasLegacyQualityReport = /"repairDirectives"\s*:/.test(String(project?.script?.raw || ""));
-  const recoverableFailure = (!active && writerCheckpoint) || (scriptOperation
+  const recoverableFailure = (!active && (writerCheckpoint || analysisCheckpointReady)) || (scriptOperation
     && status === "failed"
     && (hasRecoverableCheckpoint || Boolean(automation.recoverableFailure))
     && (hasRecoverableCheckpoint
@@ -1107,8 +1113,8 @@ function scriptWorkflowState(project = state.project) {
       : checkpoint.scriptRepair?.retryRequiresExplicitResume === true
         || ["SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED", "SCRIPT_SEMANTIC_REVIEW_FAILED"].includes(String(automation.errorCode || ""))
         ? "review"
-        : writerCheckpoint ? "generation" : "";
-  return { automation, operation, stage, status, active, paused, recoverableFailure, recoveryKind, writerCheckpoint, checkpointPlanCount, checkpointShotCount, managed: active || paused };
+        : analysisCheckpointReady ? "analysis" : writerCheckpoint ? "generation" : "";
+  return { automation, operation, stage, status, active, paused, recoverableFailure, recoveryKind, writerCheckpoint, analysisCheckpointReady, checkpointPlanCount, checkpointShotCount, managed: active || paused };
 }
 
 function renderScriptTask() {
@@ -1141,7 +1147,7 @@ function renderScriptTask() {
   $("#pauseScriptGeneration").classList.toggle("hidden", !task.active || task.status !== "running");
   $("#resumeScriptGeneration").classList.toggle("hidden", !task.paused && !task.recoverableFailure);
   $("#resumeScriptGeneration").textContent = task.recoverableFailure
-    ? (task.recoveryKind === "plan" ? "重写失败批次" : task.recoveryKind === "unit" ? "复用失败批次并继续" : "按终审报告继续修订")
+    ? (task.recoveryKind === "plan" ? "重写失败批次" : task.recoveryKind === "unit" ? "复用失败批次并继续" : task.recoveryKind === "analysis" ? "从拆镜断点继续" : "按终审报告继续修订")
     : "继续写作";
   if (task.recoveryKind === "generation") $("#resumeScriptGeneration").textContent = `从 S${String(task.checkpointPlanCount + 1).padStart(2, "0")} 继续写作`;
   $("#stopScriptGeneration").classList.toggle("hidden", !task.active && !task.paused);
@@ -1152,6 +1158,8 @@ function renderScriptTask() {
   $("#scriptEditHint").textContent = task.recoverableFailure
     ? (task.recoveryKind === "plan"
       ? "前面合格批次与已付费证据已保留；点击后只重写当前失败批次，不会整剧重写。"
+      : task.recoveryKind === "analysis"
+        ? "已经成功拆出的片段已保存在本地；继续时只请求未完成片段，不会整部剧本重跑。"
       : "系统已保留失败报告和续写断点，可直接定向修订。")
     : task.managed
     ? task.paused ? "写作已暂停并保存断点；继续后会从已完成批次接着写。" : "AI 输出正在实时写入当前项目；运行期间文本只读，避免覆盖自动保存内容。"
@@ -1554,6 +1562,10 @@ function renderIdeation() {
     } else if (!hasShots && !hasScript && inputMode === "manual") {
       banner.hidden = false;
       banner.innerHTML = `<b>手动起步</b><span>请先粘贴或上传完整剧本，再点「AI 自动拆镜」或「一键全流程」。</span>`;
+    } else if (String(project.script?.modeSynopsis || "").trim()) {
+      banner.hidden = false;
+      banner.classList.remove("danger");
+      banner.innerHTML = `<b>剧情简介 · ${project.script?.detectedFormat === "timed_storyboard" ? "秒级分镜成片稿" : "上传原稿"}</b><span>${escapeHtml(project.script.modeSynopsis)}</span>`;
     } else {
       banner.hidden = true;
       banner.innerHTML = "";
@@ -1838,7 +1850,7 @@ function renderAssets(force = false) {
           </div>
         </div>
       </details>
-      <div class="asset-stage-grid single">${assetStageTile(candidate, `${scene.name} · 场景空间锚图`, "image")}</div><div class="card-actions"><button class="mini-button draw-button${drawing ? " is-loading" : ""}" data-long-action data-action="generate-image" data-stage="scene_asset" data-id="${scene.id}" ${drawing ? "disabled" : ""}>${drawing ? "抽卡中…" : "抽卡：场景空间锚图"}</button><button class="mini-button" data-action="import-candidate" data-entity-type="scene" data-stage="scene_asset" data-id="${scene.id}">上传场景空间锚图</button><button class="mini-button" data-action="select-reusable-asset" data-entity-type="scene" data-id="${scene.id}">从独立场景库选择</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="scene" data-id="${scene.id}">当前场景版本</button></div></article>`;
+      <div class="asset-stage-grid single">${assetStageTile(candidate, `${scene.name} · 场景四视图（2×2）`, "image")}</div><div class="card-actions"><button class="mini-button draw-button${drawing ? " is-loading" : ""}" data-long-action data-action="generate-image" data-stage="scene_asset" data-id="${scene.id}" ${drawing ? "disabled" : ""}>${drawing ? "抽卡中…" : "抽卡：场景四视图"}</button><button class="mini-button" data-action="import-candidate" data-entity-type="scene" data-stage="scene_asset" data-id="${scene.id}">上传场景四视图</button><button class="mini-button" data-action="select-reusable-asset" data-entity-type="scene" data-id="${scene.id}">从独立场景库选择</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="scene" data-id="${scene.id}">当前场景版本</button></div></article>`;
   }).join("") : `<div class="empty-hint">暂无场景资产。</div>`;
   syncSidebarLibraryMirror("propGrid", "sidebarPropGridHost");
   syncSidebarLibraryMirror("sceneGrid", "sidebarSceneGridHost");
@@ -2416,6 +2428,11 @@ function renderProjectStrategy() {
     : `自动生产会按顺序执行：完整剧本 → 角色/场景资产 → 人物视频与音色 → 分镜图 → ${engine} 分镜视频 → 拼接成片。任务支持断点续做。`);
   $("#projectExecutionMode").textContent = plan.executionMode === "full" ? "AI 一键制作" : "分步制作";
   $("#projectInputMode").textContent = plan.inputMode === "manual" ? "自己输入/上传" : "AI 生成";
+  $("#projectScriptFormat").textContent = plan.inputMode === "manual"
+    ? (project.script?.detectedFormat === "timed_storyboard" ? "按上传秒级分镜稿" : "按上传原稿")
+    : plan.scriptFormatConfirmed === true
+      ? (plan.scriptFormat === "dialogue" ? "简易对白稿" : plan.scriptFormat === "timed_storyboard" ? "秒级分镜成片稿" : "完整制作稿")
+      : "写剧本时选择";
   const targetSeconds = Number(project.generation?.targetDurationSeconds) || 300;
   const plannedSeconds = (project.shots || []).reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
   $("#projectStrategyHelp").textContent = confirmed
@@ -2435,7 +2452,7 @@ function renderProjectStrategy() {
       shotsBanner.innerHTML = `<b>视频上游不匹配</b><span>项目已锁定${engine}，但系统设置当前是 ${videoProviderLabel(settingsKind)}。分步制作仍可先生成分镜图；进入视频阶段前请切换到对应供应商。</span>`;
     } else {
       shotsBanner.classList.remove("danger");
-      shotsBanner.innerHTML = `<b>v0.13.22 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
+      shotsBanner.innerHTML = `<b>v0.13.25 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span>`;
     }
   }
   const strategyLocked = !confirmed;
@@ -2500,6 +2517,126 @@ function promptForProjectStrategyIfRequired() {
   if (!state.project || state.project.generation?.modeConfirmed === true || state.strategyPromptedProjectId === state.project.id) return;
   state.strategyPromptedProjectId = state.project.id;
   setTimeout(() => openProjectStrategyDialog(true), 0);
+}
+
+function promptSuggestionText(stage, target, label = "") {
+  const subject = label || target;
+  const timedFormatSuffix = state.project?.productionPlan?.scriptFormat === "timed_storyboard"
+    ? " 当前采用秒级分镜成片稿：先写剧情简介，再按幕、5–15秒分镜、秒级子镜输出场景人物物品、人声、承接、对白汇总、音效与负向提示。"
+    : "";
+  const suggestions = {
+    script: `先判断故事的因果主线、人物关系和商品应当出现的剧情节点。对白必须逐句保留，明确谁以什么语气、表情和身体动作对谁说什么；先保证观众看懂并愿意看下去，再追求华丽表达。${timedFormatSuffix}`,
+    topic_ideation: "给出开场即可看懂冲突、人物关系明确、反转有因果且适合短视频观看的选题；商品只能在剧情真正需要时自然出现。",
+    story_bible: "建立可复述的唯一主线、人物欲望与代价、递进冲突、反转和行动兑现；逐句对白的说话人、听者、语气与表演不可错位。",
+    shot_plan: "每镜只承担一条可见因果，写清起始状态、触发、动作结果、说话人、听者、语气表情、反应和有动机转场。",
+    units: "完整保留每句原对白并正确分配到生成单元；所有对白写明说话人对谁说、语气、表情、身体动作、音量、语速和听者反应。",
+    script_analysis: "忠实拆解用户原稿，不增删改台词，不交换说话人；识别故事、资产、商品窗口和每镜可见动作。",
+    semantic_review: "检查观众能否看懂故事、每句对白是否完整且角色正确、表演与语气是否贴合、商品是否在正确剧情节点出现。",
+    character_sheet: `为${subject}制作同一身份、同一年龄体型发型和整套服装的人物设定合板；中性背景，无额外人物、字幕或水印。`,
+    character_three_view: `为${subject}制作同一人物的正面、侧面、背面三视图；脸、体型、发型、服装和配饰完全一致。`,
+    character_intro: `为${subject}制作独立正脸介绍图；双眼清楚、面部居中、整套身份与人物设定一致，中性无缝背景。`,
+    character_video: `让${subject}正脸中近景完成自然表演与清晰说话；身份服装稳定，语气有起伏，口型同步，无他人、字幕、水印或背景音乐。`,
+    wardrobe_asset: `为${subject}制作可复用服装资产图；清楚展示材质、颜色、版型和完整穿着关系，不加入无关人物或文字。`,
+    prop_asset: `为${subject}制作单一道具资产图；准确展示外形、材质、数量、磨损和使用状态，不加入人物或文字。`,
+    scene_asset: `为${subject}制作一张 2×2 四视图场景参考板：左上主入口正向、右上反向轴、左下左侧45度、右下右侧45度。四格必须是同一空间、同一门窗家具拓扑、同一时段和主光方向；无人、无字。`,
+    storyboard_start: `为${subject}制作动作发生前的单张剧情首帧。读取场景四视图中最匹配的角度锁定空间，但成图不得出现四宫格、边框或参考板；人物、服装、轴线和道具状态准确。`,
+    storyboard_end: `为${subject}制作动作完成后的单张剧情尾帧。读取同一场景四视图并保持门窗家具和光向一致；尾态必须与首态肉眼不同，不得输出拼板或文字。`,
+    storyboard_sheet: `为${subject}制作按时间顺序的逐秒分镜合图；每格独立9:16，动作、表情和听者反应递进。场景空间来自四视图参考板，但每个剧情格只能是单一真实机位。`,
+    shot_video: `生成${subject}的完整剧情视频。逐句原样保留对白，明确说话人以何种语气、表情和动作对哪位听者说；听者闭口并同步反应。读取场景四视图选择匹配机位并保持空间一致，最终视频不得出现拼板边框、序号、字幕、水印或背景音乐。`
+  };
+  return suggestions[stage] || `按${subject}当前剧情事实制作，不增删对白，不改变人物、商品或空间连续性。`;
+}
+
+function promptSuggestionEntries(scope = "all") {
+  const project = state.project || {};
+  const entries = [];
+  const add = (stage, target, label = "") => entries.push({ stage, target, prompt: promptSuggestionText(stage, target, label) });
+  if (["all", "script"].includes(scope)) {
+    for (const stage of ["script", "topic_ideation", "story_bible", "shot_plan", "units", "script_analysis", "semantic_review"]) add(stage, "project", project.title || "当前项目");
+  }
+  if (["all", "assets"].includes(scope)) {
+    const characters = project.characters?.length ? project.characters : [{ id: "C01", name: "角色1（请替换名称）" }];
+    for (const character of characters) {
+      for (const stage of ["character_sheet", "character_three_view", "character_intro", "character_video"]) add(stage, character.id || character.name, character.name);
+    }
+    const wardrobes = project.assetLibraries?.wardrobes?.length ? project.assetLibraries.wardrobes : [{ id: "W01", name: "服装1（请替换名称）" }];
+    for (const item of wardrobes) add("wardrobe_asset", item.id || item.name, item.name);
+    const props = project.assetLibraries?.props?.length ? project.assetLibraries.props : [{ id: "P01", name: "道具1（请替换名称）" }];
+    for (const item of props) add("prop_asset", item.id || item.name, item.name);
+    const scenes = project.scenes?.length ? project.scenes : [{ id: "SC01", name: "场景1（请替换名称）" }];
+    for (const scene of scenes) add("scene_asset", scene.id || scene.name, scene.name);
+  }
+  if (["all", "storyboards"].includes(scope)) {
+    const shots = project.shots?.length ? project.shots : [{ id: "S01", number: 1, title: "镜头1" }];
+    for (const shot of shots) {
+      const target = shot.id || `S${String(shot.number || 1).padStart(2, "0")}`;
+      for (const stage of ["storyboard_start", "storyboard_end", "storyboard_sheet"]) add(stage, target, shot.title || target);
+    }
+  }
+  if (["all", "videos"].includes(scope)) {
+    const shots = project.shots?.length ? project.shots : [{ id: "S01", number: 1, title: "镜头1" }];
+    for (const shot of shots) {
+      const target = shot.id || `S${String(shot.number || 1).padStart(2, "0")}`;
+      add("shot_video", target, shot.title || target);
+    }
+  }
+  return entries;
+}
+
+function promptSuggestionTemplate(scope = "all") {
+  return JSON.stringify({
+    version: 1,
+    scope,
+    instructions: "可直接修改 prompt；stage 表示流程，target 可用 project、C01、SC01、S01 或实体名称。即使当前还没有角色/场景/镜头，也可先上传，系统会在实体出现后自动匹配。用户提示词优先且不会被系统建议覆盖。",
+    prompts: promptSuggestionEntries(scope)
+  }, null, 2);
+}
+
+async function importPromptBatchForScope(scope = "all") {
+  if (!state.project) return;
+  const result = await api.workbench.importPromptBatch(state.project.id, scope);
+  if (!result?.ok) return showToast(result?.message || "批量上传提示词失败", "error");
+  if (result.canceled) return;
+  setStateProject(result.project);
+  renderAll();
+  showToast(`已保存 ${result.imported || 0} 条提示词；当前没有的对象会在后续生成后自动匹配`, "success");
+}
+
+function finishScriptFormatDialog(result) {
+  const resolve = state.scriptFormatResolve;
+  state.scriptFormatResolve = null;
+  state.scriptFormatProjectId = "";
+  const dialog = $("#scriptFormatDialog");
+  if (dialog?.open) dialog.close();
+  if (typeof resolve === "function") resolve(result === true);
+}
+
+function ensureScriptFormatBeforeWriting(project = state.project, { force = false } = {}) {
+  if (!project || project.productionPlan?.inputMode === "manual") return Promise.resolve(true);
+  if (!force && project.productionPlan?.scriptFormatConfirmed === true) return Promise.resolve(true);
+  if (state.scriptFormatResolve) {
+    if (state.scriptFormatProjectId === project.id) {
+      return new Promise(resolve => {
+        const previousResolve = state.scriptFormatResolve;
+        state.scriptFormatResolve = result => {
+          previousResolve(result);
+          resolve(result);
+        };
+      });
+    }
+    finishScriptFormatDialog(false);
+  }
+  const dialog = $("#scriptFormatDialog");
+  state.scriptFormatProjectId = project.id;
+  state.scriptFormatSaving = false;
+  $("#scriptFormatError").textContent = "";
+  $$("input[name='scriptFormat']").forEach(input => {
+    input.checked = project.productionPlan?.scriptFormatConfirmed === true
+      && input.value === (project.productionPlan?.scriptFormat || "production");
+  });
+  if (!dialog.open) dialog.showModal();
+  requestAnimationFrame(() => dialog.querySelector("input:checked, input[name='scriptFormat']")?.focus({ preventScroll: true }));
+  return new Promise(resolve => { state.scriptFormatResolve = resolve; });
 }
 
 const pipelinePhases = [
@@ -2658,10 +2795,11 @@ function costCategoryLabel(bucket = {}, category = "") {
     if (!known) return bucket.pendingCount ? `待上游实扣 ${bucket.pendingCount}` : "¥0.00";
     return `已结¥${known.toFixed(2)}${bucket.pendingCount ? ` · 待实扣 ${bucket.pendingCount}` : ""}`;
   }
-  if (!known && !estimated) return "¥0.00";
-  if (known && estimated) return `已结¥${known.toFixed(2)} / 估¥${estimated.toFixed(2)}`;
-  if (known) return `已结¥${known.toFixed(2)}`;
-  return `历史估算¥${estimated.toFixed(2)}`;
+  const pending = Number(bucket.pendingCount || 0);
+  if (!known && !estimated) return pending ? `待实扣 ${pending}` : "¥0.00";
+  if (known && estimated) return `已结¥${known.toFixed(2)} / ${pending ? "待实扣·" : ""}估¥${estimated.toFixed(2)}`;
+  if (known) return `已结¥${known.toFixed(2)}${pending ? ` · 待实扣 ${pending}` : ""}`;
+  return `${pending ? "待实扣·" : ""}估¥${estimated.toFixed(2)}`;
 }
 
 function renderProjectCostBar(project = state.project) {
@@ -2678,10 +2816,10 @@ function renderProjectCostBar(project = state.project) {
     <div class="project-cost-main">
       <span class="eyebrow">PROJECT COST · 全局结算</span>
       <b>合计已结 ¥${total.toFixed(2)}</b>
-      <small>实际已结算 ¥${Number(summary.totalKnownYuan || 0).toFixed(2)} · 历史估算（不计入合计）¥${Number(summary.totalEstimatedYuan || 0).toFixed(2)} · 当前待上游结算 ${summary.pendingCount || 0}${summary.historicalUnknownCount ? ` · 已被后续实结覆盖 ${summary.historicalUnknownCount}` : ""} · 未定价 ${summary.unpricedCount || 0}</small>
+      <small>实际已结算 ¥${Number(summary.totalKnownYuan || 0).toFixed(2)} · 待实扣/历史预估（不计入合计）¥${Number(summary.totalEstimatedYuan || 0).toFixed(2)} · 当前待上游结算 ${summary.pendingCount || 0}${summary.historicalUnknownCount ? ` · 已被后续实结覆盖 ${summary.historicalUnknownCount}` : ""} · 未定价 ${summary.unpricedCount || 0}</small>
     </div>
     <div class="project-cost-cats" role="list">
-      <span role="listitem"><em>文案</em><b>¥${Number(text.knownYuan || 0).toFixed(2)}</b><small>仅上游实扣 · ${text.settledCount || 0} 次已结${text.pendingCount ? ` · ${text.pendingCount} 待实扣` : ""}</small></span>
+      <span role="listitem"><em>文案</em><b>${Number(text.knownYuan || 0) > 0 ? `已结 ¥${Number(text.knownYuan || 0).toFixed(2)}` : Number(text.estimatedYuan || 0) > 0 ? `估 ¥${Number(text.estimatedYuan || 0).toFixed(2)}` : "¥0.00"}</b><small>上游实扣 ${text.settledCount || 0} 次${text.pendingCount ? ` · ${text.pendingCount} 待实扣${Number(text.estimatedYuan || 0) > 0 ? `（预估 ¥${Number(text.estimatedYuan || 0).toFixed(2)}）` : ""}` : ""}</small></span>
       <span role="listitem"><em>图片</em><b>¥${Number(image.knownYuan || 0).toFixed(2)}</b><small>仅上游实扣 · ${image.settledCount || 0} 次已结${image.pendingCount ? ` · ${image.pendingCount} 待实扣` : ""}</small></span>
       <span role="listitem"><em>视频</em><b>¥${Number(video.knownYuan || 0).toFixed(2)}</b><small>仅上游实扣 · ${video.settledCount || 0} 次已结${video.pendingCount ? ` · ${video.pendingCount} 待实扣` : ""}</small></span>
     </div>
@@ -2699,7 +2837,7 @@ function openCostDetailDialog(project = state.project) {
   if (!dialog || !body) return;
   const entries = Array.isArray(project?.costLedger?.entries) ? project.costLedger.entries : [];
   const summary = project?.costLedger?.summary || {};
-  $("#costDetailSummary").textContent = `上游实际已结算 ¥${Number(summary.totalKnownYuan || 0).toFixed(2)} · 历史估算（不计入实际）¥${Number(summary.totalEstimatedYuan || 0).toFixed(2)} · 共 ${entries.length} 条`;
+  $("#costDetailSummary").textContent = `上游实际已结算 ¥${Number(summary.totalKnownYuan || 0).toFixed(2)} · 待实扣/历史预估（不计入实际）¥${Number(summary.totalEstimatedYuan || 0).toFixed(2)} · 共 ${entries.length} 条`;
   body.innerHTML = entries.length
     ? entries.map(entry => {
       const cat = ({ text: "文案", image: "图片", video: "视频" })[entry.category] || entry.category;
@@ -2707,7 +2845,7 @@ function openCostDetailDialog(project = state.project) {
         <td>${escapeHtml(cat)}</td>
         <td>${escapeHtml(entry.operation || "")}</td>
         <td>${escapeHtml(entry.provider || "")}</td>
-        <td>${escapeHtml(costStatusLabel(entry.status))}</td>
+        <td>${escapeHtml(entry.status === "pending" && Number(entry.amountYuan || 0) > 0 ? "待实扣（含预估）" : costStatusLabel(entry.status))}</td>
         <td>¥${Number(entry.amountYuan || 0).toFixed(3)}</td>
         <td>${escapeHtml(entry.pricingBasis || "")}</td>
         <td>${escapeHtml(String(entry.updatedAt || entry.createdAt || "").replace("T", " ").slice(0, 19))}</td>
@@ -2874,7 +3012,7 @@ function renderReusableAssetLibrary() {
         ${reusableAssetPreview(item)}
       </button>
       <div class="reusable-asset-copy">
-        <div><span>${escapeHtml(stageLabels[item.stage] || (item.kind === "character" ? "人物形象" : item.kind === "scene" ? "场景空间锚图" : reusableAssetMediaType(item) === "video" ? "资产视频" : reusableAssetMediaType(item) === "audio" ? "资产音频" : "通用图片"))}</span><b>${escapeHtml(item.label || item.id)}</b></div>
+        <div><span>${escapeHtml(stageLabels[item.stage] || (item.kind === "character" ? "人物形象" : item.kind === "scene" ? "场景四视图" : reusableAssetMediaType(item) === "video" ? "资产视频" : reusableAssetMediaType(item) === "audio" ? "资产音频" : "通用图片"))}</span><b>${escapeHtml(item.label || item.id)}</b></div>
         <p>${escapeHtml(item.description || "跨项目可复用资产")}</p>
         <small>来源：${escapeHtml(item.source?.projectTitle || "本地资产库")} · 已使用 ${Number(item.useCount || 0)} 次</small>
       </div>
@@ -2993,7 +3131,7 @@ function resumeStageForAutomation(project = state.project) {
 function pipelineCanResume(project = state.project) {
   if (!project || automationIsActive(project)) return false;
   if (String(project.automation?.status || "") === "completed" && project.finalVideoPath && !project.finalVideoStale) return false;
-  return Boolean(project.automation?.operation || project.automation?.stage || (project.shots || []).length || project.script?.raw || project.script?.generationCheckpoint);
+  return Boolean(project.automation?.operation || project.automation?.stage || (project.shots || []).length || project.script?.raw || project.script?.generationCheckpoint || project.script?.analysisCheckpoint);
 }
 
 function resumeStageLabel(stage) {
@@ -3004,9 +3142,16 @@ function projectUsesStepExecution(project = state.project) {
   return String(project?.productionPlan?.executionMode || "step") !== "full";
 }
 
-function continuePipeline(project = state.project) {
+async function continuePipeline(project = state.project) {
   if (!project) return;
   const stage = resumeStageForAutomation(project);
+  if (stage === "script"
+    && !String(project?.script?.raw || "").trim()
+    && !project?.script?.generationCheckpoint
+    && !project?.script?.analysisCheckpoint
+    && !(project?.shots || []).length) {
+    if (!await ensureScriptFormatBeforeWriting(project)) return;
+  }
   const message = projectUsesStepExecution(project)
     ? `正在从${resumeStageLabel(stage)}断点继续当前阶段…`
     : `正在从${resumeStageLabel(stage)}断点继续完整流程…`;
@@ -3057,7 +3202,7 @@ function renderAutomationQueue(project = state.project) {
                   ? "已完成"
                   : resumable ? "待继续" : "空闲";
   const resumeScriptButton = canResumeScript
-    ? `<button class="mini-button accent" id="queueResumeScriptBtn" type="button">${scriptTask.recoveryKind === "plan" ? "重写失败批次" : scriptTask.recoveryKind === "unit" ? "复用失败批次并继续" : "按报告继续修订"}</button>`
+    ? `<button class="mini-button accent" id="queueResumeScriptBtn" type="button">${scriptTask.recoveryKind === "plan" ? "重写失败批次" : scriptTask.recoveryKind === "unit" ? "复用失败批次并继续" : scriptTask.recoveryKind === "analysis" ? "从拆镜断点继续" : "按报告继续修订"}</button>`
     : "";
   const resumePipelineButton = resumable && !canResumeScript
     ? `<button class="mini-button accent" id="queueResumePipelineBtn" type="button">继续任务</button>`
@@ -3080,7 +3225,9 @@ function renderAutomationQueue(project = state.project) {
     const operation = project.automation?.operation || "idea_script";
     runScriptLong(scriptTask.recoveryKind === "plan"
       ? "正在保留合格断点并只重写失败批次…"
-      : "正在按已保存失败报告继续修订…", () => api.workbench.resumeScriptGeneration(project.id), operation);
+      : scriptTask.recoveryKind === "analysis"
+        ? "正在复用已完成片段并继续拆镜…"
+        : "正在按已保存失败报告继续修订…", () => api.workbench.resumeScriptGeneration(project.id), operation);
   });
   $("#queueResumePipelineBtn")?.addEventListener("click", () => continuePipeline(project));
   $("#queuePauseBtn")?.addEventListener("click", () => controlPipeline("pause"));
@@ -3220,7 +3367,7 @@ async function renderConsole() {
   const fleetKnown = projects.reduce((sum, item) => sum + Number(item.counts?.costKnown || 0), 0);
   const fleetEstimated = projects.reduce((sum, item) => sum + Number(item.counts?.costEstimated || 0), 0);
   const fleetUnpriced = projects.reduce((sum, item) => sum + Number(item.counts?.costUnpriced || 0), 0);
-  summaryEl.innerHTML = `<div><span class="eyebrow">FLEET STATUS</span><b>${projects.length} 个项目</b><small>运行中 ${running} · 已成片 ${completed} · 活跃任务 ${projects.reduce((sum, item) => sum + (item.activeJobs || 0), 0)}</small><small class="console-fleet-cost">已结算 ¥${fleetKnown.toFixed(2)} · 估算 ¥${fleetEstimated.toFixed(2)} · 未定价 ${fleetUnpriced}</small></div>`;
+  summaryEl.innerHTML = `<div><span class="eyebrow">FLEET STATUS</span><b>${projects.length} 个项目</b><small>运行中 ${running} · 已成片 ${completed} · 活跃任务 ${projects.reduce((sum, item) => sum + (item.activeJobs || 0), 0)}</small><small class="console-fleet-cost">已结算 ¥${fleetKnown.toFixed(2)} · 待实扣/历史预估 ¥${fleetEstimated.toFixed(2)} · 未定价 ${fleetUnpriced}</small></div>`;
   grid.innerHTML = projects.length ? projects.map(item => {
     const c = item.counts || {};
     const known = Number(c.costKnown || 0);
@@ -3246,7 +3393,7 @@ async function renderConsole() {
       </div>
       <div class="console-cost-row">
         <span class="console-cost-total">实际费用 ¥${known.toFixed(2)}</span>
-        <span class="console-cost-split">上游已结 ¥${known.toFixed(2)}${estimated > 0 ? ` · 历史估算 ¥${estimated.toFixed(2)}（不计入）` : ""}</span>
+        <span class="console-cost-split">上游已结 ¥${known.toFixed(2)}${estimated > 0 ? ` · 待实扣/历史预估 ¥${estimated.toFixed(2)}（不计入实际）` : ""}</span>
         ${unpriced > 0 ? `<span class="console-cost-unpriced">未定价 ${unpriced}</span>` : ""}
       </div>
       <p class="console-message" title="${escapePublicText(item.automation?.message || "等待操作")}">${escapePublicText(item.automation?.message || "等待操作")}</p>
@@ -3716,6 +3863,12 @@ document.addEventListener("click", async event => {
   if (button.dataset.action === "view-prompt-example") return openPromptExample(button.dataset.promptKey);
   if (button.dataset.action === "download-prompt-example") return downloadTextFile(`${button.dataset.promptKey || "prompt"}-example.json`, promptExampleForKey(button.dataset.promptKey));
   const action = button.dataset.action;
+  if (action === "import-prompt-batch") return importPromptBatchForScope(button.dataset.promptScope || "all");
+  if (action === "download-prompt-suggestions") {
+    const scope = button.dataset.promptScope || "all";
+    downloadTextFile(`纯梦老虎机-${scope}-提示词建议.json`, promptSuggestionTemplate(scope));
+    return showToast("系统提示词建议模板已下载；修改后可直接批量上传", "success");
+  }
   if (!action) return;
   const id = button.dataset.id;
   if (action === "open-independent-library") return openIndependentAssetLibrary({ entityType: "manager" });
@@ -3788,10 +3941,11 @@ document.addEventListener("click", async event => {
     if (stage === "script") {
       const hasShots = Array.isArray(project?.shots) && project.shots.length > 0;
       const hasScript = Boolean(String(project?.script?.raw || "").trim());
-      const hasCheckpoint = Boolean(project?.script?.generationCheckpoint);
+      const hasCheckpoint = Boolean(project?.script?.generationCheckpoint || project?.script?.analysisCheckpoint);
       if (!hasShots && !hasScript && !hasCheckpoint) {
         const gaps = ideaBootstrapGaps(project);
         if (gaps.length) return showToast(`空项目请先：${gaps.join(" → ")}`, "error");
+        if (!await ensureScriptFormatBeforeWriting(project)) return;
       }
     }
     return runLong(projectUsesStepExecution(project)
@@ -4036,7 +4190,9 @@ $("#resumeScriptGeneration").addEventListener("click", () => {
   const task = scriptWorkflowState();
   runScriptLong(task.recoveryKind === "plan"
     ? "正在保留合格断点并只重写失败批次…"
-    : "正在从已保存断点继续写作…", () => api.workbench.resumeScriptGeneration(state.project.id), operation);
+    : task.recoveryKind === "analysis"
+      ? "正在复用已完成片段并继续拆镜…"
+      : "正在从已保存断点继续写作…", () => api.workbench.resumeScriptGeneration(state.project.id), operation);
 });
 $("#generateTopics").addEventListener("click", async () => {
   await saveScriptFields();
@@ -4044,8 +4200,9 @@ $("#generateTopics").addEventListener("click", async () => {
 });
 $("#generateCompleteScript").addEventListener("click", async () => {
   await saveScriptFields();
+  if (!await ensureScriptFormatBeforeWriting(state.project, { force: !state.project?.script?.generationCheckpoint })) return;
   const seconds = Number(state.project?.generation?.targetDurationSeconds) || 300;
-  const result = await runScriptLong(`5分钟写作通道：正在并行生成 ${seconds} 秒完整剧本…`, () => api.workbench.generateCompleteScript(state.project.id), "idea_script");
+  const result = await runScriptLong(`正在优先加速生成 ${seconds} 秒完整剧本；超过5分钟也会继续当前任务…`, () => api.workbench.generateCompleteScript(state.project.id), "idea_script");
   if (result?.ok && state.project?.currentStage === "assets") {
     switchStage("assets");
     const elapsed = state.project?.script?.generationPerformance?.elapsedSeconds;
@@ -4056,6 +4213,7 @@ $("#runIdeaPipeline").addEventListener("click", async () => {
   await saveScriptFields();
   const gaps = ideaBootstrapGaps();
   if (gaps.length) return showToast(`还不能开跑，请先：${gaps.join(" → ")}`, "error");
+  if (!await ensureScriptFormatBeforeWriting(state.project, { force: !state.project?.script?.generationCheckpoint && !(state.project?.shots || []).length })) return;
   const engine = currentVideoEngineName();
   const seconds = Number(state.project?.generation?.targetDurationSeconds) || 300;
   if (!window.confirm(`将按全局目标 ${seconds} 秒生成并审计完整剧本，然后调用图片 API 与${engine}，自动完成角色/场景、人物视频/音色、分镜图、分镜视频和成片拼接。此操作会产生模型与视频生成消耗，确认开始吗？`)) return;
@@ -4063,7 +4221,7 @@ $("#runIdeaPipeline").addEventListener("click", async () => {
 });
 $("#analyzeScript").addEventListener("click", async () => {
   await saveScriptFields();
-  await runLong("大模型正在拆解人物、场景和镜头…", () => api.workbench.analyzeScript(state.project.id));
+  await runScriptLong("正在按安全输入/输出预算拆解剧本；已完成片段会实时保存…", () => api.workbench.analyzeScript(state.project.id), "analyze_script");
   if (state.project?.shots?.length) switchStage("assets");
 });
 $("#productImage").addEventListener("click", async () => {
@@ -4104,13 +4262,12 @@ $("#importStoryboardBatch")?.addEventListener("click", async () => {
   showToast(`已导入 ${result.imported?.length || 0} 张分镜图${failed ? `；${failed} 张质检失败或未导入` : ""}`, failed ? "error" : "success");
 });
 $("#importShotPromptsBatch")?.addEventListener("click", async () => {
-  if (!state.project?.shots?.length) return showToast("请先完成拆镜，再批量上传提示词", "error");
   const result = await api.workbench.importShotPrompts(state.project.id);
   if (!result?.ok) return showToast(result?.message || "批量上传分镜提示词失败", "error");
   if (result.canceled) return;
   setStateProject(result.project);
-  renderVideos();
-  showToast(`已把 ${result.imported || 0} 镜设为手动提示词`);
+  renderAll();
+  showToast(`已保存 ${result.imported || 0} 条视频提示词；未拆镜项目也会在后续自动匹配`);
 });
 $("#importShotVideosBatch")?.addEventListener("click", async () => {
   if (!state.project?.shots?.length) return showToast("请先完成拆镜，再批量上传分镜视频", "error");
@@ -4135,13 +4292,14 @@ $("#continueFromScript")?.addEventListener("click", async () => {
   const stepExecution = projectUsesStepExecution(project);
   const hasShots = Array.isArray(project?.shots) && project.shots.length > 0;
   const hasScript = Boolean(String(project?.script?.raw || "").trim());
-  const hasCheckpoint = Boolean(project?.script?.generationCheckpoint);
+  const hasCheckpoint = Boolean(project?.script?.generationCheckpoint || project?.script?.analysisCheckpoint);
   if (!hasShots && !hasScript && !hasCheckpoint) {
     const gaps = ideaBootstrapGaps(project);
     if (gaps.length) return showToast(`空项目请先：${gaps.join(" → ")}，再运行剧本阶段`, "error");
     const message = stepExecution
       ? "当前还没有剧本。将按已选题材写出完整剧本，完成后停在资产阶段；不会自动生成图片或视频。会产生文本模型消耗，确认开始吗？"
       : "当前还没有剧本。将按已选题材自动写完整剧本，并继续资产→分镜→视频→成片。会产生消耗，确认开始吗？";
+    if (!await ensureScriptFormatBeforeWriting(project)) return;
     if (!window.confirm(message)) return;
   } else if (!window.confirm(stepExecution
     ? "只完成当前剧本写作/拆镜，完成后停在资产阶段，不会自动生成图片或视频。继续吗？"
@@ -4343,13 +4501,14 @@ $("#runFullPipeline").addEventListener("click", async () => {
   const project = state.project;
   const hasShots = Array.isArray(project?.shots) && project.shots.length > 0;
   const hasScript = Boolean(String(project?.script?.raw || "").trim());
-  const hasCheckpoint = Boolean(project?.script?.generationCheckpoint);
+  const hasCheckpoint = Boolean(project?.script?.generationCheckpoint || project?.script?.analysisCheckpoint);
   if (!hasShots && !hasScript && !hasCheckpoint) {
     if (project.productionPlan?.inputMode === "manual") {
       return showToast("手动起步请先粘贴/上传完整剧本，再点一键全流程", "error");
     }
     const gaps = ideaBootstrapGaps(project);
     if (gaps.length) return showToast(`空项目请先：${gaps.join(" → ")}`, "error");
+    if (!await ensureScriptFormatBeforeWriting(project)) return;
   }
   const frameStep = project?.generation?.mode === "storyboard_sheet" ? "逐秒合图（无首尾帧）" : "首尾帧/延续帧";
   const stepNotice = projectUsesStepExecution(project)
@@ -4445,7 +4604,15 @@ function setQualityBlueprintMenuOpen(open, { restoreFocus = false } = {}) {
     if (restoreFocus) toggle.focus({ preventScroll: true });
     return;
   }
-  requestAnimationFrame(() => menu.focus({ preventScroll: true }));
+  // Move keyboard focus in the same event turn. Deferring the only focus call
+  // by one animation frame leaves screen-reader and fast keyboard users on the
+  // trigger while the dialog is already visible.
+  menu.focus({ preventScroll: true });
+  requestAnimationFrame(() => {
+    if (!menu.classList.contains("hidden") && !menu.contains(document.activeElement)) {
+      menu.focus({ preventScroll: true });
+    }
+  });
 }
 
 $("#qualityBlueprintToggle")?.addEventListener("click", event => {
@@ -4825,6 +4992,7 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
         targetDurationSeconds
       },
       productionPlan: {
+        ...(project.productionPlan || {}),
         executionMode: $("input[name='projectExecutionMode']:checked")?.value || "step",
         inputMode: nextInputMode
       }
@@ -4846,6 +5014,56 @@ $("#closeProjectStrategyDialog").addEventListener("click", closeProjectStrategyD
 $("#projectStrategyDialog").addEventListener("cancel", event => {
   if (event.currentTarget.dataset.required === "true" || state.strategySaving) event.preventDefault();
 });
+$("#scriptFormatForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (state.scriptFormatSaving) return;
+  const selected = $("input[name='scriptFormat']:checked")?.value || "";
+  if (!selected) {
+    $("#scriptFormatError").textContent = "请选择完整制作稿、简易对白稿或秒级分镜成片稿。";
+    $("input[name='scriptFormat']")?.focus();
+    return;
+  }
+  const project = state.project;
+  if (!project || project.id !== state.scriptFormatProjectId) {
+    $("#scriptFormatError").textContent = "当前项目已切换，请关闭后重新开始写作。";
+    return;
+  }
+  state.scriptFormatSaving = true;
+  $("#confirmScriptFormat").disabled = true;
+  try {
+    await patchProject({
+      productionPlan: {
+        ...(project.productionPlan || {}),
+        scriptFormat: selected,
+        scriptFormatConfirmed: true
+      }
+    }, selected === "dialogue" ? "选择简易对白剧本格式" : selected === "timed_storyboard" ? "选择秒级分镜成片稿格式" : "选择完整制作剧本格式");
+    showToast(selected === "dialogue"
+      ? "已选择简易对白稿；后台完整生产字段仍会照常生成"
+      : selected === "timed_storyboard"
+        ? "已选择秒级分镜成片稿；将按幕、秒级子镜、对白汇总和音效直接编译生产"
+        : "已选择完整制作稿（原先模式）");
+    finishScriptFormatDialog(true);
+  } catch (error) {
+    $("#scriptFormatError").textContent = error?.message || "剧本格式保存失败";
+  } finally {
+    state.scriptFormatSaving = false;
+    $("#confirmScriptFormat").disabled = false;
+  }
+});
+function cancelScriptFormatDialog() {
+  if (state.scriptFormatSaving) return;
+  finishScriptFormatDialog(false);
+}
+$("#cancelScriptFormat").addEventListener("click", cancelScriptFormatDialog);
+$("#closeScriptFormatDialog").addEventListener("click", cancelScriptFormatDialog);
+$("#scriptFormatDialog").addEventListener("cancel", event => {
+  event.preventDefault();
+  cancelScriptFormatDialog();
+});
+$$("input[name='scriptFormat']").forEach(input => input.addEventListener("change", () => {
+  $("#scriptFormatError").textContent = "";
+}));
 $("#startBridge").addEventListener("click", async () => {
   $("#startBridge").disabled = true;
   const result = await api.startBridge();

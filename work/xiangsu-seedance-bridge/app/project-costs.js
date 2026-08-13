@@ -302,7 +302,7 @@ function repriceCostEntries(entries = [], options = {}) {
     // Video never uses local rate estimates — only upstream charge_yuan / not_charged.
     if (entry.category === "video") return entry;
 
-    if (entry.category === "text" && entry.status === "unpriced") {
+    if (entry.category === "text" && ["unpriced", "pending"].includes(entry.status)) {
       const amount = estimateTextCost({
         inputTokens: entry.inputTokens,
         outputTokens: entry.outputTokens
@@ -310,9 +310,11 @@ function repriceCostEntries(entries = [], options = {}) {
       if (amount === null) return entry;
       return normalizeCostEntry({
         ...entry,
-        status: "estimated",
+        status: entry.status === "pending" ? "pending" : "estimated",
         amountYuan: amount,
-        pricingBasis: `${textPricingBasis(entry.inputTokens, entry.outputTokens, textPricing)}（台账回填）`
+        pricingBasis: entry.status === "pending"
+          ? `等待文本上游实扣回执；${textPricingBasis(entry.inputTokens, entry.outputTokens, textPricing)}（台账回填）`
+          : `${textPricingBasis(entry.inputTokens, entry.outputTokens, textPricing)}（台账回填）`
       });
     }
     return entry;

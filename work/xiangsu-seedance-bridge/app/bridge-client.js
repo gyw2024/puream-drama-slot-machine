@@ -347,7 +347,10 @@ class BridgeClient {
       throw error;
     }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), options.timeoutMs || REQUEST_TIMEOUT_MS);
+    const requestedTimeoutMs = Object.prototype.hasOwnProperty.call(options, "timeoutMs")
+      ? Number(options.timeoutMs)
+      : REQUEST_TIMEOUT_MS;
+    const timeout = requestedTimeoutMs > 0 ? setTimeout(() => controller.abort(), requestedTimeoutMs) : null;
 
     try {
       const requestUrl = `${this.config.baseUrl}${route}`;
@@ -379,7 +382,7 @@ class BridgeClient {
       }
       return payload;
     } finally {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
     }
   }
 
@@ -558,7 +561,7 @@ class BridgeClient {
           providerKind: this.config.kind
         });
       }
-      const result = await this.request("/v1/videos", { method: "POST", body: payload, timeoutMs: 600_000 });
+      const result = await this.request("/v1/videos", { method: "POST", body: payload, timeoutMs: 0 });
       if (result?.taskId) this.saveRemoteTask(result.taskId, {
         outputDir: payload.outputDir,
         providerKind: "local-xiangsu",
@@ -573,7 +576,7 @@ class BridgeClient {
         method: "POST",
         body: cloud.body,
         headers: { "idempotency-key": cloud.requestId },
-        timeoutMs: 600_000
+        timeoutMs: 0
       });
     } catch (error) {
       const status = Number(error?.status) || 0;
@@ -619,7 +622,6 @@ class BridgeClient {
       const redirect = await this.fetch(downloadUrl, {
         method: "GET",
         headers: { authorization: `Bearer ${this.authorization()}` },
-        signal: AbortSignal.timeout(120_000),
         redirect: "manual"
       });
       if ([301, 302, 303, 307, 308].includes(redirect.status)) {
@@ -634,7 +636,7 @@ class BridgeClient {
         throw Object.assign(new Error(errorText || `纯梦下载接口失败：HTTP ${redirect.status}`), { code: "PUREAM_DOWNLOAD_REDIRECT_FAILED", status: redirect.status });
       }
     }
-    const response = await fetchPublicVideo(this.fetch, safeVideoUrl, { signal: AbortSignal.timeout(600_000) });
+    const response = await fetchPublicVideo(this.fetch, safeVideoUrl);
     if (!response.ok) throw Object.assign(new Error(`下载远程视频失败：HTTP ${response.status}`), { code: "REMOTE_VIDEO_DOWNLOAD_FAILED" });
     return writeResponseToFile(response, target);
   }

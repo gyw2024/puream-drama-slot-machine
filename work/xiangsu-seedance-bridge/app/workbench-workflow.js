@@ -14,10 +14,13 @@ const { parseCompiledDialogueSegments, parseSourceDialogueLedger } = require("./
 const { allocateH3ShotSpeakers, h3AllowedSpeakersByShot } = require("./h3-speaker-allocation");
 const { directFastUserPrompt, materializeDirectFastScript } = require("./direct-fast-script");
 const { makeId, defaultAssetLibraries } = require("./workbench-store");
+const { promptIntakeText } = require("./prompt-intake");
 const { normalizeCloudVideoResolution, normalizeHailuoApiMode, providerEngine } = require("./video-provider-policy");
 const {
+  estimateTextCost,
   estimateTextTokens,
-  estimateVideoCost
+  estimateVideoCost,
+  textPricingBasis
 } = require("./project-costs");
 const {
   durationContract,
@@ -77,6 +80,7 @@ const {
   selectVoiceExtractPlan,
   analyzeVisualFile,
   analyzeImageFile,
+  analyzeSceneFourViewLayout,
   analyzeImageDimensions,
   analyzeImageSkinOccupancy,
   analyzeVideoEndpointFrames,
@@ -97,6 +101,14 @@ const {
 const SCRIPT_PLAN_BATCH_SIZE = 4;
 const SCRIPT_UNIT_BATCH_SIZE = 2;
 const STRUCTURED_TEXT_MAX_CHARS = 7500;
+// Uploaded prose is analyzed in smaller units than an AI-authored blueprint.
+// A single request has to carry the source excerpt, its immutable dialogue
+// ledger and a detailed production schema, while its response contains full
+// shot JSON.  Capping both sides prevents long user scripts from turning into
+// several simultaneous context-heavy requests that stall the desktop relay.
+const UPLOADED_ANALYSIS_MAX_SOURCE_CHARS = 5000;
+const UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST = 5;
+const UPLOADED_ANALYSIS_MAX_CONCURRENCY = 3;
 // Keep the official relay below its per-account saturation point. Eight-way
 // planning fills one wave; unit writing uses two bounded waves instead of
 // flooding the relay with sixteen simultaneous long JSON streams.
@@ -106,18 +118,11 @@ const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol";
 const IMAGE_BATCH_MAX_CONCURRENCY = 6;
 const VIDEO_BATCH_MAX_CONCURRENCY = 4;
 
-function scriptFastRequestBudgetMs(startedAt, reserveMs = 20_000) {
-  const startedAtMs = Date.parse(String(startedAt || ""));
-  if (!Number.isFinite(startedAtMs)) return 270_000;
-  const remaining = startedAtMs + SCRIPT_FAST_TARGET_SECONDS * 1000 - Date.now() - reserveMs;
-  if (remaining < 10_000) {
-    throw Object.assign(new Error("5分钟快速写作时限已到；已停止继续请求并保留当前断点，可手动继续"), {
-      code: "SCRIPT_FAST_DEADLINE_REACHED",
-      noAutomaticRetry: true,
-      retryRequiresExplicitResume: true
-    });
-  }
-  return Math.min(270_000, remaining);
+function scriptFastRequestBudgetMs() {
+  // Five minutes is a performance target, never a cancellation deadline.
+  // Generation stays attached to the same logical request until the provider
+  // settles it or the user explicitly pauses/stops the project.
+  return 0;
 }
 
 function fillTemplate(template, values) {
@@ -179,7 +184,7 @@ function sanitizeEmptySceneDescription(text = "", characters = []) {
 }
 
 function emptySceneVisualStyle() {
-  return "写实空置布景板，仅空间与陈设，真实材质与有动机的电影光，竖屏安全构图；严禁出现任何真人";
+  return "写实空置场景四视图参考板，仅空间与陈设，真实材质与有动机的电影光；同一空间、同一时段、同一光向，严禁出现任何真人";
 }
 
 async function probeFacesInImage(filePath) {
@@ -200,12 +205,44 @@ function productSellingPoints(project) {
   return String(project?.product?.sellingPoints || project?.product?.description || "").trim();
 }
 
+function projectScriptFormat(project) {
+  if (project?.productionPlan?.scriptFormat === "timed_storyboard") return "timed_storyboard";
+  return project?.productionPlan?.scriptFormat === "dialogue" ? "dialogue" : "production";
+}
+
+function assertAiScriptFormatConfirmed(project) {
+  if (project?.productionPlan?.inputMode === "manual") return projectScriptFormat(project);
+  if (project?.productionPlan?.scriptFormatConfirmed !== true) {
+    throw Object.assign(new Error("请先选择本项目要写完整制作稿、简易对白稿还是秒级分镜成片稿"), {
+      code: "SCRIPT_FORMAT_SELECTION_REQUIRED",
+      localValidation: true
+    });
+  }
+  return projectScriptFormat(project);
+}
+
+function scriptFormatDirective(project) {
+  const format = projectScriptFormat(project);
+  if (format === "dialogue") {
+    return `【项目剧本格式·简易对白稿】最终给用户看的剧本必须以对白为主：只保留简短背景情节、必要场景动作，以及“说话人（对谁说、语气、情绪、表情、身体动作）：原句对白”。每句必须明确且正确绑定说话人和听者，语气/表情随冲突变化，禁止把听者反应混进台词原文。内部仍必须完整填写人物、场景、商品因果、连续性、声音、subshots、dialogueTurns 等全部生产 JSON 字段，不能因为显示格式简化而降低资产、分镜图或视频提示词质量。`;
+  }
+  if (format === "timed_storyboard") {
+    return `【项目剧本格式·秒级分镜成片稿】最终给用户看的正文必须先给出【剧情简介】，再按“幕 → 5至15秒分镜 → 秒级子镜”输出。每个分镜必须明确天气/灯光/氛围、场景、人物、物品、人声设定、承接关系、逐秒镜头动作、【对话汇总】、【音效】和无字幕负向提示。对话汇总是唯一台词事实账本：逐句完整保留原话，绑定正确说话人、明确听者、起止秒数、语气、情绪、表情、身体动作、音量、语速、重音和气口；逐秒镜头不得另造、漏掉或重复台词。内部仍必须完整填写人物/场景四视图/道具商品/连续性/subshots/dialogueTurns/sourceDialogueBindings 等全部生产 JSON 字段，并按当前视频供应商允许的单元时长编译。`;
+  }
+  return `【项目剧本格式·完整制作稿（原先模式）】继续输出原有完整制作结构；人物、场景、道具商品、生成单元、声音、连续性和结尾闭环均不得省略。每句对白仍必须正确绑定说话人、听者、语气、情绪、表情和身体动作。`;
+}
+
+function viewerComprehensionPriorityDirective() {
+  return `【全局最高优先级·观众看懂并看进去】先让观众在当前镜头看懂“谁和谁是什么关系、此刻发生了什么、谁想要什么、这句话逼出了什么动作或关系变化”，再追求画面华丽。剧情必须由可见行动和逐句攻防推进，禁止靠旁白摘要、空泛独白或无因果跳切。每句对白原文必须完整保留且只说一次，严格绑定正确说话人和明确听者；同时写清贴合当下动机的语气、情绪起伏、面部微表情、身体动作、音量、语速、重音和气口。说话人必须对听者表演，听者必须有同步可见反应；禁止对镜念稿、平声播音、集体木头脸、A人说B话、漏句、改句、复读和表情语气与台词含义相反。`;
+}
+
 function ideaSignature(project) {
   return JSON.stringify({
     topicId: project?.ideation?.selectedTopicId || "",
     productName: String(project?.product?.name || "").trim(),
     sellingPoints: productSellingPoints(project),
-    imagePath: String(project?.product?.imagePath || "")
+    imagePath: String(project?.product?.imagePath || ""),
+    scriptFormat: projectScriptFormat(project)
   });
 }
 
@@ -2093,6 +2130,181 @@ function renderProductionScript(blueprint, normalized, project, topic, options =
   return lines.join("\n");
 }
 
+function renderDialogueScript(blueprint, normalized, project, topic, options = {}) {
+  const partial = options.partial === true;
+  const characters = Array.isArray(normalized?.characters) ? normalized.characters : [];
+  const scenes = Array.isArray(normalized?.scenes) ? normalized.scenes : [];
+  const shots = Array.isArray(normalized?.shots) ? normalized.shots : [];
+  const characterByKey = new Map();
+  characters.forEach((character, index) => {
+    const fallbackId = `C${String(index + 1).padStart(2, "0")}`;
+    [character?.id, character?.name, fallbackId].filter(Boolean).forEach(key => characterByKey.set(String(key), character));
+  });
+  const characterName = key => characterByKey.get(String(key || ""))?.name || String(key || "").trim() || "角色";
+  const title = String(blueprint?.title || topic?.title || project?.title || "未命名短剧").trim();
+  const synopsis = String(blueprint?.story?.synopsis || blueprint?.logline || topic?.logline || "").trim();
+  const lines = [
+    partial ? `# ${title}｜简易对白剧本（实时草稿）` : `# ${title}｜简易对白剧本`,
+    "",
+    "## 简单背景情节",
+    "",
+    synopsis || "人物因一场现实冲突被迫直面真相，并用行动完成关系与生活的改变。",
+    "",
+    "## 主要人物",
+    ""
+  ];
+  characters.forEach(character => {
+    const source = (blueprint?.characters || []).find(item => item?.id === character?.id || item?.name === character?.name) || {};
+    lines.push(`- ${character.name}：${String(source.role || character.description || "故事人物").trim()}`);
+  });
+  if (scenes.length) {
+    lines.push("", "## 场景背景", "");
+    scenes.forEach(scene => lines.push(`- ${scene.name}：${String(scene.description || scene.atmosphere || "按剧情连续呈现").trim()}`));
+  }
+  lines.push("", "## 对白剧本", "");
+  let cursorSec = 0;
+  shots.forEach((shot, index) => {
+    const duration = Math.max(1, Number(shot?.duration) || 10);
+    const start = cursorSec;
+    const end = cursorSec + duration;
+    cursorSec = end;
+    const shotNumber = Number(shot?.number) || index + 1;
+    const action = String(shot?.action || shot?.visualBeat || shot?.mainlineBeat || "人物继续当前行动").trim();
+    lines.push(`### S${String(shotNumber).padStart(2, "0")}｜${timecode(start)}–${timecode(end)}｜${shot.sceneName || "剧情现场"}`);
+    lines.push(`【背景/动作：${action}】`);
+    const turns = (Array.isArray(shot?.dialogueTurns) ? shot.dialogueTurns : [])
+      .map((turn, turnIndex) => normalizeDialogueTurn(turn, turnIndex + 1))
+      .filter(turn => turn.speakerId && turn.text);
+    if (turns.length) {
+      turns.forEach(turn => {
+        const speaker = characterName(turn.speakerId);
+        const listeners = turn.listenerIds.map(characterName).filter(Boolean);
+        const tone = [...new Set([
+          turn.sourceTone,
+          turn.emotionStart && turn.emotionPeak ? `${turn.emotionStart}到${turn.emotionPeak}` : (turn.emotionPeak || turn.emotionStart),
+          turn.delivery,
+          turn.body
+        ].map(value => String(value || "").trim()).filter(Boolean))].join("；") || String(shot?.emotion || "贴合当前冲突自然表达").trim();
+        const listenerClause = listeners.length ? `对${listeners.join("、")}说；` : "";
+        lines.push(`${speaker}（${listenerClause}${tone}）：${turn.text}`);
+      });
+    } else if (String(shot?.dialogue || "").trim() && String(shot.dialogue).trim() !== "无") {
+      lines.push(`对白（${String(shot?.emotion || "贴合当前冲突自然表达").trim()}）：${String(shot.dialogue).trim()}`);
+    } else {
+      lines.push("【无对白：用表情、视线和动作完成本镜。】");
+    }
+    if (shot?.productMention) {
+      lines.push(`【商品动作：${String(project?.product?.name || "用户上传商品").trim()}只按用户上传原图与真实卖点进入当前剧情动作。】`);
+    }
+    lines.push("");
+  });
+  if (partial) {
+    lines.push("## 当前写作进度", "");
+    lines.push(`- 已完成对白单元：${shots.length}/${Number(options.expectedUnitCount) || Number(blueprint?.shotPlan?.length) || shots.length || "?"}`);
+    lines.push(`- 已完成分镜规划：${Number(options.plannedCount) || 0}`);
+    lines.push(`- 当前阶段：${options.message || "正在继续生成"}`);
+    lines.push("- 这是自动保存草稿，完整生产字段仍在后台同步编译，尚未完成最终审计。", "");
+  } else {
+    lines.push("## 结尾", "");
+    lines.push(String(blueprint?.story?.ending || shots.at(-1)?.endFrame || "人物用可见行动完成故事闭环").trim());
+  }
+  return lines.join("\n");
+}
+
+function renderTimedStoryboardScript(blueprint, normalized, project, topic, options = {}) {
+  const partial = options.partial === true;
+  const shots = Array.isArray(normalized?.shots) ? normalized.shots : [];
+  const characters = Array.isArray(normalized?.characters) ? normalized.characters : [];
+  const characterById = new Map(characters.map(item => [String(item?.id || ""), String(item?.name || item?.id || "角色")]));
+  const ledgerById = new Map((normalized?.sourceDialogueLedger || []).map(item => [String(item?.id || ""), item]));
+  const title = String(blueprint?.title || topic?.title || project?.title || "未命名短剧").trim();
+  const synopsis = String(
+    blueprint?.story?.synopsis
+    || normalized?.story?.synopsis
+    || blueprint?.story?.premise
+    || normalized?.story?.premise
+    || topic?.logline
+    || "人物在现实冲突中被迫作出选择，事件经由证据与行动反转，并在结尾完成关系和结果闭环。"
+  ).trim();
+  const hasAuthoredActs = shots.some(shot => Number(shot?.actNumber) > 1 || String(shot?.actTitle || "").trim());
+  const fallbackActTitles = ["冲突建立", "局势反转", "高潮收束"];
+  const shotAct = (shot, index) => {
+    if (hasAuthoredActs) return Math.max(1, Math.min(9, Number(shot?.actNumber) || 1));
+    return Math.min(3, Math.floor(index * 3 / Math.max(1, shots.length)) + 1);
+  };
+  const lines = [
+    partial ? `# ${title}｜秒级分镜成片稿（实时草稿）` : `# ${title}｜秒级分镜成片稿`,
+    "",
+    `【剧情简介】${synopsis}`,
+    "",
+    "【模式简介】按“幕 → 5至15秒分镜 → 秒级子镜”组织，逐镜写清场景人物物品、人声、承接、表演、对白汇总、音效与负向提示；可直接编译为资产图、分镜图和视频提示词。",
+    ""
+  ];
+  let previousAct = 0;
+  shots.forEach((shot, index) => {
+    const act = shotAct(shot, index);
+    if (act !== previousAct) {
+      const actTitle = String(shot?.actTitle || fallbackActTitles[Math.min(fallbackActTitles.length - 1, act - 1)] || `剧情推进${act}`).trim();
+      lines.push(`第${act}幕：【${actTitle}】`);
+      previousAct = act;
+    }
+    const duration = Math.max(1, Number(shot?.duration) || 10);
+    const subshots = Array.isArray(shot?.subshots) ? shot.subshots : [];
+    const people = (shot?.scenePresenceCharacterNames?.length ? shot.scenePresenceCharacterNames : shot?.characterNames || [])
+      .map(String).filter(Boolean);
+    const turns = (Array.isArray(shot?.dialogueTurns) ? shot.dialogueTurns : [])
+      .map((turn, turnIndex) => normalizeDialogueTurn(turn, turn?.subshotNumber || turnIndex + 1))
+      .filter(turn => turn.speakerId && turn.text);
+    const speakers = [...new Set(turns.map(turn => characterById.get(turn.speakerId) || turn.speakerId).filter(Boolean))];
+    lines.push(`分镜 ${index + 1}（${Math.max(1, subshots.length)}个镜头·${shot?.pace || "中等节奏"}）※ ${shot?.sceneName || "剧情现场"}｜场景固定`);
+    lines.push(`天气/灯光/氛围：${shot?.weatherLightingAtmosphere || shot?.emotion || "光线、色温与情绪按本幕连续变化。"}`);
+    lines.push(`场景：@${shot?.sceneName || "剧情现场"}`);
+    lines.push(`人物：${people.length ? people.map(name => `@${name}`).join(" ") : "@无"}`);
+    lines.push(`物品：${shot?.propNames?.length ? shot.propNames.map(name => `@${name}`).join(" ") : "@无"}`);
+    lines.push(`人声设定：${speakers.length ? speakers.map(name => `@${name}`).join(" ") : "@无"}`);
+    lines.push(`承接上一分镜：【${shot?.authoredContinuity || shot?.stateBefore || (index ? "承接上一镜人物位置、动作结果与情绪余波" : "开篇全景引入")}】`);
+    lines.push(`【0-${duration}秒】镜头：`);
+    if (subshots.length) {
+      subshots.forEach(subshot => {
+        const start = Number(subshot?.start) || 0;
+        const end = Number(subshot?.end) || duration;
+        const framing = String(subshot?.framing || subshot?.shotType || shot?.shotSize || "中景").trim();
+        const camera = String(subshot?.camera || shot?.cameraMove || "固定镜头").trim();
+        const action = String(subshot?.action || shot?.action || "人物继续当前行动").trim();
+        lines.push(`${start}-${end}秒，【${framing}，${camera}，${action}】；`);
+      });
+    } else {
+      lines.push(`0-${duration}秒，【${shot?.shotSize || "中景"}，${shot?.cameraMove || "固定镜头"}，${shot?.action || "人物按剧情完成本镜行动"}】；`);
+    }
+    lines.push("【对话汇总】");
+    if (!turns.length) {
+      lines.push("无对白；人物闭口，以视线、表情、动作与环境声推进。");
+    } else {
+      turns.forEach(turn => {
+        const ledger = ledgerById.get(turn.sourceDialogueId) || {};
+        const subshot = subshots[Math.max(0, (Number(turn.subshotNumber) || 1) - 1)] || {};
+        const start = Number.isFinite(Number(ledger.startSecond)) ? Number(ledger.startSecond) : (Number(subshot.start) || 0);
+        const end = Number.isFinite(Number(ledger.endSecond)) ? Number(ledger.endSecond) : (Number(subshot.end) || duration);
+        const speaker = characterById.get(turn.speakerId) || turn.speakerId;
+        const listeners = turn.listenerIds.map(id => characterById.get(id) || id).filter(Boolean);
+        const tone = [turn.sourceTone, turn.delivery, turn.body, turn.listenerBeat].map(value => String(value || "").trim()).filter(Boolean).join("；") || "按剧情自然起伏";
+        lines.push(`@${speaker}（${listeners.length ? `对@${listeners.join("、@")}；` : ""}${start}-${end}秒；${tone}）：“${turn.text}”`);
+      });
+    }
+    lines.push(`【音效】${shot?.soundDesign || shot?.audioPlan || "现场环境声与人物动作声"}`);
+    lines.push("【画面禁止项 / 负向提示】严禁字幕、气泡、排版文字、字母、Logo误绘和水印；对白只驱动口型、语气、表情与动作。", "");
+  });
+  if (partial) lines.push(`【当前进度】已完成 ${shots.length}/${Number(options.expectedUnitCount) || shots.length || "?"} 个分镜；这是实时草稿，后台生产字段仍在同步编译。`);
+  return lines.join("\n");
+}
+
+function renderScriptForProject(blueprint, normalized, project, topic, options = {}) {
+  const format = projectScriptFormat(project);
+  if (format === "dialogue") return renderDialogueScript(blueprint, normalized, project, topic, options);
+  if (format === "timed_storyboard") return renderTimedStoryboardScript(blueprint, normalized, project, topic, options);
+  return renderProductionScript(blueprint, normalized, project, topic, options);
+}
+
 function selectedOrLatest(project, entityType, entityId, stage) {
   const activeRevision = project.productionRevision || "";
   const matches = project.candidates
@@ -2302,7 +2514,12 @@ function seedanceTextStageDirective(stage) {
 
 function textStagePromptForProject(project, settings, promptKey, stage) {
   const base = compileTextStagePrompt(settings?.prompts?.[promptKey], settings?.prompts || {}, stage);
-  return projectVideoEngine(project) === "hailuo-h3" ? base : `${base}\n\n${seedanceTextStageDirective(stage)}`;
+  const enginePrompt = projectVideoEngine(project) === "hailuo-h3" ? base : `${base}\n\n${seedanceTextStageDirective(stage)}`;
+  const creatorPrompt = promptIntakeText(project, stage, project);
+  const creatorDirective = creatorPrompt
+    ? `\n\n【用户从零批量上传的本阶段创作提示词·最高创作意图】\n${creatorPrompt}\n只要不改变用户原始对白、不交换说话人/听者、不破坏商品真实信息和机器可读输出结构，就按这份用户提示词执行；不得用系统范例覆盖。`
+    : "";
+  return `${enginePrompt}\n\n${viewerComprehensionPriorityDirective()}\n\n${scriptFormatDirective(project)}${creatorDirective}`;
 }
 
 /** Source-level directive injected into script unit / analysis prompts. The H3 branch deliberately retains the prior contract byte-for-byte. */
@@ -2637,7 +2854,7 @@ function imageSafetyStageContract(stage = "", language = "zh") {
     character_sheet: "Create one fictional adult character reference board on a clean neutral background. Preserve the requested age, face, hair, body and complete wardrobe; no celebrity likeness, real-person claim, brand, text or sensitive content.",
     character_three_view: "Create one fictional adult character turn-around board on a clean neutral background. Preserve one identity and one complete wardrobe; no celebrity likeness, real-person claim, brand, text or sensitive content.",
     character_intro: "Create one fictional adult character portrait on a seamless neutral background. Center the face, keep both eyes visible and the head within 15 degrees of frontal; no celebrity likeness, real-person claim, brand, text or sensitive content.",
-    scene_asset: "Create one empty fictional spatial-anchor image from one coherent camera position. Preserve doors, windows, walls, furniture topology, entrances, screen axis, time of day and light direction; no people, collage, contact sheet, text, brand or sensitive content.",
+    scene_asset: "Create one 16:9 image containing an exact 2-by-2 four-angle empty-scene reference board: front master, reverse axis, left 45-degree and right 45-degree views of the same coherent fictional space. Preserve identical doors, windows, walls, furniture topology, entrances, time of day and light direction across all four panels; no people, labels, text, brand or sensitive content.",
     storyboard_start: "Create one fictional live-action opening frame for the current shot. Preserve supplied identities, complete wardrobes, scene topology, screen axis and prop states; show the action before it happens; no collage, reference board, text, brand or sensitive content.",
     storyboard_end: "Create one fictional live-action ending frame for the current shot. Preserve supplied identities, complete wardrobes, scene topology, screen axis and prop states; show the stable result after the action; no collage, reference board, text, brand or sensitive content.",
     storyboard_sheet: "Create one fictional chronological contact sheet for the current shot. Every individual panel is a complete portrait 9:16 frame; tile the exact requested panel count left-to-right, top-to-bottom with narrow gutters. Preserve supplied identities, wardrobes, scene topology, prop continuity and panel order; no design-board layout, extra person, text, brand or sensitive content.",
@@ -2648,7 +2865,7 @@ function imageSafetyStageContract(stage = "", language = "zh") {
     character_sheet: "只生成一张成年虚构角色设定板：中性干净背景，锁定年龄、脸、发型、体型和整套服装；不得影射名人或真人，不得出现品牌、文字和敏感内容。",
     character_three_view: "只生成一张成年虚构角色转面设定板：同一身份、同一整套服装、中性干净背景；不得影射名人或真人，不得出现品牌、文字和敏感内容。",
     character_intro: "只生成一张成年虚构角色独立正脸肖像：无缝中性背景、脸在视觉中心、双眼清楚、头部偏转不超过15度；不得影射名人或真人，不得出现品牌、文字和敏感内容。",
-    scene_asset: "只生成一张无人场景空间锚图：单一连贯机位，锁定门窗墙面、家具拓扑、出入口、正反打轴线、时段和光向；禁止人物、拼贴、多宫格、文字、品牌和敏感内容。",
+    scene_asset: "只生成一张16:9、严格2×2分割的无人场景四视图：左上主入口正向、右上反向轴、左下左侧45度、右下右侧45度；四格必须是同一空间、同一门窗家具拓扑、同一时段和光向。禁止人物、标签、文字、品牌和敏感内容。",
     storyboard_start: "只生成本镜一张动作发生前的电影首帧：严格保留参考人物身份、整套服装、场景拓扑、轴线和道具状态；禁止拼贴、设定板、文字、品牌和敏感内容。",
     storyboard_end: "只生成本镜一张动作完成后的电影尾帧：严格保留参考人物身份、整套服装、场景拓扑、轴线和道具状态；禁止拼贴、设定板、文字、品牌和敏感内容。",
     storyboard_sheet: "只生成本镜一张逐时接触印合图：每个独立小格必须是完整9:16竖屏画面，按从左到右、从上到下拼接；格数与时间顺序必须准确，人物、服装、场景和道具连续；禁止设定板、额外人物、文字、品牌和敏感内容。",
@@ -3409,9 +3626,9 @@ function imageStageAspectRatio(project, stage, entity = null) {
   return String(project?.generation?.aspectRatio || "9:16").trim() || "9:16";
 }
 
-function imageGenerationOptions(project, stage, referenceInputs = [], entity = null) {
+function imageGenerationOptions(project, stage, referenceInputs = [], entity = null, signal = null) {
   const aspectRatio = imageStageAspectRatio(project, stage, entity);
-  return { referenceInputs, size: aspectRatio, aspectRatio };
+  return { referenceInputs, size: aspectRatio, aspectRatio, ...(signal ? { signal } : {}) };
 }
 
 function continuityReferenceRequired(stage) {
@@ -3556,7 +3773,7 @@ function storyAssetDirective(project = {}, stage = "", entity = {}) {
     const related = (project?.shots || []).filter(shot => shot.sceneId === entity.id || shot.sceneName === entity.name);
     const beats = related.map(shot => shot.sceneObjective || shot.mainlineBeat || shot.action).filter(Boolean).slice(0, 4);
     const productUsed = related.some(shot => shot.productMention);
-    return `【故事判断后的场景资产合同】该空间承载：${beats.join("；") || entity.scenePurpose || "按场景圣经"}。固定出入口、家具、光向、拍摄轴和可行动区域；${productUsed ? "后续有用户上传商品剧情，预留符合剧本动作的干净操作面，但空场景资产不得提前画入商品。" : "本场无商品剧情，不得画入商品或广告陈列。"}场景资产必须是无人空镜。`;
+    return `【故事判断后的场景四视图合同】该空间承载：${beats.join("；") || entity.scenePurpose || "按场景圣经"}。一张16:9画布严格分成2×2四格：主入口正向、反向轴、左侧45度、右侧45度；四格锁定同一出入口、门窗家具拓扑、光向、拍摄轴和可行动区域。${productUsed ? "后续有用户上传商品剧情，预留符合剧本动作的干净操作面，但空场景资产不得提前画入商品。" : "本场无商品剧情，不得画入商品或广告陈列。"}四个角度都必须无人。`;
   }
   return "";
 }
@@ -3798,9 +4015,6 @@ function uniqueDialogueTurns(project, shot) {
 function assertSystemPromptDialogueParity(project, shot, prompt, engine = projectVideoEngine(project)) {
   const turns = uniqueDialogueTurns(project, shot);
   if (!turns.length) return true;
-  const sourceLocked = turns.some(turn => String(turn?.sourceDialogueId || "").trim())
-    || Array.isArray(project?.script?.sourceDialogueLedger) && project.script.sourceDialogueLedger.length > 0;
-  if (!sourceLocked) return true;
   const text = String(prompt || "");
   const expectedCounts = new Map();
   for (const turn of turns) expectedCounts.set(turn.text, (expectedCounts.get(turn.text) || 0) + 1);
@@ -4401,7 +4615,12 @@ async function mapWithConcurrency(items, concurrency, worker) {
       results[index] = await worker(list[index], index);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(limit, list.length) }, run));
+  // Do not reject while sibling workers are still running.  Returning early
+  // used to detach the remaining paid requests from their project operation,
+  // so the UI reported failure while background model calls kept completing.
+  const settled = await Promise.allSettled(Array.from({ length: Math.min(limit, list.length) }, run));
+  const failed = settled.find(item => item.status === "rejected");
+  if (failed) throw failed.reason;
   return results;
 }
 
@@ -4418,10 +4637,12 @@ function isScriptControlError(error) {
 
 function hasRecoverableScriptCheckpoint(project = {}) {
   const checkpoint = project?.script?.generationCheckpoint || {};
+  const analysisCheckpoint = project?.script?.analysisCheckpoint || {};
   return Boolean(
     checkpoint.planContractFailure?.retryRequiresExplicitResume === true
     || checkpoint.unitContractFailure?.retryRequiresExplicitResume === true
     || checkpoint.scriptRepair?.retryRequiresExplicitResume === true
+    || (analysisCheckpoint.signature && Array.isArray(analysisCheckpoint.chunks))
   );
 }
 
@@ -5740,7 +5961,7 @@ function mergeAnalysisChunks(chunks) {
   return { story: story.filter(Boolean), characters: canonicalCharacters, scenes: canonicalScenes, props: canonicalProps, shots, sourceDialogueLedger };
 }
 
-function analysisChunksForSchedule(text, unitCount) {
+function analysisChunksForSchedule(text, unitCount, options = {}) {
   const count = Math.max(1, Math.floor(Number(unitCount) || 1));
   const source = String(text || "").trim();
   if (source.length > count * STRUCTURED_TEXT_MAX_CHARS) {
@@ -5751,11 +5972,25 @@ function analysisChunksForSchedule(text, unitCount) {
       maxCharsPerUnit: STRUCTURED_TEXT_MAX_CHARS
     });
   }
-  const desiredParallelChunks = Math.max(1, Math.min(count, Math.ceil(count / 8)));
-  const targetChunkChars = Math.max(240, Math.min(STRUCTURED_TEXT_MAX_CHARS, Math.ceil(source.length / desiredParallelChunks)));
+  const maxSourceChars = Math.max(1000, Math.min(
+    STRUCTURED_TEXT_MAX_CHARS,
+    Math.floor(Number(options.maxSourceChars) || UPLOADED_ANALYSIS_MAX_SOURCE_CHARS)
+  ));
+  const maxUnitsPerRequest = Math.max(1, Math.min(
+    8,
+    Math.floor(Number(options.maxUnitsPerRequest) || UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST)
+  ));
+  const desiredParallelChunks = Math.max(1, Math.min(count, Math.max(
+    Math.ceil(count / maxUnitsPerRequest),
+    Math.ceil(source.length / maxSourceChars)
+  )));
+  const targetChunkChars = Math.max(240, Math.min(maxSourceChars, Math.ceil(source.length / desiredParallelChunks)));
   let chunks = splitForAnalysis(source, targetChunkChars);
   while (chunks.length > desiredParallelChunks) {
-    const candidates = chunks.slice(0, -1).map((chunk, index) => ({ index, size: chunk.length + chunks[index + 1].length }));
+    const candidates = chunks.slice(0, -1)
+      .map((chunk, index) => ({ index, size: chunk.length + chunks[index + 1].length + 1 }))
+      .filter(item => item.size <= maxSourceChars);
+    if (!candidates.length) break;
     const target = candidates.sort((left, right) => left.size - right.size || left.index - right.index)[0];
     chunks.splice(target.index, 2, `${chunks[target.index]}\n${chunks[target.index + 1]}`);
   }
@@ -5791,6 +6026,21 @@ function analysisChunksForSchedule(text, unitCount) {
     cursor = end;
     return { text: chunk, start, end };
   });
+}
+
+function uploadedAnalysisConcurrency(chunkSchedules = []) {
+  const list = Array.isArray(chunkSchedules) ? chunkSchedules : [];
+  if (!list.length) return 1;
+  const maxSourceChars = Math.max(...list.map(item => String(item?.text || "").length));
+  const maxUnits = Math.max(...list.map(item => Number(item?.unitCount) || 0));
+  // Very dense excerpts are held to two streams. Normal uploaded scripts use
+  // three, below the relay's long-JSON saturation point while still allowing
+  // different projects to be queued independently by the management backend.
+  return Math.max(1, Math.min(
+    UPLOADED_ANALYSIS_MAX_CONCURRENCY,
+    list.length,
+    maxSourceChars > UPLOADED_ANALYSIS_MAX_SOURCE_CHARS || maxUnits > UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST ? 2 : 3
+  ));
 }
 
 function analysisChunkSchedules(chunks, filmSchedule) {
@@ -6016,6 +6266,384 @@ function auditDramaSpec(normalized, options = {}) {
     };
   }
   return { ok: failures.length === 0, failures, metrics };
+}
+
+function stripTimedStoryboardInlineDialogue(value = "") {
+  return String(value || "")
+    .replace(/@[^：:“”\n]{1,24}\s*[：:]\s*[“\"][^”\"]*[”\"]/g, "说话人按对话汇总完成口型与表演")
+    .replace(/台词延续\s*[：:]\s*[“\"][^”\"]*[”\"]/g, "延续上一拍说话表演")
+    .replace(/\s*[，,；;]\s*[，,；;]+/g, "，")
+    .trim();
+}
+
+function splitTimedDialogueSentences(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  const parts = text.match(/[^。！？!?]+[。！？!?]+|[^。！？!?]+$/g)?.map(item => item.trim()).filter(Boolean) || [];
+  return parts.length ? parts : [text];
+}
+
+function timedStoryboardSynopsis(actTitles = [], shots = [], ledger = []) {
+  const cleanTitles = [...new Set(actTitles.map(item => String(item || "").trim()).filter(Boolean))];
+  // Synopsis deliberately paraphrases visible action instead of quoting the
+  // immutable dialogue ledger, so every authored line still appears exactly
+  // once in the dialogue section and downstream video prompt.
+  const middleShot = shots[Math.max(0, Math.floor(shots.length / 2))] || {};
+  const opening = shots[0]?.authoredContinuity || shots[0]?.action || "人物冲突爆发";
+  const middle = middleShot.authoredContinuity || middleShot.action || "关系与证据发生反转";
+  const ending = shots.at(-1)?.stateAfter || shots.at(-1)?.endFrame || "人物用行动完成结果闭环";
+  const arc = cleanTitles.length ? cleanTitles.join(" → ") : "冲突建立 → 证据反转 → 行动收束";
+  const compact = value => String(value || "").replace(/\s+/g, "").slice(0, 72);
+  return `本稿共${shots.length}个秒级分镜，剧情沿“${arc}”推进。开场以“${compact(opening)}”建立矛盾；中段以“${compact(middle)}”改变局势；结尾以“${compact(ending)}”完成收束。`;
+}
+
+/**
+ * Parse the user-authored "幕 → 15秒分镜 → 秒级子镜 → 对话汇总" format
+ * without spending another model request. The summary section is the only
+ * dialogue truth source; inline copies are removed from visual actions.
+ */
+function parseTimedStoryboardScript(text) {
+  const source = String(text || "").replace(/\r\n?/g, "\n");
+  if (!/【对话汇总】/.test(source) || !/【0-\d+(?:\.\d+)?秒】镜头/.test(source)) return null;
+  const markers = [...source.matchAll(/分镜\s*(\d+)\s*（([^）\n]+)）/g)];
+  if (markers.length < 2) return null;
+  const actMarkers = [...source.matchAll(/第\s*(\d+)\s*幕\s*[：:]\s*【([^】\n]+)】/g)];
+  const actAt = index => {
+    const found = actMarkers.filter(item => Number(item.index) <= index).at(-1);
+    return { number: Math.max(1, Number(found?.[1]) || 1), title: String(found?.[2] || "").trim() };
+  };
+  const normalizeAuthoredName = value => String(value || "").trim().replace(/[（(](?:仅[^）)]*|画外音|旁白|不出镜)[）)]$/g, "").trim();
+  const atNames = value => [...String(value || "").matchAll(/@([^\s@，、；;｜|]+)/g)].map(item => normalizeAuthoredName(item[1])).filter(Boolean);
+  const field = (block, label) => {
+    const match = block.match(new RegExp(`(?:^|\\n)${label}[：:]([^\\n]+)`));
+    return String(match?.[1] || "").trim();
+  };
+  const drafts = [];
+  const globalLedger = [];
+  const allNames = new Set();
+  const propNames = new Set();
+  const sceneRecords = new Map();
+  for (let shotIndex = 0; shotIndex < markers.length; shotIndex += 1) {
+    const marker = markers[shotIndex];
+    const blockStart = Number(marker.index);
+    const blockEnd = Number(markers[shotIndex + 1]?.index ?? source.length);
+    const block = source.slice(blockStart, blockEnd);
+    const header = block.split("\n", 1)[0];
+    const act = actAt(blockStart);
+    const duration = Math.max(1, Number(block.match(/【0-(\d+(?:\.\d+)?)秒】镜头/)?.[1]) || 15);
+    const pace = String(marker[2] || "").split("·").at(-1)?.trim() || "中等节奏";
+    const sceneName = String(field(block, "场景").replace(/^@/, "").trim() || header.match(/@([^｜\n]+)/)?.[1] || `场景${shotIndex + 1}`).trim();
+    const cast = atNames(field(block, "人物"));
+    const objects = atNames(field(block, "物品")).filter(name => name !== "无");
+    cast.forEach(name => allNames.add(name));
+    objects.forEach(name => propNames.add(name));
+    const weather = field(block, "天气/灯光/氛围") || "按剧情连续呈现光线、色温与情绪";
+    const sceneDetails = [...block.matchAll(/(?:^|\n)场景[：:]([^@\n][^\n]*)/g)].map(item => String(item[1] || "").trim()).filter(Boolean);
+    if (!sceneRecords.has(sceneName)) {
+      sceneRecords.set(sceneName, {
+        name: sceneName,
+        description: sceneDetails[0] || `${sceneName}的固定空间结构、出入口、门窗家具与可行动区域`,
+        time: String(header.match(/※\s*([^@\n]+)/)?.[1] || "按原稿").trim(),
+        atmosphere: weather,
+        lighting: weather,
+        layout: "同一空间四视图锁定主入口正向、反向轴、左45度、右45度及门窗家具拓扑",
+        cameraAnchors: ["主入口正向", "反向轴", "左侧45度", "右侧45度"],
+        continuityLocks: ["四视图属于同一空间", "门窗家具拓扑固定", "主光方向与时段固定", "拍摄轴不翻转"]
+      });
+    }
+    const summaryStart = block.indexOf("【对话汇总】");
+    const soundStart = summaryStart >= 0 ? block.indexOf("【音效】", summaryStart) : -1;
+    const summaryRaw = summaryStart >= 0
+      ? block.slice(summaryStart + "【对话汇总】".length, soundStart >= 0 ? soundStart : block.length)
+      : "";
+    const summaryLines = summaryRaw
+      .replace(/[ \t]+(?=@[^\s（(]{1,24}\s*[（(]\s*音色)/g, "\n")
+      .split("\n").map(item => item.trim()).filter(Boolean);
+    const turns = [];
+    for (const summaryLine of summaryLines) {
+      const match = summaryLine.match(/^@([^\s（(]+)\s*[（(]\s*音色[：:]\s*@?([^，,）)]+)\s*[，,]\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*秒\s*[，,]\s*([^）)]+)[）)]\s*[：:]\s*([\s\S]+)$/);
+      if (!match) continue;
+      const speaker = normalizeAuthoredName(match[1]);
+      const voice = String(match[2]).trim();
+      const turnStart = Math.max(0, Number(match[3]) || 0);
+      const turnEnd = Math.max(turnStart + 0.1, Number(match[4]) || duration);
+      const tone = String(match[5]).trim();
+      const exactText = String(match[6]).trim().replace(/^[“\"「『]+/, "").replace(/[”\"」』]+$/, "").trim();
+      allNames.add(speaker);
+      const sentences = splitTimedDialogueSentences(exactText);
+      const weights = sentences.map(item => Math.max(1, item.replace(/\s/g, "").length));
+      const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+      let cursor = turnStart;
+      sentences.forEach((sentence, sentenceIndex) => {
+        const end = sentenceIndex === sentences.length - 1
+          ? turnEnd
+          : cursor + (turnEnd - turnStart) * weights[sentenceIndex] / weightTotal;
+        const id = `D${String(globalLedger.length + 1).padStart(3, "0")}`;
+        const ledgerEntry = {
+          id,
+          order: globalLedger.length + 1,
+          speaker,
+          speakerRaw: speaker,
+          tone,
+          text: sentence,
+          spokenText: sentence,
+          metadata: { sourceTone: tone, emotion: tone, delivery: tone, body: tone, voice },
+          sourceStart: blockStart + Math.max(0, block.indexOf(summaryLine)),
+          sourceEnd: blockStart + Math.max(0, block.indexOf(summaryLine)) + summaryLine.length,
+          shotNumber: shotIndex + 1,
+          startSecond: Number(cursor.toFixed(3)),
+          endSecond: Number(end.toFixed(3))
+        };
+        globalLedger.push(ledgerEntry);
+        turns.push({ ...ledgerEntry, voice });
+        cursor = end;
+      });
+    }
+    const timelineStart = block.search(/【0-\d+(?:\.\d+)?秒】镜头[：:]/);
+    const timeline = timelineStart >= 0
+      ? block.slice(timelineStart, summaryStart >= 0 ? summaryStart : block.length)
+      : "";
+    const subshots = [...timeline.matchAll(/(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)秒\s*[，,]?\s*【([\s\S]*?)】\s*[；;]/g)].map((sub, subIndex) => {
+      const start = Number(sub[1]);
+      const end = Number(sub[2]);
+      const rawAction = String(sub[3] || "").trim();
+      const localTurns = turns.filter(turn => turn.startSecond >= start && turn.startSecond < end + 0.001);
+      const visibleNames = [...new Set([
+        ...atNames(rawAction),
+        ...cast.filter(name => rawAction.includes(name)),
+        ...localTurns.map(turn => turn.speaker)
+      ])].slice(0, 2);
+      return {
+        number: subIndex + 1,
+        start,
+        end,
+        framing: rawAction.match(/^(全景|中景|近景|特写|大特写|远景|半身|双人|越肩)/)?.[1] || "中景",
+        camera: rawAction.match(/缓慢推进|快速推进|推进|拉远|平移|跟镜头|跟拍|环绕|摇镜|固定镜头|转特写/)?.[0] || "按动作连续运镜",
+        action: stripTimedStoryboardInlineDialogue(rawAction),
+        dialogueTurns: localTurns,
+        sourceDialogueIds: localTurns.map(turn => turn.id),
+        dialogue: localTurns.map(turn => `${turn.speaker}：${turn.text}`).join("；"),
+        visibleNames,
+        sound: "动作声与现场环境声",
+        transition: subIndex ? "由动作、视线或声音切换" : "承接上一镜动作结果"
+      };
+    });
+    const continuity = String(block.match(/承接上一分镜[：:]\s*【([^】]+)】/)?.[1] || (shotIndex ? "承接上一分镜结果" : "开篇全景引入")).trim();
+    const sound = soundStart >= 0
+      ? String(block.slice(soundStart + "【音效】".length).split("【画面禁止项")[0] || "").trim()
+      : "现场环境声与人物动作声";
+    drafts.push({
+      id: `S${String(shotIndex + 1).padStart(2, "0")}`,
+      number: shotIndex + 1,
+      title: `${act.title || "剧情推进"} · 分镜${shotIndex + 1}`,
+      actNumber: act.number,
+      actTitle: act.title,
+      pace,
+      weatherLightingAtmosphere: weather,
+      authoredContinuity: continuity,
+      duration,
+      scene: sceneName,
+      characters: cast,
+      props: objects,
+      subshots,
+      dialogueTurns: turns,
+      dialogue: turns.map(turn => `${turn.speaker}：${turn.text}`).join("；"),
+      action: subshots.map(item => item.action).join("；") || sceneDetails[0] || continuity,
+      shotSize: subshots[0]?.framing || "中景",
+      cameraMove: subshots[0]?.camera || "按动作连续运镜",
+      emotion: weather,
+      performance: turns.map(turn => `${turn.speaker}以${turn.tone}完成逐句表演`).join("；") || "无对白表演",
+      mainlineStage: shotIndex === 0 ? "hook" : "",
+      mainlineBeat: continuity,
+      kindnessCost: act.number === 1 ? "人物在冲突中承受可见的尊严、关系或现实代价" : "承接前幕已付出的代价",
+      stateBefore: continuity,
+      stateAfter: subshots.at(-1)?.action || "本镜动作结果落地",
+      causalLink: `因为${continuity}，所以推进到${subshots.at(-1)?.action || "下一分镜"}`,
+      visualBeat: subshots.map(item => item.action).join(" → "),
+      compositionPlan: subshots.map(item => `${item.start}-${item.end}秒${item.framing}/${item.camera}`).join("；"),
+      audioPlan: sound,
+      soundDesign: sound,
+      transitionIn: continuity,
+      transitionOut: "以末拍动作、视线或声音承接下一分镜",
+      startFrame: subshots[0]?.action || sceneDetails[0] || continuity,
+      endFrame: subshots.at(-1)?.action || "本镜动作结果落地",
+      productMention: /商品|产品|下单|链接|购物车|直播间|包装|使用|一盒|一瓶|一袋/.test(block)
+    });
+  }
+  if (!drafts.length || !globalLedger.length) return null;
+  const characterNames = [...allNames];
+  const firstTextFor = name => {
+    const draft = drafts.find(item => item.characters.includes(name) || item.dialogueTurns.some(turn => turn.speaker === name));
+    return String(draft?.subshots?.find(item => item.action.includes(name))?.action || draft?.action || "按用户原稿角色关系与动作建立写实身份").slice(0, 220);
+  };
+  const voiceFor = name => globalLedger.filter(item => item.speaker === name).map(item => item.tone).filter(Boolean);
+  const firstLineFor = name => globalLedger.find(item => item.speaker === name)?.text || "按剧情自然表达";
+  const idByName = new Map(characterNames.map((name, index) => [name, `C${String(index + 1).padStart(2, "0")}`]));
+  const characters = characterNames.map((name, index) => ({
+    id: idByName.get(name),
+    name,
+    description: `${firstTextFor(name)}；提炼为写实人物资产，年龄、脸型、五官、发型、体型、惯用姿态和首套服装必须跨镜固定。`,
+    identitySignature: `${name}专属身份锚${index + 1}：固定年龄段、脸型五官比例、体型姿态与发型轮廓，不得只靠换衣区分`,
+    voiceDescription: `${[...new Set(voiceFor(name))].slice(0, 4).join("、") || "贴合人物关系自然表达"}；音色与说话节奏跨镜稳定`,
+    signatureLine: firstLineFor(name),
+    importance: index < 2 ? "lead" : "supporting",
+    continuityLocks: ["脸型五官比例固定", "年龄体型固定", "发型轮廓固定", "同场连续服装固定"]
+  }));
+  drafts.forEach((shot, index) => {
+    const firstIndexOfAct = drafts.findIndex(item => item.actNumber === shot.actNumber);
+    shot.mainlineStage = index === 0
+      ? "hook"
+      : shot.actNumber >= 3
+        ? "payoff"
+        : shot.actNumber === 2 && index === firstIndexOfAct
+          ? "main_reversal"
+          : shot.actNumber === 1 ? "pressure" : "evidence";
+    shot.scenePresenceCharacterIds = shot.characters.map(name => idByName.get(name)).filter(Boolean);
+    shot.visibleCharacterIds = [...new Set(shot.subshots.flatMap(item => item.visibleNames.map(name => idByName.get(name)).filter(Boolean)))].slice(0, 2);
+    shot.dialogueTurns = shot.dialogueTurns.map(turn => {
+      const listeners = shot.characters.filter(name => name !== turn.speaker).slice(0, 2).map(name => idByName.get(name)).filter(Boolean);
+      const targetSubshot = shot.subshots.findIndex(item => item.sourceDialogueIds.includes(turn.id));
+      return {
+        sourceDialogueId: turn.id,
+        sourceTone: turn.tone,
+        speakerId: idByName.get(turn.speaker) || turn.speaker,
+        listenerIds: listeners,
+        text: turn.text,
+        delivery: turn.tone,
+        emotionStart: turn.tone,
+        emotionPeak: turn.tone,
+        body: `${turn.tone}对应的面部微表情、视线和身体动作`,
+        listenerBeat: listeners.length ? "听者闭口并给出与台词含义一致的可见反应" : "镜头用环境与动作承接",
+        subshotNumber: Math.max(1, targetSubshot + 1),
+        onScreen: true
+      };
+    });
+    shot.sourceDialogueIds = shot.dialogueTurns.map(turn => turn.sourceDialogueId);
+    shot.sourceDialogueBindings = shot.dialogueTurns.map(turn => ({
+      sourceDialogueId: turn.sourceDialogueId,
+      listenerIds: turn.listenerIds,
+      subshotNumber: turn.subshotNumber,
+      onScreen: true,
+      intent: turn.sourceTone
+    }));
+    shot.subshots = shot.subshots.map(item => ({
+      ...item,
+      visibleCharacterIds: item.visibleNames.map(name => idByName.get(name)).filter(Boolean).slice(0, 2),
+      dialogueTurns: shot.dialogueTurns.filter(turn => item.sourceDialogueIds.includes(turn.sourceDialogueId)),
+      speakerIds: shot.dialogueTurns.filter(turn => item.sourceDialogueIds.includes(turn.sourceDialogueId)).map(turn => turn.speakerId),
+      emotionBeat: weatherForTimedSubshot(item, shot),
+      faceAction: "说话人与听者按逐句语义产生同步微表情",
+      bodyAction: item.action,
+      voiceDelivery: shot.dialogueTurns.filter(turn => item.sourceDialogueIds.includes(turn.sourceDialogueId)).map(turn => turn.sourceTone).join("；")
+    }));
+  });
+  const actTitles = actMarkers.map(item => item[2]);
+  const synopsis = timedStoryboardSynopsis(actTitles, drafts, globalLedger);
+  const scenes = [...sceneRecords.values()].map((scene, index) => ({ id: `SC${String(index + 1).padStart(2, "0")}`, ...scene }));
+  const props = [...propNames].map((name, index) => ({
+    id: `P${String(index + 1).padStart(2, "0")}`,
+    name,
+    description: `${name}按用户原稿状态生成写实资产，形状、材质、颜色、磨损和持有人状态跨镜固定`,
+    purpose: drafts.filter(shot => shot.props.includes(name)).map(shot => shot.authoredContinuity).slice(0, 3).join("；"),
+    units: drafts.filter(shot => shot.props.includes(name)).map(shot => shot.id),
+    continuity: "出现、持有、位置和状态变化必须按秒级分镜连续"
+  }));
+  return {
+    detectedFormat: "timed_storyboard",
+    modeSynopsis: synopsis,
+    story: {
+      synopsis,
+      premise: synopsis,
+      hook: drafts[0]?.mainlineBeat || drafts[0]?.action || "开场冲突",
+      conflict: actTitles[0] || "人物关系与现实利益冲突",
+      turns: actTitles,
+      climax: actTitles.at(-1) || drafts.at(-1)?.action || "真相与行动落锤",
+      ending: drafts.at(-1)?.endFrame || "行动结果闭环",
+      emotionCurve: actTitles.length ? actTitles : ["压抑", "反转", "释放"],
+      storyMechanism: "evidence_reversal"
+    },
+    characters,
+    scenes,
+    props,
+    shots: drafts,
+    sourceDialogueLedger: globalLedger
+  };
+}
+
+function weatherForTimedSubshot(subshot = {}, shot = {}) {
+  const delivery = (subshot.dialogueTurns || []).map(turn => turn.tone || turn.sourceTone).filter(Boolean).join("；");
+  return delivery || shot.weatherLightingAtmosphere || shot.emotion || "按剧情自然表演";
+}
+
+function expandTimedStoryboardForProvider(data, providerKind = "", options = {}) {
+  if (!data || data.detectedFormat !== "timed_storyboard") return data;
+  const contract = durationContract(providerKind, options);
+  const max = Number(contract.max) || 15;
+  const min = Number(contract.min) || 5;
+  if ((data.shots || []).every(shot => Number(shot.duration) <= max)) return data;
+  const ledgerById = new Map((data.sourceDialogueLedger || []).map(item => [item.id, { ...item }]));
+  const authoredTimingById = new Map((data.sourceDialogueLedger || []).map(item => [item.id, {
+    startSecond: Number(item.startSecond) || 0,
+    endSecond: Number(item.endSecond) || 0
+  }]));
+  const shots = [];
+  for (const shot of data.shots || []) {
+    const authoredDuration = Math.max(1, Math.round(Number(shot.duration) || max));
+    const segmentCount = Math.max(1, Math.ceil(authoredDuration / max));
+    const base = Math.floor(authoredDuration / segmentCount);
+    const durations = Array.from({ length: segmentCount }, (_, index) => base + (index < authoredDuration - base * segmentCount ? 1 : 0));
+    if (durations.some(value => value < min || value > max)) {
+      throw Object.assign(new Error(`上传分镜 ${shot.number || shot.id} 的 ${authoredDuration} 秒无法适配当前供应商 ${min}-${max} 秒单元`), { code: "TIMED_STORYBOARD_DURATION_UNREPRESENTABLE" });
+    }
+    let offset = 0;
+    durations.forEach((duration, segmentIndex) => {
+      const segmentEnd = offset + duration;
+      const turns = (shot.dialogueTurns || []).filter(turn => {
+        const timing = authoredTimingById.get(turn.sourceDialogueId) || {};
+        const start = Number(timing.startSecond);
+        return start >= offset - 0.001 && (segmentIndex === durations.length - 1 ? start <= segmentEnd + 0.001 : start < segmentEnd - 0.001);
+      }).map(turn => {
+        const ledger = ledgerById.get(turn.sourceDialogueId);
+        const timing = authoredTimingById.get(turn.sourceDialogueId) || {};
+        if (ledger) {
+          ledger.shotNumber = shots.length + 1;
+          ledger.startSecond = Number(Math.max(0, Number(timing.startSecond) - offset).toFixed(3));
+          ledger.endSecond = Number(Math.min(duration, Math.max(ledger.startSecond + 0.1, Number(timing.endSecond) - offset)).toFixed(3));
+        }
+        return { ...turn };
+      });
+      let subshots = (shot.subshots || []).filter(item => Number(item.end) > offset && Number(item.start) < segmentEnd).map((item, subIndex) => ({
+        ...item,
+        number: subIndex + 1,
+        start: Number(Math.max(0, Number(item.start) - offset).toFixed(3)),
+        end: Number(Math.min(duration, Number(item.end) - offset).toFixed(3)),
+        dialogueTurns: turns.filter(turn => item.sourceDialogueIds?.includes(turn.sourceDialogueId)),
+        sourceDialogueIds: turns.filter(turn => item.sourceDialogueIds?.includes(turn.sourceDialogueId)).map(turn => turn.sourceDialogueId)
+      }));
+      if (!subshots.length) subshots = [{ number: 1, start: 0, end: duration, framing: shot.shotSize, camera: shot.cameraMove, action: shot.action, dialogueTurns: turns, sourceDialogueIds: turns.map(turn => turn.sourceDialogueId) }];
+      subshots[0].start = 0;
+      subshots[subshots.length - 1].end = duration;
+      shots.push({
+        ...shot,
+        id: `${shot.id}_${segmentIndex + 1}`,
+        number: shots.length + 1,
+        title: segmentCount > 1 ? `${shot.title}（${segmentIndex + 1}/${segmentCount}）` : shot.title,
+        duration,
+        subshots,
+        dialogueTurns: turns,
+        dialogue: turns.map(turn => `${turn.speakerId}：${turn.text}`).join("；"),
+        sourceDialogueIds: turns.map(turn => turn.sourceDialogueId),
+        sourceDialogueBindings: turns.map(turn => ({ sourceDialogueId: turn.sourceDialogueId, listenerIds: turn.listenerIds, subshotNumber: Math.max(1, subshots.findIndex(item => item.sourceDialogueIds?.includes(turn.sourceDialogueId)) + 1), onScreen: turn.onScreen !== false, intent: turn.intent || turn.sourceTone })),
+        mainlineStage: segmentIndex ? (shot.mainlineStage === "hook" ? "pressure" : shot.mainlineStage) : shot.mainlineStage,
+        stateBefore: segmentIndex ? `承接同一原分镜第${segmentIndex}段的末拍状态` : shot.stateBefore,
+        causalLink: segmentIndex ? "同一原分镜因供应商时长上限无缝续接，人物位置、口型、动作和情绪不断裂" : shot.causalLink,
+        startFrame: subshots[0]?.action || shot.startFrame,
+        endFrame: subshots.at(-1)?.action || shot.endFrame
+      });
+      offset = segmentEnd;
+    });
+  }
+  return { ...data, shots, sourceDialogueLedger: [...ledgerById.values()].sort((a, b) => a.order - b.order) };
 }
 
 function parseStructuredProductionScript(text) {
@@ -6374,6 +7002,11 @@ function normalizeAnalysis(data, project) {
       id: item.id || makeId("shot"),
       number: index + 1,
       title: String(item.title || `镜头 ${index + 1}`),
+      actNumber: Math.max(1, Number(item.actNumber) || 1),
+      actTitle: String(item.actTitle || "").trim(),
+      pace: String(item.pace || "").trim(),
+      weatherLightingAtmosphere: String(item.weatherLightingAtmosphere || item.weather || "").trim(),
+      authoredContinuity: String(item.authoredContinuity || item.continuity || "").trim(),
       duration,
       characterIds: activeCharacterIds.length ? activeCharacterIds : scenePresenceCharacterIds.slice(0, 2),
       characterNames: (activeCharacterIds.length ? activeCharacterIds : scenePresenceCharacterIds.slice(0, 2)).map(id => characters.find(character => character.id === id)?.name || id),
@@ -6457,6 +7090,8 @@ function normalizeAnalysis(data, project) {
   const reconciledScenes = reconcileShotSceneCatalog(scenes, shots);
   assertKnownCharacterReferences(reconciledScenes.shots, characters, "SCRIPT_IMPORTED_CHARACTER_REFERENCE_INVALID");
   return {
+    detectedFormat: String(data?.detectedFormat || "").trim(),
+    modeSynopsis: String(data?.modeSynopsis || data?.story?.synopsis || "").trim(),
     story: data?.story || [],
     characters,
     scenes: reconciledScenes.scenes,
@@ -7245,14 +7880,24 @@ class WorkbenchWorkflow {
 
   settleTextGeneration(projectId, operation, messages, result, config = {}, options = {}) {
     const inputText = (Array.isArray(messages) ? messages : []).map(item => this.messageTextContent(item?.content)).join("\n");
-    const outputText = typeof result === "string" ? result : JSON.stringify(result || {});
+    const hasResult = result !== null && result !== undefined;
+    const outputText = typeof result === "string" ? result : (hasResult ? JSON.stringify(result) : "");
     const usage = options.usage && typeof options.usage === "object" ? options.usage : {};
     const inputTokens = Number(usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens) || estimateTextTokens(inputText);
-    const outputTokens = Number(usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens) || estimateTextTokens(outputText);
+    const outputTokens = Number(usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens) || (hasResult ? estimateTextTokens(outputText) : 0);
     const trustedReceipt = ["puream.desktop.done", "puream.desktop.billing"].includes(usage.receiptSource);
     const receipt = trustedReceipt ? upstreamBillingReceipt(usage) : { amountYuan: null, hasActual: false, pending: true, notCharged: false, billingStatus: "" };
     const status = receipt.notCharged ? "not_charged" : (receipt.hasActual && !receipt.pending ? "settled" : "pending");
-    const amountYuan = status === "settled" ? receipt.amountYuan : 0;
+    const textPricing = this.store.getSettings()?.textPricing || {};
+    const hasBillableOutputEvidence = outputTokens > 0 && (trustedReceipt || hasResult || !(options.errorCode || usage.errorCode));
+    const estimatedAmount = status === "pending" && hasBillableOutputEvidence
+      ? estimateTextCost({ inputTokens, outputTokens }, textPricing)
+      : null;
+    const amountYuan = status === "settled"
+      ? receipt.amountYuan
+      : status === "pending" && estimatedAmount !== null
+        ? estimatedAmount
+        : 0;
     const receiptAttempt = Number(usage.attempt) || Number(options.receiptIndex) || 0;
     const receiptSession = String(usage.sessionId || options.sessionId || Date.now());
     const entryPayload = {
@@ -7267,7 +7912,9 @@ class WorkbenchWorkflow {
         ? "文本上游返回的实际人民币结算"
         : status === "not_charged"
           ? "上游明确返回不计费、退款或失败"
-          : "等待文本上游返回实际扣费金额（本地不估价）",
+          : estimatedAmount !== null
+            ? `等待文本上游实扣回执；${textPricingBasis(inputTokens, outputTokens, textPricing)}`
+            : "等待文本上游返回实际扣费金额（尚无完整输出 token，暂不估算）",
       inputTokens,
       outputTokens,
       entityType: options.entityType || "",
@@ -7280,7 +7927,10 @@ class WorkbenchWorkflow {
     const canUpgradeExisting = entry?.__created !== true
       && ["settled", "not_charged"].includes(status)
       && !["settled", "not_charged"].includes(String(entry?.status || ""));
-    if (canUpgradeExisting) {
+    const canRefreshPendingEstimate = entry?.__created !== true
+      && status === "pending"
+      && amountYuan > Number(entry?.amountYuan || 0);
+    if (canUpgradeExisting || canRefreshPendingEstimate) {
       entry = this.store.updateCostEntry(projectId, entry.id, entryPayload);
       shouldReportActual = status === "settled" && amountYuan > 0;
     }
@@ -7406,7 +8056,11 @@ class WorkbenchWorkflow {
 
   saveScriptCheckpoint(projectId, checkpoint, topic, stage, message) {
     const project = this.store.getProject(projectId);
-    const savedCheckpoint = { ...checkpoint, updatedAt: new Date().toISOString() };
+    const savedCheckpoint = {
+      ...checkpoint,
+      scriptFormat: checkpoint?.scriptFormat || projectScriptFormat(project),
+      updatedAt: new Date().toISOString()
+    };
     const source = savedCheckpoint.blueprint || savedCheckpoint.storyBible;
     let raw = project.script?.raw || "";
     if (source) {
@@ -7416,7 +8070,7 @@ class WorkbenchWorkflow {
         scenes: source.scenes || [],
         shots: savedCheckpoint.shots || []
       }, project);
-      raw = renderProductionScript(source, normalized, project, topic, {
+      raw = renderScriptForProject(source, normalized, project, topic, {
         partial: true,
         plannedCount: (savedCheckpoint.shotPlan || source.shotPlan || []).length,
         message
@@ -7440,7 +8094,8 @@ class WorkbenchWorkflow {
     if (!["pause", "stop"].includes(intent)) throw Object.assign(new Error("写作控制指令无效"), { code: "SCRIPT_CONTROL_INVALID" });
     const control = this.operationControls.get(projectId);
     const project = this.store.getProject(projectId);
-    if (intent === "stop" && project.automation?.status === "paused_user" && project.script?.generationCheckpoint) {
+    if (intent === "stop" && project.automation?.status === "paused_user"
+      && (project.script?.generationCheckpoint || project.script?.analysisCheckpoint)) {
       const message = "写作已停止；已保留当前文字并清除续写断点";
       project.automation = {
         ...(project.automation || {}),
@@ -7454,16 +8109,17 @@ class WorkbenchWorkflow {
       project.script = {
         ...(project.script || {}),
         generationCheckpoint: null,
+        analysisCheckpoint: null,
         generationLive: { ...(project.script?.generationLive || {}), message, updatedAt: new Date().toISOString() }
       };
       this.store.saveProject(project);
       return project.automation;
     }
     const operation = project.automation?.operation || "";
-    const scriptOperation = ["idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(operation)
+    const scriptOperation = ["analyze_script", "idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(operation)
       || (operation === "pipeline_from_stage" && String(project.automation?.targetId || "") === "script");
     const scriptStage = String(project.automation?.stage || "").startsWith("script")
-      || ["idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(project.automation?.stage);
+      || ["analyze_script", "idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(project.automation?.stage);
     if (!control || !this.hasActiveOperation(projectId) || !scriptOperation || !scriptStage) {
       throw Object.assign(new Error("当前项目没有正在运行的剧本写作任务"), { code: "SCRIPT_GENERATION_NOT_RUNNING" });
     }
@@ -7484,6 +8140,7 @@ class WorkbenchWorkflow {
   async resumeScriptGeneration(projectId) {
     const project = this.store.getProject(projectId);
     const planCheckpoint = project.script?.generationCheckpoint;
+    const analysisCheckpoint = project.script?.analysisCheckpoint;
     const resumableWriterCheckpoint = Boolean(planCheckpoint)
       && !(Array.isArray(project.shots) && project.shots.length > 0)
       && Boolean(
@@ -7507,9 +8164,12 @@ class WorkbenchWorkflow {
       && project.script?.generationCheckpoint?.unitContractFailure?.retryRequiresExplicitResume === true;
     const resumableScopedRepair = project.automation?.status === "failed"
       && project.script?.generationCheckpoint?.scriptRepair?.retryRequiresExplicitResume === true;
-    const resumableFailure = resumableWriterCheckpoint || resumableQualityFailure || resumablePaidPlanFailure || resumablePaidUnitFailure || resumableScopedRepair;
+    const resumableAnalysis = Boolean(analysisCheckpoint?.signature)
+      && Array.isArray(analysisCheckpoint?.chunks)
+      && !(Array.isArray(project.shots) && project.shots.length > 0);
+    const resumableFailure = resumableAnalysis || resumableWriterCheckpoint || resumableQualityFailure || resumablePaidPlanFailure || resumablePaidUnitFailure || resumableScopedRepair;
     const legacyQualityReport = resumableQualityFailure ? semanticReviewFromLiveRaw(project.script?.raw) : null;
-    const hasRecoveryState = Boolean(project.script?.generationCheckpoint || legacyQualityReport);
+    const hasRecoveryState = Boolean(project.script?.analysisCheckpoint || project.script?.generationCheckpoint || legacyQualityReport);
     if ((!resumableFailure && project.automation?.status !== "paused_user") || !hasRecoveryState) {
       throw Object.assign(new Error("当前没有可继续的剧本写作断点"), { code: "SCRIPT_GENERATION_NOT_PAUSED" });
     }
@@ -7528,6 +8188,7 @@ class WorkbenchWorkflow {
     if (project.automation.operation === "idea_to_full_pipeline") return this.runIdeaToFullPipeline(projectId);
     if (project.automation.operation === "full_pipeline") return this.runFullPipeline(projectId);
     if (project.automation.operation === "pipeline_from_stage") return this.runPipelineFromStage(projectId, "script");
+    if (project.automation.operation === "analyze_script" || resumableAnalysis) return this.analyzeScript(projectId);
     return this.generateCompleteScript(projectId);
   }
 
@@ -7662,7 +8323,7 @@ class WorkbenchWorkflow {
         };
         project.script = {
           ...(project.script || {}),
-          ...(paused ? {} : { generationCheckpoint: null }),
+          ...(paused ? {} : { generationCheckpoint: null, analysisCheckpoint: null }),
           generationLive: {
             ...(project.script?.generationLive || {}),
             message: error.message,
@@ -7675,7 +8336,7 @@ class WorkbenchWorkflow {
       const resumable = isResumableVideoPause(error);
       const failedProject = this.store.getProject(projectId);
       const failedOperation = String(failedProject.automation?.operation || "");
-      const scriptOperation = ["idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(failedOperation)
+      const scriptOperation = ["analyze_script", "idea_script", "idea_to_full_pipeline", "full_pipeline"].includes(failedOperation)
         || (failedOperation === "pipeline_from_stage" && String(failedProject.automation?.targetId || "") === "script");
       const recoverableScriptFailure = scriptOperation && (
         error?.retryRequiresExplicitResume === true
@@ -8076,7 +8737,7 @@ class WorkbenchWorkflow {
     this.setAutomation(projectId, {
       stage: "script_direct",
       status: "running",
-      message: `5分钟写作通道：正在并行生成 ${filmSchedule.totalSeconds} 秒剧本前后两段并本地合并生产字段`
+      message: `优先加速写作：正在并行生成 ${filmSchedule.totalSeconds} 秒剧本前后两段并本地合并生产字段；不设总耗时截止线`
     });
     let rawText = "";
     const receipts = [];
@@ -8090,7 +8751,7 @@ class WorkbenchWorkflow {
       const segmentResults = await Promise.allSettled(segments.map(([segmentStart, segmentEnd], segmentIndex) => this.generateText(scriptTextProvider, [
         {
           role: "system",
-          content: "你是中国现实主义竖屏短剧总编剧。只输出严格紧凑JSON；对白必须口语化、有明确情绪语气、音量速度和听者反应所需的剧情依据；禁止解释、Markdown、背景音乐、模型名称和医疗功效承诺。"
+          content: `你是中国现实主义竖屏短剧总编剧。只输出严格紧凑JSON；对白必须口语化、有明确情绪语气、音量速度和听者反应所需的剧情依据；禁止解释、Markdown、背景音乐、模型名称和医疗功效承诺。\n${viewerComprehensionPriorityDirective()}\n${scriptFormatDirective(project)}`
         },
         {
           role: "user",
@@ -8105,7 +8766,8 @@ class WorkbenchWorkflow {
             totalSeconds: filmSchedule.totalSeconds,
             productStartNumber,
             segmentStart,
-            segmentEnd
+            segmentEnd,
+            scriptFormatDirective: scriptFormatDirective(project)
           })
         }
       ], this.scriptGenerationOptions(projectId, `script_direct_${segmentIndex + 1}`, {
@@ -8196,7 +8858,7 @@ class WorkbenchWorkflow {
         });
       }
       project = this.store.getProject(projectId);
-      const raw = renderProductionScript(blueprint, normalized, project, topic);
+      const raw = renderScriptForProject(blueprint, normalized, project, topic);
       beginProductionRevision(project);
       project.title = blueprint.title || topic.title;
       project.characters = normalized.characters;
@@ -8291,6 +8953,7 @@ class WorkbenchWorkflow {
       return this.runTrackedOperation(projectId, "idea_script", "", () => this.generateCompleteScript(projectId, { ...options, track: false }));
     }
     let project = this.store.getProject(projectId);
+    const selectedScriptFormat = assertAiScriptFormatConfirmed(project);
     const settings = this.store.getSettings();
     const topic = (project.ideation?.topics || []).find(item => item.id === project.ideation?.selectedTopicId);
     if (!topic) throw Object.assign(new Error("请先从 10 个候选题材中选择一个"), { code: "TOPIC_SELECTION_REQUIRED" });
@@ -8305,6 +8968,7 @@ class WorkbenchWorkflow {
       : null;
     let checkpoint = canResume ? {
       ...existingCheckpoint,
+      scriptFormat: existingCheckpoint.scriptFormat || selectedScriptFormat,
       shotPlan: Array.isArray(existingCheckpoint.shotPlan) ? existingCheckpoint.shotPlan : [],
       shots: Array.isArray(existingCheckpoint.shots) ? existingCheckpoint.shots : [],
       blueprintFailures: Array.isArray(existingCheckpoint.blueprintFailures) ? existingCheckpoint.blueprintFailures : [],
@@ -8312,6 +8976,7 @@ class WorkbenchWorkflow {
     } : {
       version: 1,
       ideaSignature: currentIdeaSignature,
+      scriptFormat: selectedScriptFormat,
       topicId: topic.id,
       sessionId: `script-${projectId}-${Date.now()}`,
       startedAt: new Date().toISOString(),
@@ -8468,7 +9133,7 @@ class WorkbenchWorkflow {
           }
           this.setAutomation(projectId, {
             stage: "script_plan",
-            message: `5分钟写作通道：${planTasks.length} 批单元规划正在并行生成`
+            message: `优先加速写作：${planTasks.length} 批单元规划正在并行生成；超过目标时间仍继续同一任务`
           });
           const planResults = await mapWithConcurrency(planTasks, SCRIPT_FAST_CONCURRENCY, async task => {
             const { startNumber, endNumber, batchSize } = task;
@@ -8805,7 +9470,7 @@ class WorkbenchWorkflow {
               verdict: "pass",
               scores: Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, 100])),
               hardFailures: [],
-              summary: "5分钟写作通道已通过本地完整蓝图硬合同；云端重复语义复审已合并到最终本地硬审计",
+              summary: "加速写作通道已通过本地完整蓝图硬合同；云端重复语义复审已合并到最终本地硬审计",
               repairDirectives: [],
               phase: "blueprint"
             }
@@ -8932,7 +9597,7 @@ class WorkbenchWorkflow {
         }
         this.setAutomation(projectId, {
           stage: "script_units",
-          message: `5分钟写作通道：${unitTasks.length} 批正式分镜正在并行写作`
+          message: `优先加速写作：${unitTasks.length} 批正式分镜正在并行写作；不设总耗时截止线`
         });
         const unitTextStagePrompt = textStagePromptForProject(project, settings, "scriptUnitGeneration", "units");
         const fastUnitResults = await mapWithConcurrency(unitTasks, SCRIPT_FAST_CONCURRENCY, async task => {
@@ -9229,7 +9894,7 @@ class WorkbenchWorkflow {
             verdict: "pass",
             scores: Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, 100])),
             hardFailures: [],
-            summary: "5分钟写作通道已完成并行正式稿；云端重复复审已合并到本地参考片硬审计",
+            summary: "加速写作通道已完成并行正式稿；云端重复复审已合并到本地参考片硬审计",
             repairDirectives: [],
             phase: "full"
           }
@@ -9357,7 +10022,7 @@ class WorkbenchWorkflow {
       throw error;
     }
     project = this.store.getProject(projectId);
-    const raw = renderProductionScript(blueprint, normalized, project, topic);
+    const raw = renderScriptForProject(blueprint, normalized, project, topic);
     beginProductionRevision(project);
     project.title = blueprint.title || topic.title;
     project.characters = normalized.characters;
@@ -9436,17 +10101,39 @@ class WorkbenchWorkflow {
     return result;
   }
 
-  async analyzeScript(projectId) {
+  async analyzeScript(projectId, options = {}) {
+    if (options.track !== false) {
+      return this.runTrackedOperation(projectId, "analyze_script", "script", () => this.analyzeScript(projectId, { ...options, track: false }));
+    }
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
     if (!project.script?.raw?.trim()) throw Object.assign(new Error("请先粘贴完整短剧剧本"), { code: "SCRIPT_REQUIRED" });
     const commitAnalysis = (normalized, analysisMethod, analysisChunks) => {
-      const qualityAudit = auditDramaSpec(normalized, {
+      const auditedQuality = auditDramaSpec(normalized, {
         ...scriptQualityGateOptions(settings),
         productName: project.product?.name || "",
         sellingPoints: productSellingPoints(project)
       });
+      const userAuthoredTimedStoryboard = projectInputMode(project) === "manual"
+        && normalized?.detectedFormat === "timed_storyboard";
+      // A complete user-authored second-by-second production blueprint is an
+      // instruction source, not prose for the AI to rewrite. Keep blueprint
+      // findings as visible suggestions while structural parsing, duration and
+      // exact-dialogue parity remain hard local contracts.
+      const qualityAudit = userAuthoredTimedStoryboard && !auditedQuality.ok
+        ? {
+            ...auditedQuality,
+            ok: true,
+            advisory: true,
+            advisoryFailures: auditedQuality.failures,
+            ignoredFailures: auditedQuality.failures,
+            failures: [],
+            note: "用户上传的秒级分镜成片稿已按原稿执行；审核发现项作为提示词建议展示，不擅自改写或拦截原稿"
+          }
+        : auditedQuality;
       project.script.analysis = normalized.story;
+      project.script.modeSynopsis = String(normalized.modeSynopsis || normalized.story?.synopsis || normalized.story?.premise || "").trim();
+      project.script.detectedFormat = String(normalized.detectedFormat || "").trim();
       project.script.analysisChunks = analysisChunks;
       project.script.analysisMethod = analysisMethod;
       project.script.sourceDialogueLedger = Array.isArray(normalized.sourceDialogueLedger)
@@ -9457,6 +10144,13 @@ class WorkbenchWorkflow {
       project.script.analyzedAt = new Date().toISOString();
       project.script.sourceFingerprint = crypto.createHash("sha256").update(String(project.script.raw || "")).digest("hex");
       project.script.durationContract = normalized.durationContract;
+      if (userAuthoredTimedStoryboard) {
+        project.productionPlan = {
+          ...(project.productionPlan || {}),
+          scriptFormat: "timed_storyboard",
+          scriptFormatConfirmed: true
+        };
+      }
       if (!qualityAudit.ok) {
         project.currentStage = "script";
         project.status = "script_needs_revision";
@@ -9481,12 +10175,41 @@ class WorkbenchWorkflow {
       };
       project.script.generationCheckpoint = null;
       project.script.generationLive = null;
+      project.script.analysisCheckpoint = null;
       project.currentStage = "assets";
       project.status = "analyzed";
       this.store.saveProject(project);
+      // The analyzer's initial project snapshot predates per-chunk checkpoint
+      // writes. Concurrent-save merging correctly preserves those writes, so
+      // clear the checkpoint once more on the freshly merged project after the
+      // complete normalized analysis has been committed.
+      const committedProject = this.store.getProject(projectId);
+      if (committedProject.script?.analysisCheckpoint) {
+        committedProject.script = { ...(committedProject.script || {}), analysisCheckpoint: null };
+        this.store.saveProject(committedProject);
+      }
       this.syncReferenceLibraries(projectId, { props: normalized.props || [] });
       return this.store.getProject(projectId);
     };
+    const timedStoryboard = parseTimedStoryboardScript(project.script.raw);
+    if (timedStoryboard) {
+      const providerKind = projectVideoProviderKind(project, settings);
+      const adapted = expandTimedStoryboardForProvider(timedStoryboard, providerKind, { engine: projectVideoEngine(project) });
+      const targetSeconds = adapted.shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
+      const durationEstimate = {
+        mode: "uploaded-timed-storyboard-authored",
+        targetSeconds,
+        dialogueTurns: adapted.sourceDialogueLedger.length,
+        authoredShotCount: timedStoryboard.shots.length,
+        providerUnitCount: adapted.shots.length,
+        providerKind
+      };
+      return commitAnalysis(conformImportedAnalysisToDurationContract(
+        adapted,
+        project,
+        { adaptiveTargetSeconds: targetSeconds, durationEstimate }
+      ), "uploaded-timed-storyboard-local-v1", 0);
+    }
     const structured = parseStructuredProductionScript(project.script.raw);
     if (structured) {
       try {
@@ -9546,20 +10269,151 @@ class WorkbenchWorkflow {
       const target = chunkSchedules.find(chunk => item.sourceStart < chunk.end) || chunkSchedules.at(-1);
       if (target) target.sourceDialogueLedger.push(item);
     }
-    const partials = await mapWithConcurrency(chunkSchedules, Math.min(4, chunkSchedules.length), async chunk => {
+    const analysisPromptBase = appendDocxPromptFusion(
+      textStagePromptForProject(project, settings, "scriptAnalysis", "script_analysis"),
+      settings.prompts,
+      "script_analysis"
+    );
+    const modeDirective = generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project));
+    const schemaJson = JSON.stringify(schema);
+    const sourceFingerprint = crypto.createHash("sha256").update(String(project.script.raw || "")).digest("hex");
+    const chunkFingerprint = chunk => crypto.createHash("sha256").update(JSON.stringify({
+      text: chunk.text,
+      start: chunk.start,
+      end: chunk.end,
+      unitCount: chunk.unitCount,
+      durations: chunk.durations,
+      dialogue: (chunk.sourceDialogueLedger || []).map(item => [item.id, item.speaker, item.tone, item.text])
+    })).digest("hex");
+    const analysisSignature = crypto.createHash("sha256").update(JSON.stringify({
+      version: 2,
+      sourceFingerprint,
+      targetSeconds: filmSchedule.totalSeconds,
+      unitDurations: filmSchedule.unitDurations,
+      providerKind,
+      videoEngine: projectVideoEngine(project),
+      generationMode: normalizeProjectMode(project.generation?.mode),
+      product: {
+        name: project.product?.name || "",
+        description: project.product?.description || "",
+        sellingPoints: project.product?.sellingPoints || ""
+      },
+      textProvider: {
+        kind: settings.textProvider?.kind || "",
+        baseUrl: settings.textProvider?.baseUrl || "",
+        model: settings.textProvider?.model || ""
+      },
+      promptLibraryVersion: settings.promptLibraryVersion || "",
+      promptSha256: crypto.createHash("sha256").update(`${analysisPromptBase}\n${modeDirective}\n${schemaJson}`).digest("hex"),
+      chunks: chunkSchedules.map(chunkFingerprint)
+    })).digest("hex");
+    const analysisConcurrency = uploadedAnalysisConcurrency(chunkSchedules);
+    const checkpointSeed = {
+      version: 2,
+      kind: "uploaded-script-analysis",
+      signature: analysisSignature,
+      sourceFingerprint,
+      targetSeconds: filmSchedule.totalSeconds,
+      totalChunks: chunkSchedules.length,
+      concurrency: analysisConcurrency,
+      chunks: [],
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const checkpointProject = this.store.getProject(projectId);
+    const priorCheckpoint = checkpointProject.script?.analysisCheckpoint?.signature === analysisSignature
+      ? checkpointProject.script.analysisCheckpoint
+      : checkpointSeed;
+    const priorByIndex = new Map((Array.isArray(priorCheckpoint?.chunks) ? priorCheckpoint.chunks : [])
+      .filter(item => item && Number.isInteger(Number(item.index)))
+      .map(item => [Number(item.index), item]));
+    const partials = new Array(chunkSchedules.length);
+    const reusableIndices = new Set();
+    for (const chunk of chunkSchedules) {
+      const saved = priorByIndex.get(chunk.index);
+      if (!saved
+        || saved.fingerprint !== chunkFingerprint(chunk)
+        || !Array.isArray(saved.data?.shots)
+        || saved.data.shots.length !== chunk.unitCount) continue;
+      partials[chunk.index] = saved.data;
+      reusableIndices.add(chunk.index);
+    }
+    checkpointProject.script = {
+      ...(checkpointProject.script || {}),
+      analysisCheckpoint: {
+        ...checkpointSeed,
+        startedAt: priorCheckpoint?.startedAt || checkpointSeed.startedAt,
+        chunks: [...reusableIndices].map(index => priorByIndex.get(index)).filter(Boolean),
+        updatedAt: new Date().toISOString()
+      }
+    };
+    checkpointProject.automation = {
+      ...(checkpointProject.automation || {}),
+      stage: "script_analysis",
+      message: reusableIndices.size
+        ? `已恢复 ${reusableIndices.size}/${chunkSchedules.length} 个拆镜断点，正在继续其余片段`
+        : `正在按输入/输出预算拆解 ${chunkSchedules.length} 个剧本片段（最多并发 ${analysisConcurrency}）`,
+      updatedAt: new Date().toISOString()
+    };
+    this.store.saveProject(checkpointProject);
+
+    const saveCompletedAnalysisChunk = (chunk, data, requestChars) => {
+      const latest = this.store.getProject(projectId);
+      const current = latest.script?.analysisCheckpoint?.signature === analysisSignature
+        ? latest.script.analysisCheckpoint
+        : checkpointSeed;
+      const byIndex = new Map((Array.isArray(current.chunks) ? current.chunks : []).map(item => [Number(item.index), item]));
+      byIndex.set(chunk.index, {
+        index: chunk.index,
+        fingerprint: chunkFingerprint(chunk),
+        unitCount: chunk.unitCount,
+        durations: [...chunk.durations],
+        sourceChars: String(chunk.text || "").length,
+        requestChars,
+        data,
+        completedAt: new Date().toISOString()
+      });
+      const completedChunks = [...byIndex.values()].sort((left, right) => left.index - right.index);
+      latest.script = {
+        ...(latest.script || {}),
+        analysisCheckpoint: {
+          ...current,
+          ...checkpointSeed,
+          startedAt: current.startedAt || checkpointSeed.startedAt,
+          chunks: completedChunks,
+          updatedAt: new Date().toISOString()
+        }
+      };
+      latest.automation = {
+        ...(latest.automation || {}),
+        stage: "script_analysis",
+        message: `拆镜片段已完成 ${completedChunks.length}/${chunkSchedules.length}；已完成部分已保存，不会重复请求`,
+        updatedAt: new Date().toISOString()
+      };
+      this.store.saveProject(latest);
+    };
+    const pendingChunks = chunkSchedules.filter(chunk => !reusableIndices.has(chunk.index));
+    await mapWithConcurrency(pendingChunks, analysisConcurrency, async chunk => {
       let repair = "";
       let lastError = null;
       for (let attempt = 1; attempt <= 2; attempt += 1) {
         try {
+          this.assertOperationActive(projectId);
           const ledgerPrompt = sourceDialoguePromptBlock(chunk.sourceDialogueLedger);
-          const partial = await this.generateText(settings.textProvider, [
-            { role: "system", content: `${appendDocxPromptFusion(
-              textStagePromptForProject(project, settings, "scriptAnalysis", "script_analysis"),
-              settings.prompts,
-              "script_analysis"
-            )}\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n${ledgerPrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。只输出 JSON，不要解释。JSON 结构必须匹配：${JSON.stringify(schema)}${repair ? `\n【上次输出修复】${repair}` : ""}` },
+          const messages = [
+            { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}${repair ? `\n【上次输出修复】${repair}` : ""}` },
             { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先判断本段故事因果、人物关系、每句话的说话人/听者/语气/表情和商品出现时机，再写人物场景资产信息、分镜结构与sourceDialogueBindings。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。\n\n剧本片段：\n${chunk.text}` }
-          ], { json: true, costProjectId: projectId, costOperation: `script_analysis_chunk_${chunk.index + 1}_attempt_${attempt}` });
+          ];
+          const requestChars = JSON.stringify(messages).length;
+          const control = this.operationControls.get(projectId);
+          const partial = await this.generateText(settings.textProvider, messages, {
+            json: true,
+            signal: control?.controller.signal,
+            sessionId: `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-${attempt}`,
+            maxTokens: Math.min(16384, 4096 + chunk.unitCount * 2400),
+            costProjectId: projectId,
+            costOperation: `script_analysis_chunk_${chunk.index + 1}_attempt_${attempt}`
+          });
           const actualCount = Array.isArray(partial?.shots) ? partial.shots.length : 0;
           if (actualCount !== chunk.unitCount) {
             throw Object.assign(new Error(`剧本第 ${chunk.index + 1}/${chunks.length} 段应拆成 ${chunk.unitCount} 个生成单元，实际返回 ${actualCount} 个`), {
@@ -9569,7 +10423,10 @@ class WorkbenchWorkflow {
               actualCount
             });
           }
-          return bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger);
+          const bound = bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger);
+          partials[chunk.index] = bound;
+          saveCompletedAnalysisChunk(chunk, bound, requestChars);
+          return bound;
         } catch (error) {
           lastError = error;
           if (attempt >= 2 || !["SCRIPT_ANALYSIS_UNIT_COUNT_MISMATCH", "SCRIPT_DIALOGUE_BINDING_INVALID"].includes(error?.code)) throw error;
@@ -9597,7 +10454,9 @@ class WorkbenchWorkflow {
     const override = entity?.promptOverrides?.[stage] || {};
     if (!options.forceCompiled) {
       if (override.mode === "manual" && String(override.manual || "").trim()) {
-        return withStageParity(String(override.manual).trim(), settings.prompts, stage);
+        // User-owned means byte-for-byte user-owned. References still travel in
+        // the provider request, but no hidden system template rewrites this text.
+        return String(override.manual).trim();
       }
       if (String(override.system || "").trim()) {
         const system = String(override.system).trim();
@@ -9804,12 +10663,17 @@ ${shotAnchor}
     const compiled = this.compileCharacterVideoPrompt(project, settings, character).prompt;
     let authored = String(promptOverride || "").trim();
     if (!authored && override.mode === "manual" && String(override.manual || "").trim()) authored = String(override.manual).trim();
+    if (authored && (String(promptOverride || "").trim() || override.mode === "manual")) {
+      // Same contract as shot video prompts: creator text is submitted exactly
+      // as saved. The system prompt remains available as a downloadable suggestion.
+      return authored;
+    }
     // H3 must always rebuild its canonical speech, frontal framing and output-form
     // contract from the current character. A saved system prompt is only a cached
     // preview and must never replace the current identity/speech contract.
     if (projectVideoEngine(project) === "hailuo-h3") {
       if (!authored) return compiled;
-      return `${compiled}\n\nAdditional creator intent (subordinate to every contract above; do not alter the 5.00-second duration and do not add, remove or paraphrase spoken lines):\n${authored}`.trim();
+      return authored;
     }
     if (!authored && String(override.system || "").trim()) authored = String(override.system).trim();
     if (!authored) return compiled;
@@ -10245,9 +11109,9 @@ ${shotAnchor}
         }
         const scene = selectedOrLatest(project, "scene", entity.sceneId, "scene_asset");
         if (!scene?.filePath) {
-          throw Object.assign(new Error(`镜头 ${entity.id || entity.number} 缺少场景空间锚图`), { code: "STORYBOARD_SCENE_REFERENCE_REQUIRED", shotId: entity.id, sceneId: entity.sceneId });
+          throw Object.assign(new Error(`镜头 ${entity.id || entity.number} 缺少场景四视图`), { code: "STORYBOARD_SCENE_REFERENCE_REQUIRED", shotId: entity.id, sceneId: entity.sceneId });
         }
-        addReference(scene, `场景“${entity.sceneName || "未命名"}”空间与光线基准（空镜布局，不锁本镜人物站位）`);
+        addReference(scene, `场景“${entity.sceneName || "未命名"}”2×2四角度空间基准；只选与本镜机位最匹配的一格锁门窗家具与光向，成图禁止复制四宫格、边框或参考板`);
       } else if (stage === "storyboard_start" || stage === "storyboard_sheet") {
         const imageCharacterIds = Array.isArray(entity.imageReferenceCharacterIds)
           ? entity.imageReferenceCharacterIds
@@ -10266,9 +11130,9 @@ ${shotAnchor}
         }
         const scene = selectedOrLatest(project, "scene", entity.sceneId, "scene_asset");
         if (!scene?.filePath) {
-          throw Object.assign(new Error(`镜头 ${entity.id || entity.number} 缺少场景空间锚图`), { code: "STORYBOARD_SCENE_REFERENCE_REQUIRED", shotId: entity.id, sceneId: entity.sceneId });
+          throw Object.assign(new Error(`镜头 ${entity.id || entity.number} 缺少场景四视图`), { code: "STORYBOARD_SCENE_REFERENCE_REQUIRED", shotId: entity.id, sceneId: entity.sceneId });
         }
-        addReference(scene, `场景“${entity.sceneName || "未命名"}”空间与光线基准（空镜布局）`);
+        addReference(scene, `场景“${entity.sceneName || "未命名"}”2×2四角度空间基准；按当前构图选最匹配角度，锁定同一门窗家具拓扑和光向，剧情画面禁止出现拼板边框`);
         // Same-scene keyframe only: optional mild axis continuity. Cross-scene / cut shots
         // must NOT inherit the previous end composition or they cannot change camera/scene.
         if ((project.generation?.mode || "") === "keyframe" && Number(entity.number) > 1 && stage === "storyboard_start") {
@@ -10340,7 +11204,7 @@ ${shotAnchor}
           addReference(portrait, `角色“${character?.name || characterId}”身份与服装基准`);
         }
         const scene = selectedOrLatest(project, "scene", entity.sceneId, "scene_asset");
-        addReference(scene, `场景“${entity.sceneName || "未命名"}”空间与光线基准`);
+        addReference(scene, `场景“${entity.sceneName || "未命名"}”四角度空间基准；只读取匹配视角，不复刻2×2拼板`);
       }
     }
     const maxImageReferences = settings.imageProvider.kind === "puream-relay" ? 3 : 9;
@@ -10461,7 +11325,7 @@ ${shotAnchor}
     const maxPolicyAttempts = 3;
     for (let policyAttempt = 1; policyAttempt <= maxPolicyAttempts; policyAttempt += 1) {
       try {
-        generated = await generateImage(settings.imageProvider, activePrompt, targetPath, imageGenerationOptions(project, stage, readyReferences, entity));
+        generated = await generateImage(settings.imageProvider, activePrompt, targetPath, imageGenerationOptions(project, stage, readyReferences, entity, this.operationControls.get(projectId)?.controller?.signal));
         prompt = activePrompt;
         break;
       } catch (error) {
@@ -10484,7 +11348,7 @@ ${shotAnchor}
           readyReferences = [];
           activePrompt += `\n\n【注意】上游拒绝了参考图链接，已自动改为纯文字重试。`;
           try {
-            generated = await generateImage(settings.imageProvider, activePrompt, targetPath, imageGenerationOptions(project, stage, [], entity));
+            generated = await generateImage(settings.imageProvider, activePrompt, targetPath, imageGenerationOptions(project, stage, [], entity, this.operationControls.get(projectId)?.controller?.signal));
           } catch (retryError) {
             try {
               this.settleImageFailure(projectId, {
@@ -10698,10 +11562,11 @@ ${shotAnchor}
     // a person baked into the set becomes a competing face reference in video.
     const ffmpeg = this.locateFfmpeg();
     if (!ffmpeg) throw Object.assign(new Error("未找到像塑 FFmpeg"), { code: "FFMPEG_NOT_FOUND" });
-    const [image, skin, faceProbe] = await Promise.all([
+    const [image, skin, faceProbe, fourView] = await Promise.all([
       analyzeImageFile(ffmpeg, candidate.filePath),
       analyzeImageSkinOccupancy(ffmpeg, candidate.filePath),
-      probeFacesInImage(candidate.filePath)
+      probeFacesInImage(candidate.filePath),
+      analyzeSceneFourViewLayout(ffmpeg, candidate.filePath)
     ]);
     const characterReferences = [];
     for (const character of project.characters || []) {
@@ -10721,20 +11586,22 @@ ${shotAnchor}
     const decision = assessEmptySceneImage(image, skin, characterReferences, faceProbe, {
       // Judge people leakage from the scene bible text, not from negative prompt boilerplate.
       prompt: `${scene.name || ""}\n${scene.description || ""}\n${candidate.prompt || ""}`,
-      characters: project.characters || []
+      characters: project.characters || [],
+      fourView
     });
     const audit = {
       ok: decision.ok,
       checkedAt: new Date().toISOString(),
-      type: "empty_scene",
+      type: "empty_scene_four_view",
       image,
       skin,
       faceProbe,
+      fourView,
       closestCharacter: decision.closestCharacter,
       failures: decision.failures,
       repairDirective: decision.ok
         ? ""
-        : "重画无人空场景：删掉画面里的所有人；只保留建筑、门窗、家具与光线；角色外貌只能来自角色参考图，绝不能画进场景板"
+        : "重画一张16:9无人场景四视图：严格2×2四格，依次为主入口正向、反向轴、左45度、右45度；四格必须是同一门窗家具拓扑、同一时段和光向且角度不能重复；删掉所有人、标签和文字"
     };
     this.store.updateCandidate(projectId, candidateId, { qualityAudit: audit });
     return audit;
@@ -10745,7 +11612,7 @@ ${shotAnchor}
     let lastAudit = null;
     let existing = candidateReady(this.store.getProject(projectId), "scene", sceneId, "scene_asset", settings);
     if (existing) {
-      lastAudit = existing.qualityAudit?.type === "empty_scene"
+      lastAudit = existing.qualityAudit?.type === "empty_scene_four_view"
         ? existing.qualityAudit
         : await this.auditSceneAssetCandidate(projectId, sceneId, existing.id);
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
@@ -10988,8 +11855,7 @@ ${shotAnchor}
       const job = this.store.getProject(projectId).jobs.find(item => item.id === jobId);
       return job?.videoEngine === "hailuo-h3" || job?.providerKind === "puream-hailuo-h3" ? "海螺 H3" : "Seedance";
     };
-    const maxAttempts = providerLabel() === "海螺 H3" ? 720 : 240;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    for (let attempt = 1; ; attempt += 1) {
       this.assertOperationActive(projectId);
       await this.videoQueryPollSleep(5_000);
       let result;
@@ -11041,11 +11907,6 @@ ${shotAnchor}
         });
       }
     }
-    throw Object.assign(new Error(`${providerLabel()}生成轮询超时`), {
-      code: "VIDEO_POLL_TIMEOUT",
-      taskId,
-      remoteGenerationPending: true
-    });
   }
 
   async submitVideo(projectId, entityType, entityId, stage, prompt, references, duration) {
@@ -12256,7 +13117,7 @@ ${shotAnchor}
       const scene = candidateReady(project, "scene", shot.sceneId, "scene_asset");
       const sceneEntity = project.scenes.find(item => item.id === shot.sceneId);
       if (!scene?.filePath) {
-        throw Object.assign(new Error(`镜头 ${shot.id || shot.number} 缺少场景空间锚图，禁止只靠文字生成导致门向、家具和昼夜漂移`), {
+        throw Object.assign(new Error(`镜头 ${shot.id || shot.number} 缺少场景四视图，禁止只靠文字生成导致门向、家具和昼夜漂移`), {
           code: "SHOT_SCENE_REFERENCE_REQUIRED",
           shotId: shot.id,
           sceneId: shot.sceneId
@@ -12265,7 +13126,7 @@ ${shotAnchor}
       addImage(scene.filePath, {
         type: "scene",
         entityId: shot.sceneId,
-        label: `单视图空场景空间锚点（锁门窗、家具、时段、主光与轴线；核对名 ${sceneEntity?.name || shot.sceneName || "未命名"}）`,
+        label: `2×2空场景四角度参考板（按本镜机位选择匹配角度，锁门窗、家具、时段、主光与轴线；最终视频严禁出现拼板边框；核对名 ${sceneEntity?.name || shot.sceneName || "未命名"}）`,
         candidateId: scene.id,
         sourceStage: scene.stage,
         entityType: scene.entityType,
@@ -12491,7 +13352,21 @@ ${shotAnchor}
     }, shot);
     const effectiveMode = shotStrategy.strategy || mode || project.generation?.mode || "keyframe";
     const fingerprint = promptFingerprint(project, shot, effectiveMode);
+    const promptQualityEnabled = this.qualityGatesEnabled(settings, "videos");
     if (shot.hailuoPromptSpec) {
+      if (!promptQualityEnabled) {
+        // Master/module off means no hidden compiler audit. Normalize the
+        // stored shape locally and continue; never buy another text request or
+        // enter the 2/4, 3/4 repair loop merely because English scoring failed.
+        const ungatedSpec = normalizePromptSpec(shot.hailuoPromptSpec, shot, fingerprint);
+        ungatedSpec.fingerprint = fingerprint;
+        const latestProject = this.store.getProject(projectId);
+        latestProject.shots = latestProject.shots.map(item => item.id === shotId
+          ? { ...item, hailuoPromptSpec: ungatedSpec }
+          : item);
+        this.store.saveProject(latestProject);
+        return ungatedSpec;
+      }
       try {
         validatePromptSpec(shot.hailuoPromptSpec, shot, fingerprint, {
           project,
@@ -12546,10 +13421,11 @@ ${shotAnchor}
         // The shot, mode, or prompt contract changed. Recompile before any paid video submission.
       }
     }
-    // H3 is always compiled from the actual shot contract. Quality-gate toggles may
-    // skip visual scoring, but must never replace the story with a generic confrontation.
+    // The prompt is always compiled from the actual shot contract. With audits
+    // enabled it may receive bounded automatic repair; with audits disabled it
+    // compiles exactly once and proceeds without a hidden quality gate.
     const control = this.operationControls.get(projectId);
-    const maxCompileAttempts = 4;
+    const maxCompileAttempts = promptQualityEnabled ? 4 : 1;
     let lastError = null;
     let repairNote = "";
     for (let attempt = 1; attempt <= maxCompileAttempts; attempt += 1) {
@@ -12582,14 +13458,16 @@ ${shotAnchor}
         );
         const spec = normalizePromptSpec(raw, shot, fingerprint);
         spec.fingerprint = fingerprint;
-        validatePromptSpec(spec, shot, fingerprint, {
-          project,
-          requirePropStateTranslations: true
-        });
+        if (promptQualityEnabled) {
+          validatePromptSpec(spec, shot, fingerprint, {
+            project,
+            requirePropStateTranslations: true
+          });
+        }
         const latestProject = this.store.getProject(projectId);
         const latestShot = latestProject.shots.find(item => item.id === shotId);
         if (!latestShot || promptFingerprint(latestProject, latestShot, effectiveMode) !== fingerprint) {
-          if (!this.qualityGatesEnabled(settings, "videos")) {
+          if (!promptQualityEnabled) {
             throw Object.assign(new Error("海螺 H3 提示词编译期间分镜内容已变化（质检关闭将改用兜底稿）"), { code: "HAILUO_H3_PROMPT_SPEC_INVALID", failures: ["stale fingerprint under open gates"] });
           }
           throw Object.assign(new Error("海螺 H3 提示词编译期间分镜内容已变化，请重新生成本镜"), { code: "HAILUO_H3_PROMPT_STALE" });
@@ -12601,10 +13479,10 @@ ${shotAnchor}
         lastError = error;
         if (isOperationControlError(error)) throw error;
         if (shouldStopAutomaticTextRetry(error)) throw error;
-        if (error?.code === "HAILUO_H3_PROMPT_STALE" && this.qualityGatesEnabled(settings, "videos")) throw error;
+        if (error?.code === "HAILUO_H3_PROMPT_STALE" && promptQualityEnabled) throw error;
         if (error?.code !== "HAILUO_H3_PROMPT_SPEC_INVALID" && error?.code !== "HAILUO_H3_PROMPT_STALE" && error?.code !== "MODEL_JSON_INVALID" && attempt < maxCompileAttempts) {
           // keep retrying transient compile failures when gates are off
-        } else if (error?.code !== "HAILUO_H3_PROMPT_SPEC_INVALID" && error?.code !== "MODEL_JSON_INVALID" && this.qualityGatesEnabled(settings, "videos")) {
+        } else if (error?.code !== "HAILUO_H3_PROMPT_SPEC_INVALID" && error?.code !== "MODEL_JSON_INVALID" && promptQualityEnabled) {
           throw error;
         }
         if ((error?.code === "HAILUO_H3_PROMPT_SPEC_INVALID" || error?.code === "MODEL_JSON_INVALID" || error?.code === "HAILUO_H3_PROMPT_STALE") && attempt < maxCompileAttempts) {
@@ -12652,13 +13530,13 @@ ${shotAnchor}
           ? (settings.prompts.hailuoStoryboardSheetVideo || settings.prompts.hailuoKeyframeVideo)
           : (effectiveMode === "continuation" ? settings.prompts.hailuoContinuationVideo : settings.prompts.hailuoKeyframeVideo),
         qualityRepair,
-        skipValidation: false,
-        parityInstruction: [matrixRuntimePrompt, referenceParityFor(settings.prompts, "hailuo_video")].filter(Boolean).join(" ")
+        skipValidation: !isQualityGatesEnabled(settings, "videos"),
+        parityInstruction: [viewerComprehensionPriorityDirective(), matrixRuntimePrompt, referenceParityFor(settings.prompts, "hailuo_video")].filter(Boolean).join(" ")
       });
       const compiledPrompt = !isSheet ? hailuoPrompt : `${hailuoPrompt}
 
 [storyboard_sheet] <Picture 1> is a chronological contact sheet made from complete portrait 9:16 panels. Animate every panel left-to-right, top-to-bottom in time order. Do not render panel borders, index strips, or storyboard UI in the final video.`.trim();
-      assertSystemPromptDialogueParity(project, shot, compiledPrompt, engine);
+      if (this.qualityGatesEnabled(settings, "script")) assertSystemPromptDialogueParity(project, shot, compiledPrompt, engine);
       return compiledPrompt;
     }
     const pictureToken = index => `图${index}`;
@@ -12674,6 +13552,7 @@ ${shotAnchor}
     const promptDialogue = uniqueDialogueTurns(project, shot)
       .map(item => {
         const meta = item.metadata || {};
+        const listenerNames = (item.listenerIds || []).map(id => (project.characters || []).find(character => character.id === id || character.name === id)?.name || id).filter(Boolean);
         const fields = [
           item.sourceTone ? `sourceTone=${item.sourceTone}` : "",
           meta.intent ? `intent=${meta.intent}` : "",
@@ -12684,7 +13563,7 @@ ${shotAnchor}
           meta.stressWord ? `stressWord=${meta.stressWord}` : "",
           meta.breath ? `breath=${meta.breath}` : "",
           meta.body ? `body=${meta.body}` : "",
-          meta.listenerBeat ? `listenerBeat=${meta.listenerBeat}` : ""
+          listenerNames.length || meta.listenerBeat ? `listenerBeat=${listenerNames.length ? `面对${listenerNames.join("、")}；` : ""}${meta.listenerBeat || "听者必须有同步可见反应"}` : ""
         ].filter(Boolean).join("；");
         return `${item.speaker}：${item.text}${fields ? `｜${fields}` : ""}`;
       })
@@ -12759,6 +13638,7 @@ ${shotAnchor}
       performanceInstruction,
       productInstruction,
       productPromptDirective(project, shot),
+      viewerComprehensionPriorityDirective(),
       matrixRuntimePrompt,
       diversityInstruction,
       sceneLock,
@@ -12768,7 +13648,7 @@ ${shotAnchor}
       referenceParityFor(settings.prompts, "seedance_video")
     ].filter(Boolean).join("");
     const compiledPrompt = `${authoredPrompt}\n\n【Seedance本镜约束】${hardConstraints}`.trim();
-    assertSystemPromptDialogueParity(project, shot, compiledPrompt, engine);
+    if (isQualityGatesEnabled(settings, "script")) assertSystemPromptDialogueParity(project, shot, compiledPrompt, engine);
     return compiledPrompt;
   }
 
@@ -13462,7 +14342,7 @@ ${shotAnchor}
     const stageProvider = characterVideoStageProvider(this.store.getSettings());
     const inheritProjectVideo = stageProvider === "inherit-project";
     const waves = [
-      { id: "identity_and_scene", label: "第1波 · 人物合板 / 场景空间锚图", items: plan.filter(item => ["character_sheet", "scene_asset", "product_reference"].includes(item.kind)) },
+      { id: "identity_and_scene", label: "第1波 · 人物合板 / 场景四视图", items: plan.filter(item => ["character_sheet", "scene_asset", "product_reference"].includes(item.kind)) },
       { id: "character_intro", label: "第2A波 · 独立正脸介绍图", items: plan.filter(item => ["character_intro", "character_three_view"].includes(item.kind)) },
       { id: "asset_library", label: "第2B波 · 道具 / 换装资产库", items: plan.filter(item => ["prop_asset", "wardrobe_asset"].includes(item.kind)) },
       {
@@ -13809,7 +14689,7 @@ ${shotAnchor}
           ? "检测到旧分镜时长与目标不一致，正在按当前时长重新拆镜"
           : route === "reanalyze_source" ? "检测到剧本原稿已变化，正在隔离旧生产版本并重新拆镜" : "正在拆解已导入的完整剧本" });
         this.assertOperationActive(projectId);
-        await this.analyzeScript(projectId);
+        await this.analyzeScript(projectId, { track: false });
         project = this.store.getProject(projectId);
       } else if (route === "missing") {
         if (projectInputMode(project) === "manual") {
@@ -14046,7 +14926,7 @@ ${shotAnchor}
     const targetPath = path.join(this.store.assetDir(projectId, category), `${stage}-${slug(asset.name)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.png`);
     let generated;
     try {
-      generated = await generateImage(settings.imageProvider, prompt, targetPath, imageGenerationOptions(project, stage, referenceInputs));
+      generated = await generateImage(settings.imageProvider, prompt, targetPath, imageGenerationOptions(project, stage, referenceInputs, null, this.operationControls.get(projectId)?.controller?.signal));
     } catch (error) {
       try {
         this.settleImageFailure(projectId, {
@@ -14585,7 +15465,7 @@ ${shotAnchor}
   }
 }
 
-module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, renderProductionScript, ideaSignature, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
+module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, projectScriptFormat, assertAiScriptFormatConfirmed, scriptFormatDirective, viewerComprehensionPriorityDirective, renderProductionScript, renderDialogueScript, renderTimedStoryboardScript, renderScriptForProject, ideaSignature, parseTimedStoryboardScript, expandTimedStoryboardForProvider, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
 module.exports.reconcileShotSceneCatalog = reconcileShotSceneCatalog;
 module.exports.activeBlueprintFailures = activeBlueprintFailures;
 module.exports.scriptQualityGateOptions = scriptQualityGateOptions;

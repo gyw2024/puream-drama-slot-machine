@@ -9,7 +9,7 @@
  * - the same reference-film contract is shared by writing, images and video.
  */
 
-const REFERENCE_PARITY_PROMPT_VERSION = "2026.08-reference-all-modes-v7";
+const REFERENCE_PARITY_PROMPT_VERSION = "2026.08-reference-all-modes-v8";
 
 const STAGE_TO_KEY = Object.freeze({
   story_bible: "referenceParityStoryBible",
@@ -72,28 +72,29 @@ function defaultReferenceParityTemplates() {
 
     referenceParityCharacterPortraitImage: `【参考片人物介绍图硬合同】只出现一个角色；脸部位于画面视觉中心，双眼清楚，正脸或不超过15度轻微转头面对镜头，三分之二身或中近景，双手自然可见。保持人物资产的脸、年龄、体型、发型、整套服装和配饰；背景必须是纯色中性无缝棚拍背景，不得出现日常环境、家具、门窗或场景线索。禁止侧脸遮眼、仰俯角变形、三视图、拼贴、额外人物、文字和网红磨皮。`,
 
-    referenceParitySceneAssetImage: `【参考片场景空间锚图硬合同】只输出一张连续、完整、无分割的写实无人空场景主空间锚图，采用稳定低畸变广角主机位；严禁2×2、四宫格、四视图、多视角拼接、分镜板、拼贴、画中画、边框、编号、文字或水印。必须在单一透视中锁定墙面转折、门窗所在墙面、主要出入口、固定家具拓扑、通行路线、正反打轴线、关键道具/主题物件锚点及其相对位置；只允许一个明确时段、天气、色温和主光方向，门窗亮度、投影与实用灯必须相互一致。画面作为后续视频唯一场景基准，禁止复制门窗家具、生成不可能空间或混合昼夜。场景必须无人、无人体、无镜中人、无反射人影、无照片/海报人物，不得出现剧情动作或人物素材板。`,
+    referenceParitySceneAssetImage: `【参考片场景四视图硬合同】只输出一张16:9写实无人空场景参考板，严格2×2四格：左上主入口正向广角、右上同轴反向广角、左下左侧45度、右下右侧45度。四格必须是同一个可连通空间、同一道门窗、同一固定家具拓扑、同一通行路线、同一正反打轴线、同一时段天气色温和主光方向；只能改变摄影视点，不得复制/增删门窗家具、镜像翻转、混合昼夜或生成四个不同房间。只允许窄分隔线，禁止编号、角度字、标注、标题、Logo或水印。每格必须无人、无人体、无镜中人、无反射人影、无照片/海报人物。后续分镜/视频只选匹配机位的一格锁空间，最终成片严禁出现四宫格、边框或参考板。`,
 
     referenceParityObjectAssetImage: `【参考片服装/道具资产硬合同】只展示一个明确资产及必要的正反侧/细节视图；颜色、材质、磨损、结构、数量、左右方向和比例清楚可复用。服装图若引用角色，只允许同一角色中性站姿，保持脸、年龄和体型，仅更换指定服装；道具图不得新增手或人物。禁止剧情场景、广告文案、Logo重绘、字幕、水印和多个无关物品。`,
 
-    referenceParityStoryboardImage: `【参考片剧情分镜图硬合同】这是剧情时刻，不是资产展示。只出现本镜 visibleCharacterIds 允许的0–2人，场内旁观者不得自动入画；单人说话镜只画说话人，听者在画外方向，双人镜仅画明确的说话人与听者。锁定人物脸/年龄/体型/发型/整套服装、场景空间/时段/主光、左右站位/视线轴、持物手和道具状态。商品整体/细节镜让商品占画面45%–75%，禁止无关人脸、遮挡、额外手和抢镜背景人物。首帧是动作尚未发生的可执行起点，尾帧是动作完成后的可见新状态；禁止三视图、灰底排排站、拼贴、字幕、水印、伪文字和参考图界面。`,
+    referenceParityStoryboardImage: `【参考片剧情分镜图硬合同】这是剧情时刻，不是资产展示。只出现本镜 visibleCharacterIds 允许的0–2人，场内旁观者不得自动入画；单人说话镜只画说话人，听者在画外方向，双人镜仅画明确的说话人与听者。人物脸/年龄/体型/发型/整套服装、左右站位/视线轴、持物手和道具状态必须锁定。场景参考图是2×2四角度空间板：只读取与本镜机位最匹配的一格及相邻格来推导同一空间、时段和主光，最终分镜必须是单一真实机位，禁止复制四宫格、边框或参考板。商品整体/细节镜让商品占画面45%–75%，禁止无关人脸、遮挡、额外手和抢镜背景人物。首帧是动作尚未发生的可执行起点，尾帧是动作完成后的可见新状态；禁止三视图、灰底排排站、拼贴、字幕、水印、伪文字和参考图界面。`,
 
     referenceParityCharacterVideo: `【参考片人物视频硬合同】全程仅一个角色，身份、服装和声线严格匹配人物资产；0.00秒就是正脸中近景且立刻开口，脸始终位于视觉中心，头部偏转不超过15度，不低头遮眼、不离开画面。完整说完音色采集台词，口型与中文同步，覆盖日常腔、压火腔和拔高腔；环境底噪稳定，无BGM、无他人声、无切镜。末尾闭口保持0.5秒。禁止三视图、网格线、字幕、水印或额外人物。`,
 
     referenceParityHailuoCharacterVideo: `TEN-FILM REFERENCE PARITY — CHARACTER VOICE ASSET: the output is exactly 5.00 seconds and contains exactly one live-action character whose face, age, body, hair and complete wardrobe match Picture 1. At 0.00 seconds use a centered frontal static medium close-up and begin speaking immediately. Keep both eyes visible, head yaw within 10 degrees, the mouth unobstructed and the face inside the visual center for the entire clip. Deliver only the exact 18–22 Chinese characters inside the <d>[Chinese] block; speech continues without a silent gap until the final syllable completes between 4.90 and 5.00 seconds. Use synchronized lips and one role-matching timbre, moving across natural, restrained-pressure and firm raised-conviction clauses without changing identity or voice. Use clean dry speech and faint room tone with no music, no other voice, no cut and no silent tail. Never show a contact sheet, three-view board, face grid, subtitle, watermark or extra person.`,
 
-    referenceParitySeedanceVideo: `【十部参考成片同规格·Seedance本镜硬合同·全模式】严格按图/视频/音频编号使用参考：首尾帧、上一视频或逐秒合图只控制本镜时间锚，人物/场景/服装/道具/商品图只控制对应资产，音频只控制同名角色音色。完整执行0→duration的动作与对白顺序；说话人看听者且仅其开口，听者闭嘴并给反应，不对镜头。镜头必须从首态推进到肉眼不同的尾态；三段/多格动作·表情·身体必须互异，禁止等分空镜与整板复制。禁止复刻参考板、重复前镜构图、人物换脸换装、空间反转、商品早泄。环境底噪与同步SFX覆盖全段，头尾不得掉声；禁止背景音乐/BGM。首尾帧模式走首→尾因果链；延续模式无缝承接上一视频末态；合图模式按格序演绎且禁止格线序号入成片。`,
+    referenceParitySeedanceVideo: `【十部参考成片同规格·Seedance本镜硬合同·全模式】严格按图/视频/音频编号使用参考：首尾帧、上一视频或逐秒合图只控制本镜时间锚，人物/服装/道具/商品图只控制对应资产，音频只控制同名角色音色；场景图是2×2四角度板，只选与本镜机位匹配的一格来锁门窗家具与光向，最终视频禁止出现四宫格、边框或参考板。完整执行0→duration的动作与对白顺序；说话人看听者且仅其开口，听者闭嘴并给反应，不对镜头。镜头必须从首态推进到肉眼不同的尾态；三段/多格动作·表情·身体必须互异，禁止等分空镜与整板复制。禁止复刻参考板、重复前镜构图、人物换脸换装、空间反转、商品早泄。环境底噪与同步SFX覆盖全段，头尾不得掉声；禁止背景音乐/BGM。首尾帧模式走首→尾因果链；延续模式无缝承接上一视频末态；合图模式按格序演绎且禁止格线序号入成片。`,
 
     referenceParityHailuoCompiler: `REFERENCE-DIRECTOR PARITY — COMPILER (DRAMA FIRST, ALL MODES):
 - Compile one isolated 5–15s irreversible unit: cause → visible action → new state the viewer can see.
 - Translate emotionArc/performanceBeats/cutReason into concrete English face, body, breath, voice and cut bridges before any continuity boilerplate.
 - Keep zero-to-two visibleCharacterIds only. Prefer speaker close-up → listener reaction → action/evidence result. Each subshot/panel must have a DIFFERENT visible action/face/body beat.
 - Mode anchors: keyframe = first→last causal chain; continuation = prior end-state without replay/reset; storyboard_sheet = ordered panels, never render grid/UI as a frame.
+- The scene reference is one 2-by-2 four-angle board of the same space. Select only the panel matching the authored camera axis to preserve doors, windows, furniture and light; never render the board, gutters or labels in the video.
 - Speakers look at listeners, never the camera; only the matching speaker opens the mouth.
 - Cuts must be dialogue/eyeline/matched-action/object/entrance/sound bridges. Keep micro-motion through the final frame.
 - Continuous bed + synced SFX only; nonDiegeticMusicEn always N/A; never BGM/underscore. Product packshot/detail: product 45–75%, no extra face/hand. English JSON only.`,
 
-    referenceParityHailuoVideo: `REFERENCE-DIRECTOR PARITY — FINAL UNIT (DRAMA FIRST, ALL MODES): render one irreversible live-action beat with rising performance intensity (start→trigger→peak→aftershock). Only the supplied 0–2 visible characters. Execute authored face/body/voice change, motivated cuts, exact Chinese speaker-to-voice binding, continuous bed/SFX only (no BGM/underscore), and micro-motion through the end. Keyframe / continuation / storyboard-sheet only change temporal anchors — drama, VO density, cut motives and SFX-only stay identical. Never flatten to neutral acting, freeze, show boards/labels/subtitles, add a third face, or invent an establishing reset.`
+    referenceParityHailuoVideo: `REFERENCE-DIRECTOR PARITY — FINAL UNIT (DRAMA FIRST, ALL MODES): render one irreversible live-action beat with rising performance intensity (start→trigger→peak→aftershock). Only the supplied 0–2 visible characters. Execute authored face/body/voice change, motivated cuts, exact Chinese speaker-to-voice binding, continuous bed/SFX only (no BGM/underscore), and micro-motion through the end. The scene reference is a 2-by-2 four-angle board of one space: use only the matching camera-angle panel to lock doors, windows, furniture and light; never render the board or gutters. Keyframe / continuation / storyboard-sheet only change temporal anchors — drama, VO density, cut motives and SFX-only stay identical. Never flatten to neutral acting, freeze, show boards/labels/subtitles, add a third face, or invent an establishing reset.`
   };
   return {
     ...templates,

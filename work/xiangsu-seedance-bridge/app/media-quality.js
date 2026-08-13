@@ -375,6 +375,55 @@ async function analyzeImageFile(ffmpeg, filePath) {
   }
 }
 
+async function analyzeSceneFourViewLayout(ffmpeg, filePath) {
+  const dimensions = await analyzeImageDimensions(ffmpeg, filePath);
+  const failures = [];
+  if (!dimensions.ok) {
+    failures.push({ code: "SCENE_FOUR_VIEW_UNREADABLE", message: "无法读取场景四视图画布尺寸" });
+    return { ok: false, dimensions, quadrantHashes: [], similarities: [], failures };
+  }
+  const ratioDelta = Math.abs(Number(dimensions.aspectRatio || 0) - (16 / 9)) / (16 / 9);
+  if (ratioDelta > 0.08) {
+    failures.push({ code: "SCENE_FOUR_VIEW_ASPECT_INVALID", message: `场景四视图必须是一张16:9的2×2画布，当前为 ${dimensions.width}×${dimensions.height}` });
+  }
+  const crops = [
+    "crop=floor(iw/2):floor(ih/2):0:0",
+    "crop=floor(iw/2):floor(ih/2):floor(iw/2):0",
+    "crop=floor(iw/2):floor(ih/2):0:floor(ih/2)",
+    "crop=floor(iw/2):floor(ih/2):floor(iw/2):floor(ih/2)"
+  ];
+  const quadrantHashes = await Promise.all(crops.map(async crop => {
+    try {
+      const width = 32;
+      const height = 32;
+      const output = await spawnBuffer(ffmpeg, [
+        "-hide_banner", "-loglevel", "error", "-i", filePath,
+        "-frames:v", "1", "-vf", `${crop},scale=${width}:${height}:flags=area,format=gray`,
+        "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"
+      ]);
+      const frame = output.subarray(0, width * height);
+      return frame.length === width * height ? frameHash(frame, width, height) : "";
+    } catch {
+      return "";
+    }
+  }));
+  if (quadrantHashes.some(hash => !hash)) {
+    failures.push({ code: "SCENE_FOUR_VIEW_QUADRANT_MISSING", message: "场景四视图至少有一个角度无法解码" });
+  }
+  const similarities = [];
+  for (let left = 0; left < quadrantHashes.length; left += 1) {
+    for (let right = left + 1; right < quadrantHashes.length; right += 1) {
+      if (!quadrantHashes[left] || !quadrantHashes[right]) continue;
+      similarities.push({ left, right, similarity: hashSimilarity(quadrantHashes[left], quadrantHashes[right]) });
+    }
+  }
+  const duplicated = similarities.filter(item => item.similarity >= 0.985);
+  if (duplicated.length) {
+    failures.push({ code: "SCENE_FOUR_VIEW_DUPLICATED_ANGLE", message: "场景四视图存在几乎完全重复的格子，必须提供同一空间的四个不同角度", duplicated });
+  }
+  return { ok: failures.length === 0, dimensions, quadrantHashes, similarities, failures };
+}
+
 async function analyzeImageDimensions(ffmpeg, filePath) {
   try {
     const result = await spawnText(ffmpeg, [
@@ -478,6 +527,9 @@ function assessEmptySceneImage(image, skin = null, characterReferences = [], fac
       message: `场景资产图检测到 ${faceProbe.faceCount} 张人脸；空场景板禁止出现任何人`,
       faceCount: faceProbe.faceCount
     });
+  }
+  if (options.fourView && options.fourView.ok !== true) {
+    failures.push(...(options.fourView.failures || [{ code: "SCENE_FOUR_VIEW_INVALID", message: "场景资产不是合格的一张2×2四视图" }]));
   }
   return { ok: failures.length === 0, failures, closestCharacter, matches, skin, faceProbe };
 }
@@ -760,6 +812,7 @@ module.exports = {
   selectVoiceExtractPlan,
   analyzeVisualFile,
   analyzeImageFile,
+  analyzeSceneFourViewLayout,
   analyzeImageDimensions,
   analyzeImageSkinOccupancy,
   analyzeVideoEndpointFrames,

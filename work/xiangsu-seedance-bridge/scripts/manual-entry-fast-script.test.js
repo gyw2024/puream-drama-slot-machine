@@ -26,7 +26,7 @@ test("every production stage exposes an explicit manual entry", () => {
   for (const label of ["人物图", "场景图", "通用图片", "资产视频", "资产音频"]) assert.match(html, new RegExp(label));
 
   const renderer = source("app/renderer/workbench.js");
-  for (const label of ["上传人物合板", "上传人物三视图", "上传人物介绍图", "上传人物视频", "上传音色", "上传服装图", "上传道具图", "上传场景空间锚图", "上传本镜视频"]) {
+  for (const label of ["上传人物合板", "上传人物三视图", "上传人物介绍图", "上传人物视频", "上传音色", "上传服装图", "上传道具图", "上传场景四视图", "上传本镜视频"]) {
     assert.match(renderer, new RegExp(label));
   }
 });

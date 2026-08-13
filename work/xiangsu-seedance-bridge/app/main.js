@@ -12,6 +12,13 @@ const { testProvider } = require("./ai-provider");
 const { stageSubmissionMedia } = require("./media-staging");
 const { WorkbenchStore, defaultPromptTemplates } = require("./workbench-store");
 const { WorkbenchWorkflow, projectRequiresFaceMesh, hasOssCredentials } = require("./workbench-workflow");
+const {
+  PROMPT_SCOPE_STAGES,
+  normalizePromptStage,
+  normalizePromptEntry,
+  mergePromptIntake,
+  applyPromptIntakeToMaterializedEntities
+} = require("./prompt-intake");
 const { DramaLicenseClient, licenseBypassAllowed, DEFAULT_LICENSE_BASE_URL } = require("./license-gate");
 const { createIntegrityGuard } = require("./integrity-guard");
 const { isActiveVideoJob } = require("./workbench-status");
@@ -688,10 +695,10 @@ function createWindow() {
               await wait(50);
             }
             const expected = {
-              script: ['importScriptFile'],
-              assets: ['open-independent-library'],
-              shots: ['importStoryboardBatch'],
-              videos: ['importShotPromptsBatch', 'importShotVideosBatch'],
+              script: ['importScriptFile', 'import-prompt-batch', 'download-prompt-suggestions'],
+              assets: ['import-prompt-batch', 'download-prompt-suggestions', 'open-independent-library'],
+              shots: ['import-prompt-batch', 'download-prompt-suggestions', 'importStoryboardBatch'],
+              videos: ['importShotPromptsBatch', 'download-prompt-suggestions', 'importShotVideosBatch'],
               final: ['importFinalVideo']
             };
             const stages = {};
@@ -1263,6 +1270,158 @@ function planBatchPrompts(project, filePaths) {
   const sortedPaths = filePaths.slice().sort((left, right) => path.basename(left).localeCompare(path.basename(right), "zh-CN", { numeric: true }));
   if (sortedPaths.length === shots.length) return sortedPaths.map((filePath, index) => ({ shot: shots[index], prompt: readBoundedTextFile(filePath, PROMPT_IMPORT_MAX_CHARS).trim(), filePath })).filter(item => item.prompt);
   return [];
+}
+
+function promptStageFromFile(filePath, scope, project = {}) {
+  const name = path.basename(filePath, path.extname(filePath)).toLowerCase();
+  const rules = [
+    [/character[_\- ]?(?:sheet|board)|人物(?:合板|设定)/i, "character_sheet"],
+    [/character[_\- ]?(?:three[_\- ]?view|threeview)|人物三视图/i, "character_three_view"],
+    [/character[_\- ]?(?:intro|portrait)|人物(?:介绍|肖像)/i, "character_intro"],
+    [/character[_\- ]?video|人物视频/i, "character_video"],
+    [/wardrobe|服装/i, "wardrobe_asset"],
+    [/prop|道具/i, "prop_asset"],
+    [/scene|场景/i, "scene_asset"],
+    [/storyboard[_\- ]?(?:start|first)|首帧|起始帧/i, "storyboard_start"],
+    [/storyboard[_\- ]?(?:end|last)|尾帧|结束帧/i, "storyboard_end"],
+    [/storyboard[_\- ]?(?:sheet|board)|分镜合图|逐秒合图/i, "storyboard_sheet"],
+    [/shot[_\- ]?video|video[_\- ]?prompt|视频提示词/i, "shot_video"],
+    [/topic|选题/i, "topic_ideation"],
+    [/story[_\- ]?bible|故事圣经/i, "story_bible"],
+    [/shot[_\- ]?plan|拆镜计划/i, "shot_plan"],
+    [/(?:^|[_\- ])units?(?:$|[_\- ])|生成单元/i, "units"],
+    [/script[_\- ]?analysis|剧本拆解/i, "script_analysis"],
+    [/semantic[_\- ]?review|语义终审/i, "semantic_review"],
+    [/script|剧本提示词/i, "script"]
+  ];
+  for (const [pattern, stage] of rules) if (pattern.test(name)) return stage;
+  if (scope === "script") return "script";
+  if (scope === "videos") return "shot_video";
+  if (scope === "storyboards") return project.generation?.mode === "storyboard_sheet" ? "storyboard_sheet" : "storyboard_start";
+  return "";
+}
+
+function promptTargetFromFile(filePath, stage = "") {
+  const name = path.basename(filePath, path.extname(filePath));
+  const scene = name.match(/(?:^|[^a-z0-9])SC[-_ ]*0*(\d{1,4})(?:[^0-9]|$)/i);
+  if (scene) return `SC${String(Number(scene[1])).padStart(2, "0")}`;
+  const character = name.match(/(?:^|[^a-z0-9])C[-_ ]*0*(\d{1,4})(?:[^0-9]|$)/i);
+  if (character) return `C${String(Number(character[1])).padStart(2, "0")}`;
+  const shot = name.match(/(?:^|[^a-z0-9])(?:SHOT|S|镜头)[-_ ]*0*(\d{1,4})(?:[^0-9]|$)/i);
+  if (shot) return `S${String(Number(shot[1])).padStart(2, "0")}`;
+  if (["script", "topic_ideation", "story_bible", "shot_plan", "units", "script_analysis", "semantic_review"].includes(stage)) return "project";
+  return "project";
+}
+
+function defaultPromptStageForScope(scope, project = {}) {
+  if (scope === "script") return "script";
+  if (scope === "videos") return "shot_video";
+  if (scope === "storyboards") return project.generation?.mode === "storyboard_sheet" ? "storyboard_sheet" : "storyboard_start";
+  return "";
+}
+
+function promptEntriesFromJson(value, options = {}) {
+  const sourceFile = String(options.sourceFile || "");
+  const scope = String(options.scope || "all");
+  const defaultStage = normalizePromptStage(options.defaultStage || defaultPromptStageForScope(scope, options.project));
+  const result = [];
+  const add = (item, fallback = {}) => {
+    const normalized = normalizePromptEntry({
+      ...(typeof item === "string" ? { prompt: item } : item || {}),
+      stage: item?.stage || fallback.stage || defaultStage,
+      target: item?.target || item?.targetId || item?.entityId || fallback.target || "project",
+      sourceFile,
+      importedAt: new Date().toISOString()
+    }, result.length);
+    if (normalized) result.push(normalized);
+  };
+  const walk = (node, fallback = {}) => {
+    if (typeof node === "string") return add(node, fallback);
+    if (Array.isArray(node)) return node.forEach(item => walk(item, fallback));
+    if (!node || typeof node !== "object") return;
+    if (node.prompt || node.text || node.content || node.instruction) return add(node, fallback);
+    if (Array.isArray(node.prompts)) node.prompts.forEach(item => walk(item, fallback));
+    for (const scopeName of ["script", "assets", "storyboards", "videos"]) {
+      if (node[scopeName] !== undefined) walk(node[scopeName], { ...fallback, stage: defaultPromptStageForScope(scopeName, options.project) });
+    }
+    for (const [key, child] of Object.entries(node)) {
+      if (["version", "scope", "instructions", "prompts", "script", "assets", "storyboards", "videos"].includes(key)) continue;
+      const stage = normalizePromptStage(key);
+      if (stage) {
+        if (typeof child === "string") add(child, { stage, target: "project" });
+        else if (Array.isArray(child)) child.forEach(item => walk(item, { stage }));
+        else if (child && typeof child === "object") {
+          for (const [target, prompt] of Object.entries(child)) walk(prompt, { stage, target });
+        }
+        continue;
+      }
+      if (typeof child === "string" || (child && typeof child === "object" && (child.prompt || child.text))) {
+        walk(child, { ...fallback, target: key, stage: fallback.stage || defaultStage });
+      }
+    }
+  };
+  walk(value);
+  return result;
+}
+
+function parsePromptIntakeFiles(project, filePaths, scope = "all") {
+  const normalizedScope = PROMPT_SCOPE_STAGES[scope] ? scope : "all";
+  const entries = [];
+  for (const filePath of filePaths || []) {
+    const text = readBoundedTextFile(filePath, PROMPT_IMPORT_MAX_CHARS).trim();
+    if (!text) continue;
+    if (path.extname(filePath).toLowerCase() === ".json") {
+      try {
+        entries.push(...promptEntriesFromJson(JSON.parse(text), { sourceFile: path.basename(filePath), scope: normalizedScope, project }));
+        continue;
+      } catch (error) {
+        if (error instanceof SyntaxError) {
+          throw Object.assign(new Error(`${path.basename(filePath)} 不是有效 JSON；可改用 TXT，或下载系统建议模板后填写`), { code: "PROMPT_BATCH_JSON_INVALID" });
+        }
+        throw error;
+      }
+    }
+    const stage = promptStageFromFile(filePath, normalizedScope, project);
+    if (!stage) {
+      throw Object.assign(new Error(`${path.basename(filePath)} 无法判断提示词阶段；资产提示词请在文件名写 character_sheet、scene、wardrobe 或 prop，或使用系统建议 JSON 模板`), { code: "PROMPT_BATCH_STAGE_REQUIRED" });
+    }
+    const entry = normalizePromptEntry({
+      stage,
+      target: promptTargetFromFile(filePath, stage),
+      prompt: text,
+      sourceFile: path.basename(filePath),
+      importedAt: new Date().toISOString()
+    }, entries.length);
+    if (entry) entries.push(entry);
+  }
+  const allowed = new Set(PROMPT_SCOPE_STAGES[normalizedScope]);
+  return entries.filter(entry => allowed.has(entry.stage));
+}
+
+async function importPromptBatch(projectId, scope = "all") {
+  const normalizedScope = PROMPT_SCOPE_STAGES[scope] ? scope : "all";
+  const titles = { script: "批量上传剧本流程提示词", assets: "批量上传资产提示词", storyboards: "批量上传分镜图提示词", videos: "批量上传视频提示词", all: "批量上传全流程提示词" };
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: titles[normalizedScope],
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      { name: "提示词文件", extensions: ["txt", "md", "markdown", "json"] },
+      { name: "所有文件", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled) return { ok: true, canceled: true };
+  const { store } = requireWorkbench();
+  const project = store.getProject(projectId);
+  const entries = parsePromptIntakeFiles(project, result.filePaths, normalizedScope);
+  if (!entries.length) {
+    throw Object.assign(new Error("没有识别到可用提示词；请下载本阶段系统建议模板，保留 stage、target、prompt 三个字段后再上传"), { code: "PROMPT_BATCH_EMPTY" });
+  }
+  project.promptIntake = mergePromptIntake(project.promptIntake, entries);
+  applyPromptIntakeToMaterializedEntities(project, { overwrite: true, entries });
+  project.activity = Array.isArray(project.activity) ? project.activity : [];
+  project.activity.unshift({ id: crypto.randomUUID(), type: "prompt_batch_imported", summary: `从零批量上传 ${entries.length} 条${titles[normalizedScope].replace("批量上传", "")}`, createdAt: new Date().toISOString() });
+  const updated = store.saveProject(project);
+  return { ok: true, imported: entries.length, stages: [...new Set(entries.map(entry => entry.stage))], project: updated };
 }
 
 function readBoundedTextFile(filePath, maxChars) {
@@ -1855,34 +2014,13 @@ ipcMain.handle("workbench:import-batch-media", async (_event, projectId, kind) =
     return { ok: imported.length > 0, imported, failed, project: store.getProject(projectId), message: imported.length ? "" : (failed[0]?.message || "批量导入失败") };
   } catch (error) { return publicError(error); }
 });
+ipcMain.handle("workbench:import-prompt-batch", async (_event, projectId, scope = "all") => {
+  try { return await importPromptBatch(projectId, scope); }
+  catch (error) { return publicError(error); }
+});
 ipcMain.handle("workbench:import-shot-prompts", async (_event, projectId) => {
-  try {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: "批量上传分镜提示词",
-      properties: ["openFile", "multiSelections"],
-      filters: [
-        { name: "提示词文件", extensions: ["txt", "md", "markdown", "json"] },
-        { name: "所有文件", extensions: ["*"] }
-      ]
-    });
-    if (result.canceled) return { ok: true, canceled: true };
-    const { store } = requireWorkbench();
-    const project = store.getProject(projectId);
-    const assignments = planBatchPrompts(project, result.filePaths);
-    if (!assignments.length) {
-      throw Object.assign(new Error("无法把提示词对应到分镜。请按 S01.txt、S02.txt 命名，或上传以 S01/S02 为键的 JSON。"), { code: "IMPORT_PROMPT_MAPPING_FAILED" });
-    }
-    const promptByShotId = new Map(assignments.map(item => [item.shot.id, item.prompt]));
-    const shots = project.shots.map(shot => promptByShotId.has(shot.id)
-      ? { ...shot, promptMode: "manual", manualVideoPrompt: promptByShotId.get(shot.id) }
-      : shot);
-    const updated = store.patchProject(projectId, {
-      shots,
-      script: { ...(project.script || {}), manualShotPrompts: true },
-      activitySummary: `批量上传 ${promptByShotId.size} 镜分镜提示词`
-    });
-    return { ok: true, imported: promptByShotId.size, project: updated };
-  } catch (error) { return publicError(error); }
+  try { return await importPromptBatch(projectId, "videos"); }
+  catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:import-final-video", async (_event, projectId) => {
   try {
