@@ -1,8 +1,8 @@
 {
   "name": "xiangsu-seedance-bridge",
-  "version": "0.13.33",
+  "version": "0.14.2",
   "description": "纯梦短剧老虎机：纯梦云端算力默认、可切换本地像塑的一键短剧生产工具",
-  "main": "app/main.js",
+  "main": "app/bootstrap.js",
   "author": "PUREAM",
   "license": "UNLICENSED",
   "private": true,
@@ -16,9 +16,12 @@
     "build:installer": "electron-builder --win nsis --x64",
     "audit:packaged": "node scripts/audit-packaged.js",
     "audit:installed": "node scripts/audit-installed.js",
+    "audit:foundry-relocation": "node scripts/audit-foundry-storage-relocation.js",
+    "audit:live-upgrade": "node scripts/audit-live-upgrade.js",
     "audit:upload-transport": "electron scripts/electron-upload-transport.audit.js"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
     "axe-core": "4.13.0",
     "electron": "43.2.0",
     "electron-builder": "26.15.3",
@@ -48,20 +51,23 @@
       }
     ],
     "directories": {
-      "output": "dist-fixed-0.13.33"
+      "output": "dist-fixed-0.14.2"
     },
     "win": {
       "icon": "app/assets/app.ico",
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
     "nsis": {
       "guid": "316c72bd-3643-54c3-8e80-9c42a313b0eb",
-      "oneClick": true,
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
       "perMachine": false,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
@@ -69,5 +75,8 @@
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true
     }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0"
   }
 }

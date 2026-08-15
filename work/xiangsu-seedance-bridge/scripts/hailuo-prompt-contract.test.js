@@ -9,6 +9,7 @@ const {
   HAILUO_PROMPT_SPEC_VERSION,
   buildFullReferencePrompt,
   containsCjkOutsideDialogue,
+  sanitizeCjkOutsideDialogue,
   promptFingerprint
 } = require("../app/hailuo-h3-prompt");
 const { matrixRuntimeVideoPromptForProject } = require("../app/production-mode-matrix");
@@ -161,4 +162,19 @@ test("cloud and local video prompts remain separate compiler branches", () => {
   assert.match(compiler, /buildFullReferencePrompt\(/);
   assert.match(compiler, /formatDialogueWithAudioBinding\(/);
   assert.match(compiler, /【Seedance本镜约束】/);
+});
+
+test("historical Chinese metadata is auto-repaired without changing exact dialogue", t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "puream-prompt-cjk-repair-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const audioPath = path.join(dir, "voice.wav");
+  writeVoiceWav(audioPath);
+  const { project, shot, spec, references } = fixture(audioPath);
+  shot.mainlineStage = "开场钩子";
+  spec.fingerprint = promptFingerprint(project, shot, "storyboard_sheet");
+  const prompt = buildFullReferencePrompt({ project, shot, mode: "storyboard_sheet", references, spec, template: TEMPLATE });
+  assert.equal(containsCjkOutsideDialogue(prompt), false);
+  assert.match(prompt, /<d>\[Chinese\] 你到底瞒了我多久？<\/d>/);
+  assert.equal((prompt.match(/你到底瞒了我多久？/g) || []).length, 1);
+  assert.equal(sanitizeCjkOutsideDialogue("English 中文 <d>[Chinese] 原句不变！</d> 尾注"), "English <d>[Chinese] 原句不变！</d>");
 });

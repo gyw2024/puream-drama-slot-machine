@@ -492,6 +492,7 @@ async function analyzeImageSkinOccupancy(ffmpeg, filePath) {
 
 function assessEmptySceneImage(image, skin = null, characterReferences = [], faceProbe = null, options = {}) {
   const failures = [];
+  const advisories = [];
   if (!image?.ok || !image.hash) {
     failures.push({ code: "SCENE_IMAGE_UNREADABLE", message: "场景资产图无法解码，不能作为空场景参考" });
     return { ok: false, failures, closestCharacter: null };
@@ -514,8 +515,11 @@ function assessEmptySceneImage(image, skin = null, characterReferences = [], fac
     .sort((a, b) => b.similarity - a.similarity);
   const closestCharacter = matches[0] || null;
   if (closestCharacter?.similarity >= 0.72) {
-    failures.push({
-      code: "SCENE_CONTAINS_CHARACTER_LIKENESS",
+    // A whole-image perceptual hash measures palette/layout similarity, not
+    // whether a person is present. Keep it as a review hint only; warm wood,
+    // furniture and four-view grids routinely resemble character sheets.
+    advisories.push({
+      code: "SCENE_CHARACTER_HASH_SIMILARITY_ADVISORY",
       message: `场景资产图与角色“${closestCharacter.characterName || closestCharacter.characterId}”参考过于相似（${Math.round(closestCharacter.similarity * 100)}%），疑似把人物画进了空场景`,
       relatedCandidateId: closestCharacter.candidateId || "",
       relatedCharacterId: closestCharacter.characterId || ""
@@ -531,12 +535,32 @@ function assessEmptySceneImage(image, skin = null, characterReferences = [], fac
   if (options.fourView && options.fourView.ok !== true) {
     failures.push(...(options.fourView.failures || [{ code: "SCENE_FOUR_VIEW_INVALID", message: "场景资产不是合格的一张2×2四视图" }]));
   }
-  return { ok: failures.length === 0, failures, closestCharacter, matches, skin, faceProbe };
+  return { ok: failures.length === 0, failures, advisories, closestCharacter, matches, skin, faceProbe };
 }
 
 function sceneDescriptionImpliesPeople(text = "", characters = []) {
   const raw = String(text || "");
   if (!raw.trim()) return false;
+  // Only inspect positive authored clauses. Negative contracts such as
+  // "无人空镜/禁止出现人物" must never become evidence that a person exists.
+  // This also prevents compiled prompt boilerplate from creating false blocks.
+  const positiveClauses = raw
+    .split(/[。；;\n]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+    .filter(item => !/(?:无人|空镜|无人物|无人体|不含人物|不出现人物|不得出现人物|不能出现人物|禁止出现人物|严禁出现人物|删除所有人物|no\s+(?:people|person|human)|without\s+(?:people|person|human))/i.test(item));
+  const positiveText = positiveClauses.join("；");
+  if (!positiveText) return false;
+  for (const character of characters || []) {
+    const name = String(character?.name || "").trim();
+    if (!name) continue;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`${escaped}(?!家)[^\n，。；]{0,12}(?:坐|站|躺|跪|蹲|靠|拿|握|抱|走|跑|说|看|哭|笑|推|拉)`).test(positiveText)) return true;
+    if (new RegExp(`(?:坐|站|躺|跪|蹲|靠)[^\n，。；]{0,8}${escaped}`).test(positiveText)) return true;
+  }
+  if (/(?:男人|女人|老人|孩子|角色|人物|顾客|店员|医生|护士|家人|有人|一人|两人)[^，。；\n]{0,12}(?:坐|站|躺|跪|蹲|靠|拿|握|抱|走|跑|说|看|哭|笑|推|拉)|(?:坐|站|躺|跪|蹲|靠)[^，。；\n]{0,8}(?:男人|女人|老人|孩子|角色|人物|顾客|店员|医生|护士)/.test(positiveText)) return true;
+  return false;
+  /* istanbul ignore next -- retained legacy parser below for old snapshots */
   // Strip hard-negative clauses that mention 人物 only as forbidden.
   const withoutNegatives = raw
     .replace(/禁止[^。；\n]{0,80}/g, " ")

@@ -6,11 +6,19 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
-const { generateImage, generateText, generateVideo, parseStructuredJson } = require("./ai-provider");
+const { compactProviderVideoPrompt, generateImage, generateText, generateVideo, parseStructuredJson } = require("./ai-provider");
 const { resolvePureamMediaUploadConfig, resolveReferenceUrl } = require("./puream-video-adapters");
 const { processFaceGrid } = require("./face-grid-processor");
 const { stageSubmissionMedia } = require("./media-staging");
-const { parseCompiledDialogueSegments, parseSourceDialogueLedger } = require("./dialogue-parser");
+const { detectUploadedScriptFormat, parseCompiledDialogueSegments, parseSourceDialogueLedger } = require("./dialogue-parser");
+const {
+  assertSourceSceneParity,
+  bindDialogueLedgerToScenes,
+  buildSourceSceneLedger,
+  enforceSourceSceneLedger,
+  sceneContextForRange,
+  sourceScenePromptBlock
+} = require("./script-scene-ledger");
 const { allocateH3ShotSpeakers, h3AllowedSpeakersByShot } = require("./h3-speaker-allocation");
 const {
   assertDirectFastSegment,
@@ -25,6 +33,7 @@ const {
   materializeDirectFastScript
 } = require("./direct-fast-script");
 const { makeId, defaultAssetLibraries } = require("./workbench-store");
+const { AdaptiveProductionAgent, commercePlanDirective, normalizeCommerceShotCount, resolveCommercePlan } = require("./adaptive-production-agent");
 const { promptIntakeText } = require("./prompt-intake");
 const { normalizeCloudVideoResolution, normalizeHailuoApiMode, providerEngine } = require("./video-provider-policy");
 const {
@@ -78,10 +87,15 @@ const {
   matrixGlobalPrompt,
   matrixRuntimeVideoPromptForProject
 } = require("./production-mode-matrix");
+const { assetPromptPolicy } = require("./foundry/asset-passport");
+const { compileProductionContract, contractPromptBlock } = require("./foundry/production-contract");
+const { buildNovelTopicBatch, priorTopicTitles, rememberTopicBatch } = require("./foundry/topic-diversity");
 const {
   buildFullReferencePrompt,
+  compactFullReferencePrompt,
   compilerMessages,
   containsCjkOutsideDialogue,
+  assertHailuoFinalPromptIntegrity,
   expandShotCharacterCast,
   visibleShotCharacterCast,
   normalizePromptSpec,
@@ -143,6 +157,7 @@ const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = 60_000;
 const SCRIPT_WRITING_SLA_MS = 9 * 60_000;
 const IMAGE_BATCH_MAX_CONCURRENCY = 6;
 const VIDEO_BATCH_MAX_CONCURRENCY = 4;
+const AUTHORITY_BATCH_MAX_CONCURRENCY = 64;
 
 function fillTemplate(template, values) {
   return String(template || "").replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, key) => values[key] ?? "");
@@ -307,7 +322,7 @@ function normalizeTopicOptions(data, { expectedCount = 10, idOffset = 0 } = {}) 
   return topics;
 }
 
-function buildLocalTopicOptions(project = {}) {
+function buildLocalTopicOptions(project = {}, generationIndex = 1) {
   const productName = String(project?.product?.name || "").trim();
   const productHint = productName ? `反转完成后，${productName}只在真实生活任务中自然出现` : "反转完成后再按用户商品事实安排自然生活动作";
   const seeds = [
@@ -320,9 +335,21 @@ function buildLocalTopicOptions(project = {}) {
     ["继母锁住的抽屉", "继母继女", "evidence_reversal", "继女砸开继母抽屉，指控她吞掉母亲遗物", "遗嘱复印件、保管清单与律师到场形成互证", "继女收回指控，真正挪用者失去继承份额", "铜锁抽屉"],
     ["姑嫂争的那床旧被", "姑嫂", "kindness_misjudged", "嫂子把小姑的旧被扔进雨里，逼她搬出娘家", "旧被夹层的维修票据证明小姑一直替父母修房", "嫂子让丈夫归还份额并重新划清边界", "蓝花旧棉被"],
     ["奶奶藏起来的录取信", "祖孙", "sacrifice_repaid", "孙女抢走奶奶的铁盒，指责她毁掉自己的前程", "奶奶卖首饰补学费，退信记录证明通知被别人截走", "孙女追回机会并带奶奶离开伤害环境", "生锈铁盒"],
-    ["老同事留下的钥匙", "老同事", "rescue_repaid", "退休工人被赶出旧厂房，钥匙串摔在警戒线外", "他当年冒险救下的学徒带着事故记录回来作证", "学徒保住其合法补偿并公开恢复名誉", "缺齿钥匙串"]
+    ["老同事留下的钥匙", "老同事", "rescue_repaid", "退休工人被赶出旧厂房，钥匙串摔在警戒线外", "他当年冒险救下的学徒带着事故记录回来作证", "学徒保住其合法补偿并公开恢复名誉", "缺齿钥匙串"],
+    ["母亲藏了十年的药费单", "母子", "evidence_reversal", "儿子在社区门口指责母亲拿走赔偿款", "母亲替他垫付康复费，收费单与银行流水互证", "儿子追回被亲戚挪走的钱并承担照护", "褪色药费单"],
+    ["门卫室里的半张合影", "师生", "rescue_repaid", "退休老师被学生家长赶出校庆会场", "门卫保存的合影与旧处分记录证明老师曾替学生担责", "学生公开澄清并恢复老师名誉", "撕裂合影"],
+    ["被换掉的房本封皮", "妯娌", "evidence_reversal", "大嫂在家庭会上把弟媳赶出老宅", "房本封皮编号、缴费票与公证录像揭开调包", "侵占者交还份额并搬离", "磨损房本封皮"],
+    ["雨棚下没送出的伞", "母女", "kindness_misjudged", "女儿把母亲送来的旧伞扔进雨水里", "伞柄里的维修票证明母亲一直替她守住小店", "女儿赔偿损失并请母亲共同经营", "旧格子伞"],
+    ["父亲退回的工钱袋", "父女", "sacrifice_repaid", "女儿当众质问父亲为何拒收她的赡养费", "工钱袋与借款凭证证明父亲暗中替她还清创业债", "女儿停止误解并接父亲回家", "牛皮纸钱袋"],
+    ["邻居替她按下的电梯", "邻里", "rescue_repaid", "独居老人被业委会堵在电梯口要求搬走", "监控记录与急救回执证明她曾救下邻家孩子", "邻居联合撤回驱赶并修复无障碍设施", "磨亮的电梯键"],
+    ["哥哥没有寄出的汇款单", "兄弟", "sacrifice_repaid", "弟弟在父亲灵前撕毁哥哥的汇款单", "邮局底单与工友证词证明哥哥多年替家里还债", "弟弟归还占用款并共同赡养老人", "泛黄汇款单"],
+    ["保姆柜里的儿童画", "雇佣关系", "kindness_misjudged", "雇主当众搜查保姆衣柜指控她偷钱", "儿童画背面的时间线与门禁记录锁定真正拿钱者", "雇主道歉赔偿并解除错误指控", "蜡笔儿童画"],
+    ["老裁缝压箱底的尺子", "师徒", "rescue_repaid", "徒弟直播时否认师父并扔掉旧尺子", "订单底稿与顾客证言证明师父曾替他承担赔款", "徒弟撤下虚假宣传并返还署名收益", "木制裁衣尺"],
+    ["姐姐没拆封的录音笔", "姐妹", "evidence_reversal", "妹妹在调解室指控姐姐逼母亲改遗嘱", "未拆封录音笔、护理签到与医生记录形成完整证据", "造谣者撤诉并承担护理费用", "银色录音笔"]
   ];
-  return normalizeTopicOptions({ topics: seeds.map(([title, relationship, storyMechanism, hook, logline, reversal, themeObject], index) => ({
+  const offset = ((Math.max(1, Math.floor(Number(generationIndex) || 1)) - 1) * 10) % seeds.length;
+  const selectedSeeds = Array.from({ length: 10 }, (_, index) => seeds[(offset + index) % seeds.length]);
+  return normalizeTopicOptions({ topics: selectedSeeds.map(([title, relationship, storyMechanism, hook, logline, reversal, themeObject], index) => ({
     title,
     genre: "现实家庭伦理",
     relationship,
@@ -663,7 +690,7 @@ function validateStoryBible(data, options = {}) {
     : ["audienceBelieves", "antagonistMisdirection", "evidence1", "reinterpretation", "costAfterReversal"];
   if (reversalKeys.some(key => Array.isArray(reversalMatrix[key]) ? !reversalMatrix[key].length : !String(reversalMatrix[key] || "").trim())) failures.push(`${storyMechanism}所需的清算证明字段未写完整`);
   const activeFailures = activeBlueprintFailures(failures, options);
-  if (activeFailures.length && !options.skipQualityGates) throw Object.assign(new Error(`故事圣经未达标：${activeFailures.join("；")}`), { code: "SCRIPT_STORY_BIBLE_INVALID", failures: activeFailures });
+  if (activeFailures.length && !options.skipQualityGates && !options.advisoryOnly) throw Object.assign(new Error(`故事圣经未达标：${activeFailures.join("；")}`), { code: "SCRIPT_STORY_BIBLE_INVALID", failures: activeFailures });
   return { ...source, storyCore, reversalMatrix, characters, scenes, actPlan: acts };
 }
 
@@ -881,7 +908,7 @@ function validateShotPlanBatch(data, startNumber, expectedCount = SCRIPT_PLAN_BA
       : "none";
     return plan;
   });
-  assertKnownCharacterReferences(normalized, characters, "SCRIPT_PLAN_CHARACTER_REFERENCE_INVALID");
+  normalized = reconcileOrphanCharacterReferences({ characters, shots: normalized }, { allowCharacterCreation: false }).project.shots;
   normalized = normalizeRedundantMainReversalLabels(normalized, priorPlan);
   const stages = normalized.map(item => String(item.mainlineStage || "").trim());
   const reversalCount = stages.filter(stage => stage === "main_reversal").length;
@@ -964,14 +991,14 @@ function validateShotPlanBatch(data, startNumber, expectedCount = SCRIPT_PLAN_BA
     contractFailures.push(...openingHookContractFailures(normalized, { requireDialogue: false }).map(item => item.message));
   }
   const activeContractFailures = activeBlueprintFailures(contractFailures, options);
-  if (activeContractFailures.length && !options.bypassProductionContracts) {
+  if (activeContractFailures.length && !options.bypassProductionContracts && !options.advisoryOnly) {
     throw Object.assign(new Error(`分段单元计划违反生产硬合同：${activeContractFailures.join("；")}`), {
       code: "SCRIPT_PLAN_BATCH_CONTRACT_FAILED",
       failures: activeContractFailures
     });
   }
   const activeFailures = activeBlueprintFailures(failures, options);
-  if (activeFailures.length && !options.skipQualityGates) throw Object.assign(new Error(`分段单元计划未达标：${activeFailures.join("；")}`), { code: "SCRIPT_PLAN_BATCH_QUALITY_FAILED", failures: activeFailures });
+  if (activeFailures.length && !options.skipQualityGates && !options.advisoryOnly) throw Object.assign(new Error(`分段单元计划未达标：${activeFailures.join("；")}`), { code: "SCRIPT_PLAN_BATCH_QUALITY_FAILED", failures: activeFailures });
   return normalized;
 }
 
@@ -1061,17 +1088,18 @@ function planBatchActResponsibilities(storyBible = {}, batchStartSeconds = 0, ba
   });
 }
 
-function productTailUnitCount(unitCount = 30, totalSeconds = 300) {
+function productTailUnitCount(unitCount = 30, totalSeconds = 300, requestedCount = 0) {
   const count = Math.max(1, Math.round(Number(unitCount) || 30));
+  if (Number(requestedCount) > 0) return resolveCommercePlan(count, requestedCount, true).count;
   const seconds = Math.max(1, Math.round(Number(totalSeconds) || count * 10));
   if (count <= 12 || seconds <= 120) return Math.min(2, count);
   return Math.min(8, Math.max(3, Math.round(count * 0.13)));
 }
 
-function productTailRange(unitCount = 30, productEntryIndex = 0, totalSeconds = 300) {
+function productTailRange(unitCount = 30, productEntryIndex = 0, totalSeconds = 300, requestedCount = 0) {
   const count = Math.max(1, Math.round(Number(unitCount) || 30));
   const entryIndex = Math.max(0, Math.min(count - 1, Math.round(Number(productEntryIndex) || Math.floor(count * 0.65))));
-  const tailCount = productTailUnitCount(count, totalSeconds);
+  const tailCount = productTailUnitCount(count, totalSeconds, requestedCount);
   const startNumber = Math.max(entryIndex + 1, count - tailCount + 1);
   return { startNumber, endNumber: count, count: Math.max(1, count - startNumber + 1) };
 }
@@ -1095,7 +1123,7 @@ function planBatchContractHints(startNumber, endNumber, filmSchedule = {}, prior
   const productEntry = Number(filmSchedule.productEntryIndex) || Math.floor(unitCount * 0.65);
   const productShot = `S${String(productEntry + 1).padStart(2, "0")}`;
   const productThresholdSeconds = Math.ceil((Number(filmSchedule.totalSeconds) || 300) * 0.65);
-  const productTail = productTailRange(unitCount, productEntry, Number(filmSchedule.totalSeconds) || 300);
+  const productTail = productTailRange(unitCount, productEntry, Number(filmSchedule.totalSeconds) || 300, filmSchedule.commerceShotCount);
   const productTailStart = productTail.startNumber;
   const productTailAssignments = Array.from({ length: Math.max(0, unitCount - productTailStart + 1) }, (_item, index) => {
     const number = productTailStart + index;
@@ -1162,7 +1190,8 @@ const CHARACTER_REFERENCE_ARRAY_KEYS = new Set([
   "videoReferenceCharacterIds",
   "offscreenSpeakerIds",
   "speakerIds",
-  "listenerIds"
+  "listenerIds",
+  "audios"
 ]);
 
 const CHARACTER_REFERENCE_SCALAR_KEYS = new Set([
@@ -1364,7 +1393,25 @@ function bindSourceDialogueLedgerToAnalysis(data, ledger = []) {
   const characterByName = new Map(characters.map(item => [String(item?.name || "").trim(), item]).filter(([name]) => name));
   const characterById = new Map(characters.map(item => [String(item?.id || "").trim(), item]).filter(([id]) => id));
   const ledgerById = new Map(sourceLedger.map(item => [String(item.id || "").trim(), item]));
-  const shots = (Array.isArray(source.shots) ? source.shots : []).map((shot, shotIndex) => {
+  const rawShots = (Array.isArray(source.shots) ? source.shots : []).map(item => ({ ...item }));
+  const referencedIds = new Set(rawShots.flatMap(shot => [
+    ...(Array.isArray(shot?.sourceDialogueBindings) ? shot.sourceDialogueBindings.map(item => String(item?.sourceDialogueId || item?.sourceId || item?.id || "").trim()) : []),
+    ...normalizeStringArray(shot?.sourceDialogueIds),
+    ...(Array.isArray(shot?.subshots) ? shot.subshots.flatMap(subshot => normalizeStringArray(subshot?.sourceDialogueIds)) : [])
+  ]).filter(id => ledgerById.has(id)));
+  // Repair model omissions locally before compiling. Every uploaded line gets
+  // one deterministic home; this never makes another paid request.
+  sourceLedger.forEach((item, index) => {
+    const id = String(item?.id || "").trim();
+    if (!id || referencedIds.has(id) || !rawShots.length) return;
+    const targetIndex = Math.min(rawShots.length - 1, Math.floor(index * rawShots.length / Math.max(1, sourceLedger.length)));
+    const target = rawShots[targetIndex];
+    target.sourceDialogueBindings = Array.isArray(target.sourceDialogueBindings) ? target.sourceDialogueBindings : [];
+    target.sourceDialogueBindings.push({ sourceDialogueId: id, subshotNumber: 1, onScreen: true });
+    referencedIds.add(id);
+  });
+  const claimedDialogueIds = new Set();
+  const shots = rawShots.map((shot, shotIndex) => {
     const subshots = (Array.isArray(shot?.subshots) ? shot.subshots : []).map(item => ({ ...item }));
     let bindings = (Array.isArray(shot?.sourceDialogueBindings) ? shot.sourceDialogueBindings : [])
       .map(item => normalizeSourceDialogueBinding(item, 1));
@@ -1383,6 +1430,17 @@ function bindSourceDialogueLedgerToAnalysis(data, ledger = []) {
       bindings = sourceLedger.filter(item => authored.includes(String(item.text || "")))
         .map(item => normalizeSourceDialogueBinding({ sourceDialogueId: item.id }, 1));
     }
+    // The model often repeats the same source ID in shot-level bindings and a
+    // subshot copy, or across two adjacent shots. They are alternate structural
+    // views of one utterance, not two spoken lines. Keep the first real location.
+    const localDialogueIds = new Set();
+    bindings = bindings.filter(binding => {
+      const id = String(binding?.sourceDialogueId || "").trim();
+      if (!ledgerById.has(id) || localDialogueIds.has(id) || claimedDialogueIds.has(id)) return false;
+      localDialogueIds.add(id);
+      claimedDialogueIds.add(id);
+      return true;
+    });
     const turns = bindings.map(binding => {
       const item = ledgerById.get(binding.sourceDialogueId);
       if (!item) return { binding, error: `未知台词ID ${binding.sourceDialogueId || "(空)"}` };
@@ -1671,7 +1729,7 @@ function productionShotSchema(mode = "continuation", options = {}) {
       summaryEn: "English summary of the visible action and intended result",
       subshots: [{ number: 1, visualEn: "English visual, performance and camera description only", soundEn: "English diegetic ambience and physical sounds only", visibleCharacterIds: ["C01"], offscreenSpeakerIds: ["C02"] }],
       overallSoundscapeEn: "English diegetic soundscape covering the full unit",
-      nonDiegeticMusicEn: "tense muted strings"
+      nonDiegeticMusicEn: "N/A"
     };
   }
   return { shots: [shot] };
@@ -1679,7 +1737,7 @@ function productionShotSchema(mode = "continuation", options = {}) {
 
 function validateBlueprint(data, productName = "", options = {}) {
   const source = data && typeof data === "object" ? data : {};
-  const characters = Array.isArray(source.characters) ? source.characters : [];
+  let characters = Array.isArray(source.characters) ? source.characters : [];
   const scenes = Array.isArray(source.scenes) ? source.scenes : [];
   const plans = Array.isArray(source.shotPlan) ? source.shotPlan : [];
   const expectedCount = Math.max(6, Math.round(Number(options.expectedUnitCount) || plans.length || 30));
@@ -1690,7 +1748,7 @@ function validateBlueprint(data, productName = "", options = {}) {
   const density = storyDensityTargets(targetSeconds, expectedCount);
   if (scenes.length < density.sceneMin || scenes.length > density.sceneMax) failures.push(`主要场景必须为${density.sceneMin}-${density.sceneMax}个，当前${scenes.length}个；每个场景都要承担新任务，不得只换背景`);
   if (plans.length !== expectedCount) failures.push(`生成单元计划必须恰好${expectedCount}个，当前${plans.length}个`);
-  const normalizedPlans = plans.slice(0, expectedCount).map((item, index) => ({
+  let normalizedPlans = plans.slice(0, expectedCount).map((item, index) => ({
     ...item,
     ...normalizePlanProductionFields(item, Number(item?.duration) || 10),
     id: `S${String(index + 1).padStart(2, "0")}`,
@@ -1729,7 +1787,14 @@ function validateBlueprint(data, productName = "", options = {}) {
     plan.transitionReason = plan.transitionReason || "由上一镜动作、视线或声音承接";
     plan.productShotType = plan.productMention ? (plan.productShotType === "none" ? "product_use" : plan.productShotType) : "none";
   }
-  assertKnownCharacterReferences(normalizedPlans, characters, "SCRIPT_BLUEPRINT_CHARACTER_REFERENCE_INVALID");
+  const referenceRepair = reconcileOrphanCharacterReferences({
+    ...source,
+    characters,
+    shots: normalizedPlans,
+    sourceDialogueLedger: source.sourceDialogueLedger
+  });
+  characters = referenceRepair.project.characters;
+  normalizedPlans = referenceRepair.project.shots;
   const durationSum = normalizedPlans.reduce((sum, item) => sum + (Number(item.duration) || 0), 0);
   if (durationSum !== targetSeconds) failures.push(`单元时长合计 ${durationSum} 秒，必须精确等于剧总时长 ${targetSeconds} 秒`);
   const stages = normalizedPlans.map(item => `${item.mainlineStage} ${item.mainlineBeat}`);
@@ -1761,21 +1826,22 @@ function validateBlueprint(data, productName = "", options = {}) {
   if (dominantSceneCount > Math.ceil(expectedCount * 0.5)) failures.push(`单一场景最多承载全片50%生成单元，当前最多${dominantSceneCount}/${expectedCount}；必须用有任务的救援/送医/上门/公开清算/结果场景推进`);
   const contractFailures = productionHardContractFailures({ shots: normalizedPlans }, {
     productName,
+    commerceShotCount: options.commerceShotCount,
     requireHook: true,
     requireHookDialogue: false,
     requireProduct: Boolean(productName)
   });
-  if (contractFailures.length && !options.bypassProductionContracts) {
+  if (contractFailures.length && !options.bypassProductionContracts && !options.advisoryOnly) {
     throw Object.assign(new Error(`剧本蓝图违反生产硬合同：${contractFailures.map(item => item.message).join("；")}`), {
       code: "SCRIPT_BLUEPRINT_CONTRACT_FAILED",
       failures: contractFailures
     });
   }
   const activeFailures = activeBlueprintFailures(failures, options);
-  if (activeFailures.length && !options.skipQualityGates) throw Object.assign(new Error(`剧本蓝图未达标：${activeFailures.join("；")}`), { code: "SCRIPT_BLUEPRINT_INVALID", failures: activeFailures });
+  if (activeFailures.length && !options.skipQualityGates && !options.advisoryOnly) throw Object.assign(new Error(`剧本蓝图未达标：${activeFailures.join("；")}`), { code: "SCRIPT_BLUEPRINT_INVALID", failures: activeFailures });
   return {
     ...source,
-    characters: characters.map((item, index) => ({ ...item, id: `C${String(index + 1).padStart(2, "0")}` })),
+    characters: characters.map((item, index) => ({ ...item, id: item.id || `C${String(index + 1).padStart(2, "0")}` })),
     scenes: scenes.map((item, index) => ({ ...item, id: `SC${String(index + 1).padStart(2, "0")}` })),
     props: Array.isArray(source.props) ? source.props : [],
     shotPlan: normalizedPlans,
@@ -1785,7 +1851,7 @@ function validateBlueprint(data, productName = "", options = {}) {
 
 function validateShotBatch(data, plannedShots, productName = "", videoEngine = "seedance", options = {}) {
   const generationMode = normalizeProjectMode(options.generationMode || "continuation");
-  const raw = Array.isArray(data?.shots) ? data.shots : [];
+  let raw = Array.isArray(data?.shots) ? data.shots : [];
   const failures = [];
   const contractFailures = [];
   if (raw.length !== plannedShots.length) {
@@ -1800,8 +1866,12 @@ function validateShotBatch(data, plannedShots, productName = "", videoEngine = "
       actualIds: raw.map(item => String(item?.id || "").trim())
     });
   }
-  assertKnownCharacterReferences(plannedShots, options.characters, "SCRIPT_PLAN_CHARACTER_REFERENCE_INVALID");
-  assertKnownCharacterReferences(raw, options.characters, "SCRIPT_UNIT_CHARACTER_REFERENCE_INVALID");
+  const repairedReferences = reconcileOrphanCharacterReferences({
+    characters: options.characters,
+    shots: [...plannedShots, ...raw]
+  }, { allowCharacterCreation: false });
+  plannedShots = repairedReferences.project.shots.slice(0, plannedShots.length);
+  raw = repairedReferences.project.shots.slice(plannedShots.length);
   assertUnitCharacterReferencesPlanned(raw, plannedShots);
   const shots = plannedShots.map((plan, index) => {
     const item = rawById.get(String(plan.id || "").toUpperCase());
@@ -2099,14 +2169,14 @@ function validateShotBatch(data, plannedShots, productName = "", videoEngine = "
     contractFailures.push(...openingHookContractFailures(shots, { requireDialogue: true }));
   }
   const activeContractFailures = activeBlueprintFailures(contractFailures, options);
-  if (activeContractFailures.length && !options.bypassProductionContracts) {
+  if (activeContractFailures.length && !options.bypassProductionContracts && !options.advisoryOnly) {
     throw Object.assign(new Error(`生成单元违反生产硬合同：${activeContractFailures.map(item => item.message).join("；")}`), {
       code: "SCRIPT_UNIT_CONTRACT_FAILED",
       failures: activeContractFailures
     });
   }
   const activeFailures = activeBlueprintFailures(failures, options);
-  if (activeFailures.length && !options.skipQualityGates) throw Object.assign(new Error(`生成单元批次未达标：${activeFailures.join("；")}`), { code: "SCRIPT_UNIT_BATCH_INVALID", failures: activeFailures });
+  if (activeFailures.length && !options.skipQualityGates && !options.advisoryOnly) throw Object.assign(new Error(`生成单元批次未达标：${activeFailures.join("；")}`), { code: "SCRIPT_UNIT_BATCH_INVALID", failures: activeFailures });
   return shots;
 }
 
@@ -2417,11 +2487,13 @@ function renderScriptForProject(blueprint, normalized, project, topic, options =
 
 function selectedOrLatest(project, entityType, entityId, stage) {
   const activeRevision = project.productionRevision || "";
-  const matches = project.candidates
+  const revisionMatches = project.candidates
     .filter(item => item.entityType === entityType && item.entityId === entityId && item.stage === stage)
     .filter(item => (item.productionRevision || "") === activeRevision)
-    .filter(item => item.stale !== true)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  const manualSelection = revisionMatches.find(item => item.selected === true && item.manualSelectionOverride === true && item.filePath);
+  if (manualSelection) return manualSelection;
+  const matches = revisionMatches.filter(item => item.stale !== true);
   // Explicit user confirmation always wins — otherwise video can bind a newer auto-passed
   // frame while the storyboard UI still shows the card the user thinks is active.
   const selected = matches.find(item => item.selected);
@@ -2434,14 +2506,29 @@ function selectedOrLatest(project, entityType, entityId, stage) {
 function candidateReady(project, entityType, entityId, stage, settings = null) {
   const candidate = selectedOrLatest(project, entityType, entityId, stage);
   if (!candidate?.filePath) return null;
-  if (candidate.qualityAudit?.ok === false && isQualityGatesEnabled(settings, qualityModuleForStage(stage))) return null;
+  if (!qualityAccepted(candidate, settings)) return null;
   if (isQualityGatesEnabled(settings, "assets") && projectRequiresFaceMesh(project, settings) && entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(stage) && candidate.faceMesh?.applied !== true) return null;
   return !path.isAbsolute(candidate.filePath) || fs.existsSync(candidate.filePath) ? candidate : null;
 }
 
-/** Prefer an independent portrait for all downstream identity work; sheets are authoring-only fallbacks. */
+/** Use the identity explicitly selected for the character, regardless of which identity-card stage produced it. */
 function characterIdentityCandidate(project, characterId, settings = null) {
-  return candidateReady(project, "character", characterId, "character_intro", settings)
+  const stages = new Set(["character_sheet", "character_three_view", "character_intro"]);
+  const activeRevision = project.productionRevision || "";
+  const character = (project.characters || []).find(item => item.id === characterId);
+  const available = (project.candidates || [])
+    .filter(item => item.entityType === "character" && item.entityId === characterId && stages.has(item.stage))
+    .filter(item => (item.productionRevision || "") === activeRevision && item.stale !== true && item.filePath)
+    .filter(item => qualityAccepted(item, settings))
+    .filter(item => !(isQualityGatesEnabled(settings, "assets") && projectRequiresFaceMesh(project, settings) && item.faceMesh?.applied !== true))
+    .filter(item => !path.isAbsolute(item.filePath) || fs.existsSync(item.filePath));
+  const active = available.find(item => item.id === character?.activeIdentityCandidateId);
+  if (active) return active;
+  const byRecency = (left, right) => String(right.manualSelectedAt || right.updatedAt || right.createdAt || "")
+    .localeCompare(String(left.manualSelectedAt || left.updatedAt || left.createdAt || ""));
+  return available.filter(item => item.selected === true && item.manualSelectionOverride === true).sort(byRecency)[0]
+    || available.filter(item => item.selected === true).sort(byRecency)[0]
+    || candidateReady(project, "character", characterId, "character_intro", settings)
     || candidateReady(project, "character", characterId, "character_sheet", settings)
     || candidateReady(project, "character", characterId, "character_three_view", settings);
 }
@@ -2514,6 +2601,33 @@ function projectVideoEngine(project) {
 
 function shotUsesManualVideoPrompt(shot = {}) {
   return shot?.promptMode === "manual" && Boolean(String(shot?.manualVideoPrompt || "").trim());
+}
+
+/**
+ * System shot compilers own their complete provider budget. The submit layer is
+ * deliberately validation-only for those prompts so a second generic pass can
+ * never truncate dialogue, voice bindings, or immutable output policy.
+ * Manual and non-shot prompts still use the generic bounded compiler.
+ */
+function finalizeVideoPromptForSubmission(project, entityType, entityId, stage, prompt, expectedEngine = projectVideoEngine(project)) {
+  const source = String(prompt || "").replace(/\r/g, "").trim();
+  if (!source) throw Object.assign(new Error("Video prompt is empty"), { code: "VIDEO_PROMPT_REQUIRED" });
+  const shot = entityType === "shot" && stage === "shot_video"
+    ? (project?.shots || []).find(item => item.id === entityId)
+    : null;
+  const compilerOwned = Boolean(shot && !shotUsesManualVideoPrompt(shot));
+  if (!compilerOwned) return compactProviderVideoPrompt(source);
+  if (source.length > 1900) {
+    throw Object.assign(new Error(`Compiled ${expectedEngine} shot prompt is ${source.length} characters; refusing to truncate an immutable production contract`), {
+      code: "VIDEO_PROMPT_COMPILER_BUDGET_EXCEEDED",
+      shotId: shot.id,
+      promptLength: source.length,
+      limit: 1900
+    });
+  }
+  assertSystemPromptDialogueParity(project, shot, source, expectedEngine);
+  if (expectedEngine === "hailuo-h3") assertHailuoFinalPromptIntegrity(source, 1900);
+  return source;
 }
 
 function assertVideoProviderAligned(project, settings) {
@@ -2627,7 +2741,8 @@ function textStagePromptForProject(project, settings, promptKey, stage) {
   const creatorDirective = creatorPrompt
     ? `\n\n【用户从零批量上传的本阶段创作提示词·最高创作意图】\n${creatorPrompt}\n只要不改变用户原始对白、不交换说话人/听者、不破坏商品真实信息和机器可读输出结构，就按这份用户提示词执行；不得用系统范例覆盖。`
     : "";
-  return `${enginePrompt}\n\n${viewerComprehensionPriorityDirective()}\n\n${scriptFormatDirective(project)}${creatorDirective}`;
+  const productionContract = project?.foundry?.contract || compileProductionContract(project, settings, { source: `text_stage:${stage}` });
+  return `${enginePrompt}\n\n${viewerComprehensionPriorityDirective()}\n\n${scriptFormatDirective(project)}${creatorDirective}\n\n${contractPromptBlock(productionContract)}`;
 }
 
 /** Source-level directive injected into script unit / analysis prompts. The H3 branch deliberately retains the prior contract byte-for-byte. */
@@ -2896,6 +3011,382 @@ function isQualityGatesEnabled(settings, moduleName = "script") {
   return moduleValue === true || moduleValue === 1 || moduleValue === "true" || moduleValue === "1" || moduleValue === "on";
 }
 
+function productionStructureGateEnabled(settings, project = null) {
+  const override = project?.qualityReviewOverrides?.productionStructure;
+  if (override && String(override.productionRevision || "") === String(project?.productionRevision || "")) return false;
+  return isQualityGatesEnabled(settings, "script")
+    && normalizeBlueprintAuditChecks(settings?.generation?.blueprintAuditChecks || {}).productionStructure === true;
+}
+
+function dialogueRewriteCharacterSet(value) {
+  return new Set(String(value || "")
+    .toLowerCase()
+    .replace(/[\s，。！？、；：,.!?;:'"“”‘’（）()\[\]【】《》<>—…·-]/g, "")
+    .split("")
+    .filter(Boolean));
+}
+
+function dialogueRewriteSimilarity(source, rewritten) {
+  const left = dialogueRewriteCharacterSet(source);
+  const right = dialogueRewriteCharacterSet(rewritten);
+  if (!left.size || !right.size) return 0;
+  let shared = 0;
+  for (const character of left) if (right.has(character)) shared += 1;
+  return (2 * shared) / (left.size + right.size);
+}
+
+function dialogueRewriteNumericTokens(value) {
+  return String(value || "").match(/\d+(?:\.\d+)?(?:[%％元万千百十年月日号岁秒分钟天])?/g) || [];
+}
+
+function dialogueRewriteNameMap(ledger = []) {
+  const genericPattern = /^(?:[A-ZＡ-Ｚ]|[a-zａ-ｚ]|甲|乙|丙|丁|角色\s*\d+|人物\s*\d+)$/i;
+  const candidates = ["林岚", "周诚", "秦若", "陈川", "苏晴", "顾言", "许宁", "沈禾", "方予", "程安", "陆遥", "唐悦"];
+  const sourceNames = [...new Set(ledger.map(item => String(item?.speaker || item?.speakerRaw || "").trim()).filter(Boolean))];
+  const reserved = new Set(sourceNames.filter(name => !genericPattern.test(name)));
+  let candidateIndex = 0;
+  return sourceNames.map(sourceName => {
+    if (!genericPattern.test(sourceName)) return { sourceName, newName: sourceName, renamed: false };
+    while (candidateIndex < candidates.length && reserved.has(candidates[candidateIndex])) candidateIndex += 1;
+    const newName = candidates[candidateIndex] || `人物${candidateIndex + 1}`;
+    candidateIndex += 1;
+    reserved.add(newName);
+    return { sourceName, newName, renamed: newName !== sourceName };
+  });
+}
+
+function normalizedCharacterName(value = "") {
+  return String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+}
+
+function usableCharacterName(value = "") {
+  const name = String(value || "").trim();
+  if (!name || /^C\d+$/i.test(name)) return "";
+  if (/^(?:未知|未命名|待定|角色|人物|剧情人物)(?:\d+|C\d+)?$/i.test(name.replace(/\s+/g, ""))) return "";
+  return name;
+}
+
+function cloneReferenceTree(value) {
+  if (Array.isArray(value)) return value.map(cloneReferenceTree);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneReferenceTree(child)]));
+  }
+  return value;
+}
+
+function replaceCharacterIdToken(value, sourceId, targetId) {
+  if (typeof value !== "string" || !sourceId || !targetId || sourceId === targetId) return value;
+  return value.replace(new RegExp(`\\b${sourceId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi"), targetId);
+}
+
+/**
+ * Repairs legacy/model character-reference drift without rewriting dialogue.
+ * Evidence order: source dialogue ledger -> explicit speaker/name -> aligned
+ * characterIds/characterNames. Unknown metadata-only IDs are removed. An ID
+ * that owns real dialogue is preserved by creating a minimal character asset.
+ */
+function reconcileOrphanCharacterReferences(project = {}, options = {}) {
+  const source = project && typeof project === "object" ? project : {};
+  const characters = (Array.isArray(source.characters) ? source.characters : []).map((character, index) => ({
+    ...cloneReferenceTree(character),
+    id: String(character?.id || `C${String(index + 1).padStart(2, "0")}`).trim()
+  }));
+  const shots = (Array.isArray(source.shots) ? source.shots : []).map(cloneReferenceTree);
+  const failuresBefore = characterReferenceFailures(shots, characters);
+  if (!failuresBefore.length) {
+    return {
+      project: { ...source, characters, shots },
+      changed: false,
+      addedCharacters: [],
+      remappedReferences: {},
+      removedReferences: [],
+      failuresBefore: [],
+      failuresAfter: []
+    };
+  }
+
+  const unknownIds = [...new Set(failuresBefore.flatMap(item => item.unknownIds || []))].map(id => String(id).toUpperCase());
+  const unknownSet = new Set(unknownIds);
+  const knownById = new Map(characters.map(character => [String(character.id || "").toUpperCase(), character]).filter(([id]) => id));
+  const knownIdByName = new Map(characters.map(character => [normalizedCharacterName(character.name), String(character.id || "")]).filter(([name, id]) => name && id));
+  const nameEvidence = new Map(unknownIds.map(id => [id, []]));
+  const spokenEvidence = new Map(unknownIds.map(id => [id, []]));
+  const ledgerById = new Map((Array.isArray(source.sourceDialogueLedger) ? source.sourceDialogueLedger : [])
+    .map(item => [String(item?.id || "").trim(), item])
+    .filter(([id]) => id));
+
+  const addNameEvidence = (id, name, weight = 1) => {
+    const key = String(id || "").toUpperCase();
+    const cleanName = usableCharacterName(name);
+    if (!unknownSet.has(key) || !cleanName) return;
+    nameEvidence.get(key).push({ name: cleanName, weight });
+  };
+  const addSpokenEvidence = (id, text = "", name = "") => {
+    const key = String(id || "").toUpperCase();
+    if (!unknownSet.has(key)) return;
+    const line = String(text || "").trim();
+    if (line) spokenEvidence.get(key).push(line);
+    addNameEvidence(key, name, 5);
+  };
+  const scanObject = value => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(scanObject);
+      return;
+    }
+    const speakerId = String(value.speakerId || value.characterId || "").trim().toUpperCase();
+    if (unknownSet.has(speakerId) && String(value.text || value.spokenText || "").trim()) {
+      const ledgerSpeaker = ledgerById.get(String(value.sourceDialogueId || value.sourceId || "").trim())?.speaker;
+      addSpokenEvidence(
+        speakerId,
+        value.text || value.spokenText,
+        ledgerSpeaker || value.speakerName || value.characterName || (/^C\d+$/i.test(String(value.speaker || "")) ? "" : value.speaker)
+      );
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (CHARACTER_REFERENCE_ARRAY_KEYS.has(key) && Array.isArray(child)) {
+        child.forEach(id => {
+          const token = String(id || "").trim().toUpperCase();
+          if (unknownSet.has(token) && ["speakerIds", "offscreenSpeakerIds"].includes(key)) {
+            const dialogueText = String(value.dialogue || value.text || value.spokenText || "").trim();
+            if (dialogueText && new RegExp(`(?:^|[；;\\n])\\s*${token}\\s*[：:]`, "i").test(dialogueText)) {
+              addSpokenEvidence(token, dialogueText);
+            }
+          }
+        });
+      }
+      scanObject(child);
+    }
+  };
+
+  for (const shot of shots) {
+    const alignedPairs = [
+      [shot.characterIds, shot.characterNames],
+      [shot.scenePresenceCharacterIds, shot.scenePresenceCharacterNames]
+    ];
+    for (const [ids, names] of alignedPairs) {
+      (Array.isArray(ids) ? ids : []).forEach((id, index) => addNameEvidence(id, Array.isArray(names) ? names[index] : "", 3));
+    }
+    const dialogueSources = [shot.dialogue, shot.videoPromptDialogueOverride, ...(Array.isArray(shot.subshots) ? shot.subshots.map(item => item?.dialogue) : [])];
+    for (const raw of dialogueSources) {
+      for (const turn of parseCompiledDialogueSegments(raw || "", [...knownIdByName.keys(), ...unknownIds])) {
+        const speaker = String(turn?.speaker || turn?.speakerId || "").trim();
+        if (unknownSet.has(speaker.toUpperCase())) addSpokenEvidence(speaker, turn?.spokenText || turn?.text || "");
+      }
+    }
+    scanObject(shot);
+  }
+
+  const remap = new Map();
+  const addedCharacters = [];
+  const removedReferences = [];
+  for (const unknownId of unknownIds) {
+    const ranked = new Map();
+    for (const evidence of nameEvidence.get(unknownId) || []) {
+      const key = normalizedCharacterName(evidence.name);
+      if (!key) continue;
+      const entry = ranked.get(key) || { name: evidence.name, score: 0 };
+      entry.score += Number(evidence.weight) || 1;
+      ranked.set(key, entry);
+    }
+    const best = [...ranked.values()].sort((left, right) => right.score - left.score)[0];
+    const existingId = best ? knownIdByName.get(normalizedCharacterName(best.name)) : "";
+    if (existingId) {
+      remap.set(unknownId, existingId);
+      continue;
+    }
+    const spokenLines = spokenEvidence.get(unknownId) || [];
+    if (spokenLines.length && options.allowCharacterCreation !== false) {
+      const name = best?.name || `剧情人物${unknownId}`;
+      const character = {
+        id: unknownId,
+        name,
+        age: "",
+        role: "剧情人物",
+        description: `${name}是从原剧本对白中自动补齐的出场人物；保持生活化真实外形，并依据剧情上下文统一年龄、发型、体态与服装。`,
+        identitySignature: `${unknownId}独立人物身份；脸型、发型、体态和服装跨镜保持一致`,
+        voiceDescription: "符合人物年龄与剧情身份的自然中文口语；完整保留原对白的语气、停顿、重音和情绪变化。",
+        signatureLine: String(spokenLines[0] || "").slice(0, 80),
+        continuityLocks: ["人物身份跨镜一致", "对白说话人不得替换", "情绪与原剧本语气一致"],
+        importance: "supporting",
+        outfits: []
+      };
+      characters.push(character);
+      addedCharacters.push(character);
+      knownById.set(unknownId, character);
+      knownIdByName.set(normalizedCharacterName(name), unknownId);
+      remap.set(unknownId, unknownId);
+      continue;
+    }
+    removedReferences.push(unknownId);
+  }
+
+  const repairTree = (value, key = "") => {
+    if (CHARACTER_REFERENCE_ARRAY_KEYS.has(key)) {
+      const input = Array.isArray(value) ? value : [];
+      return [...new Set(input.map(item => {
+        const token = String(item || "").trim();
+        if (!/^C\d+$/i.test(token)) return token;
+        const upper = token.toUpperCase();
+        if (!unknownSet.has(upper)) return token;
+        return remap.get(upper) || "";
+      }).filter(Boolean))];
+    }
+    if (CHARACTER_REFERENCE_SCALAR_KEYS.has(key)) {
+      const token = String(value || "").trim();
+      if (!/^C\d+$/i.test(token)) return value;
+      const upper = token.toUpperCase();
+      return unknownSet.has(upper) ? (remap.get(upper) || "") : value;
+    }
+    if (Array.isArray(value)) return value.map(item => repairTree(item, ""));
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [childKey, repairTree(child, childKey)]));
+    }
+    if (typeof value === "string") {
+      let output = value;
+      for (const [sourceId, targetId] of remap.entries()) output = replaceCharacterIdToken(output, sourceId, targetId);
+      return output;
+    }
+    return value;
+  };
+
+  const repairedShots = shots.map(shot => {
+    const repaired = repairTree(shot);
+    const byId = new Map(characters.map(character => [String(character.id || ""), character]));
+    repaired.characterNames = normalizeStringArray(repaired.characterIds).map(id => byId.get(id)?.name || id);
+    repaired.scenePresenceCharacterNames = normalizeStringArray(repaired.scenePresenceCharacterIds).map(id => byId.get(id)?.name || id);
+    repaired.visibleCharacterIds = normalizeStringArray(repaired.visibleCharacterIds).slice(0, 2);
+    repaired.imageReferenceCharacterIds = normalizeStringArray(repaired.imageReferenceCharacterIds).filter(id => repaired.visibleCharacterIds.includes(id));
+    repaired.videoReferenceCharacterIds = normalizeStringArray(repaired.videoReferenceCharacterIds).filter(id => repaired.visibleCharacterIds.includes(id));
+    if (!repaired.visibleCharacterIds.includes(repaired.focusCharacterId)) repaired.focusCharacterId = repaired.visibleCharacterIds[0] || "";
+    if (!repaired.visibleCharacterIds.includes(repaired.counterpartCharacterId) || repaired.counterpartCharacterId === repaired.focusCharacterId) {
+      repaired.counterpartCharacterId = repaired.visibleCharacterIds.find(id => id !== repaired.focusCharacterId) || "";
+    }
+    const beforeIds = collectCharacterReferenceIds(shot).sort().join(",");
+    const afterIds = collectCharacterReferenceIds(repaired).sort().join(",");
+    if (beforeIds !== afterIds) {
+      repaired.hailuoPromptSpec = null;
+      if (!String(repaired.manualImagePrompt || "").trim()) repaired.systemImagePrompt = "";
+      if (!String(repaired.manualVideoPrompt || "").trim()) repaired.systemVideoPrompt = "";
+    }
+    return repaired;
+  });
+  const failuresAfter = characterReferenceFailures(repairedShots, characters);
+  return {
+    project: { ...source, characters, shots: repairedShots },
+    changed: JSON.stringify(shots) !== JSON.stringify(repairedShots) || addedCharacters.length > 0,
+    addedCharacters,
+    remappedReferences: Object.fromEntries([...remap.entries()].filter(([sourceId, targetId]) => sourceId !== targetId)),
+    removedReferences,
+    failuresBefore,
+    failuresAfter
+  };
+}
+
+function validateDialogueRewriteLines(sourceLedger = [], authoredLines = [], nameMap = []) {
+  if (!Array.isArray(authoredLines) || authoredLines.length !== sourceLedger.length) {
+    throw Object.assign(new Error(`对白轻改必须逐句返回：需要 ${sourceLedger.length} 句，实际 ${Array.isArray(authoredLines) ? authoredLines.length : 0} 句`), {
+      code: "DIALOGUE_REWRITE_LINE_COUNT_MISMATCH"
+    });
+  }
+  const mappedNames = new Map(nameMap.map(item => [item.sourceName, item.newName]));
+  const seen = new Set();
+  return sourceLedger.map((source, index) => {
+    const authored = authoredLines[index] || {};
+    const sourceId = String(authored.sourceId || authored.id || "").trim();
+    if (sourceId !== source.id || seen.has(sourceId)) {
+      throw Object.assign(new Error(`对白轻改第 ${index + 1} 句编号或顺序不一致`), { code: "DIALOGUE_REWRITE_ORDER_MISMATCH" });
+    }
+    seen.add(sourceId);
+    const dialogue = String(authored.dialogue || authored.text || authored.spokenText || "").trim();
+    if (!dialogue) throw Object.assign(new Error(`对白轻改第 ${index + 1} 句为空`), { code: "DIALOGUE_REWRITE_EMPTY_LINE" });
+    const original = String(source.text || "").trim();
+    const similarity = dialogueRewriteSimilarity(original, dialogue);
+    const maxLength = Math.max(original.length + 28, Math.ceil(original.length * 1.75));
+    const sourceNumbers = dialogueRewriteNumericTokens(original);
+    const rewrittenNumbers = dialogueRewriteNumericTokens(dialogue);
+    const missingNumber = sourceNumbers.find(token => !rewrittenNumbers.includes(token));
+    const inventedNumber = rewrittenNumbers.find(token => !sourceNumbers.includes(token));
+    if (similarity < 0.42 || dialogue.length > maxLength || missingNumber || inventedNumber) {
+      throw Object.assign(new Error(`对白轻改第 ${index + 1} 句偏离原意，已拒绝该批结果`), {
+        code: "DIALOGUE_REWRITE_SEMANTIC_DRIFT",
+        similarity,
+        sourceId
+      });
+    }
+    return {
+      sourceId: source.id,
+      sourceName: source.speaker,
+      speakerName: mappedNames.get(source.speaker) || source.speaker,
+      tone: String(authored.tone || source.tone || "自然口语").trim(),
+      scene: String(authored.scene || "").trim(),
+      action: String(authored.action || "").trim(),
+      originalText: original,
+      rewrittenText: dialogue,
+      similarity
+    };
+  });
+}
+
+function localDialogueRewriteLines(sourceLedger = [], nameMap = []) {
+  const mappedNames = new Map(nameMap.map(item => [item.sourceName, item.newName]));
+  return sourceLedger.map(item => ({
+    sourceId: item.id,
+    sourceName: item.speaker,
+    speakerName: mappedNames.get(item.speaker) || item.speaker,
+    tone: String(item.tone || "自然口语").trim(),
+    scene: "",
+    action: "按原稿事件顺序和人物关系自然表演",
+    originalText: String(item.text || "").trim(),
+    rewrittenText: String(item.text || "").trim(),
+    similarity: 1
+  }));
+}
+
+function dialogueRewriteBackgroundAnchors(sourceText, ledger = []) {
+  const source = String(sourceText || "").replace(/\r/g, "");
+  let offset = 0;
+  return source
+    .split("\n")
+    .map((line, index) => {
+      const start = offset;
+      const end = start + line.length;
+      offset = end + 1;
+      return { line: line.trim(), index, start, end };
+    })
+    .filter(item => item.line && !ledger.some(turn => {
+      const turnStart = Number(turn?.sourceStart);
+      return Number.isFinite(turnStart) && turnStart >= item.start && turnStart <= item.end;
+    }))
+    .map(item => item.line)
+    .filter(Boolean)
+    .slice(0, 80);
+}
+
+function renderDialogueRewriteScript(sourceText, ledger, lines, nameMap) {
+  const anchors = dialogueRewriteBackgroundAnchors(sourceText, ledger);
+  const cast = nameMap.map(item => item.renamed
+    ? `${item.newName}（原稿代号：${item.sourceName}）`
+    : item.newName);
+  const body = lines.map((line, index) => {
+    const performance = [line.tone, line.action].map(value => String(value || "").trim()).filter(Boolean).join("；") || "自然口语";
+    const scene = line.scene && (index === 0 || line.scene !== lines[index - 1]?.scene)
+      ? `\n【场景】${line.scene}\n`
+      : "";
+    return `${scene}${line.speakerName}（${performance}）：${line.rewrittenText}`;
+  }).join("\n");
+  return [
+    "# 完整对白轻改剧本",
+    "",
+    "【改写合同】人物名称可重构，措辞只做轻微口语化与少量衔接；故事事实、事件顺序、人物关系、结局和商品出现节点保持不变。",
+    cast.length ? `【人物】${cast.join("、")}` : "",
+    anchors.length ? `【原稿背景与情节锚点（原样保留）】\n${anchors.join("\n")}` : "",
+    "",
+    "【正文】",
+    body
+  ].filter(Boolean).join("\n").trim();
+}
+
 function qualityModuleForStage(stage = "") {
   const value = String(stage || "");
   if (value === "shot_video") return "videos";
@@ -3039,7 +3530,63 @@ function skippedQualityAudit(type = "disabled") {
 function qualityAccepted(candidate, settings = null) {
   if (!candidate?.filePath) return false;
   if (!isQualityGatesEnabled(settings, qualityModuleForStage(candidate.stage))) return true;
-  return candidate.qualityAudit?.ok === true || candidate.qualityAudit?.skipped === true || candidate.qualityAudit?.mode === "manual";
+  return candidate.manualSelectionOverride === true
+    || candidate.qualityAudit?.ok === true
+    || candidate.qualityAudit?.skipped === true
+    || candidate.qualityAudit?.accepted === true
+    || candidate.qualityAudit?.overridden === true
+    || ["manual", "human_override", "advisory_continue"].includes(String(candidate.qualityAudit?.mode || ""));
+}
+
+const QUALITY_ADVISORY_ERROR_CODES = new Set([
+  "PRODUCTION_HARD_CONTRACT_FAILED",
+  "SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED",
+  "SCRIPT_SEMANTIC_REVIEW_FAILED",
+  "SCRIPT_REFERENCE_SPEC_FAILED",
+  "SCENE_EMPTY_RETRY_EXHAUSTED",
+  "CHARACTER_INTRO_QUALITY_RETRY_EXHAUSTED",
+  "STORYBOARD_QUALITY_RETRY_EXHAUSTED",
+  "CHARACTER_VIDEO_QUALITY_RETRY_EXHAUSTED",
+  "SHOT_QUALITY_RETRY_EXHAUSTED",
+  "PROJECT_MEDIA_QUALITY_FAILED",
+  "FINAL_MEDIA_QUALITY_FAILED",
+  "CANDIDATE_QUALITY_FAILED",
+  "SHOT_VIDEO_QUALITY_REQUIRED",
+  "CHARACTER_VIDEO_QUALITY_REQUIRED"
+]);
+
+function qualityWarningCanBeIgnored(code = "") {
+  return QUALITY_ADVISORY_ERROR_CODES.has(String(code || "").trim().toUpperCase());
+}
+
+function ignoredQualityAudit(audit = null, details = {}) {
+  const original = audit && typeof audit === "object" ? JSON.parse(JSON.stringify(audit)) : { ok: null, failures: [] };
+  return {
+    ...original,
+    ok: true,
+    verdict: "ignored",
+    accepted: true,
+    overridden: true,
+    mode: "human_override",
+    overriddenAt: new Date().toISOString(),
+    originalOk: original.ok,
+    originalFailures: Array.isArray(original.failures) ? original.failures : [],
+    failures: [],
+    note: details.note || "用户已查看质检提醒，并人工确认忽略后继续使用原结果"
+  };
+}
+
+function advisoryQualityAudit(audit = null, details = {}) {
+  const original = audit && typeof audit === "object" ? audit : { ok: true, failures: [] };
+  if (original.ok !== false) return original;
+  return {
+    ...original,
+    advisory: true,
+    blocking: false,
+    verdict: original.verdict || "review",
+    advisoryAt: new Date().toISOString(),
+    note: details.note || "质检发现可优化项；当前内容已保留，可选择 AI 修复或人工忽略后继续"
+  };
 }
 
 function fileSha256(filePath) {
@@ -3105,24 +3652,36 @@ async function videoSubmissionFingerprint(project, providerKind, entityType, ent
 }
 
 function isRecoverableVideoBatchError(error) {
+  const code = String(error?.code || "");
   return error?.remoteSubmissionUnknown === true
     || error?.remoteGenerationPending === true
-    || ["VIDEO_SUBMISSION_RESPONSE_UNKNOWN", "VIDEO_REMOTE_PENDING", "VIDEO_POLL_TIMEOUT", "AUTODL_QUARANTINED", "AUTODL_ISOLATED", "PROVIDER_QUARANTINED"].includes(String(error?.code || ""));
+    || ["VIDEO_SUBMISSION_RESPONSE_UNKNOWN", "VIDEO_REMOTE_PENDING", "VIDEO_POLL_TIMEOUT", "PROVIDER_QUARANTINED"].includes(code)
+    || /(?:QUARANTINED|ISOLATED)$/i.test(code);
 }
 
-async function executeShotVideoBatch(shots, runShot) {
+async function executeShotVideoBatch(shots, runShot, concurrency = VIDEO_BATCH_MAX_CONCURRENCY) {
   const orderedShots = Array.isArray(shots) ? shots : [];
   const results = new Array(orderedShots.length);
   const batchFailures = [];
   const recoverablePending = [];
   let cursor = 0;
+  let controlError = null;
   const worker = async () => {
-    while (cursor < orderedShots.length) {
+    while (!controlError && cursor < orderedShots.length) {
       const index = cursor++;
       const shot = orderedShots[index];
       try {
         results[index] = await runShot(shot, index);
       } catch (error) {
+        // Pause/stop is a single user control signal, never a failure for every
+        // remaining shot in the batch.  Let sibling workers settle, then return
+        // the control signal once so the tracked operation can save a clean
+        // resumable checkpoint without a red batch-failure cascade.
+        if (isScriptControlError(error)) {
+          controlError ||= error;
+          results[index] = null;
+          break;
+        }
         const record = {
           shotId: shot?.id || "",
           shotNumber: Number(shot?.number) || index + 1,
@@ -3135,9 +3694,16 @@ async function executeShotVideoBatch(shots, runShot) {
       }
     }
   };
-  // Keep the desktop responsive and bound local socket/file pressure. The
-  // official queue remains authoritative for account capacity beyond this cap.
-  await Promise.all(Array.from({ length: Math.min(VIDEO_BATCH_MAX_CONCURRENCY, orderedShots.length) }, worker));
+  // The authenticated admin session is the concurrency authority.  The caller
+  // passes that limit for paid video submissions; the legacy constant is only
+  // a safe fallback for local/dev callers that have no license client.
+  const workerCount = Math.max(1, Math.min(
+    orderedShots.length || 1,
+    AUTHORITY_BATCH_MAX_CONCURRENCY,
+    Math.floor(Number(concurrency) || VIDEO_BATCH_MAX_CONCURRENCY)
+  ));
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  if (controlError) throw controlError;
   return { results, batchFailures, recoverablePending };
 }
 
@@ -3442,11 +4008,10 @@ function archiveCurrentFinalVideo(project, reason = "replaced") {
 }
 
 function isResumableVideoPause(error) {
-  return [
+  const code = String(error?.code || "");
+  return /(?:QUARANTINED|ISOLATED)$/i.test(code) || [
     "SEEDANCE_DAILY_QUOTA_EXHAUSTED",
     "ACCOUNT_SWITCH_IN_PROGRESS",
-    "AUTODL_QUARANTINED",
-    "AUTODL_ISOLATED",
     "PROVIDER_QUARANTINED",
     "VIDEO_SUBMISSION_RESPONSE_UNKNOWN",
     "VIDEO_REMOTE_PENDING",
@@ -3455,11 +4020,39 @@ function isResumableVideoPause(error) {
     "ASSET_VIDEO_DEPENDENCIES_PENDING",
     "SHOT_SPEAKER_VOICE_REQUIRED",
     "HAILUO_SPEAKER_VOICE_REQUIRED"
-  ].includes(error?.code);
+  ].includes(code);
 }
 
 function isOperationControlError(error) {
   return isScriptControlError(error) || ["PIPELINE_PAUSED", "PIPELINE_STOPPED", "ACCOUNT_SWITCH_IN_PROGRESS"].includes(error?.code);
+}
+
+const ADVISORY_LEGACY_ERROR_CODES = new Set([
+  "SHOT_QUALITY_RETRY_EXHAUSTED",
+  "STORYBOARD_QUALITY_RETRY_EXHAUSTED",
+  "CHARACTER_QUALITY_RETRY_EXHAUSTED",
+  "CHARACTER_VIDEO_QUALITY_RETRY_EXHAUSTED",
+  "SCENE_QUALITY_RETRY_EXHAUSTED",
+  "PROJECT_MEDIA_QUALITY_FAILED",
+  "FINAL_MEDIA_QUALITY_FAILED",
+  "SCRIPT_GENERATION_PAUSED",
+  "SCRIPT_GENERATION_STOPPED"
+]);
+
+function legacyAutomationIsAdvisory(automation = {}) {
+  const directCode = String(automation.errorCode || "").trim();
+  if (ADVISORY_LEGACY_ERROR_CODES.has(directCode)) return true;
+  const nested = [
+    ...(automation.progress?.items || []),
+    ...(automation.lastStoryboardFailures || []),
+    ...(automation.lastShotVideoFailures || [])
+  ].map(item => String(item?.errorCode || item?.code || "").trim()).filter(Boolean);
+  const messageCodes = [...String(automation.message || "").matchAll(/\b([A-Z][A-Z0-9_]{4,})\b/g)]
+    .map(match => match[1])
+    .filter(code => !["SHOT_VIDEO_BATCH_PARTIAL_FAILED", "STORYBOARD_BATCH_PARTIAL_FAILED"].includes(code));
+  const childCodes = [...nested, ...messageCodes];
+  if (!["SHOT_VIDEO_BATCH_PARTIAL_FAILED", "STORYBOARD_BATCH_PARTIAL_FAILED"].includes(directCode)) return false;
+  return childCodes.length > 0 && childCodes.every(code => ADVISORY_LEGACY_ERROR_CODES.has(code));
 }
 
 function characterVideoStageProvider(settings = {}) {
@@ -3749,7 +4342,15 @@ function imageStageAspectRatio(project, stage, entity = null) {
 
 function imageGenerationOptions(project, stage, referenceInputs = [], entity = null, signal = null) {
   const aspectRatio = imageStageAspectRatio(project, stage, entity);
-  return { referenceInputs, size: aspectRatio, aspectRatio, ...(signal ? { signal } : {}) };
+  // Public image providers commonly support only these three ratios. Sending a
+  // dynamic sheet ratio (for example 9:8) was silently coerced to 9:16, which
+  // then failed our own contact-sheet audit. Use the nearest supported canvas
+  // while keeping the exact logical grid in the prompt and audit metadata.
+  const parsed = String(aspectRatio).match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
+  const ratio = parsed ? Number(parsed[1]) / Math.max(Number(parsed[2]), 0.001) : 1;
+  const supported = [["9:16", 9 / 16], ["1:1", 1], ["16:9", 16 / 9]];
+  const size = supported.slice().sort((left, right) => Math.abs(Math.log(ratio / left[1])) - Math.abs(Math.log(ratio / right[1])))[0][0];
+  return { referenceInputs, size, aspectRatio, ...(signal ? { signal } : {}) };
 }
 
 function localUngatedHailuoPromptSpec(shot, fingerprint = "", mode = "", source = null) {
@@ -3920,7 +4521,9 @@ function storyAssetDirective(project = {}, stage = "", entity = {}) {
   }
   if (stage === "scene_asset") {
     const related = (project?.shots || []).filter(shot => shot.sceneId === entity.id || shot.sceneName === entity.name);
-    const beats = related.map(shot => shot.sceneObjective || shot.mainlineBeat || shot.action).filter(Boolean).slice(0, 4);
+    // Scene-library prompts describe only space. Raw story beats contain actor
+    // names/actions and were leaking people into otherwise empty-scene prompts.
+    const beats = [sanitizeEmptySceneDescription(entity.scenePurpose || entity.description || "后续剧情拍摄空间", project?.characters || [])].filter(Boolean);
     const productUsed = related.some(shot => shot.productMention);
     return `【故事判断后的场景四视图合同】该空间承载：${beats.join("；") || entity.scenePurpose || "按场景圣经"}。一张16:9画布严格分成2×2四格：主入口正向、反向轴、左侧45度、右侧45度；四格锁定同一出入口、门窗家具拓扑、光向、拍摄轴和可行动区域。${productUsed ? "后续有用户上传商品剧情，预留符合剧本动作的干净操作面，但空场景资产不得提前画入商品。" : "本场无商品剧情，不得画入商品或广告陈列。"}四个角度都必须无人。`;
   }
@@ -4159,6 +4762,128 @@ function uniqueDialogueTurns(project, shot) {
   }
   for (const turn of parseCompiledDialogueSegments(shot?.dialogue || "", names)) push(turn, 1);
   return items;
+}
+
+const GENERATED_VIDEO_PROMPT_LIMIT = 1900;
+
+function compactPromptValue(value, limit) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (!limit || normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, Math.max(0, limit - 1)).trim()}…`;
+}
+
+function compactGeneratedImagePrompt(prompt, stage = "", maxLength = 1850) {
+  const source = String(prompt || "").replace(/\r/g, "").trim();
+  const limit = Math.max(800, Math.min(1950, Number(maxLength) || 1850));
+  if (source.length <= limit) return source;
+  const clauses = source.split(/\n+/).map(item => item.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const high = item => /不可变|输出形态|最高优先级|参考图编号|商品硬锁定|本镜强制人物|逐秒节拍|首帧强制状态|尾帧必须不同|场景四视图|2×2|合图|接触印|格数|panel|grid|canvas|gutter/i.test(item);
+  const medium = item => /人物|身份|服装|场景|道具|商品|动作|表演|时序|起始|结束|镜头/i.test(item);
+  const ordered = [
+    ...clauses.filter(high),
+    ...clauses.filter(item => !high(item) && medium(item)),
+    ...clauses.filter(item => !high(item) && !medium(item))
+  ];
+  const stageLock = imageSafetyStageContract(stage, "zh");
+  const result = [];
+  let used = stageLock.length + 1;
+  const seen = new Set();
+  for (const clause of ordered) {
+    const key = clause.replace(/[\s，。；、：:！？!?]/g, "").toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const remaining = limit - used - 1;
+    if (remaining < 24) break;
+    const value = compactPromptValue(clause, Math.min(remaining, high(clause) ? 520 : 260));
+    if (!value) continue;
+    result.push(value);
+    used += value.length + 1;
+  }
+  return [stageLock, ...result].join("\n").slice(0, limit).trim();
+}
+
+function isPromptTooLongError(error) {
+  return /PROMPT_TOO_LONG|prompt.{0,12}(?:too long|length|limit)|提示词.{0,10}(?:过长|超长|超限)/i.test(`${error?.code || ""} ${error?.message || ""}`);
+}
+
+/**
+ * The cloud Seedance-compatible relay accepts no more than 2,000 characters.
+ * Rebuild an overlong system prompt from canonical shot data instead of
+ * truncating the tail, because dialogue, speaker, listener and acting tone are
+ * the highest-priority production contract. Manual prompts are never sent here.
+ */
+function compactGeneratedSeedanceVideoPrompt(project, shot, references = {}, mode = "", prompt = "", maxLength = GENERATED_VIDEO_PROMPT_LIMIT) {
+  const original = String(prompt || "").trim();
+  const limit = Math.max(800, Math.min(1990, Number(maxLength) || GENERATED_VIDEO_PROMPT_LIMIT));
+  if (original.length <= limit) return original;
+
+  const turns = uniqueDialogueTurns(project, shot);
+  const dialogueLines = turns.map(turn => {
+    const listeners = (turn.listenerIds || []).map(id => (
+      (project.characters || []).find(character => character.id === id || character.name === id)?.name || id
+    )).filter(Boolean);
+    const meta = turn.metadata || {};
+    const tone = turn.sourceTone || meta.sourceTone || meta.delivery || meta.emotion || shot.emotion || "符合剧情的生活化情绪语气";
+    const acting = [meta.body, meta.beat, meta.breath].filter(Boolean).join("；") || shot.performance || "脸、身体与声线同步表演";
+    const reaction = meta.listenerBeat || (listeners.length ? "听者闭嘴并给出同步可见反应" : "");
+    return `角色“${turn.speaker}”${listeners.length ? `面对${listeners.join("、")}` : ""}；原稿语气=${tone}；表演=${acting}${reaction ? `；listenerBeat=${reaction}` : ""}；只说一遍：${turn.text}`;
+  });
+  const dialogueContract = dialogueLines.length
+    ? `【对白最高优先级·逐字完整】${dialogueLines.join("；")}。说话人、听者和音色不得互换，每句只说一遍。`
+    : "【对白】本镜无对白，禁止新增台词或画外音。";
+  const hardContract = "【成片硬约束】写实竖屏短剧；人物身份、服装、商品、场景与参考素材一致；镜头必须推进剧情并从首态变化到尾态；环境底噪和同步动作声覆盖全段，禁止BGM、字幕、水印、参考板、网格和无关人物。";
+
+  if (dialogueContract.length + hardContract.length + 2 > limit) {
+    // A single short video unit should never contain this much dialogue. Keep
+    // every authored word and only drop optional prose; do not silently damage
+    // the user's script to satisfy a provider limit.
+    return `${dialogueContract}\n${hardContract}`;
+  }
+
+  const imageManifest = (references.imageRoles || []).map((item, index) => `图${index + 1}=${item.label || item.type || "参考资产"}`).join("；");
+  const videoManifest = (references.videoRoles || []).map((item, index) => `视频${index + 1}=${item.label || item.type || "上一镜"}`).join("；");
+  const audioManifest = (references.audios || []).map((item, index) => `音频${index + 1}=${item.characterName || "角色"}音色`).join("；");
+  const matrixMarkers = [...new Set(original.match(/[a-z][a-z0-9_-]*:(?:keyframe|continuation|storyboard_sheet|smart)/gi) || [])].join("；");
+  const scene = (project.scenes || []).find(item => item.id === shot.sceneId);
+  const performanceBeats = Array.isArray(shot.performanceBeats)
+    ? shot.performanceBeats
+    : shot.performanceBeats && typeof shot.performanceBeats === "object"
+      ? Object.values(shot.performanceBeats)
+      : shot.performanceBeats
+        ? [shot.performanceBeats]
+        : [];
+  const modeLabel = mode === "storyboard_sheet"
+    ? "按逐秒合图从左到右、从上到下演绎，禁止把格线和序号生成进成片"
+    : mode === "continuation"
+      ? "从上一视频末态无缝继续，禁止重演、重置或切换空间"
+      : "首帧到尾帧形成连续因果动作，禁止中途换空间";
+  const optionalSections = [
+    ["剧情动作", shot.action || shot.visualBeat || shot.shotFunction, 300],
+    ["表演推进", [shot.emotion, shot.performance, ...performanceBeats].filter(Boolean).join("；"), 320],
+    ["镜头调度", [shot.shotSize, shot.cameraMove, shot.compositionPlan, shot.transitionReason].filter(Boolean).join("；"), 230],
+    ["模式", modeLabel, 150],
+    ["矩阵", matrixMarkers, 100],
+    ["参考素材", [imageManifest, videoManifest, audioManifest].filter(Boolean).join("；"), 250],
+    ["场景", [scene?.name, scene?.description, shot.stateBefore, shot.stateAfter].filter(Boolean).join("；"), 220],
+    ["商品", project.product?.name
+      ? `用户上传商品硬绑定：${[project.product.name, shot.productRole, shot.productAction, shot.productShotType].filter(Boolean).join("；")}`
+      : [shot.productRole, shot.productAction, shot.productShotType].filter(Boolean).join("；"), 220],
+    ["声音", shot.audioPlan || shot.soundDesign || "对白清晰，环境底噪连续，只保留同步动作声", 160]
+  ];
+
+  const parts = [dialogueContract];
+  let used = dialogueContract.length + hardContract.length + 2;
+  for (const [label, value, preferred] of optionalSections) {
+    if (!String(value || "").trim()) continue;
+    const remaining = limit - used - label.length - 4;
+    if (remaining < 24) continue;
+    const body = compactPromptValue(value, Math.min(preferred, remaining));
+    const section = `【${label}】${body}`;
+    parts.push(section);
+    used += section.length + 1;
+  }
+  parts.push(hardContract);
+  return parts.join("\n").slice(0, limit).trim();
 }
 
 function assertSystemPromptDialogueParity(project, shot, prompt, engine = projectVideoEngine(project)) {
@@ -4433,18 +5158,13 @@ function productionHardContractFailures(normalized = {}, options = {}) {
     return failures;
   }
   const productDuration = semanticProductIndexes.reduce((sum, index) => sum + Math.max(0, Number(shots[index]?.duration) || 0), 0);
-  if (shots.length >= 24 && totalDuration >= 240 && productDuration / totalDuration > 0.2) {
-    failures.push({
-      code: "PRODUCT_SCREEN_TIME_DOMINATES",
-      shotId: shots[semanticProductIndexes[0]]?.id || "",
-      message: `商品相关镜头共${productDuration}秒，占全片${Math.round((productDuration / totalDuration) * 100)}%；不得超过20%，避免带货段抢走剧情主线`
-    });
-  }
+  // The user controls commerce depth. A larger requested tail is intentional,
+  // so never reject it with the old fixed 20% ceiling.
   // The late product chain scales with the real film length. A 6/7/10-minute
   // film must not inherit a fixed S27-S30 template, and a short film must not
   // surrender half its running time to product shots.
   if (shots.length >= 24 && totalDuration >= 240) {
-  const tailRange = productTailRange(shots.length, Math.floor(shots.length * 0.65), totalDuration);
+  const tailRange = productTailRange(shots.length, Math.floor(shots.length * 0.65), totalDuration, options.commerceShotCount);
   const productTailStartIndex = Math.max(0, tailRange.startNumber - 1);
   const productTail = shots.slice(productTailStartIndex);
   const productTailStartId = shots[productTailStartIndex]?.id || `S${String(productTailStartIndex + 1).padStart(2, "0")}`;
@@ -4456,7 +5176,10 @@ function productionHardContractFailures(normalized = {}, options = {}) {
     currentTailProductRun = flagged ? currentTailProductRun + 1 : 0;
     longestTailProductRun = Math.max(longestTailProductRun, currentTailProductRun);
   }
-  const requiredTailProductRun = Math.min(3, productTail.length);
+  const requiredTailProductRun = Math.min(
+    Math.max(1, Number(options.commerceShotCount) > 0 ? normalizeCommerceShotCount(options.commerceShotCount, 3) : 3),
+    productTail.length
+  );
   if (longestTailProductRun < requiredTailProductRun) {
     failures.push({
       code: "PRODUCT_TAIL_CHAIN_MISSING",
@@ -4553,6 +5276,43 @@ function assertProductionHardContracts(normalized = {}, options = {}) {
     });
   }
   return true;
+}
+
+function productionContractRepairShotIds(project = {}, failures = []) {
+  const shots = (Array.isArray(project?.shots) ? project.shots : [])
+    .slice()
+    .sort((left, right) => (Number(left?.number) || Number(String(left?.id || "").replace(/\D/g, "")) || 0)
+      - (Number(right?.number) || Number(String(right?.id || "").replace(/\D/g, "")) || 0));
+  const known = new Set(shots.map((shot, index) => String(shot?.id || `S${String(index + 1).padStart(2, "0")}`)));
+  const selected = new Set();
+  const addNumber = number => {
+    const shot = shots[Math.max(0, Math.min(shots.length - 1, Number(number) - 1))];
+    if (shot?.id) selected.add(String(shot.id));
+  };
+  for (const failure of Array.isArray(failures) ? failures : []) {
+    const direct = normalizeFailureShotId(failure?.shotId);
+    if (direct && known.has(direct)) selected.add(direct);
+    const range = normalizeFailureShotRange(failure?.shotRange || failure?.range);
+    if (range) {
+      for (let number = Number(range.start.slice(1)); number <= Number(range.end.slice(1)); number += 1) addNumber(number);
+    }
+    const code = String(failure?.code || "").toUpperCase();
+    if (code.startsWith("MAIN_REVERSAL_")) {
+      const window = mainReversalWindow(shots.length);
+      // mainReversalWindow returns zero-based indexes. Convert only that exact
+      // window to one-based shot numbers so a targeted repair never rewrites
+      // valid neighbouring shots.
+      for (let number = window.startIndex + 1; number <= window.endIndex + 1; number += 1) addNumber(number);
+      shots.forEach((shot, index) => { if (String(shot?.mainlineStage || "") === "main_reversal") addNumber(index + 1); });
+    }
+    if (code === "PRODUCT_REQUIRED" || code.startsWith("PRODUCT_TAIL_")) {
+      const totalDuration = shots.reduce((sum, shot) => sum + Math.max(0, Number(shot?.duration) || 0), 0);
+      const tail = productTailRange(shots.length, Math.floor(shots.length * 0.65), totalDuration);
+      for (let number = tail.startNumber; number <= shots.length; number += 1) addNumber(number);
+    }
+  }
+  if (!selected.size && shots[0]?.id) selected.add(String(shots[0].id));
+  return shots.map(shot => String(shot.id)).filter(id => selected.has(id));
 }
 
 function shotSpeakingCharacterIds(project, shot) {
@@ -4751,6 +5511,42 @@ function summarizeAssetBatch(items = [], waveLabel = "", kind = "asset_batch") {
 function imageBatchConcurrency(project) {
   const requested = Number(project?.generation?.keyframeConcurrency) || IMAGE_BATCH_MAX_CONCURRENCY;
   return Math.max(1, Math.min(IMAGE_BATCH_MAX_CONCURRENCY, requested));
+}
+
+function authorityConcurrencyValue(session, kind, fallback) {
+  const key = kind === "video" ? "videoConcurrency" : "imageConcurrency";
+  const value = Math.floor(Number(session?.[key]));
+  if (Number.isFinite(value) && value >= 1) {
+    return Math.min(AUTHORITY_BATCH_MAX_CONCURRENCY, value);
+  }
+  if (session?.bypass === true || !session) return Math.max(1, Math.floor(Number(fallback) || 1));
+  throw Object.assign(new Error(`管理后台没有返回有效的${kind === "video" ? "视频" : "图片"}并发额度，已停止新的生成任务`), {
+    code: "CONCURRENCY_AUTHORITY_INVALID",
+    kind
+  });
+}
+
+function projectFinalDeliveryComplete(project) {
+  const outputPath = String(project?.finalVideoPath || "").trim();
+  return Boolean(
+    outputPath
+    && project?.finalVideoStale !== true
+    && String(project?.status || "") === "completed"
+    && fs.existsSync(outputPath)
+  );
+}
+
+function completedAutomationStage(project, operation = "", targetId = "") {
+  const liveStage = String(project?.automation?.stage || "").trim().toLowerCase();
+  if (liveStage && !["completed", "running", "stage_completed"].includes(liveStage)) return liveStage;
+  const op = String(operation || project?.automation?.operation || "").toLowerCase();
+  if (op === "pipeline_from_stage") return String(targetId || project?.automation?.targetId || project?.currentStage || "script").toLowerCase();
+  if (/stitch|final|delivery/.test(op)) return "stitch";
+  if (/shot_videos|shot-video|shot_video|video_batch/.test(op)) return "shot_videos";
+  if (/storyboard/.test(op)) return "storyboards";
+  if (/asset|character|scene|voice|library/.test(op)) return "assets";
+  if (/prompt/.test(op)) return "creator_prompts";
+  return "script";
 }
 
 async function mapWithConcurrency(items, concurrency, worker) {
@@ -5906,17 +6702,13 @@ function ffmpegDrawTextValue(value = "") {
 }
 
 function criticalTextOverlayFilters(shot = {}, offsetSeconds = 0) {
-  return (Array.isArray(shot?.criticalOnScreenText) ? shot.criticalOnScreenText : [])
-    .map(cue => {
-      const text = ffmpegDrawTextValue(cue?.text);
-      const start = Math.max(0, Number(cue?.start) || 0) + Math.max(0, Number(offsetSeconds) || 0);
-      const end = Math.max(start, Number(cue?.end) || Number(shot?.duration) || start) + Math.max(0, Number(offsetSeconds) || 0);
-      if (!text || end <= start) return "";
-      const anchor = String(cue?.anchor || "bottom");
-      const y = anchor === "top" ? "80" : anchor === "center" ? "(h-text_h)/2" : "h-text_h-110";
-      return `drawtext=fontfile='C\\:/Windows/Fonts/msyh.ttc':text='${text}':fontcolor=white:fontsize=h/26:x=(w-text_w)/2:y=${y}:box=1:boxcolor=black@0.68:boxborderw=14:enable='between(t,${start.toFixed(3)},${end.toFixed(3)})'`;
-    })
-    .filter(Boolean);
+  // Product contract: final videos never contain subtitles, captions, titles,
+  // name straps, prices or any other readable overlay. Older scripts may still
+  // carry criticalOnScreenText metadata; it is descriptive evidence only and
+  // must never become an FFmpeg drawtext instruction.
+  void shot;
+  void offsetSeconds;
+  return [];
 }
 
 function finalCriticalTextOverlayFilter(shots = []) {
@@ -5991,6 +6783,11 @@ function splitForAnalysis(text, maxChars = 2400) {
   return chunks;
 }
 
+function generatedScenePlaceholderName(value = "") {
+  const name = String(value || "").trim();
+  return /^(?:用户原稿场景|原稿场景|剧情现场|场景)\s*\d+$/i.test(name);
+}
+
 function mergeAnalysisChunks(chunks) {
   const characters = new Map();
   const scenes = new Map();
@@ -6006,7 +6803,8 @@ function mergeAnalysisChunks(chunks) {
       characters.set(key, { ...(characters.get(key) || {}), ...item, name: key });
     }
     for (const item of Array.isArray(chunk?.scenes) ? chunk.scenes : []) {
-      const key = String(item.name || "").trim();
+      const rawKey = String(item.name || "").trim();
+      const key = generatedScenePlaceholderName(rawKey) ? "剧情主要空间" : rawKey;
       if (!key) continue;
       scenes.set(key, { ...(scenes.get(key) || {}), ...item, name: key });
     }
@@ -6037,7 +6835,8 @@ function mergeAnalysisChunks(chunks) {
     }
     const localSceneMap = new Map();
     for (const item of Array.isArray(chunk?.scenes) ? chunk.scenes : []) {
-      const canonical = sceneByName.get(String(item?.name || "").trim());
+      const rawName = String(item?.name || "").trim();
+      const canonical = sceneByName.get(generatedScenePlaceholderName(rawName) ? "剧情主要空间" : rawName);
       if (!canonical) continue;
       localSceneMap.set(String(item?.name || "").trim(), canonical);
       if (item?.id) localSceneMap.set(String(item.id).trim(), canonical);
@@ -6069,7 +6868,8 @@ function mergeAnalysisChunks(chunks) {
     for (const sourceShot of Array.isArray(chunk?.shots) ? chunk.shots : []) {
       const dialogueTurns = (Array.isArray(sourceShot?.dialogueTurns) ? sourceShot.dialogueTurns : []).map(remapTurn);
       const sceneToken = String(sourceShot?.scene || sourceShot?.sceneName || sourceShot?.sceneId || "").trim();
-      const canonicalScene = localSceneMap.get(sceneToken) || sceneByName.get(sceneToken);
+      const canonicalScene = localSceneMap.get(sceneToken)
+        || sceneByName.get(generatedScenePlaceholderName(sceneToken) ? "剧情主要空间" : sceneToken);
       const subshots = (Array.isArray(sourceShot?.subshots) ? sourceShot.subshots : []).map(subshot => {
         const localTurns = (Array.isArray(subshot?.dialogueTurns) ? subshot.dialogueTurns : []).map(remapTurn);
         return {
@@ -6233,7 +7033,7 @@ function localUploadedAnalysisChunk(chunk, project = {}) {
   }));
   const characterByName = new Map(characters.map(item => [item.name, item]));
   const sceneMatch = String(chunk?.text || "").match(/(?:【场景】|场景[：:])\s*([^\n]{2,40})/);
-  const sceneName = String(sceneMatch?.[1] || `用户原稿场景${Number(chunk?.index || 0) + 1}`).trim();
+  const sceneName = String(sceneMatch?.[1] || "剧情主要空间").trim();
   const scenes = [{
     id: `SC${String(Number(chunk?.index || 0) + 1).padStart(2, "0")}`,
     name: sceneName,
@@ -6327,7 +7127,7 @@ function localUploadedAnalysisChunk(chunk, project = {}) {
       subshots
     };
   });
-  return bindSourceDialogueLedgerToAnalysis({
+  const bound = bindSourceDialogueLedgerToAnalysis({
     story: {
       synopsis: String(chunk?.text || "").replace(/\s+/g, " ").slice(0, 500),
       premise: "按用户上传原稿识别人物关系、事件顺序和冲突",
@@ -6339,6 +7139,7 @@ function localUploadedAnalysisChunk(chunk, project = {}) {
     scenes,
     shots
   }, ledger);
+  return enforceSourceSceneLedger(bound, chunk?.sourceSceneLedger, ledger);
 }
 
 function headingBlocks(text, pattern) {
@@ -6487,6 +7288,7 @@ function auditDramaSpec(normalized, options = {}) {
   const dialogueTargets = dialogueReferenceTargets(duration);
   const hardFailures = productionHardContractFailures(normalized, {
     productName,
+    commerceShotCount: options.commerceShotCount,
     requireProduct: Boolean(productName),
     requireHook: true,
     requireHookDialogue: true
@@ -7008,17 +7810,26 @@ function parseStructuredProductionScript(text) {
     };
   });
 
-  assertKnownCharacterReferences(shotBlocks.map(({ match, body }) => ({
-    id: match[1],
-    characterIds: [...new Set(String(body || "").match(/C\d{2,}/gi) || [])]
-  })), characters, "SCRIPT_IMPORTED_CHARACTER_REFERENCE_INVALID");
-
+  const referenceRepair = reconcileOrphanCharacterReferences({ characters, scenes, shots }, { allowCharacterCreation: false });
   return {
     story: { premise: "从结构化制作剧本本地解析", hook: shots[0]?.action || "", ending: shots.at(-1)?.action || "" },
-    characters,
+    characters: referenceRepair.project.characters,
     scenes,
-    shots
+    shots: referenceRepair.project.shots
   };
+}
+
+function splitUploadedScriptSections(text = "") {
+  const source = String(text || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").trim();
+  const lines = source.split("\n");
+  const bodyHeader = lines.findIndex(line => /^(?:\s*#{1,4}\s*)?(?:正式剧情|剧情正文|剧本正文|正文|正片)\s*[:：]?\s*$/i.test(line.trim()));
+  const firstDramaticLine = bodyHeader >= 0
+    ? lines.findIndex((line, index) => index > bodyHeader && line.trim())
+    : lines.findIndex(line => /^(?:\s*#{1,4}\s*)?(?:S\d{1,3}\b|SC\d{1,3}\b|第[一二三四五六七八九十百千零〇\d]+(?:场|幕|镜)|【\s*场景\s*】|场景\s*[:：]|地点\s*[:：]|内景\s*[:：]|外景\s*[:：]|INT\.|EXT\.|INT\/EXT\.|I\/E\.|\d{1,4}[.、)]\s*(?:场景|内景|外景|INT\.|EXT\.))/i.test(line.trim()));
+  if (firstDramaticLine <= 0) return { metadata: "", dramaticBody: source };
+  const metadata = lines.slice(0, firstDramaticLine).join("\n").trim();
+  const dramaticBody = lines.slice(firstDramaticLine).join("\n").trim();
+  return dramaticBody ? { metadata, dramaticBody } : { metadata: "", dramaticBody: source };
 }
 
 function inferredSceneProfile(name = "") {
@@ -7081,7 +7892,19 @@ function inferredSceneProfile(name = "") {
 }
 
 function reconcileShotSceneCatalog(sceneInput = [], shotInput = []) {
-  const scenes = (Array.isArray(sceneInput) ? sceneInput : []).map(scene => ({ ...scene }));
+  const sourceScenes = (Array.isArray(sceneInput) ? sceneInput : []).map(scene => ({ ...scene }));
+  const placeholderIds = new Set(sourceScenes.filter(scene => generatedScenePlaceholderName(scene?.name)).map(scene => String(scene.id || "")).filter(Boolean));
+  const placeholder = sourceScenes.find(scene => generatedScenePlaceholderName(scene?.name));
+  const scenes = sourceScenes.filter(scene => !generatedScenePlaceholderName(scene?.name));
+  if (placeholder) {
+    scenes.push({
+      ...placeholder,
+      id: String(placeholder.id || "SC01"),
+      name: "剧情主要空间",
+      description: "按原稿中的地点、门窗、主要家具、人物走位区和拍摄轴连续呈现",
+      source: "uploaded_script_scene_reconciled"
+    });
+  }
   const shots = (Array.isArray(shotInput) ? shotInput : []).map(shot => ({ ...shot }));
   const byId = new Map(scenes.map(scene => [String(scene.id || "").trim(), scene]).filter(([id]) => id));
   const byName = new Map(scenes.map(scene => [String(scene.name || "").trim(), scene]).filter(([name]) => name));
@@ -7095,8 +7918,10 @@ function reconcileShotSceneCatalog(sceneInput = [], shotInput = []) {
   };
 
   for (const shot of shots) {
-    const requestedId = String(shot.sceneId || "").trim();
-    const requestedName = String(shot.sceneName || shot.scene || "").trim();
+    const rawRequestedId = String(shot.sceneId || "").trim();
+    const rawRequestedName = String(shot.sceneName || shot.scene || "").trim();
+    const requestedId = placeholderIds.has(rawRequestedId) ? String(placeholder?.id || "") : rawRequestedId;
+    const requestedName = generatedScenePlaceholderName(rawRequestedName) ? "剧情主要空间" : rawRequestedName;
     let scene = requestedId ? byId.get(requestedId) : null;
     if (!scene && requestedName) scene = byName.get(requestedName);
     if (!scene && requestedName) {
@@ -7360,15 +8185,21 @@ function normalizeAnalysis(data, project) {
     return shot;
   });
   const reconciledScenes = reconcileShotSceneCatalog(scenes, shots);
-  assertKnownCharacterReferences(reconciledScenes.shots, characters, "SCRIPT_IMPORTED_CHARACTER_REFERENCE_INVALID");
+  const referenceRepair = reconcileOrphanCharacterReferences({
+    ...project,
+    characters,
+    scenes: reconciledScenes.scenes,
+    shots: reconciledScenes.shots,
+    sourceDialogueLedger: Array.isArray(data?.sourceDialogueLedger) ? data.sourceDialogueLedger : []
+  });
   return {
     detectedFormat: String(data?.detectedFormat || "").trim(),
     modeSynopsis: String(data?.modeSynopsis || data?.story?.synopsis || "").trim(),
     story: data?.story || [],
-    characters,
-    scenes: reconciledScenes.scenes,
+    characters: referenceRepair.project.characters,
+    scenes: referenceRepair.project.scenes,
     props,
-    shots: reconciledScenes.shots,
+    shots: referenceRepair.project.shots,
     sourceDialogueLedger: Array.isArray(data?.sourceDialogueLedger) ? data.sourceDialogueLedger.map(item => ({ ...item })) : []
   };
 }
@@ -7471,7 +8302,11 @@ function scriptQualityGateOptions(settings, extra = {}) {
     // detail only bypasses structural contracts; every other selected detail
     // must continue to run independently.
     skipQualityGates: !scriptEnabled,
-    bypassProductionContracts: !structuralEnabled
+    bypassProductionContracts: !structuralEnabled,
+    // Creative review is always advisory at runtime. Shape/parsing/provider
+    // requirements remain hard, but a score or blueprint opinion may never
+    // strand a usable script or erase the user's material.
+    advisoryOnly: scriptEnabled
   };
 }
 
@@ -7862,7 +8697,7 @@ function semanticReviewPayload(blueprint, shots = []) {
 }
 
 class WorkbenchWorkflow {
-  constructor({ store, bridge, locateFfmpeg, stagingRoot, textGenerator, faceGridProcessor, licenseClient = null, integrityGuard = null }) {
+  constructor({ store, bridge, locateFfmpeg, stagingRoot, textGenerator, faceGridProcessor, licenseClient = null, integrityGuard = null, adaptiveAgent = null, foundryKernel = null }) {
     this.store = store;
     this.bridge = bridge;
     this.locateFfmpeg = locateFfmpeg;
@@ -7870,6 +8705,7 @@ class WorkbenchWorkflow {
     this.stagingRoot = stagingRoot;
     this.license = licenseClient || null;
     this.integrityGuard = integrityGuard || null;
+    this.foundryKernel = foundryKernel || store?.foundryKernel || null;
     const rawGenerateText = typeof textGenerator === "function" ? textGenerator : generateText;
     this._rawGenerateText = rawGenerateText;
     this.generateText = async (config, messages, options = {}) => {
@@ -8032,15 +8868,49 @@ class WorkbenchWorkflow {
     this.operationControls = new Map();
     this.liveDraftWrites = new Map();
     this.videoSubmissionPromises = new Map();
-    // 官网已经持久化接单并统一调度 AutoDL 实例。客户端不得再按 10 秒
+    // 官网已经持久化接单并统一调度 云端算力节点 实例。客户端不得再按 10 秒
     // 人为串行提交；只对“提交响应未知”使用同一幂等键做有限恢复。
     this.videoSubmissionRecoveryAttempts = 3;
     this.videoSubmissionRecoverySleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     this.videoQueryPollSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    this.adaptiveAgent = adaptiveAgent instanceof AdaptiveProductionAgent ? adaptiveAgent : new AdaptiveProductionAgent();
+    if (!this.adaptiveAgent.hasAdapter("text", "default")) {
+      this.adaptiveAgent.registerAdapter("text", "default", payload => this.generateText(payload.config, payload.messages, payload.options || {}));
+    }
+  }
+
+  registerAdaptiveAdapter(capability, platform, handler) {
+    this.adaptiveAgent.registerAdapter(capability, platform, handler);
+    return this;
+  }
+
+  executeAdaptiveCapability(capability, platform, payload, context = {}) {
+    return this.adaptiveAgent.execute(capability, platform, payload, context);
+  }
+
+  adaptiveProductionPlan(projectId) {
+    return this.adaptiveAgent.plan(this.store.getProject(projectId));
   }
 
   licenseEnabled() {
     return Boolean(this.license) && !licenseBypassAllowed();
+  }
+
+  async authoritativeGenerationConcurrency(project = null) {
+    const currentProject = project || null;
+    const fallback = {
+      image: imageBatchConcurrency(currentProject),
+      video: VIDEO_BATCH_MAX_CONCURRENCY,
+      source: "local_fallback"
+    };
+    if (!this.license || typeof this.license.ensureSession !== "function") return fallback;
+    const session = await this.license.ensureSession();
+    return {
+      image: authorityConcurrencyValue(session, "image", fallback.image),
+      video: authorityConcurrencyValue(session, "video", fallback.video),
+      source: session?.bypass === true ? "local_bypass" : "admin_license",
+      authority: String(session?.concurrencyAuthority || "")
+    };
   }
 
   async withLicenseLease(kind, taskId, meta, fn) {
@@ -8488,6 +9358,64 @@ class WorkbenchWorkflow {
     return project.automation;
   }
 
+  reconcileProjectCharacterReferences(projectId, options = {}) {
+    const current = this.store.getProject(projectId);
+    const result = reconcileOrphanCharacterReferences(current, {
+      allowCharacterCreation: options.allowCharacterCreation !== false
+    });
+    const hadReferenceFailure = /CHARACTER_REFERENCE|CHARACTER_REFERENCE_NOT_IN_BIBLE/.test(
+      `${String(current.automation?.errorCode || "")} ${String(current.automation?.message || "")}`
+    ) || /角色圣经中不存在的人物/.test(String(current.automation?.message || ""));
+    if (!result.changed && !hadReferenceFailure) return result;
+    const repairedAt = new Date().toISOString();
+    const repairedProject = result.project;
+    repairedProject.activity = Array.isArray(repairedProject.activity) ? repairedProject.activity : [];
+    if (result.changed) {
+      const additions = result.addedCharacters.map(item => `${item.name}(${item.id})`);
+      const remapped = Object.entries(result.remappedReferences).map(([from, to]) => `${from}→${to}`);
+      const removed = result.removedReferences;
+      repairedProject.activity.unshift({
+        id: makeId("activity"),
+        at: repairedAt,
+        type: "character_reference_auto_repaired",
+        summary: `已自动修复分镜人物引用${additions.length ? `；补齐人物 ${additions.join("、")}` : ""}${remapped.length ? `；重绑 ${remapped.join("、")}` : ""}${removed.length ? `；清理无对白残留 ${removed.join("、")}` : ""}`
+      });
+      repairedProject.activity = repairedProject.activity.slice(0, 300);
+    }
+    if (options.clearFailure === true || hadReferenceFailure) {
+      const stage = String(current.automation?.stage || "").toLowerCase();
+      const resumeStage = result.addedCharacters.length
+        ? "assets"
+        : /script|idea|blueprint|plan|unit/.test(stage)
+        ? "script"
+        : /storyboard|shot_frame/.test(stage)
+          ? "shots"
+          : /shot_video|video/.test(stage)
+            ? "videos"
+            : /stitch|final|delivery/.test(stage)
+              ? "final"
+              : "assets";
+      repairedProject.automation = {
+        ...(repairedProject.automation || {}),
+        status: "paused_user",
+        stage: resumeStage,
+        message: result.changed
+          ? "人物引用已自动修复；原对白和已有资产均已保留，可一键继续"
+          : "人物引用已经有效，可从当前断点继续",
+        errorCode: "",
+        recoverableFailure: true,
+        updatedAt: repairedAt
+      };
+      result.resumeStage = resumeStage;
+    }
+    this.store.saveProject(repairedProject);
+    return result;
+  }
+
+  repairCharacterReferences(projectId) {
+    return this.reconcileProjectCharacterReferences(projectId, { clearFailure: true, allowCharacterCreation: true });
+  }
+
   async reviewScriptSemantics(settings, blueprint, shots, sessionId, phase = "full", projectId = "") {
     if (!this.qualityGatesEnabled(settings)) {
       return {
@@ -8517,6 +9445,25 @@ class WorkbenchWorkflow {
         phase
       };
     }
+    const reviewProject = projectId ? this.store.getProject(projectId) : null;
+    const humanOverride = reviewProject?.qualityReviewOverrides?.[phase];
+    if (humanOverride?.ideaSignature && humanOverride.ideaSignature === ideaSignature(reviewProject)) {
+      return {
+        ok: true,
+        skipped: false,
+        accepted: true,
+        overridden: true,
+        mode: "human_override",
+        verdict: "ignored",
+        scores: Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, 100])),
+        enabledFields,
+        hardFailures: [],
+        summary: "用户已查看本轮审核提醒并确认忽略，继续使用原剧本",
+        repairDirectives: [],
+        phase,
+        overriddenAt: humanOverride.acceptedAt
+      };
+    }
     const payload = semanticReviewPayload(blueprint, shots);
     const reviewUnits = phase === "blueprint"
       ? (Array.isArray(blueprint?.shotPlan) ? blueprint.shotPlan : [])
@@ -8524,7 +9471,6 @@ class WorkbenchWorkflow {
     const reviewUnitCount = reviewUnits.length;
     const reviewDuration = reviewUnits.reduce((sum, item) => sum + Math.max(0, Number(item?.duration) || 0), 0);
     const requestOptions = { json: true, sessionId, timeoutMs: TOPIC_REQUEST_TIMEOUT_MS, maxReconnectAttempts: 1 };
-    const reviewProject = projectId ? this.store.getProject(projectId) : null;
     try {
       const data = await this.generateText(settings.textProvider, [
         { role: "system", content: `${appendDocxPromptFusion(
@@ -8556,6 +9502,267 @@ class WorkbenchWorkflow {
     }
   }
 
+  async repairProductionContracts(projectId, options = {}) {
+    if (options.track !== false) {
+      return this.runTrackedOperation(projectId, "repair_script_contract", "", () => this.repairProductionContracts(projectId, { ...options, track: false }));
+    }
+    const settings = this.store.getSettings();
+    if (!productionStructureGateEnabled(settings)) {
+      this.reconcileProductionContracts(projectId, { markScriptFailed: false });
+      return { repaired: false, skipped: true, reason: "production_structure_audit_disabled" };
+    }
+    let project = this.store.getProject(projectId);
+    const contractOptions = {
+      productName: project.product?.name || "",
+      commerceShotCount: normalizeCommerceShotCount(project.productionPlan?.commerceShotCount, 3),
+      requireProduct: Boolean(project.product?.name),
+      requireHook: true,
+      requireHookDialogue: true
+    };
+    let failures = productionHardContractFailures(project, contractOptions);
+    if (!failures.length) return { repaired: false, skipped: true, reason: "already_valid" };
+    const initialFailures = failures.map(item => ({ ...item }));
+    const changedShotIds = new Set();
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2 && failures.length; attempt += 1) {
+      this.assertOperationActive(projectId);
+      const targetIds = productionContractRepairShotIds(project, failures);
+      const targets = (project.shots || []).filter(shot => targetIds.includes(String(shot.id)));
+      const orderedShots = (project.shots || []).slice().sort((left, right) => (Number(left.number) || 0) - (Number(right.number) || 0));
+      const context = orderedShots.map(shot => ({
+        id: shot.id,
+        duration: shot.duration,
+        mainlineStage: shot.mainlineStage,
+        title: shot.title,
+        stateBefore: shot.stateBefore,
+        stateAfter: shot.stateAfter,
+        causalLink: shot.causalLink,
+        productMention: shot.productMention
+      }));
+      this.setAutomation(projectId, {
+        stage: "script_contract_repair",
+        message: `蓝图发现 ${failures.length} 项制作问题；AI 正在第 ${attempt}/2 轮定点修复 ${targetIds.join("、")}`
+      });
+      try {
+        const data = await this.generateText(settings.textProvider, [
+          {
+            role: "system",
+            content: `${textStagePromptForProject(project, settings, "scriptRepair", "script_repair")}\n\n你是短剧蓝图定点修订器。只修改报告点名的镜头，必须返回完整 JSON 根对象 {"shots":[...]}。每个返回镜头必须保留原 id、duration、人物身份、事实、事件顺序、关系、结局、所有数字金额和既有商品节点；未被报告点名的内容不得改写。除非报告明确指向对白，否则原对白逐句保留。修复必须落实到 action、mainlineStage、subshots、dialogueTurns、productCausalBridge 等可执行字段，禁止只写解释。`
+          },
+          {
+            role: "user",
+            content: [
+              `【只修这些失败项】${JSON.stringify(failures)}`,
+              `【全剧顺序上下文，不得改写】${JSON.stringify(context)}`,
+              `【人物锁】${JSON.stringify((project.characters || []).map(item => ({ id: item.id, name: item.name, role: item.role, identitySignature: item.identitySignature })))}`,
+              `【场景锁】${JSON.stringify((project.scenes || []).map(item => ({ id: item.id, name: item.name })))}`,
+              `【商品锁】${JSON.stringify({ name: project.product?.name || "", description: project.product?.description || "", sellingPoints: productSellingPoints(project) })}`,
+              `【待修镜头完整原文】${JSON.stringify(targets)}`,
+              "只返回待修镜头，数量和 id 必须与待修镜头完全一致。先在内部逐项对照失败报告，全部落实后再输出 JSON。"
+            ].join("\n")
+          }
+        ], this.scriptGenerationOptions(projectId, "script_contract_repair", {
+          json: true,
+          requiredKeys: ["shots"],
+          unwrapKeys: ["data", "result", "payload", "content"],
+          maxTokens: Math.max(4096, Math.min(16384, targets.length * 1800)),
+          sessionId: `script-contract-repair-${projectId}-${Date.now()}-${attempt}`
+        }));
+        const repaired = Array.isArray(data?.shots) ? data.shots : [];
+        const returnedIds = repaired.map(item => String(item?.id || ""));
+        if (repaired.length !== targets.length || targetIds.some(id => !returnedIds.includes(id)) || returnedIds.some(id => !targetIds.includes(id))) {
+          throw Object.assign(new Error("AI 改错返回的镜头范围与失败报告不一致，已拒绝覆盖原剧本"), { code: "SCRIPT_CONTRACT_REPAIR_SCOPE_MISMATCH" });
+        }
+        const repairedById = new Map(repaired.map(item => [String(item.id), item]));
+        const nextProject = JSON.parse(JSON.stringify(project));
+        nextProject.shots = (project.shots || []).map(original => {
+          const repair = repairedById.get(String(original.id));
+          if (!repair) return original;
+          changedShotIds.add(String(original.id));
+          return {
+            ...original,
+            ...repair,
+            id: original.id,
+            number: original.number,
+            duration: original.duration
+          };
+        });
+        failures = productionHardContractFailures(nextProject, contractOptions);
+        project = nextProject;
+        if (!failures.length) break;
+      } catch (error) {
+        if (isScriptControlError(error)) throw error;
+        lastError = error;
+        if (attempt === 2) break;
+      }
+    }
+    if (failures.length) {
+      throw Object.assign(lastError || new Error(`AI 已完成两轮定点改错，但仍有 ${failures.length} 项未通过；原剧本和失败报告已保留，可再次点击“AI 一键改错”`), {
+        code: lastError?.code || "SCRIPT_CONTRACT_REPAIR_REVIEW_FAILED",
+        failures,
+        initialFailures,
+        retryRequiresExplicitResume: true
+      });
+    }
+    beginProductionRevision(project);
+    project.status = "analyzed";
+    project.currentStage = "assets";
+    project.ideation = {
+      ...(project.ideation || {}),
+      status: "script_ready",
+      errorCode: "",
+      message: `AI 已定点修复 ${changedShotIds.size} 个镜头并通过蓝图复检`
+    };
+    project.script = {
+      ...(project.script || {}),
+      productionContractRepair: {
+        repairedAt: new Date().toISOString(),
+        changedShotIds: [...changedShotIds],
+        initialFailures,
+        remainingFailures: [],
+        sourcePreserved: true
+      }
+    };
+    project.productionContractAudit = {
+      ok: true,
+      checkedAt: new Date().toISOString(),
+      failures: [],
+      repairedByAi: true,
+      changedShotIds: [...changedShotIds]
+    };
+    project.activity.unshift({
+      id: makeId("activity"),
+      at: new Date().toISOString(),
+      type: "script_contract_ai_repair",
+      summary: `AI 按蓝图报告定点修复 ${changedShotIds.size} 个镜头并复检通过`
+    });
+    this.store.saveProject(project);
+    return { repaired: true, changedShotIds: [...changedShotIds], initialFailures, remainingFailures: [] };
+  }
+
+  acceptQualityWarnings(projectId, options = {}) {
+    let project = this.store.getProject(projectId);
+    const settings = this.store.getSettings();
+    const inferredQualityCode = project.productionContractAudit?.ok === false
+      ? "PRODUCTION_HARD_CONTRACT_FAILED"
+      : "";
+    const errorCode = String(options.errorCode || project.automation?.errorCode || inferredQualityCode).trim().toUpperCase();
+    const activeRevision = project.productionRevision || "";
+    const targetCandidateId = String(options.candidateId || "").trim();
+    const candidates = (project.candidates || [])
+      .filter(item => !targetCandidateId || item.id === targetCandidateId)
+      .filter(item => (item.productionRevision || "") === activeRevision)
+      .filter(item => item.filePath && fs.existsSync(item.filePath))
+      .filter(item => item.qualityAudit?.ok === false || (targetCandidateId && item.qualityAudit?.ok !== true))
+      .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")));
+    const latestByStage = new Map();
+    for (const candidate of candidates) {
+      const key = `${candidate.entityType}:${candidate.entityId}:${candidate.stage}`;
+      if (!latestByStage.has(key)) latestByStage.set(key, candidate);
+    }
+    if (!latestByStage.size && !qualityWarningCanBeIgnored(errorCode)) {
+      throw Object.assign(new Error("当前没有可人工忽略的质检提醒；技术错误仍需先修复"), { code: "QUALITY_WARNING_NOT_FOUND" });
+    }
+    const acceptedCandidateIds = [];
+    for (const candidate of latestByStage.values()) {
+      this.store.confirmCandidate(projectId, candidate.id, false, { forceQuality: true });
+      acceptedCandidateIds.push(candidate.id);
+    }
+    project = this.store.getProject(projectId);
+    const acceptedAt = new Date().toISOString();
+    project.qualityReviewOverrides = project.qualityReviewOverrides && typeof project.qualityReviewOverrides === "object"
+      ? project.qualityReviewOverrides
+      : {};
+    if (errorCode === "PRODUCTION_HARD_CONTRACT_FAILED") {
+      project.qualityReviewOverrides.productionStructure = { productionRevision: activeRevision, acceptedAt, errorCode };
+      project.productionContractAudit = ignoredQualityAudit(project.productionContractAudit);
+      project.status = "analyzed";
+      project.currentStage = "assets";
+      project.ideation = { ...(project.ideation || {}), status: "script_ready", errorCode: "", message: "用户已忽略制作结构提醒，继续使用原剧本" };
+    }
+    if (["SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED", "SCRIPT_SEMANTIC_REVIEW_FAILED", "SCRIPT_REFERENCE_SPEC_FAILED"].includes(errorCode)) {
+      const phase = errorCode === "SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED" ? "blueprint" : "full";
+      project.qualityReviewOverrides[phase] = { ideaSignature: ideaSignature(project), acceptedAt, errorCode };
+      const checkpoint = project.script?.generationCheckpoint;
+      const snapshot = checkpoint?.scriptRepair?.failureSnapshot;
+      if (checkpoint && snapshot?.rawJson) {
+        const actualHash = crypto.createHash("sha256").update(String(snapshot.rawJson), "utf8").digest("hex");
+        if (!snapshot.rawJsonSha256 || snapshot.rawJsonSha256 === actualHash) {
+          try {
+            const restored = JSON.parse(snapshot.rawJson);
+            if (phase === "blueprint" && Array.isArray(restored.shotPlan) && restored.shotPlan.length) {
+              checkpoint.storyBible = restored.storyBible || checkpoint.storyBible;
+              checkpoint.shotPlan = restored.shotPlan;
+              checkpoint.blueprint = {
+                ...(restored.storyBible || checkpoint.storyBible || {}),
+                storyBible: restored.storyBible || checkpoint.storyBible || {},
+                shotPlan: restored.shotPlan,
+                semanticReview: ignoredQualityAudit(checkpoint.blueprintRetryContext?.review),
+                targetDurationSeconds: Number(project.generation?.targetDurationSeconds) || restored.shotPlan.reduce((sum, item) => sum + (Number(item.duration) || 0), 0)
+              };
+              checkpoint.blueprintRetryContext = null;
+            }
+            if (phase === "full" && Array.isArray(restored.shots) && restored.shots.length) {
+              checkpoint.shots = restored.shots;
+              checkpoint.semanticReview = ignoredQualityAudit(project.script?.semanticReview);
+            }
+            checkpoint.scriptRepair = null;
+          } catch {}
+        }
+      }
+    }
+    for (const key of ["mediaQualityAudit", "finalQualityAudit"]) {
+      if (project[key]?.ok === false) project[key] = ignoredQualityAudit(project[key]);
+    }
+    const finalOutputPath = String(project.finalQualityAudit?.outputPath || "");
+    let completed = false;
+    if (errorCode === "FINAL_MEDIA_QUALITY_FAILED" && finalOutputPath && fs.existsSync(finalOutputPath)) {
+      archiveCurrentFinalVideo(project, "human-quality-override");
+      project.finalVideoPath = finalOutputPath;
+      project.finalVideoSource = "generated-human-override";
+      project.finalVideoStale = false;
+      project.finalVideoStaleAt = "";
+      project.finalVideoStaleReason = "";
+      project.status = "completed";
+      project.currentStage = "final";
+      completed = true;
+    }
+    project.qualityOverrideHistory = Array.isArray(project.qualityOverrideHistory) ? project.qualityOverrideHistory : [];
+    project.qualityOverrideHistory.unshift({ id: makeId("quality-override"), at: acceptedAt, errorCode, candidateIds: acceptedCandidateIds, productionRevision: activeRevision });
+    project.qualityOverrideHistory = project.qualityOverrideHistory.slice(0, 200);
+    project.activity = Array.isArray(project.activity) ? project.activity : [];
+    project.activity.unshift({ id: makeId("activity"), at: acceptedAt, type: "quality_warning_overridden", summary: `用户已忽略 ${errorCode || acceptedCandidateIds.length + " 项"} 质检提醒并继续使用原结果` });
+    project.activity = project.activity.slice(0, 300);
+    const acceptedStages = [...latestByStage.values()].map(item => String(item.stage || ""));
+    const resumeStage = acceptedStages.some(stage => stage === "shot_video")
+      ? "videos"
+      : acceptedStages.some(stage => stage.startsWith("storyboard_"))
+        ? "shots"
+        : acceptedStages.some(stage => /^(?:scene_asset|character_|prop_asset|wardrobe_asset)/.test(stage))
+          ? "assets"
+          : /SCRIPT|PRODUCTION/.test(errorCode)
+      ? (errorCode === "PRODUCTION_HARD_CONTRACT_FAILED" ? "assets" : "script")
+      : /SCENE|CHARACTER/.test(errorCode)
+        ? "assets"
+        : /STORYBOARD/.test(errorCode)
+          ? "shots"
+          : /SHOT|PROJECT_MEDIA/.test(errorCode)
+            ? "videos"
+            : "final";
+    project.automation = {
+      ...(project.automation || {}),
+      status: completed ? "completed" : "paused_user",
+      stage: completed ? "final" : resumeStage,
+      message: completed ? "用户已忽略成片质检提醒，原成片已确认交付" : "用户已忽略质检提醒，原结果已确认，可继续下一步",
+      errorCode: "",
+      recoverableFailure: !completed,
+      updatedAt: acceptedAt,
+      ...(completed ? { completedAt: acceptedAt } : {})
+    };
+    this.store.saveProject(project);
+    return { accepted: true, acceptedCandidateIds, errorCode, resumeStage, completed };
+  }
+
   async runTrackedOperation(projectId, operation, targetId, action) {
     if (this.hasActiveOperation(projectId)) {
       throw Object.assign(new Error("当前项目已有任务在运行；可切换到其他项目并行制作，或等待本项目任务完成"), {
@@ -8572,34 +9779,45 @@ class WorkbenchWorkflow {
       const control = this.operationControls.get(projectId);
       if (control) control.operation = operation;
     }
-    this.setAutomation(projectId, {
-      operation,
-      targetId: targetId || "",
-      status: "running",
-      stage: operation,
-      message: "生产流程正在运行",
-      progress: null,
-      resumeAfterAccountSwitch: false,
-      recoverableFailure: false,
-      startedAt: new Date().toISOString(),
-      completedAt: null,
-      errorCode: ""
-    });
+    let foundryHandle = null;
     try {
+      const operationProject = this.store.getProject(projectId);
+      foundryHandle = this.foundryKernel?.beginOperation(operationProject, operation, targetId || "", {
+        executionMode: operationProject.productionPlan?.executionMode || "step",
+        currentStage: operationProject.currentStage || ""
+      }) || null;
+      this.setAutomation(projectId, {
+        operation,
+        targetId: targetId || "",
+        status: "running",
+        stage: operation,
+        message: "生产流程正在运行",
+        progress: null,
+        resumeAfterAccountSwitch: false,
+        recoverableFailure: false,
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        errorCode: ""
+      });
       const result = await action();
       if ((this.activeOperations.get(projectId)?.size || 0) <= 1) {
+        const completedProject = this.store.getProject(projectId);
+        const deliveryComplete = projectFinalDeliveryComplete(completedProject);
+        const completedStage = completedAutomationStage(completedProject, operation, targetId);
         this.setAutomation(projectId, {
-          status: "completed",
-          stage: "completed",
-          message: "生产流程已完成",
+          status: deliveryComplete ? "completed" : "stage_completed",
+          stage: deliveryComplete ? "completed" : completedStage,
+          message: deliveryComplete ? "全部生产阶段已完成，成片已通过交付确认" : "本阶段已完成，可继续下一生产阶段",
           resumeAfterAccountSwitch: false,
           recoverableFailure: false,
           completedAt: new Date().toISOString(),
           errorCode: ""
         });
       }
+      this.foundryKernel?.finishOperation(foundryHandle, { ok: true, operation, targetId: targetId || "" });
       return result;
     } catch (error) {
+      try { this.foundryKernel?.failOperation(foundryHandle, error); } catch (runtimeError) { console.warn("[foundry] operation failure audit skipped", runtimeError?.message || runtimeError); }
       if (isScriptControlError(error)) {
         const project = this.store.getProject(projectId);
         const paused = error.code === "SCRIPT_GENERATION_PAUSED";
@@ -8764,6 +9982,9 @@ class WorkbenchWorkflow {
   async auditRecoveredVideoCandidate(projectId, candidate) {
     if (!candidate || candidate.qualityAudit || !this.locateFfmpeg()) return candidate;
     const project = this.store.getProject(projectId);
+    const settings = this.store.getSettings();
+    if (candidate.stage === "shot_video" && !this.qualityGatesEnabled(settings, "videos")) return candidate;
+    if (candidate.stage === "character_video" && !this.qualityGatesEnabled(settings, "assets")) return candidate;
     if ((candidate.productionRevision || "") !== (project.productionRevision || "")) return candidate;
     try {
       if (candidate.stage === "shot_video") await this.auditShotCandidate(projectId, candidate.entityId, candidate.id);
@@ -8905,7 +10126,45 @@ class WorkbenchWorkflow {
         }
       }
       catch { continue; }
-      const automation = project.automation || {};
+      let automation = project.automation || {};
+      // v0.14.0 and earlier reused `completed` for both a single successful
+      // operation and the actual six-stage delivery.  Heal that persisted
+      // ambiguity once: only a present, non-stale final movie is whole-flow
+      // complete; every other successful operation is a resumable stage.
+      if (automation.status === "completed" && !projectFinalDeliveryComplete(project)) {
+        const updatedAt = new Date().toISOString();
+        project.automation = {
+          ...automation,
+          status: "stage_completed",
+          stage: completedAutomationStage(project, automation.operation, automation.targetId),
+          message: "旧版完成状态已校正为“本阶段完成”；后续阶段尚未制作，可继续执行。",
+          progress: sanitizeBatchProgress(automation.progress, "stage_completed"),
+          wholeFlowStatusMigrated: true,
+          updatedAt
+        };
+        this.store.saveProject(project);
+        automation = project.automation;
+        reconciled.push({ projectId: project.id, status: automation.status, operation: automation.operation, migratedWholeFlowStatus: true });
+      }
+      // Projects created by older builds may persist quality reminders or a
+      // single pause signal as a terminal failed automation.  Migrate only the
+      // known advisory codes; real provider/file errors remain visible.
+      if (automation.status === "failed" && legacyAutomationIsAdvisory(automation)) {
+        const updatedAt = new Date().toISOString();
+        project.automation = {
+          ...automation,
+          status: "paused_user",
+          errorCode: "",
+          recoverableFailure: true,
+          advisoryRecovered: true,
+          message: "旧版质检或暂停记录已转为提醒；已有内容已保留，可直接继续下一步。",
+          progress: sanitizeBatchProgress(automation.progress, "paused_user"),
+          updatedAt
+        };
+        this.store.saveProject(project);
+        automation = project.automation;
+        reconciled.push({ projectId: project.id, status: automation.status, operation: automation.operation, migratedAdvisory: true });
+      }
       if (automation.status !== "running" || this.hasActiveOperation(project.id) || activeProjectIds.has(project.id)) {
         // Clear ghost “running” chips left by killed processes even when status is already failed/interrupted.
         const cleaned = sanitizeBatchProgress(automation.progress, automation.status);
@@ -8930,19 +10189,23 @@ class WorkbenchWorkflow {
         && project.finalVideoPath
         && fs.existsSync(project.finalVideoPath)
         && (project.finalQualityAudit?.ok === true || !this.qualityGatesEnabled(settings, "delivery"));
-      const completed = targetFinished || allShotVideosFinished || fullPipelineFinished;
-      const cleanedProgress = sanitizeBatchProgress(automation.progress, completed ? "completed" : "interrupted");
+      const deliveryComplete = projectFinalDeliveryComplete(project) || fullPipelineFinished;
+      const stageCompleted = targetFinished || allShotVideosFinished;
+      const completedStatus = deliveryComplete ? "completed" : stageCompleted ? "stage_completed" : "interrupted";
+      const cleanedProgress = sanitizeBatchProgress(automation.progress, completedStatus);
       project.automation = {
         ...automation,
-        status: completed ? "completed" : "interrupted",
-        stage: completed ? "completed" : automation.stage,
+        status: completedStatus,
+        stage: deliveryComplete ? "completed" : stageCompleted ? completedAutomationStage(project, automation.operation, automation.targetId) : automation.stage,
         progress: cleanedProgress,
-        message: completed
-          ? "应用已核对本地结果：上次流程实际已经完成"
+        message: deliveryComplete
+          ? "应用已核对本地结果：完整成片实际已经完成"
+          : stageCompleted
+            ? "应用已核对本地结果：上次生产阶段实际已经完成，可继续下一阶段"
           : "上次生产进程已中断，当前没有上游任务运行；可从现有资产安全续做",
         resumeAfterAccountSwitch: false,
-        completedAt: completed ? new Date().toISOString() : null,
-        errorCode: completed ? "" : "LOCAL_OPERATION_INTERRUPTED",
+        completedAt: deliveryComplete || stageCompleted ? new Date().toISOString() : null,
+        errorCode: deliveryComplete || stageCompleted ? "" : "LOCAL_OPERATION_INTERRUPTED",
         updatedAt: new Date().toISOString()
       };
       this.store.saveProject(project);
@@ -8953,16 +10216,25 @@ class WorkbenchWorkflow {
 
   async generateTopicOptions(projectId, options = {}) {
     if (options.track !== false) {
-      return this.runTrackedOperation(projectId, "topic_ideation", "", () => this.generateTopicOptions(projectId, { track: false }));
+      const current = this.store.getProject(projectId);
+      const fresh = current.ideation?.status === "ready" && Array.isArray(current.ideation?.topics) && current.ideation.topics.length > 0;
+      return this.runTrackedOperation(projectId, "topic_ideation", "", () => this.generateTopicOptions(projectId, { track: false, fresh }));
     }
     let project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
-    const recoveryEligible = ["failed", "generating"].includes(String(project.ideation?.status || ""));
+    const previousTopics = Array.isArray(project.ideation?.topics) ? project.ideation.topics.map(item => ({ ...item })) : [];
+    const previousTitles = new Set([
+      ...previousTopics.map(item => String(item?.title || "").trim()),
+      ...priorTopicTitles(project, 120)
+    ].filter(Boolean));
+    const generationIndex = Math.max(1, Math.floor(Number(project.ideation?.generationIndex) || 0) + (options.fresh ? 1 : 0));
+    const recoveryEligible = !options.fresh && ["failed", "generating"].includes(String(project.ideation?.status || ""));
     const recovered = recoveryEligible ? recoverTopicOptionsFromDiagnostics(project) : { status: "none" };
     if (recovered.status === "recovered") {
       const selectedTopicId = recovered.topics.some(item => item.id === project.ideation?.selectedTopicId)
         ? project.ideation.selectedTopicId
         : "";
+      rememberTopicBatch(project, recovered.topics, "recovered_upstream");
       project.ideation = {
         ...(project.ideation || {}),
         status: "ready",
@@ -8986,11 +10258,12 @@ class WorkbenchWorkflow {
     // Persist one logical topic request across reconnects and explicit resume.
     // A wall-clock id created on every click causes an unknown SSE response to
     // become a second paid server request after the user presses Continue.
-    const topicSessionId = String(project.ideation?.requestSessionId || `topic-${projectId}-${crypto.randomUUID()}`);
+    const topicSessionId = String(options.fresh ? `topic-${projectId}-${crypto.randomUUID()}` : (project.ideation?.requestSessionId || `topic-${projectId}-${crypto.randomUUID()}`));
     const requestStartedAt = new Date();
     project.ideation = {
       ...(project.ideation || {}),
       requestSessionId: topicSessionId,
+      generationIndex,
       generationStartedAt: requestStartedAt.toISOString(),
       status: "generating",
       message: "正在为中老年观众生成 10 个不同的爆款题材",
@@ -9006,6 +10279,7 @@ class WorkbenchWorkflow {
             "请生成恰好10个候选选题。10个题材不能只是更换姓名，必须满足家庭伦理为主、关系与反转机制多样。",
             project.product?.name ? `当前可能带货商品名称：${project.product.name}` : "当前尚未填写商品，选题不得依赖具体商品成立。",
             productSellingPoints(project) ? `用户提供卖点：${productSellingPoints(project)}` : "商品卖点尚未填写，不得虚构。",
+            previousTitles.size ? `本次是重新抽取，以下上一批片名及其同义改写全部禁用：${[...previousTitles].join("、")}。人物关系、伤害动作、证据物件和反转机制也必须换新。` : "这是首次抽取。",
           ].filter(Boolean).join("\n") }
         // Topic relays commonly wrap a valid body as {data:{topics:[...]}} or
         // {result:{topics:[...]}}. Require the logical shape and unwrap those
@@ -9022,9 +10296,14 @@ class WorkbenchWorkflow {
           costOperation: "topic_ideation"
         });
         const topics = normalizeTopicOptions(data);
+        const repeatedTitles = topics.filter(item => previousTitles.has(String(item.title || "").trim()));
+        if (options.fresh && repeatedTitles.length > 0) {
+          throw Object.assign(new Error(`云端重复返回上一批选题：${repeatedTitles.map(item => item.title).join("、")}`), { code: "TOPIC_NOT_NOVEL" });
+        }
         project = this.store.getProject(projectId);
         const selectedTopicId = topics.some(item => item.id === project.ideation?.selectedTopicId) ? project.ideation.selectedTopicId : "";
         const generatedAt = new Date();
+        rememberTopicBatch(project, topics, "upstream");
         project.ideation = {
           ...(project.ideation || {}),
           status: "ready",
@@ -9043,8 +10322,10 @@ class WorkbenchWorkflow {
     }
     project = this.store.getProject(projectId);
     const generatedAt = new Date();
-    const topics = buildLocalTopicOptions(project);
+    const localBatch = buildNovelTopicBatch(project, generationIndex);
+    const topics = normalizeTopicOptions({ topics: localBatch.topics });
     const selectedTopicId = topics.some(item => item.id === project.ideation?.selectedTopicId) ? project.ideation.selectedTopicId : "";
+    rememberTopicBatch(project, topics, "local_diversity_compiler");
     project.ideation = {
       ...(project.ideation || {}),
       status: "ready",
@@ -9053,6 +10334,7 @@ class WorkbenchWorkflow {
       generatedAt: generatedAt.toISOString(),
       generationElapsedSeconds: Math.max(0, Math.round((generatedAt.getTime() - requestStartedAt.getTime()) / 1000)),
       generationSource: "local-fallback",
+      topicBatchNonce: localBatch.nonce,
       fallbackReason: `${lastError?.code || "TOPIC_RESULT_INVALID"}:${String(lastError?.message || "选题上游暂不可用").slice(0, 180)}`,
       message: "云端选题暂未按结构返回，已由本地编剧补齐 10 个不同题材；可直接选择并继续，不会重复请求或重复扣费",
       errorCode: ""
@@ -9371,7 +10653,8 @@ class WorkbenchWorkflow {
         const gateOptions = {
           ...scriptQualityGateOptions(settings),
           targetDurationSeconds: filmSchedule.totalSeconds,
-          expectedUnitCount: unitCount
+          expectedUnitCount: unitCount,
+          commerceShotCount: filmSchedule.commerceShotCount
         };
         const storyBible = validateStoryBible(materialized.storyBible, gateOptions);
         const blueprint = validateBlueprint({ ...storyBible, shotPlan: materialized.plans }, project.product.name, gateOptions);
@@ -9398,12 +10681,14 @@ class WorkbenchWorkflow {
           ...project,
           generation: { ...(project.generation || {}), targetDurationSeconds: filmSchedule.totalSeconds }
         });
-        const qualityAudit = auditDramaSpec(normalized, {
+        let qualityAudit = auditDramaSpec(normalized, {
           ...scriptQualityGateOptions(settings),
           productName: project.product?.name || "",
+          commerceShotCount: filmSchedule.commerceShotCount,
           sellingPoints: productSellingPoints(project)
         });
-        if (!qualityAudit.ok) {
+        qualityAudit = advisoryQualityAudit(qualityAudit, { note: "本地剧本质检建议已保留；紧凑剧本继续进入资产阶段" });
+        if (!qualityAudit.ok && qualityAudit.blocking !== false) {
           throw Object.assign(new Error(`单次紧凑全剧未通过本地硬审计：${qualityAudit.failures.map(item => item.message).join("；")}`), {
             code: "SCRIPT_DIRECT_FAST_AUDIT_FAILED",
             audit: qualityAudit
@@ -9654,11 +10939,14 @@ class WorkbenchWorkflow {
     const productFacts = `商品名称：${project.product.name}\n用户提供卖点：${productSellingPoints(project)}\n商品外观只由用户上传图片锁定；禁止虚构价格、规格、赠品、品牌承诺或功效；禁止 AI 凭空生成商品图。`;
     const requestedFilmSeconds = Math.max(30, Math.round(Number(project.generation?.targetDurationSeconds) || 300));
     const preferredScriptUnitSeconds = requestedFilmSeconds < 60 ? 5 : (Number(project.generation?.shotDuration) || 10);
-    const filmSchedule = planFilmSchedule(
-      requestedFilmSeconds,
-      project.generation?.engine === "hailuo-h3" ? "puream-hailuo-h3" : (settings.videoProvider?.kind || "puream-seedance"),
-      { preferredUnit: preferredScriptUnitSeconds, engine: project.generation?.engine }
-    );
+    const filmSchedule = {
+      ...planFilmSchedule(
+        requestedFilmSeconds,
+        project.generation?.engine === "hailuo-h3" ? "puream-hailuo-h3" : (settings.videoProvider?.kind || "puream-seedance"),
+        { preferredUnit: preferredScriptUnitSeconds, engine: project.generation?.engine }
+      ),
+      commerceShotCount: normalizeCommerceShotCount(project.productionPlan?.commerceShotCount, 3)
+    };
     const unitCount = filmSchedule.unitCount;
     if (canResume) {
       const resumePlanPrefix = continuousCheckpointPrefix(
@@ -9675,12 +10963,14 @@ class WorkbenchWorkflow {
       `节奏参考（非强制秒表）：冲突/打脸/主反转尽量贴近上限；加压交锋取中段；抽音/过场贴近下限。`,
       `软建议分布（仅当模型漏写 duration 时兜底，可按节拍改）：${filmSchedule.suggestedDurations.join(",")}。`,
       `商品最早从第 ${filmSchedule.productEntryIndex + 1} 个单元（S${String(filmSchedule.productEntryIndex + 1).padStart(2, "0")}）且晚于主反转后才可 productMention=true。`
+      ,commercePlanDirective(filmSchedule.unitCount, filmSchedule.commerceShotCount, project.product?.name || "")
     ].join("");
     const craftBase = {
       totalSeconds: filmSchedule.totalSeconds,
       unitCount,
       productName: project.product.name,
-      productEntryIndex: filmSchedule.productEntryIndex
+      productEntryIndex: filmSchedule.productEntryIndex,
+      commerceShotCount: filmSchedule.commerceShotCount
     };
     if (useFastScriptPath && (!canResume || checkpoint.directFastGeneration === true) && options.directFast !== false) {
       return this.generateDirectFastScript(projectId, {
@@ -9790,6 +11080,7 @@ class WorkbenchWorkflow {
                 totalUnitCount: unitCount,
                 targetDurationSeconds: filmSchedule.totalSeconds,
                 productEntryIndex: filmSchedule.productEntryIndex,
+                commerceShotCount: filmSchedule.commerceShotCount,
                 productName: project.product.name,
                 characters: storyBible.characters,
                 priorPlan: []
@@ -9850,6 +11141,7 @@ class WorkbenchWorkflow {
             totalUnitCount: unitCount,
             targetDurationSeconds: filmSchedule.totalSeconds,
             productEntryIndex: filmSchedule.productEntryIndex,
+            commerceShotCount: filmSchedule.commerceShotCount,
             productName: project.product.name,
             characters: storyBible.characters,
             priorPlan: shotPlan,
@@ -10072,11 +11364,12 @@ class WorkbenchWorkflow {
         }, project.product.name, {
           expectedUnitCount: unitCount,
           targetDurationSeconds: filmSchedule.totalSeconds,
+          commerceShotCount: filmSchedule.commerceShotCount,
           ...scriptQualityGateOptions(settings)
         });
         this.setAutomation(projectId, { stage: "script_blueprint_review", message: `正在终审完整故事蓝图与${unitCount}单元计划` });
         this.assertOperationActive(projectId);
-        const blueprintReview = useFastScriptPath
+        let blueprintReview = useFastScriptPath
           ? {
               ok: true,
               skipped: false,
@@ -10090,7 +11383,8 @@ class WorkbenchWorkflow {
               phase: "blueprint"
             }
           : await this.reviewScriptSemantics(settings, candidateBlueprint, [], `${sessionId}-blueprint-review-${attempt}`, "blueprint", projectId);
-        if (!blueprintReview.ok) {
+        blueprintReview = advisoryQualityAudit(blueprintReview, { note: "故事蓝图终审建议已保留；继续生成完整剧本" });
+        if (!blueprintReview.ok && blueprintReview.blocking !== false) {
           throw Object.assign(new Error(`故事蓝图终审未通过：${blueprintReview.summary || blueprintReview.hardFailures.map(item => item.message).join("；")}`), { code: "SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED", review: blueprintReview });
         }
         const planSum = (candidateBlueprint.shotPlan || []).reduce((sum, item) => sum + (Number(item.duration) || 0), 0);
@@ -10119,6 +11413,7 @@ class WorkbenchWorkflow {
           phase: "blueprint",
           unitCount,
           productEntryIndex: filmSchedule.productEntryIndex
+          ,commerceShotCount: filmSchedule.commerceShotCount
         });
         const snapshot = scriptRepairFailureSnapshot({
           storyBible: checkpoint.storyBible,
@@ -10126,7 +11421,11 @@ class WorkbenchWorkflow {
         });
         const marker = scriptRepairMarker(error, route, snapshot);
         const preservedPlan = route.scoped ? fullFailedPlan.slice(0, route.keepCount) : [];
-        blueprintError = Object.assign(error, {
+        const canAutoRepair = false;
+        blueprintError = Object.assign(error, canAutoRepair ? {
+          automaticRepairScheduled: true,
+          scriptRepair: marker
+        } : {
           noAutomaticRetry: true,
           retryRequiresExplicitResume: true,
           scriptRepair: marker
@@ -10134,25 +11433,29 @@ class WorkbenchWorkflow {
         blueprint = null;
         checkpoint = this.saveScriptCheckpoint(projectId, {
           ...checkpoint,
-          blueprintAttempt: attempt,
+          blueprintAttempt: canAutoRepair ? attempt + 1 : attempt,
           storyBible: route.scoped ? checkpoint.storyBible : null,
           shotPlan: preservedPlan,
           blueprint: null,
           blueprintFailures,
           blueprintRetryContext: failureRecord,
-          scriptRepair: marker,
+          scriptRepair: canAutoRepair ? null : marker,
           updatedAt: new Date().toISOString()
         }, topic, "script_blueprint", route.scoped
-          ? `蓝图终审未通过；已保留 S01-S${String(route.keepCount).padStart(2, "0")}，等待明确继续后只重写 S${String(route.startNumber).padStart(2, "0")}-S${String(route.endNumber).padStart(2, "0")}`
-          : "蓝图终审未通过；完整失败快照已保存，已停止自动二次付费请求");
-        break;
+          ? canAutoRepair
+            ? `蓝图发现 ${failureRecord.review?.hardFailures?.length || failureRecord.failures?.length || 1} 项问题；AI 正在保留 S01-S${String(route.keepCount).padStart(2, "0")} 并定点重写 S${String(route.startNumber).padStart(2, "0")}-S${String(route.endNumber).padStart(2, "0")}`
+            : `蓝图终审未通过；已保留 S01-S${String(route.keepCount).padStart(2, "0")}，可点击“AI 一键改错”只重写 S${String(route.startNumber).padStart(2, "0")}-S${String(route.endNumber).padStart(2, "0")}`
+          : canAutoRepair
+            ? "蓝图发现全局问题；AI 正按审核报告自动重构故事蓝图并复检"
+            : "蓝图终审未通过；完整失败快照已保存，可点击“AI 一键改错”按报告修订");
+        if (!canAutoRepair) break;
       }
     }
     if (!blueprint) {
       const lastFailure = blueprintFailures.at(-1) || {};
       const lastSummary = lastFailure.review?.summary || lastFailure.message || "语义质量不足";
       const route = checkpoint.scriptRepair || {};
-      const failureMessage = `剧本蓝图终审未通过：${lastSummary} 已保存完整失败快照${route.scoped ? `并保留前 ${route.keepCount} 个合格单元；点击继续后只重写 S${String(route.startNumber).padStart(2, "0")}-S${String(route.endNumber).padStart(2, "0")}` : "；点击继续后再按终审报告修订"}。`;
+      const failureMessage = `剧本蓝图复检仍未通过：${lastSummary} 已保存完整失败快照${route.scoped ? `并保留前 ${route.keepCount} 个合格单元；点击“AI 一键改错”后只重写 S${String(route.startNumber).padStart(2, "0")}-S${String(route.endNumber).padStart(2, "0")}` : "；可点击“AI 一键改错”按终审报告再次修订"}。`;
       blueprintError = Object.assign(blueprintError || new Error(failureMessage), {
         message: failureMessage,
         code: blueprintError?.code || "SCRIPT_BLUEPRINT_FAILED",
@@ -10173,7 +11476,7 @@ class WorkbenchWorkflow {
         generationCheckpoint: retryCheckpoint,
         generationLive: {
           ...(project.script?.generationLive || {}),
-          message: "蓝图终审未通过，镜头级整改报告与续写断点已保存",
+          message: "蓝图自动改错复检仍未通过，镜头级整改报告与续写断点已保存",
           updatedAt: new Date().toISOString()
         }
       };
@@ -10514,8 +11817,10 @@ class WorkbenchWorkflow {
             phase: "full"
           }
         : await this.reviewScriptSemantics(settings, blueprint, shots, `${sessionId}-full-review-${draftAttempt}`, "full", projectId);
-      if (!semanticReview.ok) {
-        const error = Object.assign(new Error(`完整剧本终审未通过：${semanticReview.summary || semanticReview.hardFailures?.map(item => item.message).join("；") || "语义质量不足"} 已保存完整失败快照；必须明确点击继续后才会定向修订。`), {
+      semanticReview = advisoryQualityAudit(semanticReview, { note: "完整剧本终审建议已保留；保留当前完整稿并继续进入资产阶段" });
+      if (!semanticReview.ok && semanticReview.blocking !== false) {
+        const canAutoRepair = false;
+        const error = Object.assign(new Error(`完整剧本终审未通过：${semanticReview.summary || semanticReview.hardFailures?.map(item => item.message).join("；") || "语义质量不足"} 已保存完整失败快照；${canAutoRepair ? "AI 正在定点改错并自动复检" : "可点击“AI 一键改错”继续定向修订"}。`), {
           code: "SCRIPT_SEMANTIC_REVIEW_FAILED",
           review: semanticReview
         });
@@ -10523,6 +11828,7 @@ class WorkbenchWorkflow {
           phase: "full",
           unitCount: blueprint.shotPlan.length,
           productEntryIndex: filmSchedule.productEntryIndex
+          ,commerceShotCount: filmSchedule.commerceShotCount
         });
         const snapshot = scriptRepairFailureSnapshot({
           storyBible: checkpoint.storyBible || blueprint,
@@ -10536,12 +11842,21 @@ class WorkbenchWorkflow {
           blueprint,
           draftAttempt: Math.min(2, draftAttempt + 1),
           shots: preservedShots,
-          semanticReview,
-          scriptRepair: marker,
+          semanticReview: canAutoRepair ? null : semanticReview,
+          scriptRepair: canAutoRepair ? null : marker,
           updatedAt: new Date().toISOString()
         }, topic, "script_units", route.scoped
-          ? `完整剧本终审未通过；已保留前 ${route.keepCount} 个正式单元，等待明确继续后重写 S${String(route.startNumber).padStart(2, "0")}-S${String(route.endNumber).padStart(2, "0")}`
-          : "完整剧本终审未通过；完整失败快照已保存，已停止自动二次付费请求");
+          ? canAutoRepair
+            ? `完整剧本发现问题；AI 已保留前 ${route.keepCount} 个正式单元，正在定点重写 S${String(route.startNumber).padStart(2, "0")}-S${String(route.endNumber).padStart(2, "0")}`
+            : `完整剧本复检仍未通过；已保留前 ${route.keepCount} 个正式单元，可点击“AI 一键改错”重写 S${String(route.startNumber).padStart(2, "0")}-S${String(route.endNumber).padStart(2, "0")}`
+          : canAutoRepair
+            ? "完整剧本发现全局问题；AI 正按审核报告自动重写并复检"
+            : "完整剧本复检仍未通过；完整失败快照已保存，可点击“AI 一键改错”再次修订");
+        if (canAutoRepair) {
+          shots = preservedShots;
+          semanticReview = null;
+          continue;
+        }
         project = this.store.getProject(projectId);
         project.ideation = { ...(project.ideation || {}), status: "failed", message: error.message, errorCode: error.code };
         project.script = {
@@ -10551,7 +11866,7 @@ class WorkbenchWorkflow {
           generationCheckpoint: checkpoint,
           generationLive: {
             ...(project.script?.generationLive || {}),
-            message: route.scoped ? `终审未通过；已保留前 ${route.keepCount} 个单元，等待定向续写` : "终审未通过；完整失败快照已保存",
+            message: route.scoped ? `复检仍未通过；已保留前 ${route.keepCount} 个单元，可一键定向改错` : "复检仍未通过；完整失败快照已保存，可一键改错",
             updatedAt: new Date().toISOString()
           }
         };
@@ -10591,12 +11906,14 @@ class WorkbenchWorkflow {
       ...project,
       generation: { ...(project.generation || {}), targetDurationSeconds: filmSchedule.totalSeconds }
     });
-    const qualityAudit = auditDramaSpec(normalized, {
-      ...scriptQualityGateOptions(settings),
-      productName: project.product?.name || "",
-      sellingPoints: productSellingPoints(project)
+      let qualityAudit = auditDramaSpec(normalized, {
+        ...scriptQualityGateOptions(settings),
+        productName: project.product?.name || "",
+        commerceShotCount: normalizeCommerceShotCount(project.productionPlan?.commerceShotCount, 3),
+        sellingPoints: productSellingPoints(project)
     });
-    if (!qualityAudit.ok) {
+    qualityAudit = advisoryQualityAudit(qualityAudit, { note: "参考片规格建议已保留；完整剧本继续进入资产阶段" });
+    if (!qualityAudit.ok && qualityAudit.blocking !== false) {
       const error = Object.assign(new Error(`自动生成剧本未通过参考片硬审计：${qualityAudit.failures.map(item => item.message).join("；")}`), { code: "SCRIPT_REFERENCE_SPEC_FAILED", audit: qualityAudit });
       const route = scriptFailureRepairRoute(error, {
         phase: "full",
@@ -10716,6 +12033,130 @@ class WorkbenchWorkflow {
     return result;
   }
 
+  async rewriteDialogueScript(projectId, sourceText, options = {}) {
+    if (options.track !== false) {
+      return this.runTrackedOperation(projectId, "dialogue_rewrite", "script", () => this.rewriteDialogueScript(projectId, sourceText, { ...options, track: false }));
+    }
+    const project = this.store.getProject(projectId);
+    const settings = this.store.getSettings();
+    const source = String(sourceText || "").replace(/\r/g, "").trim();
+    if (!source) throw Object.assign(new Error("请选择包含人物对白的 TXT 或 Markdown 文件"), { code: "DIALOGUE_DRAFT_REQUIRED", localValidation: true });
+    const parserSource = source.replace(/\s{2,}(?=(?:[A-Za-zＡ-Ｚａ-ｚ]|甲|乙|丙|丁|角色\s*\d+)\s*[：:])/g, "\n");
+    const sourceLedger = parseSourceDialogueLedger(parserSource);
+    if (!sourceLedger.length) {
+      throw Object.assign(new Error("没有识别到“人物名：对白”格式；请参考 A：内容、B：内容，每句单独一行"), {
+        code: "DIALOGUE_DRAFT_FORMAT_REQUIRED",
+        localValidation: true
+      });
+    }
+    const nameMap = dialogueRewriteNameMap(sourceLedger);
+    const sourceFingerprint = crypto.createHash("sha256").update(parserSource).digest("hex");
+    const chunks = [];
+    let current = [];
+    let currentChars = 0;
+    for (const item of sourceLedger) {
+      const itemChars = String(item.text || "").length + String(item.tone || "").length + 64;
+      if (current.length && (current.length >= 36 || currentChars + itemChars > 6_000)) {
+        chunks.push(current);
+        current = [];
+        currentChars = 0;
+      }
+      current.push(item);
+      currentChars += itemChars;
+    }
+    if (current.length) chunks.push(current);
+
+    const control = this.operationControls.get(projectId);
+    const rewrittenChunks = await mapWithConcurrency(chunks, Math.min(2, chunks.length), async (chunk, chunkIndex) => {
+      this.assertOperationActive(projectId);
+      const first = chunk[0];
+      const last = chunk.at(-1);
+      const nearbyContext = parserSource.slice(Math.max(0, first.sourceStart - 800), Math.min(parserSource.length, last.sourceEnd + 800));
+      const sourceLines = chunk.map(item => ({
+        sourceId: item.id,
+        speaker: item.speaker,
+        tone: item.tone,
+        dialogue: item.text
+      }));
+      const localFallback = reason => ({
+        lines: localDialogueRewriteLines(chunk, nameMap),
+        fallback: true,
+        fallbackReason: String(reason?.code || reason || "LOCAL_DIALOGUE_PRESERVATION")
+      });
+      try {
+        const data = await this.generateText(settings.textProvider, [
+          {
+            role: "system",
+            content: "你是短剧对白保真编辑。只输出严格 JSON。你的权限仅限：把 A/B 等人物代号替换成给定姓名；轻微口语化措辞；在同一句里补充很少的衔接话；补充不改变事实的语气、表情、动作和场景提示。绝对禁止改变故事事实、事件顺序、人物关系、冲突结果、结局、数字金额、商品出现节点；禁止删除、合并、调换或新增独立对白句。必须逐条返回输入 sourceId，数量和顺序完全一致。"
+          },
+          {
+            role: "user",
+            content: `人物名称映射：${JSON.stringify(nameMap)}\n这是第 ${chunkIndex + 1}/${chunks.length} 段。返回 {"lines":[{"sourceId":"D001","speakerName":"映射后姓名","tone":"贴合原意的语气表情","dialogue":"轻微改写后的完整原句","scene":"不新增事实的简短场景","action":"不新增事实的简短动作"}]}。每句改写应保留原句大部分用词，新增内容不超过原句约 50%，数字必须原样保留。\n邻近上下文（仅用于理解，不得另写对白）：\n${nearbyContext}\n\n本段逐句事实账本：\n${JSON.stringify(sourceLines)}`
+          }
+        ], {
+          json: true,
+          requiredKeys: ["lines"],
+          signal: control?.controller.signal,
+          timeoutMs: SCRIPT_TEXT_REQUEST_TIMEOUT_MS,
+          maxReconnectAttempts: 1,
+          sessionId: `dialogue-rewrite-${sourceFingerprint.slice(0, 20)}-${chunkIndex + 1}-v1`,
+          maxTokens: Math.min(8192, Math.max(1024, 640 + chunk.length * 150)),
+          costProjectId: projectId,
+          costOperation: `dialogue_rewrite_chunk_${chunkIndex + 1}`
+        });
+        return { lines: validateDialogueRewriteLines(chunk, data?.lines, nameMap), fallback: false, fallbackReason: "" };
+      } catch (error) {
+        if (isScriptControlError(error)) throw error;
+        return localFallback(error);
+      }
+    });
+    const rewrittenLines = rewrittenChunks.flatMap(item => item.lines);
+    const completeScript = renderDialogueRewriteScript(parserSource, sourceLedger, rewrittenLines, nameMap);
+    const fallbackChunks = rewrittenChunks
+      .map((item, index) => ({ ...item, chunkIndex: index + 1 }))
+      .filter(item => item.fallback);
+    beginProductionRevision(project);
+    project.productionPlan = {
+      ...(project.productionPlan || {}),
+      inputMode: "manual",
+      scriptFormat: "dialogue",
+      scriptFormatConfirmed: true
+    };
+    project.script = {
+      ...(project.script || {}),
+      raw: completeScript,
+      analysis: null,
+      analyzedAt: null,
+      analysisCheckpoint: null,
+      generationCheckpoint: null,
+      generationLive: null,
+      sourceDialogueLedger: [],
+      dialogueRewrite: {
+        sourceText: source,
+        sourceFingerprint,
+        rewrittenAt: new Date().toISOString(),
+        nameMap,
+        lineage: rewrittenLines,
+        fallback: fallbackChunks.length > 0,
+        fallbackChunks: fallbackChunks.map(item => ({ index: item.chunkIndex, reason: item.fallbackReason })),
+        preservedStory: true,
+        immutableContracts: ["story_facts", "event_order", "relationships", "ending", "numbers", "product_appearance_nodes"]
+      }
+    };
+    project.status = "draft";
+    project.currentStage = "script";
+    project.activity.unshift({
+      id: makeId("activity"),
+      at: new Date().toISOString(),
+      type: "dialogue_rewrite",
+      summary: fallbackChunks.length
+        ? `对白稿已生成完整剧本；${fallbackChunks.length} 个云端不合格片段已自动使用本地保真整理`
+        : `对白稿已完成逐句轻改并生成完整剧本，共 ${rewrittenLines.length} 句`
+    });
+    this.store.saveProject(project);
+    return this.store.getProject(projectId);
+  }
+
   async analyzeScript(projectId, options = {}) {
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "analyze_script", "script", () => this.analyzeScript(projectId, { ...options, track: false }));
@@ -10723,10 +12164,16 @@ class WorkbenchWorkflow {
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
     if (!project.script?.raw?.trim()) throw Object.assign(new Error("请先粘贴完整短剧剧本"), { code: "SCRIPT_REQUIRED" });
+    const sourceFormat = detectUploadedScriptFormat(project.script.raw);
+    const sourceSceneLedger = buildSourceSceneLedger(project.script.raw);
     const commitAnalysis = (normalized, analysisMethod, analysisChunks) => {
+      const sceneContract = normalized?.sourceSceneLedger?.explicit ? normalized.sourceSceneLedger : sourceSceneLedger;
+      normalized = enforceSourceSceneLedger({ ...normalized, detectedFormat: String(normalized?.detectedFormat || sourceFormat).trim() }, sceneContract, normalized?.sourceDialogueLedger);
+      assertSourceSceneParity(normalized, sceneContract);
       const auditedQuality = auditDramaSpec(normalized, {
         ...scriptQualityGateOptions(settings),
         productName: project.product?.name || "",
+        commerceShotCount: normalizeCommerceShotCount(project.productionPlan?.commerceShotCount, 3),
         sellingPoints: productSellingPoints(project)
       });
       const userAuthoredScript = projectInputMode(project) === "manual";
@@ -10734,7 +12181,7 @@ class WorkbenchWorkflow {
       // User-authored material is an instruction source, not prose for the AI
       // to rewrite. Keep quality findings visible as suggestions while local
       // structure, duration and exact-dialogue parity remain hard contracts.
-      const qualityAudit = userAuthoredScript && !auditedQuality.ok
+      let qualityAudit = userAuthoredScript && !auditedQuality.ok
         ? {
             ...auditedQuality,
             ok: true,
@@ -10745,6 +12192,7 @@ class WorkbenchWorkflow {
             note: "用户上传剧本已按原稿执行；审核发现项作为提示词建议展示，不擅自改写或拦截原稿"
           }
         : auditedQuality;
+      qualityAudit = advisoryQualityAudit(qualityAudit, { note: "剧本质检建议已保留；当前完整剧本继续进入资产阶段" });
       project.script.analysis = normalized.story;
       project.script.modeSynopsis = String(normalized.modeSynopsis || normalized.story?.synopsis || normalized.story?.premise || "").trim();
       project.script.detectedFormat = String(normalized.detectedFormat || "").trim();
@@ -10753,6 +12201,8 @@ class WorkbenchWorkflow {
       project.script.sourceDialogueLedger = Array.isArray(normalized.sourceDialogueLedger)
         ? normalized.sourceDialogueLedger.map(item => ({ ...item }))
         : [];
+      project.script.sourceSceneLedger = normalized.sourceSceneLedger || sceneContract;
+      project.script.sceneRecognitionReport = normalized.sourceSceneLedger?.report || sceneContract?.report || null;
       project.script.qualityAudit = qualityAudit;
       project.script.promptLibraryVersion = settings.promptLibraryVersion || "";
       project.script.analyzedAt = new Date().toISOString();
@@ -10765,7 +12215,7 @@ class WorkbenchWorkflow {
           scriptFormatConfirmed: true
         };
       }
-      if (!qualityAudit.ok) {
+      if (!qualityAudit.ok && qualityAudit.blocking !== false) {
         project.currentStage = "script";
         project.status = "script_needs_revision";
         this.store.saveProject(project);
@@ -10856,14 +12306,20 @@ class WorkbenchWorkflow {
       shots: [authoredShotSchema]
     };
     const providerKind = projectVideoProviderKind(project, settings);
-    const sourceDialogueLedger = parseSourceDialogueLedger(project.script.raw);
+    const uploadedSections = splitUploadedScriptSections(project.script.raw);
+    const productionSourceText = uploadedSections.dramaticBody;
+    const productionSceneLedger = buildSourceSceneLedger(productionSourceText);
+    const sourceDialogueLedger = bindDialogueLedgerToScenes(parseSourceDialogueLedger(productionSourceText), productionSceneLedger);
     const durationEstimate = projectInputMode(project) === "manual"
-      ? estimateUploadedScriptDuration(project.script.raw, sourceDialogueLedger, providerKind, { engine: projectVideoEngine(project) })
+      ? estimateUploadedScriptDuration(productionSourceText, sourceDialogueLedger, providerKind, { engine: projectVideoEngine(project) })
       : null;
     const targetSeconds = durationEstimate?.targetSeconds
       || Math.max(30, Math.round(Number(project.generation?.targetDurationSeconds) || 300));
-    const filmSchedule = planFilmSchedule(targetSeconds, providerKind, { engine: projectVideoEngine(project) });
-    const chunks = analysisChunksForSchedule(project.script.raw, filmSchedule.unitCount);
+    const filmSchedule = {
+      ...planFilmSchedule(targetSeconds, providerKind, { engine: projectVideoEngine(project) }),
+      commerceShotCount: normalizeCommerceShotCount(project.productionPlan?.commerceShotCount, 3)
+    };
+    const chunks = analysisChunksForSchedule(productionSourceText, filmSchedule.unitCount);
     const assignedDialogueIds = new Set();
     const chunkSchedules = analysisChunkSchedules(chunks, filmSchedule).map(chunk => {
       let chunkLedger = sourceDialogueLedger.filter(item => item.sourceStart >= chunk.start && item.sourceStart < chunk.end);
@@ -10876,7 +12332,7 @@ class WorkbenchWorkflow {
         }
       }
       chunkLedger = chunkLedger.sort((left, right) => left.order - right.order);
-      return { ...chunk, sourceDialogueLedger: chunkLedger };
+      return { ...chunk, sourceDialogueLedger: chunkLedger, sourceSceneLedger: sceneContextForRange(productionSceneLedger, chunk.start, chunk.end) };
     });
     for (const item of sourceDialogueLedger) {
       if (assignedDialogueIds.has(item.id)) continue;
@@ -10897,10 +12353,11 @@ class WorkbenchWorkflow {
       end: chunk.end,
       unitCount: chunk.unitCount,
       durations: chunk.durations,
-      dialogue: (chunk.sourceDialogueLedger || []).map(item => [item.id, item.speaker, item.tone, item.text])
+      dialogue: (chunk.sourceDialogueLedger || []).map(item => [item.id, item.speaker, item.tone, item.text, item.sourceSceneId]),
+      scenes: (chunk.sourceSceneLedger?.catalogue || []).map(item => [item.id, item.name, item.aliases])
     })).digest("hex");
     const analysisSignature = crypto.createHash("sha256").update(JSON.stringify({
-      version: 2,
+      version: 3,
       sourceFingerprint,
       targetSeconds: filmSchedule.totalSeconds,
       unitDurations: filmSchedule.unitDurations,
@@ -10923,7 +12380,7 @@ class WorkbenchWorkflow {
     })).digest("hex");
     const analysisConcurrency = uploadedAnalysisConcurrency(chunkSchedules);
     const checkpointSeed = {
-      version: 2,
+      version: 3,
       kind: "uploaded-script-analysis",
       signature: analysisSignature,
       sourceFingerprint,
@@ -11010,9 +12467,10 @@ class WorkbenchWorkflow {
     await mapWithConcurrency(pendingChunks, analysisConcurrency, async chunk => {
       this.assertOperationActive(projectId);
       const ledgerPrompt = sourceDialoguePromptBlock(chunk.sourceDialogueLedger);
+      const scenePrompt = sourceScenePromptBlock(chunk.sourceSceneLedger);
       const messages = [
-        { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}` },
-        { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先判断本段故事因果、人物关系、每句话的说话人/听者/语气/表情和商品出现时机，再写人物场景资产信息、分镜结构与sourceDialogueBindings。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。\n\n剧本片段：\n${chunk.text}` }
+        { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n${scenePrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}` },
+        { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先判断本段故事因果、人物关系、每句话的说话人/听者/语气/表情和商品出现时机，再写人物场景资产信息、分镜结构与sourceDialogueBindings。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。\n${uploadedSections.metadata ? `\n人物小传/故事简介（只用于建立人物与背景事实，绝对不能生成“人物介绍”“角色展示”“故事简介”镜头）：\n${uploadedSections.metadata}\n` : ""}\n正式剧情片段（只有这里可以转成成片镜头）：\n${chunk.text}` }
       ];
       const requestChars = JSON.stringify(messages).length;
       const control = this.operationControls.get(projectId);
@@ -11042,7 +12500,7 @@ class WorkbenchWorkflow {
             code: "SCRIPT_ANALYSIS_UNIT_COUNT_MISMATCH"
           });
         }
-        bound = bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger);
+        bound = enforceSourceSceneLedger(bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger), chunk.sourceSceneLedger, chunk.sourceDialogueLedger);
       } catch (error) {
         if (isScriptControlError(error)) throw error;
         fallbackReason = `${error?.code || "TEXT_RESULT_INVALID"}:${String(error?.message || "").slice(0, 180)}`;
@@ -11065,7 +12523,7 @@ class WorkbenchWorkflow {
       }
       return bound;
     });
-    const data = mergeAnalysisChunks(partials);
+    const data = enforceSourceSceneLedger(mergeAnalysisChunks(partials), productionSceneLedger, sourceDialogueLedger);
     return commitAnalysis(conformImportedAnalysisToDurationContract(
       data,
       project,
@@ -11082,11 +12540,17 @@ class WorkbenchWorkflow {
 
   imagePrompt(project, settings, stage, entity, options = {}) {
     const override = entity?.promptOverrides?.[stage] || {};
+    const productionContract = project?.foundry?.contract || compileProductionContract(project, settings, { source: `image_stage:${stage}` });
+    const enforceAbsolutePolicy = prompt => [
+      String(prompt || "").trim(),
+      assetPromptPolicy(stage, productionContract),
+      contractPromptBlock(productionContract)
+    ].filter(Boolean).join("\n\n");
     if (!options.forceCompiled) {
       if (override.mode === "manual" && String(override.manual || "").trim()) {
-        // User-owned means byte-for-byte user-owned. References still travel in
-        // the provider request, but no hidden system template rewrites this text.
-        return String(override.manual).trim();
+        // The authored body stays byte-for-byte intact. Project-level absolute
+        // media policies are appended because they outrank every prompt source.
+        return enforceAbsolutePolicy(String(override.manual).trim());
       }
       if (String(override.system || "").trim()) {
         const system = String(override.system).trim();
@@ -11097,16 +12561,16 @@ class WorkbenchWorkflow {
         );
         // Reject short shared imagePrompt mistakenly saved as sheet override.
         const staleSheet = stage === "storyboard_sheet" && !/合图|接触印|等宽|小格|分镜板|contact sheet|panelCount/.test(system);
-        if (!staleEndClone && !staleSheet) return withStageParity(system, settings.prompts, stage);
+        if (!staleEndClone && !staleSheet) return enforceAbsolutePolicy(withStageParity(system, settings.prompts, stage));
       }
       // Storyboard start/end/sheet must never reuse the short shared systemImagePrompt.
       // Sheet especially needs the multi-panel contact-sheet template, not a one-line beat.
       if (!["storyboard_start", "storyboard_end", "storyboard_sheet"].includes(stage)) {
         if (entity?.promptMode === "manual" && String(entity?.manualImagePrompt || "").trim()) {
-          return withStageParity(String(entity.manualImagePrompt).trim(), settings.prompts, stage);
+          return enforceAbsolutePolicy(withStageParity(String(entity.manualImagePrompt).trim(), settings.prompts, stage));
         }
         if (String(entity?.systemImagePrompt || "").trim() && entity?.promptMode !== "manual") {
-          return withStageParity(String(entity.systemImagePrompt).trim(), settings.prompts, stage);
+          return enforceAbsolutePolicy(withStageParity(String(entity.systemImagePrompt).trim(), settings.prompts, stage));
         }
       }
     }
@@ -11114,13 +12578,21 @@ class WorkbenchWorkflow {
   }
 
   compileImagePrompt(project, settings, stage, entity) {
-    const finalize = prompt => withStageParity(prompt, settings.prompts, stage);
+    const productionContract = project?.foundry?.contract || compileProductionContract(project, settings, { source: `image_compile:${stage}` });
+    const finalize = prompt => [
+      withStageParity(prompt, settings.prompts, stage),
+      assetPromptPolicy(stage, productionContract),
+      contractPromptBlock(productionContract)
+    ].filter(Boolean).join("\n\n");
     const dramaVisualStyle = settings.generation.visualStyle || "";
     const matrix = matrixEntryForProject(project, settings);
     const matrixImageDirective = `【制作矩阵·${matrix.label}】${matrix.imagePolicy} ${matrix.framePolicy}`;
     const assetStoryContext = storyAssetDirective(project, stage, entity);
     // Character sheets must not inject "写实影视短剧" style slogans — those trip image safety filters.
     const characterOnly = ["character_sheet", "character_three_view", "character_intro"].includes(stage);
+    const characterBackgroundLock = characterOnly
+      ? "\n【人物资产固定背景硬合同】整张画布唯一背景必须为纯色 #E9E9E9，所有视图区背景颜色完全一致；禁止渐变、烟雾、云纹、阴影墙、地平线、暗角、黑边、留黑、透明底、环境景物和不同色块。人物必须完整落在有效画布内，画面四边不得出现黑色填充。"
+      : "";
     const durationSeconds = Math.max(5, Math.min(15, Math.round(Number(entity?.duration) || Number(project?.generation?.shotDuration) || 10)));
     const panelCount = Math.max(5, Math.min(15, durationSeconds));
     const continuityValue = value => {
@@ -11182,9 +12654,9 @@ class WorkbenchWorkflow {
       sheetPanelAspectRatio: "9:16"
     };
     const mesh = projectRequiresFaceMesh(project, settings) ? `\n${settings.prompts.seedanceFaceMesh || seedanceFaceMeshInstruction()}` : "";
-    if (stage === "character_sheet") return finalize(`${fillTemplate(settings.prompts.characterSheet || settings.prompts.characterThreeView, values)}${mesh}\n${assetStoryContext}\n${matrixImageDirective}`);
-    if (stage === "character_three_view") return finalize(`${fillTemplate(settings.prompts.characterThreeView, values)}${mesh}\n${assetStoryContext}\n${matrixImageDirective}`);
-    if (stage === "character_intro") return finalize(`${fillTemplate(settings.prompts.characterIntro, values)}${mesh}\n${assetStoryContext}\n${matrixImageDirective}`);
+    if (stage === "character_sheet") return finalize(`${fillTemplate(settings.prompts.characterSheet || settings.prompts.characterThreeView, values)}${characterBackgroundLock}${mesh}\n${assetStoryContext}\n${matrixImageDirective}`);
+    if (stage === "character_three_view") return finalize(`${fillTemplate(settings.prompts.characterThreeView, values)}${characterBackgroundLock}${mesh}\n${assetStoryContext}\n${matrixImageDirective}`);
+    if (stage === "character_intro") return finalize(`${fillTemplate(settings.prompts.characterIntro, values)}${characterBackgroundLock}${mesh}\n${assetStoryContext}\n${matrixImageDirective}`);
     if (stage === "scene_asset") return finalize(`${fillTemplate(settings.prompts.sceneAsset, values)}\n${assetStoryContext}\n${matrixImageDirective}`);
     const base = fillTemplate(settings.prompts.storyboardImage, values);
     const shotAnchor = [
@@ -11338,6 +12810,7 @@ ${shotAnchor}
   }
 
   async previewShotVideoPrompt(projectId, shotId) {
+    this.reconcileProjectCharacterReferences(projectId);
     let project = annotateProjectShotStrategies(this.store.getProject(projectId));
     const settings = this.store.getSettings();
     let shot = project.shots.find(item => item.id === shotId);
@@ -11401,6 +12874,7 @@ ${shotAnchor}
   }
 
   async refreshCreatorPrompts(projectId, options = {}) {
+    this.reconcileProjectCharacterReferences(projectId);
     let project = annotateProjectShotStrategies(this.store.getProject(projectId));
     const settings = this.store.getSettings();
     const mode = normalizeProjectMode(project.generation?.mode);
@@ -11951,6 +13425,7 @@ ${shotAnchor}
     if (["storyboard_start", "storyboard_end"].includes(stage)) {
       prompt = limitStaticStoryboardImagePrompt(prompt);
     }
+    prompt = compactGeneratedImagePrompt(prompt, stage, stage === "storyboard_sheet" ? 1700 : 1850);
     let activePrompt = prompt;
     const maxPolicyAttempts = 3;
     for (let policyAttempt = 1; policyAttempt <= maxPolicyAttempts; policyAttempt += 1) {
@@ -12002,6 +13477,13 @@ ${shotAnchor}
             code: "PRODUCT_REFERENCE_REQUIRED",
             cause: error
           });
+        }
+        if (isPromptTooLongError(error) && policyAttempt < maxPolicyAttempts) {
+          activePrompt = compactGeneratedImagePrompt(activePrompt, stage, policyAttempt === 1 ? 1350 : 950);
+          this.setAutomation(projectId, {
+            message: `${entity?.name || entity?.title || stage} 提示词已在本地无损压缩，正在重新提交`
+          });
+          continue;
         }
         if (isImageContentPolicyError(error) && policyAttempt < maxPolicyAttempts) {
           this.setAutomation(projectId, {
@@ -12075,31 +13557,37 @@ ${shotAnchor}
         method: options.faceMeshSourceCandidateId ? "reference-remesh" : "generation-prompt"
       } : { required: false, applied: false }
     });
-    if (stage === "character_intro") {
+    if (stage === "character_intro" && this.qualityGatesEnabled(settings, "assets")) {
       await this.auditCharacterIntroCandidate(projectId, entityId, candidate.id);
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
-    if (stage === "scene_asset") {
-      await this.auditSceneAssetCandidate(projectId, entityId, candidate.id);
+    if (stage === "character_intro" && !this.qualityGatesEnabled(settings, "assets")) {
+      this.store.confirmCandidate(projectId, candidate.id, false);
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
-      if (candidate.qualityAudit?.ok === true) {
+    }
+    if (stage === "scene_asset") {
+      if (this.qualityGatesEnabled(settings, "assets")) await this.auditSceneAssetCandidate(projectId, entityId, candidate.id);
+      candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+      if (!this.qualityGatesEnabled(settings, "assets") || candidate.qualityAudit?.ok === true) {
         this.store.confirmCandidate(projectId, candidate.id, false);
         candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
       }
     }
     if (stage === "storyboard_start" || stage === "storyboard_end") {
-      await this.auditStoryboardCandidate(projectId, entityId, candidate.id);
+      if (this.qualityGatesEnabled(settings, "storyboards")) await this.auditStoryboardCandidate(projectId, entityId, candidate.id);
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
       // Newly drawn frames that pass QC become the active selection immediately,
       // otherwise the old selected sibling keeps blocking video generation.
-      if (candidate.qualityAudit?.ok === true) {
+      if (!this.qualityGatesEnabled(settings, "storyboards") || candidate.qualityAudit?.ok === true) {
         this.store.confirmCandidate(projectId, candidate.id, false);
         candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
       }
     }
     if (stage === "storyboard_sheet") {
-      const audit = await this.auditStoryboardCandidate(projectId, entityId, candidate.id);
-      if (audit.ok === true) {
+      const audit = this.qualityGatesEnabled(settings, "storyboards")
+        ? await this.auditStoryboardCandidate(projectId, entityId, candidate.id)
+        : null;
+      if (!audit || audit.ok === true) {
         this.store.confirmCandidate(projectId, candidate.id, false);
       }
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
@@ -12217,8 +13705,11 @@ ${shotAnchor}
       }
     }
     const decision = assessEmptySceneImage(image, skin, characterReferences, faceProbe, {
-      // Judge people leakage from the scene bible text, not from negative prompt boilerplate.
-      prompt: `${scene.name || ""}\n${scene.description || ""}\n${candidate.prompt || ""}`,
+      // Inspect only user-authored positive text. The compiled prompt contains
+      // negative clauses such as "禁止人物", which are not evidence of people.
+      prompt: scene.promptOverrides?.scene_asset?.mode === "manual"
+        ? String(scene.promptOverrides.scene_asset.manual || candidate.prompt || "")
+        : [scene.name, scene.description, scene.scenePurpose].filter(Boolean).join("\n"),
       characters: project.characters || [],
       fourView
     });
@@ -12231,6 +13722,7 @@ ${shotAnchor}
       faceProbe,
       fourView,
       closestCharacter: decision.closestCharacter,
+      advisories: decision.advisories || [],
       failures: decision.failures,
       repairDirective: decision.ok
         ? ""
@@ -12240,19 +13732,36 @@ ${shotAnchor}
     return audit;
   }
 
+  acceptQualityAdvisoryCandidate(projectId, candidate, audit = null) {
+    if (!candidate?.id) return candidate || null;
+    if (audit && candidate.qualityAudit !== audit) {
+      this.store.updateCandidate(projectId, candidate.id, { qualityAudit: audit });
+    }
+    this.store.confirmCandidate(projectId, candidate.id, false, {
+      forceQuality: true,
+      qualityOverrideMode: "advisory_continue"
+    });
+    return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+  }
+
   async ensureSceneAssetCandidate(projectId, sceneId) {
     const settings = this.store.getSettings();
     let lastAudit = null;
-    let existing = candidateReady(this.store.getProject(projectId), "scene", sceneId, "scene_asset", settings);
+    let lastCandidate = null;
+    let existing = candidateReady(this.store.getProject(projectId), "scene", sceneId, "scene_asset", settings)
+      || selectedOrLatest(this.store.getProject(projectId), "scene", sceneId, "scene_asset");
+    if (existing?.qualityAudit?.ok === false && existing.filePath && fs.existsSync(existing.filePath)) {
+      return this.acceptQualityAdvisoryCandidate(projectId, existing, existing.qualityAudit);
+    }
+    if (existing && !this.qualityGatesEnabled(settings, "assets")) return existing;
     if (existing) {
-      lastAudit = !this.qualityGatesEnabled(settings, "assets")
-        ? await this.auditSceneAssetCandidate(projectId, sceneId, existing.id)
-        : existing.qualityAudit?.type === "empty_scene_four_view"
+      lastCandidate = existing;
+      lastAudit = existing.qualityAudit?.type === "empty_scene_four_view"
         ? existing.qualityAudit
         : await this.auditSceneAssetCandidate(projectId, sceneId, existing.id);
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
     }
-    const maxAttempts = this.qualityGatesEnabled(settings, "assets") ? 3 : 1;
+    const maxAttempts = 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const repair = lastAudit?.repairDirective ? `\n\n【上次失败修复】${lastAudit.repairDirective}` : "";
       const currentProject = this.store.getProject(projectId);
@@ -12271,14 +13780,15 @@ ${shotAnchor}
           }
         }
       );
+      lastCandidate = candidate;
+      if (!this.qualityGatesEnabled(settings, "assets")) {
+        this.store.confirmCandidate(projectId, candidate.id, false);
+        return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+      }
       lastAudit = candidate.qualityAudit || await this.auditSceneAssetCandidate(projectId, sceneId, candidate.id);
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
-    throw Object.assign(new Error(`场景“${this.store.getProject(projectId).scenes.find(item => item.id === sceneId)?.name || sceneId}”连续生成仍像带人物的空场景板：${(lastAudit?.failures || []).map(item => item.message).join("；")}`), {
-      code: "SCENE_EMPTY_RETRY_EXHAUSTED",
-      sceneId,
-      audit: lastAudit
-    });
+    return this.acceptQualityAdvisoryCandidate(projectId, lastCandidate, lastAudit);
   }
 
   async auditCharacterIntroCandidate(projectId, characterId, candidateId) {
@@ -12339,24 +13849,36 @@ ${shotAnchor}
   async ensureCharacterIntroCandidate(projectId, characterId) {
     const settings = this.store.getSettings();
     let lastAudit = null;
-    let existing = candidateReady(this.store.getProject(projectId), "character", characterId, "character_intro", settings);
+    let lastCandidate = null;
+    let existing = candidateReady(this.store.getProject(projectId), "character", characterId, "character_intro", settings)
+      || selectedOrLatest(this.store.getProject(projectId), "character", characterId, "character_intro");
+    if (existing?.qualityAudit?.ok === false && existing.filePath && fs.existsSync(existing.filePath)) {
+      return this.acceptQualityAdvisoryCandidate(projectId, existing, existing.qualityAudit);
+    }
+    if (existing && !this.qualityGatesEnabled(settings, "assets")) return existing;
     if (existing) {
+      lastCandidate = existing;
       lastAudit = this.qualityGatesEnabled(settings, "assets")
         ? (existing.qualityAudit || await this.auditCharacterIntroCandidate(projectId, characterId, existing.id))
         : skippedQualityAudit("character_intro");
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
     }
-    const maxAttempts = this.qualityGatesEnabled(settings, "assets") ? 3 : 1;
+    const maxAttempts = 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const currentProject = this.store.getProject(projectId);
       const character = currentProject.characters.find(item => item.id === characterId);
       const basePrompt = this.imagePrompt(currentProject, settings, "character_intro", character);
       const repair = lastAudit?.repairDirective ? `\n\n【上次失败修复】${lastAudit.repairDirective}` : "";
       const candidate = await this.generateImageCandidate(projectId, "character_intro", characterId, `${basePrompt}${repair}`);
+      lastCandidate = candidate;
+      if (!this.qualityGatesEnabled(settings, "assets")) {
+        this.store.confirmCandidate(projectId, candidate.id, false);
+        return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+      }
       lastAudit = candidate.qualityAudit || await this.auditCharacterIntroCandidate(projectId, characterId, candidate.id);
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
-    throw Object.assign(new Error(`人物介绍图连续3次仍像三视图素材板：${(lastAudit?.failures || []).map(item => item.message).join("；")}`), { code: "CHARACTER_INTRO_QUALITY_RETRY_EXHAUSTED", characterId, audit: lastAudit });
+    return this.acceptQualityAdvisoryCandidate(projectId, lastCandidate, lastAudit);
   }
 
   async auditStoryboardCandidate(projectId, shotId, candidateId) {
@@ -12455,14 +13977,21 @@ ${shotAnchor}
   async ensureStoryboardCandidate(projectId, stage, shotId) {
     const settings = this.store.getSettings();
     let lastAudit = null;
-    let existing = candidateReady(this.store.getProject(projectId), "shot", shotId, stage, settings);
+    let lastCandidate = null;
+    let existing = candidateReady(this.store.getProject(projectId), "shot", shotId, stage, settings)
+      || selectedOrLatest(this.store.getProject(projectId), "shot", shotId, stage);
+    if (existing?.qualityAudit?.ok === false && existing.filePath && fs.existsSync(existing.filePath)) {
+      return this.acceptQualityAdvisoryCandidate(projectId, existing, existing.qualityAudit);
+    }
+    if (existing && !this.qualityGatesEnabled(settings, "storyboards")) return existing;
     if (existing) {
+      lastCandidate = existing;
       lastAudit = this.qualityGatesEnabled(settings, "storyboards")
         ? (existing.qualityAudit || await this.auditStoryboardCandidate(projectId, shotId, existing.id))
         : skippedQualityAudit(stage);
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
     }
-    const maxAttempts = this.qualityGatesEnabled(settings, "storyboards") ? 3 : 1;
+    const maxAttempts = 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const repair = lastAudit?.repairDirective ? `\n\n【上次失败修复】${lastAudit.repairDirective}` : "";
       const currentProject = this.store.getProject(projectId);
@@ -12481,10 +14010,15 @@ ${shotAnchor}
           }
         }
       );
+      lastCandidate = candidate;
+      if (!this.qualityGatesEnabled(settings, "storyboards")) {
+        this.store.confirmCandidate(projectId, candidate.id, false);
+        return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+      }
       lastAudit = candidate.qualityAudit || await this.auditStoryboardCandidate(projectId, shotId, candidate.id);
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
-    throw Object.assign(new Error(`${storyboardStageLabel(stage)}连续3次生成仍像人物素材板：${(lastAudit?.failures || []).map(item => item.message).join("；")}`), { code: "STORYBOARD_QUALITY_RETRY_EXHAUSTED", shotId, stage, audit: lastAudit });
+    return this.acceptQualityAdvisoryCandidate(projectId, lastCandidate, lastAudit);
   }
 
   async waitForSeedance(taskId, projectId, jobId, bridgeClient = null) {
@@ -12555,6 +14089,9 @@ ${shotAnchor}
     // configure(); always sync from durable settings before any paid submit.
     // Project engine wins: hailuo-h3 must never fall through to local Xiangsu.
     const expectedEngine = assertVideoProviderAligned(project, settings);
+    // Compiler-owned shot prompts are immutable here. Manual, character, and
+    // other prompts still receive the generic bounded output-policy compiler.
+    const executionPrompt = finalizeVideoPromptForSubmission(project, entityType, entityId, stage, prompt, expectedEngine);
     const providerKind = expectedEngine === "hailuo-h3"
       ? "puream-hailuo-h3"
       : (projectVideoProviderKind(project, settings) || settings.videoProvider?.kind || "local-xiangsu");
@@ -12571,7 +14108,7 @@ ${shotAnchor}
       entityType,
       entityId,
       stage,
-      prompt,
+      executionPrompt,
       references,
       effectiveDuration,
       hailuoApiMode,
@@ -12592,7 +14129,7 @@ ${shotAnchor}
       entityType,
       entityId,
       stage,
-      prompt,
+      executionPrompt,
       references,
       effectiveDuration,
       fingerprint,
@@ -13092,7 +14629,7 @@ ${shotAnchor}
           taskId: generated.raw?.taskId || "",
           qualityAudit: { ok: true, mode: "manual", skipped: false, note: "人工确认可用（云端人物视频）" }
         });
-        if (options.audit !== false) {
+        if (options.audit !== false && this.qualityGatesEnabled(settings, "assets")) {
           try {
             await this.auditCharacterVideoCandidate(projectId, characterId, candidate.id);
             candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
@@ -13157,7 +14694,7 @@ ${shotAnchor}
       hailuoApiMode: engine === "hailuo-h3" ? "image_to_video" : "",
       aspectRatio: project.generation.aspectRatio || "9:16"
     }, characterVideoDuration);
-    if (options.audit !== false) {
+    if (options.audit !== false && this.qualityGatesEnabled(settings, "assets")) {
       await this.auditCharacterVideoCandidate(projectId, characterId, candidate.id);
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
@@ -13206,24 +14743,35 @@ ${shotAnchor}
   async generateQualityCharacterVideo(projectId, characterId) {
     const settings = this.store.getSettings();
     let project = this.store.getProject(projectId);
-    let existing = candidateReady(project, "character", characterId, "character_video", settings);
+    let existing = candidateReady(project, "character", characterId, "character_video", settings)
+      || selectedOrLatest(project, "character", characterId, "character_video");
+    if (existing?.qualityAudit?.ok === false && existing.filePath && fs.existsSync(existing.filePath)) {
+      return this.acceptQualityAdvisoryCandidate(projectId, existing, existing.qualityAudit);
+    }
     let lastAudit = null;
+    let lastCandidate = null;
+    if (existing && !this.qualityGatesEnabled(settings, "assets")) return existing;
     if (existing) {
+      lastCandidate = existing;
       lastAudit = this.qualityGatesEnabled(settings, "assets")
         ? (existing.qualityAudit || await this.auditCharacterVideoCandidate(projectId, characterId, existing.id))
         : skippedQualityAudit("character_video");
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
     }
-    const maxAttempts = this.qualityGatesEnabled(settings, "assets") ? 3 : 1;
+    const maxAttempts = 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const candidate = await this.generateCharacterVideo(projectId, characterId, "", { track: false, audit: false, qualityRepair: lastAudit?.repairDirective || "" });
+      lastCandidate = candidate;
+      if (!this.qualityGatesEnabled(settings, "assets")) {
+        this.store.confirmCandidate(projectId, candidate.id, false);
+        return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+      }
       lastAudit = this.qualityGatesEnabled(settings, "assets")
         ? await this.auditCharacterVideoCandidate(projectId, characterId, candidate.id)
         : skippedQualityAudit("character_video");
-      if (!this.qualityGatesEnabled(settings, "assets")) this.store.updateCandidate(projectId, candidate.id, { qualityAudit: lastAudit });
       if (lastAudit.ok) return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
-    throw Object.assign(new Error(`人物视频连续3次未通过声音与素材板质检：${(lastAudit?.failures || []).map(item => item.message).join("；")}`), { code: "CHARACTER_VIDEO_QUALITY_RETRY_EXHAUSTED", characterId, audit: lastAudit });
+    return this.acceptQualityAdvisoryCandidate(projectId, lastCandidate, lastAudit);
   }
 
   async extractCharacterVoice(projectId, characterId, options = {}) {
@@ -13396,10 +14944,11 @@ ${shotAnchor}
 
   reconcileProductionContracts(projectId, options = {}) {
     const project = this.store.getProject(projectId);
-    const enforcementEnabled = this.qualityGatesEnabled(this.store.getSettings());
+    const enforcementEnabled = productionStructureGateEnabled(this.store.getSettings(), project);
     const failures = enforcementEnabled && (project.shots || []).length
       ? productionHardContractFailures(project, {
         productName: project.product?.name || "",
+        commerceShotCount: normalizeCommerceShotCount(project.productionPlan?.commerceShotCount, 3),
         requireProduct: Boolean(project.product?.name),
         requireHook: true,
         requireHookDialogue: true
@@ -13410,23 +14959,17 @@ ${shotAnchor}
     const auditChanged = !previousAudit
       || previousAudit.ok !== nextOk
       || JSON.stringify(previousAudit.failures || []) !== JSON.stringify(failures);
-    const shouldMarkScriptFailed = failures.length > 0 && options.markScriptFailed === true;
+    // Blueprint review is advisory at runtime. It may propose an AI repair, but
+    // it never demotes a usable script or invalidates already generated media.
     const failureMessage = failures.map(item => item.message).join("；");
     const staleAutomationContractFailure = project.automation?.status === "failed"
       && project.automation?.errorCode === "PRODUCTION_HARD_CONTRACT_FAILED";
-    const shouldClearDisabledContractFailure = !enforcementEnabled && (
+    const shouldClearLegacyContractFailure = (
       project.status === "script_contract_failed"
       || project.ideation?.errorCode === "PRODUCTION_HARD_CONTRACT_FAILED"
       || staleAutomationContractFailure
     );
-    const stateChanged = (shouldMarkScriptFailed && (
-      project.status !== "script_contract_failed"
-      || project.currentStage !== "script"
-      || project.finalVideoStale !== true
-      || project.ideation?.status !== "failed"
-      || project.ideation?.errorCode !== "PRODUCTION_HARD_CONTRACT_FAILED"
-      || project.ideation?.message !== failureMessage
-    )) || shouldClearDisabledContractFailure;
+    const stateChanged = shouldClearLegacyContractFailure;
     // sync-video-jobs polls every four seconds. A semantic no-op must not
     // rewrite project.json/update updatedAt, otherwise the renderer thinks the
     // project changed and interrupts media playback with a full refresh.
@@ -13434,46 +14977,34 @@ ${shotAnchor}
     if (auditChanged) {
       project.productionContractAudit = {
         ok: nextOk,
+        advisory: !nextOk,
+        blocking: false,
         checkedAt: new Date().toISOString(),
         failures
       };
     }
-    if (shouldMarkScriptFailed && stateChanged) {
-      project.status = "script_contract_failed";
-      project.currentStage = "script";
-      project.finalVideoStale = true;
-      project.finalVideoStaleAt = new Date().toISOString();
-      project.finalVideoStaleReason = "剧本生产硬合同未通过，旧成片仅保留历史，不再视为当前可交付成片";
-      project.ideation = {
-        ...(project.ideation || {}),
-        status: "failed",
-        errorCode: "PRODUCTION_HARD_CONTRACT_FAILED",
-        message: failureMessage
-      };
-    } else if (shouldClearDisabledContractFailure) {
+    if (shouldClearLegacyContractFailure) {
       project.status = (project.shots || []).length ? "analyzed" : (project.status || "draft");
-      project.currentStage = project.currentStage && project.currentStage !== "script"
-        ? project.currentStage
-        : "script";
+      project.currentStage = project.currentStage || "script";
       project.ideation = {
         ...(project.ideation || {}),
         status: "script_ready",
         errorCode: "",
-        message: "审核蓝图已关闭，已跳过剧情质量与商品植入合同，继续生产"
+        message: enforcementEnabled
+          ? `蓝图发现 ${failures.length} 项可优化内容，已作为提醒保留，不阻断生产`
+          : "审核蓝图已关闭，已跳过所有蓝图检查并继续生产"
       };
       if (staleAutomationContractFailure) {
         project.automation = {
           ...(project.automation || {}),
-          operation: "",
-          targetId: "",
-          status: "idle",
-          stage: "",
-          message: "审核蓝图已关闭，旧剧情质量拦截已清除，可继续生产",
+          status: "paused_user",
+          message: enforcementEnabled
+            ? "旧版蓝图拦截已转为提醒；可选择 AI 修复或直接继续"
+            : "审核蓝图已关闭，旧版蓝图拦截已清除，可直接继续",
           resumeAfterAccountSwitch: false,
-          completedAt: new Date().toISOString(),
+          completedAt: null,
           errorCode: "",
-          recoverableFailure: false,
-          progress: null,
+          recoverableFailure: true,
           updatedAt: new Date().toISOString()
         };
       }
@@ -14212,9 +15743,10 @@ ${shotAnchor}
         skipValidation: !isQualityGatesEnabled(settings, "videos"),
         parityInstruction: [viewerComprehensionPriorityDirective(), matrixRuntimePrompt, referenceParityFor(settings.prompts, "hailuo_video")].filter(Boolean).join(" ")
       });
-      const compiledPrompt = !isSheet ? hailuoPrompt : `${hailuoPrompt}
+      const rawCompiledPrompt = !isSheet ? hailuoPrompt : `${hailuoPrompt}
 
 [storyboard_sheet] <Picture 1> is a chronological contact sheet made from complete portrait 9:16 panels. Animate every panel left-to-right, top-to-bottom in time order. Do not render panel borders, index strips, or storyboard UI in the final video.`.trim();
+      const compiledPrompt = compactFullReferencePrompt(rawCompiledPrompt);
       if (this.qualityGatesEnabled(settings, "script")) assertSystemPromptDialogueParity(project, shot, compiledPrompt, engine);
       return compiledPrompt;
     }
@@ -14326,7 +15858,10 @@ ${shotAnchor}
       "对白必须按标注句数完整说完，语气带情绪，禁止平声念词；说话人盯听者不对镜头；听者必须有可见反应。",
       referenceParityFor(settings.prompts, "seedance_video")
     ].filter(Boolean).join("");
-    const compiledPrompt = `${authoredPrompt}\n\n【Seedance本镜约束】${hardConstraints}`.trim();
+    const rawCompiledPrompt = `${authoredPrompt}\n\n【Seedance本镜约束】${hardConstraints}`.trim();
+    const compiledPrompt = shotUsesManualVideoPrompt(shot)
+      ? rawCompiledPrompt
+      : compactGeneratedSeedanceVideoPrompt(project, shot, references, projectMode, rawCompiledPrompt);
     if (isQualityGatesEnabled(settings, "script")) assertSystemPromptDialogueParity(project, shot, compiledPrompt, engine);
     return compiledPrompt;
   }
@@ -14335,6 +15870,7 @@ ${shotAnchor}
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "shot_video", shotId, () => this.generateShotVideo(projectId, shotId, modeOverride, { ...options, track: false }));
     }
+    await this.ensureStageDependencies(projectId, "videos");
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
     const shot = project.shots.find(item => item.id === shotId);
@@ -14343,13 +15879,10 @@ ${shotAnchor}
     const gateSettings = manualPromptActive
       ? { ...settings, generation: { ...(settings.generation || {}), qualityGatesEnabled: false } }
       : settings;
-    if (!manualPromptActive && this.qualityGatesEnabled(settings, "script") && (project.shots || []).length > 0) {
-      assertProductionHardContracts(project, {
-        productName: project.product?.name || "",
-        requireProduct: Boolean(project.product?.name),
-        requireHook: true,
-        requireHookDialogue: true
-      });
+    if (!manualPromptActive && productionStructureGateEnabled(settings, project) && (project.shots || []).length > 0) {
+      // Blueprint findings are advisory at execution time. Keep the report for
+      // AI repair, but never make an already-authored project unusable.
+      this.reconcileProductionContracts(projectId, { markScriptFailed: false });
     }
     const mode = assertProjectGenerationMode(project, modeOverride);
     const engine = projectVideoEngine(project);
@@ -14384,11 +15917,9 @@ ${shotAnchor}
       }
       this.store.saveProject(latest);
     }
-    for (const frame of manualPromptActive ? [] : (shouldUseImageAnchors ? requiredFrames.filter(Boolean) : [])) {
+    for (const frame of manualPromptActive || !this.qualityGatesEnabled(settings, "storyboards") ? [] : (shouldUseImageAnchors ? requiredFrames.filter(Boolean) : [])) {
       const audit = frame.qualityAudit || await this.auditStoryboardCandidate(projectId, shot.id, frame.id);
-      if (!audit.ok && this.qualityGatesEnabled(settings, "storyboards")) {
-        throw Object.assign(new Error(`本镜${frame.stage === "storyboard_start" ? "首帧" : "尾帧"}疑似人物素材板，必须先重抽分镜图：${audit.failures.map(item => item.message).join("；")}`), { code: "STORYBOARD_QUALITY_FAILED", audit });
-      }
+      if (!audit.ok) this.acceptQualityAdvisoryCandidate(projectId, frame, audit);
     }
     let refreshedProject = this.store.getProject(projectId);
     if (projectVideoEngine(refreshedProject) === "hailuo-h3" && !manualPromptActive) {
@@ -14409,8 +15940,8 @@ ${shotAnchor}
       const previousShot = refreshedProject.shots.find(item => item.number === activeShot.number - 1);
       const candidate = previousShot ? selectedOrLatest(refreshedProject, "shot", previousShot.id, "shot_video") : null;
       if (!candidate?.filePath) throw Object.assign(new Error("同场景延续必须先生成并选择上一镜视频"), { code: "PREVIOUS_SHOT_REQUIRED" });
-      if (candidate.qualityAudit?.ok !== true && !manualPromptActive && this.qualityGatesEnabled(settings, "videos")) {
-        throw Object.assign(new Error("上一镜视频尚未通过音画与资产串线质检，不能继续污染后续镜头"), { code: "PREVIOUS_SHOT_UNVERIFIED" });
+      if (!manualPromptActive && this.qualityGatesEnabled(settings, "videos") && !qualityAccepted(candidate, settings)) {
+        this.acceptQualityAdvisoryCandidate(projectId, candidate, candidate.qualityAudit || null);
       }
       previousVideo = {
         path: candidate.filePath,
@@ -14491,7 +16022,7 @@ ${shotAnchor}
         }
       }
     );
-    if (options.audit !== false) {
+    if (options.audit !== false && this.qualityGatesEnabled(settings, "videos")) {
       await this.auditShotCandidate(projectId, activeShot.id, candidate.id);
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
@@ -14652,9 +16183,19 @@ ${shotAnchor}
   async generateQualityShotVideo(projectId, shot, mode, { force = false } = {}) {
     const settings = this.store.getSettings();
     let project = this.store.getProject(projectId);
-    let existing = force ? null : candidateReady(project, "shot", shot.id, "shot_video", settings);
+    let existing = force ? null : (candidateReady(project, "shot", shot.id, "shot_video", settings)
+      || selectedOrLatest(project, "shot", shot.id, "shot_video"));
+    if (!force && existing?.qualityAudit?.ok === false && existing.filePath && fs.existsSync(existing.filePath)) {
+      return this.acceptQualityAdvisoryCandidate(projectId, existing, existing.qualityAudit);
+    }
     let lastAudit = null;
+    let lastCandidate = null;
+    if (existing && !this.qualityGatesEnabled(settings, "videos")) {
+      if (existing.selected !== true) this.store.confirmCandidate(projectId, existing.id, false);
+      return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
+    }
     if (existing) {
+      lastCandidate = existing;
       lastAudit = existing.qualityAudit || await this.auditShotCandidate(projectId, shot.id, existing.id);
       if (lastAudit.ok) {
         // A recovered paid task is added as an unselected candidate first. If its
@@ -14665,12 +16206,12 @@ ${shotAnchor}
         return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
       }
     }
-    const maxAttempts = this.qualityGatesEnabled(settings, "videos") ? 3 : 1;
+    const maxAttempts = 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       this.setAutomation(projectId, {
         stage: "shot_quality_retry",
         message: this.qualityGatesEnabled(settings, "videos")
-          ? `S${String(shot.number).padStart(2, "0")} 正在第 ${attempt}/3 次生成并执行声音、画面重复质检`
+          ? `S${String(shot.number).padStart(2, "0")} 正在生成并执行声音、画面质检`
           : `S${String(shot.number).padStart(2, "0")} 正在生成分镜视频（质检已关闭）`
       });
       const candidate = await this.generateShotVideo(projectId, shot.id, mode, {
@@ -14678,6 +16219,11 @@ ${shotAnchor}
         audit: false,
         qualityRepair: lastAudit?.repairDirective || ""
       });
+      lastCandidate = candidate;
+      if (!this.qualityGatesEnabled(settings, "videos")) {
+        this.store.confirmCandidate(projectId, candidate.id, false);
+        return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+      }
       lastAudit = await this.auditShotCandidate(projectId, shot.id, candidate.id);
       if (lastAudit.ok) {
         const audited = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id);
@@ -14686,11 +16232,7 @@ ${shotAnchor}
         return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id);
       }
     }
-    project = this.store.getProject(projectId);
-    project.status = "shot_quality_needs_regeneration";
-    project.currentStage = "videos";
-    this.store.saveProject(project);
-    throw Object.assign(new Error(`S${String(shot.number).padStart(2, "0")} 连续3次未通过音画质检：${(lastAudit?.failures || []).map(item => item.message).join("；")}`), { code: "SHOT_QUALITY_RETRY_EXHAUSTED", shotId: shot.id, audit: lastAudit });
+    return this.acceptQualityAdvisoryCandidate(projectId, lastCandidate, lastAudit);
   }
 
   async auditProjectMediaQuality(projectId) {
@@ -14751,10 +16293,7 @@ ${shotAnchor}
     applyCandidateQualityAudits(project, audit);
     project.mediaQualityAudit = audit;
     project.audioQualityAudit = { checkedAt: audit.checkedAt, ok: failures.every(item => !(item.failures || []).some(failure => failure.code.startsWith("AUDIO"))), shots: records.map(item => ({ shotId: item.shotId, shotNumber: item.shotNumber, hasDialogue: item.hasDialogue, ...item.audio, failures: item.failures.filter(failure => failure.code.startsWith("AUDIO")) })) };
-    if (!audit.ok) {
-      project.status = "shot_quality_needs_regeneration";
-      project.currentStage = "videos";
-    }
+    if (!audit.ok) audit.advisory = true;
     this.store.saveProject(project);
     return audit;
   }
@@ -14794,7 +16333,23 @@ ${shotAnchor}
     const repaired = [];
     for (const shot of targets) repaired.push(await this.generateQualityShotVideo(projectId, shot, mode, { force: true }));
     const finalAudit = await this.auditProjectMediaQuality(projectId);
-    if (!finalAudit.ok) throw Object.assign(new Error(`自动修复后仍有 ${finalAudit.failures.length} 个镜头不合格`), { code: "PROJECT_MEDIA_REPAIR_FAILED", audit: finalAudit });
+    if (!finalAudit.ok) {
+      project = this.store.getProject(projectId);
+      for (const item of finalAudit.failures || []) {
+        const candidate = selectedOrLatest(project, "shot", item.shotId, "shot_video");
+        if (candidate) this.acceptQualityAdvisoryCandidate(projectId, candidate, candidate.qualityAudit || {
+          ok: false,
+          type: "shot_video",
+          checkedAt: new Date().toISOString(),
+          failures: [item],
+          repairDirective: buildRepairDirective([item])
+        });
+      }
+      const advisory = this.store.getProject(projectId);
+      advisory.mediaQualityAudit = { ...ignoredQualityAudit(finalAudit, { note: "AI 修复后仍有质检提醒，已保留原视频并允许人工继续" }), mode: "advisory_continue" };
+      this.store.saveProject(advisory);
+      return { repaired, audit: advisory.mediaQualityAudit, advisory: true };
+    }
     project = this.store.getProject(projectId);
     project.status = "videos_ready";
     project.currentStage = "videos";
@@ -14806,8 +16361,10 @@ ${shotAnchor}
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "shot_videos", "", () => this.generateAllShotVideos(projectId, { track: false }));
     }
+    await this.ensureStageDependencies(projectId, "videos");
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
+    const videoQualityEnabled = this.qualityGatesEnabled(settings, "videos");
     assertProjectGenerationMode(project);
     assertVideoProviderAligned(project, settings);
     assertProjectStoryboardsReady(project, settings);
@@ -14879,22 +16436,32 @@ ${shotAnchor}
         const existing = candidateReady(current, "shot", shot.id, "shot_video", settings);
         let existingReady = false;
         if (existing && !chainDirty) {
-          const audit = existing.qualityAudit || await this.auditShotCandidate(projectId, shot.id, existing.id);
-          existingReady = audit.ok;
-          if (!audit.ok) chainDirty = true;
+          if (!videoQualityEnabled) existingReady = true;
+          else {
+            const audit = existing.qualityAudit || await this.auditShotCandidate(projectId, shot.id, existing.id);
+            existingReady = audit.ok;
+            if (!audit.ok) chainDirty = true;
+          }
         } else if (!existing) chainDirty = true;
         results.push(existingReady ? existing : await this.generateQualityShotVideo(projectId, shot, mode, { force: chainDirty }));
       }
-      await this.auditProjectMediaQuality(projectId);
+      if (videoQualityEnabled) await this.auditProjectMediaQuality(projectId);
       return results;
     }
-    // Client does not throttle durable queue accepts; account-side leases and
-    // the official scheduler control real AutoDL launches. A failed shot is
-    // collected while every other locally ready shot still reaches the queue.
+    // Independent shots are submitted with the exact video concurrency granted
+    // by the authenticated admin account.  Continuation/smart modes stay
+    // sequential above because their later shots genuinely depend on earlier
+    // output; that dependency is not an artificial client throttle.
+    const concurrency = await this.authoritativeGenerationConcurrency(project);
+    this.setAutomation(projectId, {
+      stage: "shot_videos",
+      message: `正在提交 ${shots.length} 个独立分镜视频；后台视频并发 ${concurrency.video}`,
+      concurrency: { image: concurrency.image, video: concurrency.video, source: concurrency.source, authority: concurrency.authority || "" }
+    });
     const { results, batchFailures, recoverablePending } = await executeShotVideoBatch(shots, async shot => {
       this.assertOperationActive(projectId);
       return this.generateQualityShotVideo(projectId, shot, mode, { force: false });
-    });
+    }, concurrency.video);
     if (batchFailures.length) {
       const detail = batchFailures.slice(0, 8).map(item => `S${String(item.shotNumber).padStart(2, "0")}(${item.code})`).join("；");
       throw Object.assign(new Error(`分镜视频批次未完成：${batchFailures.length}/${shots.length} 失败。${detail}${batchFailures.length > 8 ? "…" : ""}`), {
@@ -14910,6 +16477,7 @@ ${shotAnchor}
         pending: recoverablePending
       });
     }
+    if (!videoQualityEnabled) return results;
     const mediaAudit = await this.auditProjectMediaQuality(projectId);
     if (!mediaAudit.ok) {
       // Keyframe mode can repair only the later side of duplicate/failing pairs.
@@ -14920,7 +16488,11 @@ ${shotAnchor}
         if (shot) await this.generateQualityShotVideo(projectId, shot, mode, { force: true });
       }
       const repairedAudit = await this.auditProjectMediaQuality(projectId);
-      if (!repairedAudit.ok) throw Object.assign(new Error(`仍有 ${repairedAudit.failures.length} 个分镜未通过最终音画质检`), { code: "PROJECT_MEDIA_QUALITY_FAILED", audit: repairedAudit });
+      if (!repairedAudit.ok) {
+        const advisoryProject = this.store.getProject(projectId);
+        advisoryProject.mediaQualityAudit = { ...ignoredQualityAudit(repairedAudit, { note: "最终音画质检提醒已保留，原分镜视频继续进入拼接" }), mode: "advisory_continue" };
+        this.store.saveProject(advisoryProject);
+      }
     }
     return results;
   }
@@ -14954,25 +16526,21 @@ ${shotAnchor}
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "assets", "", () => this.generateAllAssets(projectId, { track: false }));
     }
+    this.reconcileProjectCharacterReferences(projectId);
     this.ensureProjectShotScenes(projectId);
     this.syncReferenceLibraries(projectId);
     this.reconcileProductionContracts(projectId, { markScriptFailed: false });
-    const contractProject = this.store.getProject(projectId);
+    let contractProject = this.store.getProject(projectId);
     const settings = this.store.getSettings();
-    if (this.qualityGatesEnabled(settings) && (contractProject.shots || []).length > 0) {
-      assertProductionHardContracts(contractProject, {
-        productName: contractProject.product?.name || "",
-        requireProduct: Boolean(contractProject.product?.name),
-        requireHook: true,
-        requireHookDialogue: true
-      });
-    }
+    // Contract findings are available for targeted AI repair, but are not an
+    // execution lock. This keeps uploaded and previously authored scripts usable.
     const plan = this.buildAssetBatchPlan(projectId);
-    const concurrency = imageBatchConcurrency(this.store.getProject(projectId));
+    const concurrency = await this.authoritativeGenerationConcurrency(this.store.getProject(projectId));
     this.setAutomation(projectId, {
       stage: "assets",
-      progress: summarizeAssetBatch(plan, "等待启动：并发由账号后台额度控制", "asset_batch"),
-      message: `资产批次已建立：${plan.filter(item => item.status === "completed" || item.status === "skipped").length}/${plan.length} 已就绪；客户端不设并发上限`
+      progress: summarizeAssetBatch(plan, `等待启动：图片并发 ${concurrency.image} / 视频并发 ${concurrency.video}`, "asset_batch"),
+      message: `资产批次已建立：${plan.filter(item => item.status === "completed" || item.status === "skipped").length}/${plan.length} 已就绪；严格采用后台图片 ${concurrency.image} / 视频 ${concurrency.video} 并发`,
+      concurrency: { image: concurrency.image, video: concurrency.video, source: concurrency.source, authority: concurrency.authority || "" }
     });
     const results = [];
     const failures = [];
@@ -14980,6 +16548,20 @@ ${shotAnchor}
     const runItem = async item => {
       this.assertOperationActive(projectId);
       if (item.status === "completed" || item.status === "skipped") return;
+      if (item.kind === "character_video") {
+        const current = this.store.getProject(projectId);
+        const character = (current.characters || []).find(entry => entry.id === item.entityId);
+        const projectVoice = candidateReady(current, "character", item.entityId, "character_voice", settings);
+        const reusableVoice = this.findReusableVoice(character)?.entry;
+        if (projectVoice?.filePath || reusableVoice?.filePath) {
+          this.updateAssetBatchProgress(projectId, item.key, {
+            status: "skipped",
+            errorCode: "",
+            message: "已绑定可用音色，跳过人物视频"
+          });
+          return;
+        }
+      }
       this.updateAssetBatchProgress(projectId, item.key, { status: "running", errorCode: "", message: "正在提交上游" });
       try {
         let result;
@@ -15038,16 +16620,18 @@ ${shotAnchor}
     const stageProvider = characterVideoStageProvider(this.store.getSettings());
     const inheritProjectVideo = stageProvider === "inherit-project";
     const waves = [
-      { id: "identity_and_scene", label: "第1波 · 人物合板 / 场景四视图", items: plan.filter(item => ["character_sheet", "scene_asset", "product_reference"].includes(item.kind)) },
-      { id: "character_intro", label: "第2A波 · 独立正脸介绍图", items: plan.filter(item => ["character_intro", "character_three_view"].includes(item.kind)) },
-      { id: "asset_library", label: "第2B波 · 道具 / 换装资产库", items: plan.filter(item => ["prop_asset", "wardrobe_asset"].includes(item.kind)) },
+      { id: "identity_and_scene", resource: "image", label: "第1波 · 人物合板 / 场景四视图", items: plan.filter(item => ["character_sheet", "scene_asset", "product_reference"].includes(item.kind)) },
+      { id: "character_intro", resource: "image", label: "第2A波 · 独立正脸介绍图", items: plan.filter(item => ["character_intro", "character_three_view"].includes(item.kind)) },
+      { id: "asset_library", resource: "image", label: "第2B波 · 道具 / 换装资产库", items: plan.filter(item => ["prop_asset", "wardrobe_asset"].includes(item.kind)) },
       {
         id: "character_video",
+        resource: "video",
         label: inheritProjectVideo ? "第3波 · 人物视频（依赖独立正脸图，跟随项目引擎）" : "第3波 · 人物视频（依赖独立正脸图）",
         items: plan.filter(item => item.kind === "character_video")
       },
       {
         id: "character_voice",
+        resource: "local",
         label: "第4波 · 音色提取（依赖人物视频；所有有对白角色必需）",
         items: plan.filter(item => item.kind === "character_voice")
       }
@@ -15057,9 +16641,14 @@ ${shotAnchor}
       this.assertOperationActive(projectId);
       const pending = wave.items.filter(item => item.status !== "completed" && item.status !== "skipped");
       if (!pending.length) continue;
-      const waveConcurrency = Math.max(1, Math.min(concurrency, pending.length));
+      const grantedConcurrency = wave.resource === "video"
+        ? concurrency.video
+        : wave.resource === "image"
+          ? concurrency.image
+          : Math.min(4, concurrency.video);
+      const waveConcurrency = Math.max(1, Math.min(grantedConcurrency, pending.length));
       this.setAutomation(projectId, {
-        message: `${wave.label}：已提交 ${pending.length} 项；实际并发由账号后台额度控制`
+        message: `${wave.label}：${pending.length} 项已就绪，本波实际并发 ${waveConcurrency}（后台${wave.resource === "video" ? "视频" : wave.resource === "image" ? "图片" : "任务"}额度 ${grantedConcurrency}）`
       });
       await mapWithConcurrency(pending, waveConcurrency, item => runItem(item));
     }
@@ -15326,12 +16915,55 @@ ${shotAnchor}
     return project.automation;
   }
 
+  async ensureStageDependencies(projectId, targetStage = "assets") {
+    const repairedReferences = this.reconcileProjectCharacterReferences(projectId);
+    let project = this.store.getProject(projectId);
+    const actions = [];
+    if (targetStage !== "script" && (!Array.isArray(project.shots) || project.shots.length === 0) && String(project.script?.raw || "").trim()) {
+      this.setAutomation(projectId, {
+        stage: "script",
+        message: "后续阶段发现剧本尚未拆镜，正在自动回到剧本阶段补齐分镜结构"
+      });
+      await this.analyzeScript(projectId, { track: false });
+      actions.push("script_analysis");
+      project = this.store.getProject(projectId);
+    }
+    if (["shots", "videos", "final"].includes(targetStage)) {
+      const assetPlan = this.buildAssetBatchPlan(projectId);
+      const missingAssets = assetPlan.filter(item => !["completed", "skipped"].includes(String(item.status || "")));
+      if (missingAssets.length) {
+        this.setAutomation(projectId, {
+          stage: "assets",
+          message: `后续阶段发现 ${missingAssets.length} 项依赖资产缺失，正在自动回到资产阶段补齐`
+        });
+        await this.generateAllAssets(projectId, { track: false });
+        actions.push("assets");
+        project = this.store.getProject(projectId);
+      }
+    }
+    if (["videos", "final"].includes(targetStage)) {
+      const settings = this.store.getSettings();
+      const missingFrames = listMissingStoryboardFrames(project, settings);
+      if (missingFrames.length) {
+        this.setAutomation(projectId, {
+          stage: "storyboards",
+          message: `视频阶段发现 ${missingFrames.length} 张分镜图缺失，正在自动回到分镜阶段补齐，完成后自动继续视频`
+        });
+        await this.generateAllStoryboards(projectId, { track: false, dependenciesReady: true });
+        actions.push("storyboards");
+        project = this.store.getProject(projectId);
+      }
+    }
+    return { project, actions, repairedReferences };
+  }
+
   async runPipelineFromStage(projectId, fromStage = "assets", options = {}) {
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "pipeline_from_stage", fromStage, () => this.runPipelineFromStage(projectId, fromStage, { ...options, track: false }));
     }
     const order = ["script", "assets", "shots", "videos", "final"];
     const start = Math.max(0, order.indexOf(fromStage));
+    this.reconcileProjectCharacterReferences(projectId);
     let project = this.store.getProject(projectId);
     assertProjectGenerationMode(project);
     const stepExecution = project.productionPlan?.executionMode !== "full" && options.allowCrossStage !== true;
@@ -15381,6 +17013,13 @@ ${shotAnchor}
     if (!Array.isArray(project.shots) || project.shots.length === 0) {
       assertScriptMaterializedForPipeline(project);
     }
+    if (this.foundryKernel && ["assets", "shots", "videos", "final"].some(shouldRun)) {
+      project = this.store.getProject(projectId);
+      this.foundryKernel.assertPaidGenerationReady(project, order[Math.max(start, 1)] || "assets");
+      // Persist the exact pre-cost understanding and L1/L2/L3 report that made
+      // this run eligible. It becomes replayable evidence for every later job.
+      this.store.saveProject(project);
+    }
     if (shouldRun("assets")) {
       this.setAutomation(projectId, { stage: "assets", message: "正在补齐人物/场景/服装/道具资产" });
       this.assertOperationActive(projectId);
@@ -15399,7 +17038,7 @@ ${shotAnchor}
       await this.generateAllStoryboards(projectId, { track: false });
     }
     if (shouldRun("videos")) {
-      assertProjectStoryboardsReady(this.store.getProject(projectId), this.store.getSettings());
+      await this.ensureStageDependencies(projectId, "videos");
       this.setAutomation(projectId, { stage: "shot_videos", message: "正在补齐缺失的分镜视频" });
       this.assertOperationActive(projectId);
       await this.generateAllShotVideos(projectId, { track: false });
@@ -15426,8 +17065,10 @@ ${shotAnchor}
         ready = Boolean(candidateReady(project, "character", entityId, kind, settings)?.filePath)
           || Boolean(this.findReusableVoice(character)?.entry?.filePath);
       } else if (kind === "character_video") {
+        const projectVoice = candidateReady(project, "character", entityId, "character_voice", settings);
+        const reusableVoice = this.findReusableVoice(character)?.entry;
         const video = candidateReady(project, "character", entityId, "character_video", settings);
-        ready = qualityAccepted(video, settings);
+        ready = Boolean(projectVoice?.filePath || reusableVoice?.filePath) || qualityAccepted(video, settings);
       } else {
         ready = Boolean(candidateReady(project, "character", entityId, kind, settings));
       }
@@ -15457,7 +17098,7 @@ ${shotAnchor}
         message: identityReady ? "已就绪，跳过" : "等待生成",
         updatedAt: new Date().toISOString()
       });
-      add("character_intro", character.id, `${character.name} · 独立正脸介绍图`);
+      add("character_intro", character.id, `${character.name} · 正脸身份锚图（不进成片）`);
       if (needsCharacterVoiceAssets) {
         add("character_video", character.id, `${character.name} · 人物视频`);
         add("character_voice", character.id, `${character.name} · 音色`);
@@ -15722,11 +17363,14 @@ ${shotAnchor}
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "storyboards", "", () => this.generateAllStoryboards(projectId, { track: false }));
     }
+    if (options.dependenciesReady !== true) await this.ensureStageDependencies(projectId, "shots");
+    else this.reconcileProjectCharacterReferences(projectId);
     const project = this.store.getProject(projectId);
     assertProjectGenerationMode(project);
     const sheetMode = normalizeProjectMode(project.generation?.mode) === "storyboard_sheet";
     const plan = this.buildStoryboardBatchPlan(projectId);
-    const concurrency = imageBatchConcurrency(project);
+    const authorityConcurrency = await this.authoritativeGenerationConcurrency(project);
+    const concurrency = authorityConcurrency.image;
     const pending = plan.filter(item => item.status !== "completed" && item.status !== "skipped");
     const startPending = pending.filter(item => item.kind === "storyboard_start" || item.kind === "storyboard_sheet");
     const endPending = (sheetMode ? [] : pending.filter(item => item.kind === "storyboard_end"))
@@ -15741,7 +17385,8 @@ ${shotAnchor}
       progress: summarizeAssetBatch(plan, sheetMode ? "逐秒合图单波执行" : "分镜帧按首帧→尾帧两波执行", "storyboard_batch"),
       message: sheetMode
         ? `逐秒合图模式：每镜只生成一张合图，本轮待补 ${startPending.length} 张；不会规划首帧或尾帧`
-        : `正在生产分镜帧：先补 ${startPending.length} 个首帧，再生成 ${endPending.length} 个尾帧`
+        : `正在生产分镜帧：先补 ${startPending.length} 个首帧，再生成 ${endPending.length} 个尾帧`,
+      concurrency: { image: authorityConcurrency.image, video: authorityConcurrency.video, source: authorityConcurrency.source, authority: authorityConcurrency.authority || "" }
     });
     const results = [];
     const failures = [];
@@ -15935,18 +17580,17 @@ ${shotAnchor}
   }
 
   async stitchProject(projectId) {
+    await this.ensureStageDependencies(projectId, "final");
     let project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
     if (this.qualityGatesEnabled(settings, "videos")) this.reconcileHailuoVoiceLineage(projectId);
     project = this.store.getProject(projectId);
-    if ((project.shots || []).length > 0) {
+    if (productionStructureGateEnabled(settings, project) && (project.shots || []).length > 0) {
       const contractAudit = this.reconcileProductionContracts(projectId, { markScriptFailed: true });
       project = this.store.getProject(projectId);
       if (!contractAudit.ok) {
-        throw Object.assign(new Error(`剧本生产硬合同未通过，禁止拼接旧视频：${contractAudit.failures.map(item => item.message).join("；")}`), {
-          code: "PRODUCTION_HARD_CONTRACT_FAILED",
-          failures: contractAudit.failures
-        });
+        project.productionContractAudit = { ...ignoredQualityAudit(contractAudit, { note: "制作结构提醒已保留，用户现有视频继续拼接" }), mode: "advisory_continue" };
+        this.store.saveProject(project);
       }
     }
     if (!Array.isArray(project.shots) || project.shots.length === 0) {
@@ -15954,10 +17598,17 @@ ${shotAnchor}
     }
     const targetSeconds = Math.round(Number(project.generation?.targetDurationSeconds) || 0);
     const plannedSeconds = project.shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
-    const durationLocked = this.qualityGatesEnabled(null, "script")
+    const durationLocked = productionStructureGateEnabled(settings, project)
       && (projectDurationContract(project).locked || Boolean(project.script?.generationCheckpoint?.blueprint?.targetDurationSeconds));
     if (durationLocked && targetSeconds > 0 && plannedSeconds !== targetSeconds) {
-      throw Object.assign(new Error(`分镜合计 ${plannedSeconds} 秒，与剧总时长合同 ${targetSeconds} 秒不一致，请先按合同重算分镜`), { code: "FILM_DURATION_CONTRACT_MISMATCH" });
+      project.productionContractAudit = {
+        ok: false,
+        advisory: true,
+        blocking: false,
+        checkedAt: new Date().toISOString(),
+        failures: [{ code: "FILM_DURATION_CONTRACT_MISMATCH", message: `分镜合计 ${plannedSeconds} 秒，与目标 ${targetSeconds} 秒不一致；拼接按现有镜头执行` }]
+      };
+      this.store.saveProject(project);
     }
     let videos = project.shots.slice().sort((a, b) => a.number - b.number)
       .map(shot => selectedOrLatest(project, "shot", shot.id, "shot_video"))
@@ -15967,13 +17618,13 @@ ${shotAnchor}
     }
     const ffmpeg = this.locateFfmpeg();
     if (!ffmpeg) throw Object.assign(new Error("未找到本地媒体处理组件 FFmpeg，请检查像塑安装或重新安装纯梦短剧老虎机"), { code: "FFMPEG_NOT_FOUND" });
-    const mediaAudit = await this.auditProjectMediaQuality(projectId);
+    const mediaAudit = this.qualityGatesEnabled(settings, "videos")
+      ? await this.auditProjectMediaQuality(projectId)
+      : { ok: true, skipped: true, failures: [] };
     if (!mediaAudit.ok) {
       project = this.store.getProject(projectId);
-      project.status = "shot_quality_needs_regeneration";
-      project.currentStage = "videos";
+      project.mediaQualityAudit = { ...ignoredQualityAudit(mediaAudit, { note: "分镜音画质检提醒已保留，原视频继续拼接" }), mode: "advisory_continue" };
       this.store.saveProject(project);
-      throw Object.assign(new Error(`有 ${mediaAudit.failures.length} 个分镜未通过参考片音画质检，必须定向重抽后才能拼接：${mediaAudit.failures.map(item => `S${String(item.shotNumber || "?").padStart(2, "0")}`).join("、")}`), { code: "PROJECT_MEDIA_QUALITY_FAILED", audit: mediaAudit });
     }
     project = this.store.getProject(projectId);
     videos = project.shots.slice().sort((a, b) => a.number - b.number).map(shot => selectedOrLatest(project, "shot", shot.id, "shot_video"));
@@ -15984,14 +17635,12 @@ ${shotAnchor}
     const verifyInputsStillCurrent = () => {
       if (this.qualityGatesEnabled(settings, "videos")) this.reconcileHailuoVoiceLineage(projectId);
       let current = this.store.getProject(projectId);
-      if ((current.shots || []).length > 0) {
+      if (productionStructureGateEnabled(settings, current) && (current.shots || []).length > 0) {
         const contractAudit = this.reconcileProductionContracts(projectId, { markScriptFailed: true });
         current = this.store.getProject(projectId);
         if (!contractAudit.ok) {
-          throw Object.assign(new Error(`拼接期间剧本合同已变化，输出仅保留历史：${contractAudit.failures.map(item => item.message).join("；")}`), {
-            code: "STITCH_INPUT_STALE",
-            failures: contractAudit.failures
-          });
+          current.productionContractAudit = { ...ignoredQualityAudit(contractAudit, { note: "拼接期间检测到制作结构提醒，现有镜头仍按当前版本拼接" }), mode: "advisory_continue" };
+          this.store.saveProject(current);
         }
       }
       const currentVideos = current.shots.slice().sort((a, b) => a.number - b.number).map(shot => selectedOrLatest(current, "shot", shot.id, "shot_video"));
@@ -16119,12 +17768,9 @@ ${shotAnchor}
     project.finalAudioAudit = { ...finalAudioAudit, decision: finalAudioDecision };
     project.finalVisualAudit = { ...finalVisualAudit, decision: finalVisualDecision };
     if (finalDurationAudit) project.finalDurationAudit = finalDurationAudit;
-    project.finalQualityAudit = { checkedAt: new Date().toISOString(), ok: finalAudioDecision.ok && finalVisualDecision.ok, audio: project.finalAudioAudit, visual: project.finalVisualAudit, failures: [...finalAudioDecision.failures, ...finalVisualDecision.failures] };
+    project.finalQualityAudit = { checkedAt: new Date().toISOString(), ok: finalAudioDecision.ok && finalVisualDecision.ok, outputPath, audio: project.finalAudioAudit, visual: project.finalVisualAudit, failures: [...finalAudioDecision.failures, ...finalVisualDecision.failures] };
     if (!project.finalQualityAudit.ok) {
-      project.status = "final_quality_needs_regeneration";
-      project.currentStage = "videos";
-      this.store.saveProject(project);
-      throw Object.assign(new Error(`成片终审失败：${project.finalQualityAudit.failures.map(item => item.message).join("；")}`), { code: "FINAL_MEDIA_QUALITY_FAILED", audit: project.finalQualityAudit, outputPath });
+      project.finalQualityAudit = { ...ignoredQualityAudit(project.finalQualityAudit, { note: "成片终审提醒已保留，当前成片继续交付" }), mode: "advisory_continue", outputPath };
     }
     archiveCurrentFinalVideo(project, "new-generated-final");
     project.finalVideoPath = outputPath;
@@ -16139,14 +17785,24 @@ ${shotAnchor}
   }
 }
 
-module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, topicJsonParseOptions, recoverTopicOptionsFromDiagnostics, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, projectScriptFormat, assertAiScriptFormatConfirmed, scriptFormatDirective, viewerComprehensionPriorityDirective, renderProductionScript, renderDialogueScript, renderTimedStoryboardScript, renderScriptForProject, ideaSignature, parseTimedStoryboardScript, expandTimedStoryboardForProvider, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, localUploadedAnalysisChunk, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract };
+module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, topicJsonParseOptions, recoverTopicOptionsFromDiagnostics, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, projectScriptFormat, assertAiScriptFormatConfirmed, scriptFormatDirective, viewerComprehensionPriorityDirective, renderProductionScript, renderDialogueScript, renderTimedStoryboardScript, renderScriptForProject, ideaSignature, parseTimedStoryboardScript, expandTimedStoryboardForProvider, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, localUploadedAnalysisChunk, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, compactGeneratedSeedanceVideoPrompt, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract, dialogueRewriteNameMap, validateDialogueRewriteLines, localDialogueRewriteLines, renderDialogueRewriteScript };
 module.exports.reconcileShotSceneCatalog = reconcileShotSceneCatalog;
+module.exports.finalizeVideoPromptForSubmission = finalizeVideoPromptForSubmission;
 module.exports.activeBlueprintFailures = activeBlueprintFailures;
 module.exports.scriptQualityGateOptions = scriptQualityGateOptions;
 module.exports.executeShotVideoBatch = executeShotVideoBatch;
 module.exports.collectCharacterReferenceIds = collectCharacterReferenceIds;
 module.exports.characterReferenceFailures = characterReferenceFailures;
 module.exports.assertKnownCharacterReferences = assertKnownCharacterReferences;
+module.exports.reconcileOrphanCharacterReferences = reconcileOrphanCharacterReferences;
 module.exports.assertUnitCharacterReferencesPlanned = assertUnitCharacterReferencesPlanned;
 module.exports.mergeAnalysisChunks = mergeAnalysisChunks;
 module.exports.buildLocalTopicOptions = buildLocalTopicOptions;
+module.exports.productionStructureGateEnabled = productionStructureGateEnabled;
+module.exports.qualityWarningCanBeIgnored = qualityWarningCanBeIgnored;
+module.exports.productionContractRepairShotIds = productionContractRepairShotIds;
+module.exports.executeShotVideoBatch = executeShotVideoBatch;
+module.exports.legacyAutomationIsAdvisory = legacyAutomationIsAdvisory;
+module.exports.imageGenerationOptions = imageGenerationOptions;
+module.exports.buildLocalTopicOptions = buildLocalTopicOptions;
+module.exports.splitUploadedScriptSections = splitUploadedScriptSections;

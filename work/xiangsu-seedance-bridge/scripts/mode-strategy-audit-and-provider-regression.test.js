@@ -56,12 +56,12 @@ test("new-project and project-strategy contracts expose all three script modes a
   assert.doesNotMatch(html, /data-blueprint-check="[^"]+"[^>]*\schecked/);
 });
 
-test("an explicit AutoDL quarantine response is preserved instead of mislabeled as an unknown submission", async () => {
-  const root = temporaryDirectory("puream-autodl-code-");
+test("an explicit 云端算力节点 quarantine response is preserved instead of mislabeled as an unknown submission", async () => {
+  const root = temporaryDirectory("puream-cloud-node-code-");
   try {
     const client = new BridgeClient({
       tokenPath: path.join(root, "bridge-token"),
-      fetchImpl: async () => jsonResponse({ code: "AUTODL_QUARANTINED", message: "AutoDL 服务已隔离" }, 503)
+      fetchImpl: async () => jsonResponse({ code: "PROVIDER_QUARANTINED", message: "云端算力节点 服务已隔离" }, 503)
     });
     client.configure({ kind: "puream-hailuo-h3", baseUrl: "https://puream.cn", apiKey: "test-activation", hailuoApiMode: "text_to_video" });
     await assert.rejects(() => client.submit({
@@ -74,7 +74,7 @@ test("an explicit AutoDL quarantine response is preserved instead of mislabeled 
       images: [], videos: [], videoAudios: [], audios: [],
       outputDir: root
     }), error => {
-      assert.equal(error.code, "AUTODL_QUARANTINED");
+      assert.equal(error.code, "PROVIDER_QUARANTINED");
       assert.equal(error.remoteSubmissionUnknown, undefined);
       return true;
     });
@@ -128,7 +128,7 @@ test("a recoverable character-video outage does not block independent visual ass
     workflow.generateImageCandidate = async (_projectId, stage, entityId) => addImage(stage, entityId);
     workflow.ensureCharacterIntroCandidate = async (_projectId, entityId) => addImage("character_intro", entityId);
     workflow.generateQualityCharacterVideo = async () => {
-      throw Object.assign(new Error("AutoDL 服务已隔离"), { code: "AUTODL_QUARANTINED" });
+      throw Object.assign(new Error("云端算力节点 服务已隔离"), { code: "PROVIDER_QUARANTINED" });
     };
     const results = await workflow.generateAllAssets(created.id, { track: false });
     assert.ok(results.some(item => item.stage === "character_sheet"));

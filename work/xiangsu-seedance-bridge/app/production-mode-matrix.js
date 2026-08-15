@@ -25,6 +25,40 @@ const COMMON_PRODUCT_LOCK = "商品只在剧本语义触发的镜头出现；名
 const COMMON_SCENE_LOCK = "场景资产固定为一张2×2四角度参考板；分镜和视频只选与当前机位匹配的一格锁门窗家具、轴线、时段和光向，最终剧情画面禁止出现四宫格、边框、序号或参考板。";
 const CLOUD_SCENE_LOCK = "The scene asset is one 2-by-2 four-angle board of the same space. Use only the panel matching the current camera axis to lock doors, windows, furniture, time of day and key-light direction; never render the board, gutters, labels or panel numbers in the final shot.";
 const COMMON_FLOW_LOCK = "一键制作和分阶段制作共用本合同；入口不同不得改变帧需求、台词、商品绑定、提示词编译或提交顺序。";
+const SYSTEM_VIDEO_OUTPUT_LOCK_ZH = "【最终视频输出硬锁】只保留剧中人物对白、现场环境声和与画面同步的动作声；禁止BGM、背景音乐、配乐、歌曲和音乐性音效；禁止字幕、标题、对白文字、旁白文字、贴纸、角标、价格文字、姓名条、Logo、水印、UI及任何可读屏幕文字；禁止人物介绍、人物小传、故事简介、正面身份锚图、人物四视图或任何资产板进入剧情成片。";
+const SYSTEM_VIDEO_OUTPUT_LOCK_EN = "FINAL VIDEO OUTPUT LOCK: in-story dialogue, natural location ambience and synchronized diegetic action sounds only. No BGM, background music, score, song or musical sound effect. No subtitles, captions, titles, dialogue text, narration text, stickers, labels, price text, name straps, logos, watermarks, UI or readable on-screen text. Never render a character introduction, biography, story synopsis, frontal identity anchor, character four-view sheet or any asset board as story footage.";
+
+function systemVideoOutputLockForPrompt(prompt = "", language = "auto") {
+  const source = String(prompt || "");
+  const useEnglish = language === "en" || (language === "auto" && /<d>|<Picture\s+\d+>|subject_definitions/i.test(source));
+  return useEnglish ? SYSTEM_VIDEO_OUTPUT_LOCK_EN : SYSTEM_VIDEO_OUTPUT_LOCK_ZH;
+}
+
+function stripSystemVideoOutputLock(prompt = "") {
+  return String(prompt || "")
+    .replace(/\r/g, "")
+    .replace(/【最终视频输出硬锁】[^\n]*/g, "")
+    .replace(/FINAL VIDEO OUTPUT LOCK:[^\n]*/gi, "")
+    .replace(/FINAL OUTPUT LOCK:[^\n]*/gi, "")
+    .trim();
+}
+
+function ensureSystemVideoOutputLock(prompt = "", maxLength = 1900, language = "auto") {
+  const source = String(prompt || "").replace(/\r/g, "").trim();
+  const lock = systemVideoOutputLockForPrompt(source, language);
+  const withoutDuplicate = stripSystemVideoOutputLock(source);
+  const limit = Math.max(lock.length + 80, Math.min(1990, Number(maxLength) || 1900));
+  const bodyLimit = Math.max(0, limit - lock.length - 1);
+  if (withoutDuplicate.length > bodyLimit) {
+    throw Object.assign(new Error(`Video prompt body is ${withoutDuplicate.length} characters but only ${bodyLimit} remain after reserving the mandatory output lock`), {
+      code: "VIDEO_PROMPT_OUTPUT_LOCK_BUDGET_EXCEEDED",
+      promptLength: withoutDuplicate.length,
+      bodyLimit,
+      limit
+    });
+  }
+  return [withoutDuplicate, lock].filter(Boolean).join("\n").trim();
+}
 
 const MATRIX = Object.freeze({
   "xiangsu:keyframe": Object.freeze({
@@ -128,7 +162,8 @@ function matrixGlobalPrompt(providerFamily, mode) {
     `台词合同：${COMMON_DIALOGUE_LOCK}`,
     `商品合同：${COMMON_PRODUCT_LOCK}`,
     `场景合同：${COMMON_SCENE_LOCK}`,
-    `入口合同：${COMMON_FLOW_LOCK}`
+    `入口合同：${COMMON_FLOW_LOCK}`,
+    `成片输出：${SYSTEM_VIDEO_OUTPUT_LOCK_ZH}`
   ].join("\n");
 }
 
@@ -139,8 +174,8 @@ function matrixGlobalPromptForProject(project = {}, settings = null, modeOverrid
 
 function matrixRuntimeVideoPromptForProject(project = {}, settings = null, modeOverride = "") {
   const entry = matrixEntryForProject(project, settings, modeOverride);
-  if (entry.providerFamily === "cloud") return `${CLOUD_H3_RUNTIME_PROMPTS[entry.mode]} ${CLOUD_SCENE_LOCK}`;
-  return `【八模式视频提交·${entry.label}·${entry.key}】${entry.videoPolicy} ${COMMON_DIALOGUE_LOCK} ${COMMON_PRODUCT_LOCK} ${COMMON_SCENE_LOCK}`;
+  if (entry.providerFamily === "cloud") return `${CLOUD_H3_RUNTIME_PROMPTS[entry.mode]} ${CLOUD_SCENE_LOCK} ${SYSTEM_VIDEO_OUTPUT_LOCK_EN}`;
+  return `【八模式视频提交·${entry.label}·${entry.key}】${entry.videoPolicy} ${COMMON_DIALOGUE_LOCK} ${COMMON_PRODUCT_LOCK} ${COMMON_SCENE_LOCK} ${SYSTEM_VIDEO_OUTPUT_LOCK_ZH}`;
 }
 
 module.exports = {
@@ -149,6 +184,11 @@ module.exports = {
   COMMON_FLOW_LOCK,
   COMMON_PRODUCT_LOCK,
   COMMON_SCENE_LOCK,
+  SYSTEM_VIDEO_OUTPUT_LOCK_EN,
+  SYSTEM_VIDEO_OUTPUT_LOCK_ZH,
+  ensureSystemVideoOutputLock,
+  stripSystemVideoOutputLock,
+  systemVideoOutputLockForPrompt,
   MATRIX,
   matrixEntry,
   matrixEntryForProject,

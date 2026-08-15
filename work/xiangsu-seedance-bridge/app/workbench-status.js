@@ -87,6 +87,16 @@ function isActiveVideoJob(job) {
       && settings?.generation?.qualityGateModules?.videos === true;
   }
 
+  function candidateQualityAccepted(item, settings = null) {
+    if (!item?.filePath) return false;
+    if (!qualityGatesEnabled(settings)) return true;
+    return item.manualSelectionOverride === true
+      || item.qualityAudit?.ok === true
+      || item.qualityAudit?.accepted === true
+      || item.qualityAudit?.overridden === true
+      || ["manual", "human_override", "advisory_continue"].includes(String(item.qualityAudit?.mode || ""));
+  }
+
   function shotVideoCandidate(project, shot, settings = null) {
     const activeRevision = project?.productionRevision || "";
     const matches = (project?.candidates || []).filter(item =>
@@ -95,7 +105,7 @@ function isActiveVideoJob(job) {
       && item.stage === "shot_video"
       && item.filePath
       && (item.productionRevision || "") === activeRevision
-      && (!qualityGatesEnabled(settings) || item.qualityAudit?.ok === true)
+      && candidateQualityAccepted(item, settings)
     );
     return matches.find(item => item.selected) || newest(matches);
   }
@@ -110,6 +120,7 @@ function isActiveVideoJob(job) {
       && item.filePath
       && (item.productionRevision || "") === activeRevision
       && item.qualityAudit?.ok === false
+      && !candidateQualityAccepted(item, settings)
     ));
   }
 
@@ -124,6 +135,7 @@ function isActiveVideoJob(job) {
       && (item.productionRevision || "") === activeRevision
       && item.qualityAudit?.ok !== true
       && item.qualityAudit?.ok !== false
+      && !candidateQualityAccepted(item, settings)
     ));
   }
 
@@ -163,7 +175,7 @@ function isActiveVideoJob(job) {
         job,
         activeJob,
         progress: activeJob ? videoJobProgress(activeJob) : videoJobProgress({ status: "completed" }),
-        detail: (failedCandidate.qualityAudit?.failures || []).map(item => item.message).join("；") || "音画质检未通过，必须重抽"
+        detail: (failedCandidate.qualityAudit?.failures || []).map(item => item.message).join("；") || "音画质检有提醒，可 AI 修复或人工选中原资产"
       };
     }
 
@@ -175,7 +187,7 @@ function isActiveVideoJob(job) {
         job,
         activeJob,
         progress: activeJob ? videoJobProgress(activeJob) : videoJobProgress({ status: "completed" }),
-        detail: "该视频尚未完成声音、重复画面和首帧资产串线质检，暂不能进入成片"
+        detail: "该视频尚有质检提醒，可 AI 修复或人工选中原资产继续"
       };
     }
 
@@ -233,6 +245,7 @@ function isActiveVideoJob(job) {
     videoJobProgress,
     videoJobProvider,
     videoJobStage,
+    candidateQualityAccepted,
     shotVideoCandidate,
     failedShotVideoCandidate,
     unverifiedShotVideoCandidate,

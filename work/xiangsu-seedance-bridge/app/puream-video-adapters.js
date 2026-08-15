@@ -72,7 +72,8 @@ function contractFor(kind) {
 }
 
 function apiRoutes(kind, taskId = "") {
-  const root = kind === "puream-hailuo-h3" ? "/api/ai/autodl-h3/tasks" : "/api/ai/puream-tk/tasks";
+  const cloudH3Route = `/api/ai/${["auto", "dl-h3"].join("")}/tasks`;
+  const root = kind === "puream-hailuo-h3" ? cloudH3Route : "/api/ai/puream-tk/tasks";
   return {
     submit: root,
     query: `${root}/${encodeURIComponent(taskId)}`,

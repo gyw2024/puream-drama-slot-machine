@@ -237,6 +237,43 @@ async function main() {
       await captureBackground(`script-format-dialog-${view.width}x${view.height}-zoom${view.zoom * 100}`);
       await page.evaluate(() => document.querySelector("#scriptFormatDialog")?.close());
     }
+    const foundryIntentDialogMatrix = [];
+    for (const view of auditViews) {
+      for (const dialogId of ["newProjectDialog", "projectStrategyDialog"]) {
+        await page.setViewportSize({ width: view.width, height: view.height });
+        await electronApp.evaluate(({ BrowserWindow }, size) => {
+          const win = BrowserWindow.getAllWindows()[0];
+          if (win) { win.setContentSize(size.width, size.height); win.webContents.setZoomFactor(size.zoom); }
+        }, view);
+        await page.evaluate(id => {
+          document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
+          document.getElementById(id)?.showModal();
+        }, dialogId);
+        await page.waitForTimeout(120);
+        const snapshot = await page.evaluate(id => {
+          const dialog = document.getElementById(id);
+          const rect = dialog.getBoundingClientRect();
+          const intentSelects = [...dialog.querySelectorAll(".foundry-intent-grid select")];
+          dialog.scrollTop = dialog.scrollHeight;
+          const confirm = dialog.querySelector(".dialog-actions .primary-button")?.getBoundingClientRect();
+          return {
+            id,
+            viewport: { width: innerWidth, height: innerHeight },
+            intentSelectCount: intentSelects.length,
+            intentValues: intentSelects.map(select => select.value),
+            intentSelectHeights: intentSelects.map(select => ({ id: select.id, height: select.getBoundingClientRect().height })),
+            undersizedIntentSelects: intentSelects.filter(select => select.getBoundingClientRect().height < 43.5).map(select => select.id),
+            clipped: rect.left < -1 || rect.top < -1 || rect.right > innerWidth + 1 || rect.bottom > innerHeight + 1,
+            horizontalOverflow: dialog.scrollWidth > dialog.clientWidth + 1,
+            verticalScrollable: dialog.scrollHeight > dialog.clientHeight + 1,
+            confirmReachable: Boolean(confirm && confirm.top >= rect.top - 1 && confirm.bottom <= rect.bottom + 1)
+          };
+        }, dialogId);
+        foundryIntentDialogMatrix.push({ ...view, ...snapshot });
+        await captureBackground(`foundry-intent-${dialogId}-${view.width}x${view.height}-zoom${view.zoom * 100}`);
+        await page.evaluate(id => document.getElementById(id)?.close(), dialogId);
+      }
+    }
     await electronApp.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
       if (win) { win.setContentSize(1440, 900); win.webContents.setZoomFactor(1); }
@@ -295,9 +332,9 @@ async function main() {
         const dialog = document.querySelector("#promptExampleDialog");
         const body = document.querySelector("#promptExampleText")?.value || "";
         const expected = {
-          production: ["完整制作稿示例", "【商品节点】"],
-          dialogue: ["简易对白稿示例", "对周远说"],
-          timed_storyboard: ["秒级分镜成片稿示例", "## S01"]
+          production: ["七分钟完整上传剧本案例", "## S01", "## S42", "禁止背景音乐"],
+          dialogue: ["七分钟完整上传剧本案例", "### 01", "### 42", "无背景音乐"],
+          timed_storyboard: ["七分钟完整上传剧本案例", "## S01", "## S42", "禁止BGM"]
         }[currentFormat];
         return {
           format: currentFormat,
@@ -514,9 +551,13 @@ async function main() {
       };
     }, settings.settings);
     const defaultProject = await page.evaluate(() => window.dramaSlot.workbench.createProject("packaged default audit", {}));
+    const foundryRuntime = await page.evaluate(() => window.dramaSlot.workbench.foundryStatus());
     await page.evaluate(() => document.querySelector("#newProject")?.click());
     const newProjectDefaults = await page.evaluate(() => ({
       selectedProvider: document.querySelector("input[name='newVideoProvider']:checked")?.value || "",
+      scriptHandling: document.querySelector("#newScriptHandling")?.value || "",
+      commerceMode: document.querySelector("#newCommerceMode")?.value || "",
+      priorityProfile: document.querySelector("#newPriorityProfile")?.value || "",
       providerOptions: [...document.querySelectorAll("input[name='newVideoProvider']")].map(input => ({
         value: input.value,
         label: input.closest("label")?.innerText?.trim() || ""
@@ -529,10 +570,10 @@ async function main() {
       const ai = document.querySelector('input[name="newInputMode"][value="ai"]');
       manual.checked = true;
       manual.dispatchEvent(new Event("change", { bubbles: true }));
-      const manualState = { disabled: target.disabled, required: target.required, help: help.textContent.trim() };
+      const manualState = { disabled: target.disabled, required: target.required, help: help.textContent.trim(), scriptHandling: document.querySelector("#newScriptHandling")?.value || "" };
       ai.checked = true;
       ai.dispatchEvent(new Event("change", { bubbles: true }));
-      const aiState = { disabled: target.disabled, required: target.required, help: help.textContent.trim() };
+      const aiState = { disabled: target.disabled, required: target.required, help: help.textContent.trim(), scriptHandling: document.querySelector("#newScriptHandling")?.value || "" };
       return { manualState, aiState };
     });
     await page.evaluate(() => document.querySelector("#newProjectDialog")?.close());
@@ -668,20 +709,28 @@ async function main() {
     await switchProject(stateTransitions.firstId);
     await switchProject(stateTransitions.secondId);
     await page.click('.library-nav-button[data-library="characters"]');
-    await page.waitForFunction(() => document.querySelectorAll("#sidebarCharacterGridHost .sidebar-character-card").length > 0, null, { timeout: 10_000 });
+    await page.waitForFunction(() => document.querySelector("#reusableAssetDialog")?.open === true
+      && document.querySelectorAll("#reusableAssetGrid .reusable-asset-card").length > 0, null, { timeout: 10_000 });
     const crossProjectCharacterLibrary = await page.evaluate(async () => {
       const current = await window.dramaSlot.workbench.getProject(document.querySelector("#projectSelect")?.value || "");
+      const preview = document.querySelector("#reusableAssetGrid img");
       return {
         currentProjectCharacterCount: current.project?.characters?.length || 0,
-        cardCount: document.querySelectorAll("#sidebarCharacterGridHost .sidebar-character-card").length,
-        text: document.querySelector("#sidebarCharacterGridHost")?.innerText || "",
-        visible: !document.querySelector("#sidebarLibraryPanel")?.classList.contains("hidden")
+        cardCount: document.querySelectorAll("#reusableAssetGrid .reusable-asset-card").length,
+        text: document.querySelector("#reusableAssetGrid")?.innerText || "",
+        visible: document.querySelector("#reusableAssetDialog")?.open === true,
+        preview: preview ? {
+          src: preview.src,
+          complete: preview.complete,
+          naturalWidth: preview.naturalWidth,
+          naturalHeight: preview.naturalHeight
+        } : null
       };
     });
     await page.mouse.move(900, 500);
     await page.waitForTimeout(300);
     await captureBackground("cross-project-character-library-empty-project");
-    await page.click("#closeSidebarLibrary");
+    await page.click("#closeReusableAssetDialog");
     await page.evaluate(() => document.querySelector('.stage-button[data-stage="shots"]')?.click());
     const selectedStoryboardMode = await page.evaluate(() => document.querySelector("#generationMode")?.value || "");
     await page.evaluate(() => document.querySelector('.stage-button[data-stage="videos"]')?.click());
@@ -726,12 +775,25 @@ async function main() {
       viewport: { width: window.innerWidth, height: window.innerHeight },
       documentSize: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
       pageHorizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
-      blankImages: [...document.images].filter(img => !img.complete || img.naturalWidth === 0).length
+      blankImages: [...document.images].filter(img => !img.complete || img.naturalWidth === 0).map(img => ({
+        src: img.getAttribute("src") || "",
+        currentSrc: img.currentSrc || "",
+        className: img.className || "",
+        alt: img.alt || "",
+        complete: img.complete,
+        naturalWidth: img.naturalWidth,
+        visible: (() => {
+          const rect = img.getBoundingClientRect();
+          const style = getComputedStyle(img);
+          return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+        })()
+      })).filter(item => item.src || item.visible)
     }));
     fs.writeFileSync(path.join(runDir, "preflight.json"), JSON.stringify({
       layoutMatrix,
       blueprintPopoverMatrix,
       scriptFormatDialogMatrix,
+      foundryIntentDialogMatrix,
       persistentScriptExampleMatrix,
       scriptExamplePreviews,
       scriptExampleDownloads,
@@ -758,7 +820,16 @@ async function main() {
     }, "direct OSS settings must survive a packaged runtime round trip");
     assert.equal(rawOssSettings.includes("packaged-audit-secret-never-plain"), false, "packaged settings must not persist the OSS secret in plaintext");
     assert.equal(defaultProject?.project?.generation?.videoProviderKind, "puream-hailuo-h3", "fresh project must use PUREAM cloud");
+    assert.deepEqual({
+      scriptHandling: defaultProject?.project?.productionPlan?.scriptHandling,
+      commerceMode: defaultProject?.project?.productionPlan?.commerceMode,
+      priorityProfile: defaultProject?.project?.productionPlan?.priorityProfile
+    }, { scriptHandling: "optimize", commerceMode: "none", priorityProfile: "balanced" }, "fresh projects without a product must fail closed to the no-commerce V2 contract");
+    assert.equal(foundryRuntime.ok, true, "V2 runtime status IPC must respond");
+    assert.equal(foundryRuntime.status?.ok, true, "V2 SQLite runtime must pass quick_check in the packaged app");
+    assert.ok(foundryRuntime.status?.counts?.project_state >= 1, "V2 SQLite runtime must own the created current project state");
     assert.equal(newProjectDefaults.selectedProvider, "puream-hailuo-h3", "new-project dialog must preselect PUREAM cloud");
+    assert.deepEqual({ scriptHandling: newProjectDefaults.scriptHandling, commerceMode: newProjectDefaults.commerceMode, priorityProfile: newProjectDefaults.priorityProfile }, { scriptHandling: "optimize", commerceMode: "natural", priorityProfile: "balanced" }, "new-project dialog must expose the recommended V2 intent defaults");
     assert.ok(newProjectDefaults.providerOptions.some(item => item.value === "local-xiangsu" && /本地像塑/.test(item.label)), "local Xiangsu must remain selectable");
     assert.deepEqual({
       detailControlCount: blueprintControls.detailControlCount,
@@ -782,9 +853,11 @@ async function main() {
     assert.equal(durationModeUi.manualState.disabled, true, "uploaded-script mode must disable the configured duration field");
     assert.equal(durationModeUi.manualState.required, false, "uploaded-script mode must not require a configured duration");
     assert.match(durationModeUi.manualState.help, /自适应/, "uploaded-script mode must explain adaptive duration");
+    assert.equal(durationModeUi.manualState.scriptHandling, "respect", "switching a fresh project dialog to uploaded script must default to respecting the source");
     assert.equal(durationModeUi.aiState.disabled, false, "AI mode must enable configured duration");
     assert.equal(durationModeUi.aiState.required, true, "AI mode must require configured duration");
     assert.match(durationModeUi.aiState.help, /严格/, "AI mode must explain the hard duration contract");
+    assert.equal(durationModeUi.aiState.scriptHandling, "optimize", "switching back to AI writing must restore the recommended optimize intent when the user has not overridden it");
     assert.deepEqual(visibilityAudit.forbiddenMatches, [], "user-visible flow must not expose H3/Hailuo/海螺");
     assert.deepEqual(switched, { ok: true, kind: "local-xiangsu" }, "manual local switch must persist");
     assert.equal(concurrencyUi.selectedProjectId, stateTransitions.secondId, "switching away from a running project must complete");
@@ -803,11 +876,14 @@ async function main() {
     assert.equal(concurrencyUi.manualPrompt, stateTransitions.manualPrompt, "manual prompt text must remain byte-for-byte visible");
     assert.deepEqual(concurrencyUi.systemForbiddenMatches, [], "system-rendered status must mask internal model names");
     assert.equal(concurrencyUi.systemContainsRawPath, false, "system-rendered failures must mask local filesystem paths");
-    assert.equal(concurrencyUi.firstAutomationStatus, "running", "switching projects must not cancel the background project");
+    assert.equal(concurrencyUi.firstAutomationStatus, "interrupted", "a persisted running flag without any main-process operation or remote job must be reconciled instead of showing a false running state");
     assert.equal(concurrencyUi.hostileMarkupExecuted, false, "persisted project text must never execute as markup");
     assert.equal(concurrencyUi.hostileMarkupElementPresent, false, "persisted project text must be rendered as text, not HTML");
     assert.ok(concurrencyUi.selectedProjectLabel.includes(stateTransitions.hostileMarkup), "escaped hostile project text must remain visible as literal text");
-    assert.match(concurrencyUi.specialFileUrl, /^file:\/\/\/D:\/.*%231%3F\.mp4$/i, "special filename characters must remain inside the file URL path");
+    assert.match(concurrencyUi.specialFileUrl, /^puream-asset:\/\/local\/D%3A%5C.*%231%3F\.mp4$/i, "special filename characters must remain inside the constrained asset URL");
+    assert.equal(crossProjectCharacterLibrary.preview?.complete, true, "packaged character preview must finish decoding");
+    assert.ok(crossProjectCharacterLibrary.preview?.naturalWidth > 0 && crossProjectCharacterLibrary.preview?.naturalHeight > 0, "packaged character preview must decode into real pixels");
+    assert.match(crossProjectCharacterLibrary.preview?.src || "", /^puream-asset:\/\//, "packaged media must use the constrained application asset protocol");
     assert.deepEqual(deleted, { removalOk: true, archiveFound: true, restorationOk: true, restoredVisible: true }, "packaged project deletion must be recoverable");
     assert.equal(layoutMatrix.some(item => item.pageHorizontalOverflow), false, "page must not horizontally overflow in the audited matrix");
     assert.equal(layoutMatrix.some(item => item.topbarHorizontalOverflow), false, "topbar must reflow without horizontal scrolling in the audited matrix");
@@ -829,6 +905,7 @@ async function main() {
       || !item.bottomReachability
     )), false, "blueprint panel must stay opaque, fixed, unclipped, compact by default, and fully reachable at every audited size and zoom");
     assert.equal(scriptFormatDialogMatrix.some(item => item.optionCount !== 3 || item.clipped || item.horizontalOverflow || !item.confirmReachable), false, "all three script formats and the confirm action must remain reachable at every audited size and zoom");
+    assert.equal(foundryIntentDialogMatrix.some(item => item.intentSelectCount !== 3 || item.undersizedIntentSelects.length || item.clipped || item.horizontalOverflow || !item.confirmReachable), false, "both project dialogs must keep all three V2 intent controls reachable and touch-safe at every audited size and zoom");
     assert.equal(persistentScriptExampleMatrix.some(item => !item.visible || item.previewCount !== 3 || item.downloadCount !== 3 || item.horizontalOverflow || item.clippedHorizontally || item.undersizedButtons.length), false, "all three script examples must stay visible, previewable, downloadable, and touch-safe on the script page");
     assert.equal(scriptExamplePreviews.some(item => !item.open || !item.filename.endsWith(".txt") || item.bodyLength < 100 || !item.expectedContentPresent), false, "every script example preview must expose a complete matching TXT example");
     assert.equal(scriptExampleDownloads.length, 3, "all three persistent script example downloads must be wired");
@@ -849,6 +926,7 @@ async function main() {
     assert.equal(dialogMatrix.some(item => !item.open || item.clipped || item.horizontalOverflow), false, "primary dialogs must remain visible and uncut");
     assert.equal(dialogMatrix.some(item => item.seriousAxe.length), false, "primary dialogs must have no serious accessibility violation");
     assert.equal(axe.violations.some(item => ["critical", "serious"].includes(item.impact)), false, "critical/serious accessibility violations are release blockers");
+    assert.deepEqual(runtime.blankImages, [], "every image left in the packaged DOM must decode successfully");
     const report = {
       executablePath,
       runDir,
@@ -858,6 +936,7 @@ async function main() {
       ossPersistence: { ...ossPersistence, secret: "[verified but omitted]", plaintextPersisted: rawOssSettings.includes("packaged-audit-secret-never-plain") },
       defaultProjectProviderKind: defaultProject?.project?.generation?.videoProviderKind || "",
       newProjectDefaults,
+      foundryRuntime,
       blueprintControls,
       durationModeUi,
       visibilityAudit,
@@ -870,6 +949,7 @@ async function main() {
       layoutMatrix,
       blueprintPopoverMatrix,
       scriptFormatDialogMatrix,
+      foundryIntentDialogMatrix,
       persistentScriptExampleMatrix,
       scriptExamplePreviews,
       scriptExampleDownloads,
@@ -890,11 +970,14 @@ async function main() {
     fs.writeFileSync(path.join(runDir, "audit.json"), JSON.stringify(report, null, 2));
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } finally {
-    await electronApp.close();
+    await Promise.race([
+      electronApp.close().catch(() => {}),
+      new Promise(resolve => setTimeout(resolve, 3_000))
+    ]);
   }
 }
 
-main().catch(error => {
+main().then(() => process.exit(0)).catch(error => {
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

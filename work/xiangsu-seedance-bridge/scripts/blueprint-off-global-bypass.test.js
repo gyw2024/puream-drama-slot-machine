@@ -34,12 +34,15 @@ test("blueprint master off accepts old failed assets, videos and local Hailuo pr
   const video = store.addCandidate(created.id, { entityType: "shot", entityId: "S01", stage: "shot_video", filePath: files.video, qualityAudit: { ok: false, failures: [{ code: "OLD_VIDEO_QC" }] } });
 
   const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: root, textGenerator: async () => { throw new Error("text provider must not run"); } });
+  const reusableScene = store.depositReusableAssetFromCandidate(created.id, scene.id);
+  assert.equal(reusableScene.kind, "scene", "blueprint off must not block global-library deposit because of an old audit result");
   const sceneAudit = await workflow.auditSceneAssetCandidate(created.id, "SC01", scene.id);
   assert.equal(sceneAudit.skipped, true);
   assert.equal((await workflow.auditStoryboardCandidate(created.id, "S01", sheet.id)).skipped, true);
   const selected = store.confirmCandidate(created.id, video.id, false);
   assert.equal(selected.selected, true);
-  assert.equal(selected.qualityAudit.skipped, true);
+  assert.equal(selected.qualityAudit, null);
+  assert.equal(selected.qualityAuditHistory[0].ok, false);
   const project = store.getProject(created.id);
   assert.equal(videoStatus.summarizeShotVideos(project, store.getSettings()).allReady, true);
   const counts = stageCounts(project, store.getSettings());
@@ -49,4 +52,62 @@ test("blueprint master off accepts old failed assets, videos and local Hailuo pr
   const spec = await workflow.ensureHailuoPromptSpec(created.id, "S01", "storyboard_sheet", store.getSettings());
   assert.ok(spec.styleEn);
   assert.equal(spec.subshots.length, 1);
+});
+
+test("blueprint master off invokes zero audit functions across newly generated and recovered media", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-blueprint-zero-audit-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const store = new WorkbenchStore(root);
+  const settings = store.getSettings();
+  settings.generation.qualityGatesEnabled = false;
+  settings.generation.qualityGateModules = { script: true, assets: true, storyboards: true, videos: true, delivery: true };
+  store.saveSettings(settings);
+  const created = store.createProject("zero-audit", { engine: "hailuo-h3", mode: "storyboard_sheet" });
+  store.patchProject(created.id, {
+    generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "storyboard_sheet", modeConfirmed: true },
+    characters: [{ id: "C01", name: "Lead" }],
+    scenes: [{ id: "SC01", name: "Room", description: "empty room" }],
+    shots: [{ id: "S01", number: 1, title: "Beat", duration: 8, sceneId: "SC01", characterIds: ["C01"], visibleCharacterIds: ["C01"], dialogueTurns: [] }]
+  });
+  const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "ffmpeg", stagingRoot: root, textGenerator: async () => { throw new Error("text provider must not run"); } });
+  let auditCalls = 0;
+  for (const name of ["auditSceneAssetCandidate", "auditCharacterIntroCandidate", "auditStoryboardCandidate", "auditCharacterVideoCandidate", "auditShotCandidate"]) {
+    workflow[name] = async () => {
+      auditCalls += 1;
+      throw new Error(`${name} must not run while blueprint is off`);
+    };
+  }
+  workflow.imagePrompt = () => "deterministic image prompt";
+  workflow.generateImageCandidate = async (projectId, stage, entityId) => {
+    const filePath = path.join(root, `${stage}-${entityId}.png`);
+    fs.writeFileSync(filePath, stage);
+    return store.addCandidate(projectId, {
+      entityType: stage === "scene_asset" ? "scene" : (stage === "character_intro" ? "character" : "shot"),
+      entityId,
+      stage,
+      filePath
+    });
+  };
+  workflow.generateCharacterVideo = async (projectId, characterId) => {
+    const filePath = path.join(root, `character-${characterId}.mp4`);
+    fs.writeFileSync(filePath, "video");
+    return store.addCandidate(projectId, { entityType: "character", entityId: characterId, stage: "character_video", filePath });
+  };
+  workflow.generateShotVideo = async (projectId, shotId) => {
+    const filePath = path.join(root, `shot-${shotId}.mp4`);
+    fs.writeFileSync(filePath, "video");
+    return store.addCandidate(projectId, { entityType: "shot", entityId: shotId, stage: "shot_video", filePath });
+  };
+
+  await workflow.ensureSceneAssetCandidate(created.id, "SC01");
+  await workflow.ensureCharacterIntroCandidate(created.id, "C01");
+  await workflow.ensureStoryboardCandidate(created.id, "storyboard_sheet", "S01");
+  await workflow.generateQualityCharacterVideo(created.id, "C01");
+  await workflow.generateQualityShotVideo(created.id, store.getProject(created.id).shots[0], "storyboard_sheet", { force: true });
+  const recoveredPath = path.join(root, "recovered.mp4");
+  fs.writeFileSync(recoveredPath, "video");
+  const recovered = store.addCandidate(created.id, { entityType: "shot", entityId: "S01", stage: "shot_video", filePath: recoveredPath });
+  await workflow.auditRecoveredVideoCandidate(created.id, recovered);
+
+  assert.equal(auditCalls, 0, "master off must prevent audit invocation, not merely return a skipped result from inside the auditor");
 });

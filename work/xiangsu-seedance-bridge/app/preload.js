@@ -4,6 +4,13 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("dramaSlot", {
   defaults: () => ipcRenderer.invoke("app:defaults"),
+  checkUpdate: () => ipcRenderer.invoke("app:check-update"),
+  installUpdate: () => ipcRenderer.invoke("app:install-update"),
+  onUpdateStatus: callback => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on("app:update-status", listener);
+    return () => ipcRenderer.removeListener("app:update-status", listener);
+  },
   health: () => ipcRenderer.invoke("bridge:health"),
   diagnostics: () => ipcRenderer.invoke("bridge:diagnostics"),
   startBridge: () => ipcRenderer.invoke("bridge:start"),
@@ -22,6 +29,9 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     getProject: projectId => ipcRenderer.invoke("workbench:get-project", projectId),
     patchProject: (projectId, patch) => ipcRenderer.invoke("workbench:patch-project", projectId, patch),
     getSettings: () => ipcRenderer.invoke("workbench:get-settings"),
+    getStorageLocation: () => ipcRenderer.invoke("workbench:get-storage-location"),
+    foundryStatus: () => ipcRenderer.invoke("workbench:foundry-status"),
+    chooseStorageLocation: () => ipcRenderer.invoke("workbench:choose-storage-location"),
     saveSettings: settings => ipcRenderer.invoke("workbench:save-settings", settings),
     resetSettings: () => ipcRenderer.invoke("workbench:reset-settings"),
     authStatus: () => ipcRenderer.invoke("workbench:auth-status"),
@@ -45,10 +55,13 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     importShotPrompts: projectId => ipcRenderer.invoke("workbench:import-shot-prompts", projectId),
     importFinalVideo: projectId => ipcRenderer.invoke("workbench:import-final-video", projectId),
     analyzeScript: projectId => ipcRenderer.invoke("workbench:analyze-script", projectId),
+    rewriteDialogueScript: (projectId, sourceText) => ipcRenderer.invoke("workbench:rewrite-dialogue-script", projectId, sourceText),
     generateTopics: projectId => ipcRenderer.invoke("workbench:generate-topics", projectId),
     generateCompleteScript: projectId => ipcRenderer.invoke("workbench:generate-complete-script", projectId),
     controlScriptGeneration: (projectId, intent) => ipcRenderer.invoke("workbench:control-script-generation", projectId, intent),
     resumeScriptGeneration: projectId => ipcRenderer.invoke("workbench:resume-script-generation", projectId),
+    repairProductionContracts: projectId => ipcRenderer.invoke("workbench:repair-production-contracts", projectId),
+    repairCharacterReferences: projectId => ipcRenderer.invoke("workbench:repair-character-references", projectId),
     runIdeaPipeline: projectId => ipcRenderer.invoke("workbench:run-idea-pipeline", projectId),
     generateImage: (projectId, stage, entityId, prompt) => ipcRenderer.invoke("workbench:generate-image", projectId, stage, entityId, prompt),
     previewImagePrompt: (projectId, stage, entityId) => ipcRenderer.invoke("workbench:preview-image-prompt", projectId, stage, entityId),
@@ -82,6 +95,8 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     generateLibraryAsset: (projectId, libraryType, assetId) => ipcRenderer.invoke("workbench:generate-library-asset", projectId, libraryType, assetId),
     importTextFile: kind => ipcRenderer.invoke("workbench:import-text-file", kind),
     confirmCandidate: (projectId, candidateId, discardOthers = true) => ipcRenderer.invoke("workbench:confirm-candidate", projectId, candidateId, discardOthers),
+    restoreCandidate: (projectId, candidateId) => ipcRenderer.invoke("workbench:restore-candidate", projectId, candidateId),
+    acceptQualityWarnings: (projectId, options = {}) => ipcRenderer.invoke("workbench:accept-quality-warnings", projectId, options),
     discardCandidate: (projectId, candidateId) => ipcRenderer.invoke("workbench:discard-candidate", projectId, candidateId),
     discardFailedRecords: (projectId, scope) => ipcRenderer.invoke("workbench:discard-failed-records", projectId, scope),
     clearAutomationFailures: projectId => ipcRenderer.invoke("workbench:clear-automation-failures", projectId),

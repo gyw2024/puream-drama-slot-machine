@@ -8,6 +8,7 @@ const { PROMPT_LIBRARY_VERSION, defaultPromptTemplates } = require("./prompt-lib
 const { isActiveVideoJob } = require("./workbench-status");
 const { DEFAULT_BLUEPRINT_AUDIT_CHECKS, normalizeBlueprintAuditChecks } = require("./quality-blueprint");
 const { normalizeVideoProvider, normalizeProviderKind, providerEngine } = require("./video-provider-policy");
+const { normalizeCommerceShotCount } = require("./adaptive-production-agent");
 const {
   normalizePromptIntake,
   applyPromptIntakeToMaterializedEntities
@@ -19,7 +20,7 @@ const {
   normalizeCostLedger
 } = require("./project-costs");
 
-const PROJECT_VERSION = 11;
+const PROJECT_VERSION = 13;
 const SETTINGS_VERSION = 15;
 const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MAX_SCRIPT_CHARS = 500_000;
@@ -78,6 +79,8 @@ function assertSettingsPromptLimits(prompts) {
 // version, replace only these byte-identical legacy values. Any edited value is
 // preserved verbatim.
 const LEGACY_DEFAULT_PROMPT_HASHES = Object.freeze({
+  characterThreeView: Object.freeze(["10a101c03e8c96c012d2d2fa751c8278e332425a7b660f4c20b4419d7495b93d"]),
+  characterSheet: Object.freeze(["e7f7b22e9772c94b8999c0fbf4e452aaae54ff1dad0c420a38e03a2d7fea96cf"]),
   topicIdeation: Object.freeze([
     "ee51d1a15d5e0a99c54acc5a032b3c1e03844591f9a8e0368cb5eac4f0a98c48",
     "76051fa1a6413262e3619a29b2eedd9f92af085e2564761774606082364d45bd"
@@ -146,6 +149,7 @@ const LEGACY_DEFAULT_PROMPT_HASHES = Object.freeze({
     "8d8a1a3c2855ed6b0c2bec21af8ba5955976be0f4ce8ee9afa5113d1f761e06f"
   ]),
   characterIntro: Object.freeze([
+    "4ca14d5d88a38c72aba9f049a589abf3c16f2987f2fa7667b6891a5a14ae02e7",
     "5d444906511085ad22bc618f3fdfcce97c699675acb6ed227054f7c9467c9bb8",
     "34e05605d44d7d24c01ca7302d61022880a29a010e8b34f4ceaa031358a8157c"
   ]),
@@ -667,6 +671,8 @@ function defaultIdeation() {
     status: "idle",
     audience: "45岁以上中国中老年观众",
     topics: [],
+    topicHistory: [],
+    generationIndex: 0,
     selectedTopicId: "",
     generatedAt: null,
     scriptGeneratedAt: null,
@@ -814,7 +820,17 @@ function defaultProductionPlan(options = {}) {
     executionMode: options.executionMode === "full" ? "full" : "step",
     inputMode: options.inputMode === "manual" ? "manual" : "ai",
     scriptFormat: normalizeScriptFormat(options.scriptFormat),
-    scriptFormatConfirmed: options.scriptFormatConfirmed === true
+    scriptFormatConfirmed: options.scriptFormatConfirmed === true,
+    commerceShotCount: normalizeCommerceShotCount(options.commerceShotCount, 3),
+    scriptHandling: ["respect", "optimize", "recreate"].includes(options.scriptHandling)
+      ? options.scriptHandling
+      : (options.inputMode === "manual" ? "respect" : "optimize"),
+    commerceMode: ["none", "natural", "explicit"].includes(options.commerceMode)
+      ? options.commerceMode
+      : "natural",
+    priorityProfile: ["speed", "balanced", "quality"].includes(options.priorityProfile)
+      ? options.priorityProfile
+      : "balanced"
   };
 }
 
@@ -924,6 +940,12 @@ function productionInputChangeReasons(project = {}, patch = {}) {
     const currentFormat = normalizeScriptFormat(project.productionPlan?.scriptFormat);
     const requestedFormat = normalizeScriptFormat(patch.productionPlan?.scriptFormat);
     if (requestedFormat !== currentFormat) reasons.push("剧本格式");
+  }
+  if (Object.prototype.hasOwnProperty.call(patch || {}, "productionPlan")
+    && Object.prototype.hasOwnProperty.call(patch.productionPlan || {}, "commerceShotCount")) {
+    const currentCount = normalizeCommerceShotCount(project.productionPlan?.commerceShotCount, 3);
+    const requestedCount = normalizeCommerceShotCount(patch.productionPlan?.commerceShotCount, 3);
+    if (requestedCount !== currentCount) reasons.push("带货讲解镜头数");
   }
   return [...new Set(reasons)];
 }
@@ -1309,6 +1331,12 @@ class WorkbenchStore {
     this.reusableAssetLibraryDir = path.join(rootDir, "reusable-asset-library");
     this.reusableAssetLibraryIndexPath = path.join(this.reusableAssetLibraryDir, "index.json");
     this.reusableAssetLibraryFilesDir = path.join(this.reusableAssetLibraryDir, "files");
+    // A valid persisted library index is authoritative. Re-scanning every
+    // project here used to hash/copy hundreds of large assets on every app
+    // launch and repeatedly rewrite the whole JSON index.
+    this.reusableAssetLibraryHydrated = fs.existsSync(this.reusableAssetLibraryIndexPath)
+      || fs.existsSync(`${this.reusableAssetLibraryIndexPath}.bak`);
+    this.foundryKernel = secretCodec.foundryKernel || null;
     this.trashDir = path.join(rootDir, "trash");
     this.activeVideoJobsCache = null;
     this.encodeSecret = typeof secretCodec.encode === "function" ? secretCodec.encode : value => {
@@ -1445,8 +1473,8 @@ class WorkbenchStore {
   importReusableAsset(sourcePath, options = {}) {
     const kind = String(options.kind || "").trim();
     const mediaType = String(options.mediaType || "").trim();
-    const allowedKinds = new Set(["character", "scene", "image", "video", "audio"]);
-    const expectedMediaType = ["character", "scene", "image"].includes(kind) ? "image" : kind;
+    const allowedKinds = new Set(["character", "scene", "prop", "wardrobe", "product", "image", "video", "audio"]);
+    const expectedMediaType = ["character", "scene", "prop", "wardrobe", "product", "image"].includes(kind) ? "image" : kind;
     if (!allowedKinds.has(kind) || mediaType !== expectedMediaType) {
       throw Object.assign(new Error("独立资产类型无效"), { code: "REUSABLE_ASSET_KIND_INVALID" });
     }
@@ -1458,7 +1486,7 @@ class WorkbenchStore {
       throw Object.assign(new Error("无法读取独立资产文件指纹"), { code: "REUSABLE_ASSET_HASH_FAILED" });
     }
     const fingerprint = hashStablePayload({ kind, mediaType, sha256: fileIdentity.sha256 });
-    const assets = this.readReusableAssetLibrary();
+    const assets = Array.isArray(options.libraryAssets) ? options.libraryAssets : this.readReusableAssetLibrary();
     const existingIndex = assets.findIndex(item => item.fingerprint === fingerprint);
     if (existingIndex >= 0) {
       const existing = {
@@ -1468,7 +1496,7 @@ class WorkbenchStore {
         updatedAt: now()
       };
       assets[existingIndex] = existing;
-      this.saveReusableAssetLibrary(assets);
+      if (options.deferSave !== true) this.saveReusableAssetLibrary(assets);
       return existing;
     }
     const entryId = makeId("asset");
@@ -1480,7 +1508,7 @@ class WorkbenchStore {
       id: entryId,
       kind,
       mediaType,
-      stage: String(options.stage || (kind === "character" ? "character_sheet" : kind === "scene" ? "scene_asset" : "")),
+      stage: String(options.stage || ({ character: "character_sheet", scene: "scene_asset", prop: "prop_asset", wardrobe: "wardrobe_asset", product: "product_asset" })[kind] || ""),
       label: String(options.label || path.basename(sourcePath, rawExtension) || entryId).trim(),
       description: String(options.description || "手动上传到独立资产库").trim(),
       filePath: targetPath,
@@ -1499,7 +1527,7 @@ class WorkbenchStore {
       updatedAt: now()
     };
     assets.unshift(entry);
-    this.saveReusableAssetLibrary(assets);
+    if (options.deferSave !== true) this.saveReusableAssetLibrary(assets);
     return entry;
   }
 
@@ -1552,42 +1580,62 @@ class WorkbenchStore {
     return targetPath;
   }
 
-  depositReusableAssetFromCandidate(projectId, candidateId) {
-    const project = this.getProject(projectId);
+  depositReusableAssetFromCandidate(projectId, candidateId, options = {}) {
+    const project = options.project?.id === projectId ? options.project : this.getProject(projectId);
     const candidate = (project.candidates || []).find(item => item.id === candidateId);
     if (!candidate) throw Object.assign(new Error("待入库资产不存在"), { code: "CANDIDATE_NOT_FOUND" });
     const characterStages = new Set(["character_sheet", "character_intro", "character_three_view"]);
-    const isCharacter = candidate.entityType === "character" && characterStages.has(candidate.stage);
-    const isScene = candidate.entityType === "scene" && candidate.stage === "scene_asset";
-    if (!isCharacter && !isScene) {
-      throw Object.assign(new Error("只有人物形象图和场景四视图可以进入跨项目资产库"), { code: "REUSABLE_ASSET_KIND_INVALID" });
-    }
+    const mapping = candidate.entityType === "character" && characterStages.has(candidate.stage)
+      ? { kind: "character", mediaType: "image", owner: (project.characters || []).find(item => item.id === candidate.entityId) }
+      : candidate.entityType === "scene" && candidate.stage === "scene_asset"
+        ? { kind: "scene", mediaType: "image", owner: (project.scenes || []).find(item => item.id === candidate.entityId) }
+        : candidate.entityType === "library" && candidate.stage === "prop_asset"
+          ? { kind: "prop", mediaType: "image", owner: (project.assetLibraries?.props || []).find(item => item.id === candidate.entityId) }
+          : candidate.entityType === "library" && candidate.stage === "wardrobe_asset"
+            ? { kind: "wardrobe", mediaType: "image", owner: (project.assetLibraries?.wardrobes || []).find(item => item.id === candidate.entityId) }
+            : ["character_video", "shot_video"].includes(candidate.stage)
+              ? { kind: "video", mediaType: "video", owner: candidate.entityType === "character" ? (project.characters || []).find(item => item.id === candidate.entityId) : (project.shots || []).find(item => item.id === candidate.entityId) }
+              : ["storyboard_start", "storyboard_end", "storyboard_sheet"].includes(candidate.stage)
+                ? { kind: "image", mediaType: "image", owner: (project.shots || []).find(item => item.id === candidate.entityId) }
+                : candidate.stage === "character_voice"
+                  ? { kind: "audio", mediaType: "audio", owner: (project.characters || []).find(item => item.id === candidate.entityId) }
+                  : null;
+    if (!mapping) throw Object.assign(new Error("该资产类型不能进入跨项目资产库"), { code: "REUSABLE_ASSET_KIND_INVALID" });
     if (!candidate.filePath || !fs.existsSync(candidate.filePath)) {
       throw Object.assign(new Error("资产文件不存在，无法进入跨项目资产库"), { code: "REUSABLE_ASSET_FILE_MISSING" });
     }
-    if (candidate.qualityAudit?.ok === false) {
+    const settings = this.getSettings();
+    const qualityModule = candidate.stage === "shot_video"
+      ? "videos"
+      : String(candidate.stage || "").startsWith("storyboard_")
+        ? "storyboards"
+        : "assets";
+    const qualityRequired = settings?.generation?.qualityGatesEnabled === true
+      && settings?.generation?.qualityGateModules?.[qualityModule] === true;
+    if (qualityRequired && candidate.qualityAudit?.ok === false) {
       throw Object.assign(new Error("未通过质检的资产不能进入跨项目资产库"), { code: "REUSABLE_ASSET_QUALITY_FAILED" });
     }
-    const kind = isCharacter ? "character" : "scene";
-    const owner = isCharacter
-      ? (project.characters || []).find(item => item.id === candidate.entityId)
-      : (project.scenes || []).find(item => item.id === candidate.entityId);
+    const { kind, mediaType, owner } = mapping;
     if (!owner) throw Object.assign(new Error("资产所属角色或场景不存在"), { code: "CANDIDATE_ENTITY_MISSING" });
     const fileIdentity = fileDependencyIdentity(candidate.filePath);
     if (!fileIdentity.sha256) throw Object.assign(new Error("无法读取资产文件指纹"), { code: "REUSABLE_ASSET_HASH_FAILED" });
     const fingerprint = hashStablePayload({ kind, stage: candidate.stage, sha256: fileIdentity.sha256 });
-    const assets = this.readReusableAssetLibrary();
+    const assets = Array.isArray(options.libraryAssets) ? options.libraryAssets : this.readReusableAssetLibrary();
     const existingIndex = assets.findIndex(item => item.fingerprint === fingerprint);
     const existing = existingIndex >= 0 ? assets[existingIndex] : null;
     const entryId = existing?.id || makeId("asset");
     const rawExtension = path.extname(candidate.filePath).toLowerCase();
-    const extension = /^\.[a-z0-9]{1,8}$/.test(rawExtension) ? rawExtension : ".png";
+    const extension = /^\.[a-z0-9]{1,8}$/.test(rawExtension) ? rawExtension : mediaType === "video" ? ".mp4" : mediaType === "audio" ? ".wav" : ".png";
     const targetPath = path.join(this.reusableAssetLibraryFilesDir, `${entryId}${extension}`);
-    if (path.resolve(candidate.filePath) !== path.resolve(targetPath)) fs.copyFileSync(candidate.filePath, targetPath);
+    if (path.resolve(candidate.filePath) !== path.resolve(targetPath)
+      && (!existing || !fs.existsSync(targetPath) || String(existing.sha256 || "") !== String(fileIdentity.sha256))) {
+      fs.copyFileSync(candidate.filePath, targetPath);
+    }
     const entry = {
       ...(existing || {}),
       id: entryId,
       kind,
+      mediaType,
       stage: candidate.stage,
       label: owner.name || owner.label || candidate.entityId,
       description: owner.identitySignature || owner.description || owner.atmosphere || "",
@@ -1610,32 +1658,50 @@ class WorkbenchStore {
     };
     if (existingIndex >= 0) assets[existingIndex] = entry;
     else assets.unshift(entry);
-    this.saveReusableAssetLibrary(assets);
+    if (options.deferSave !== true) this.saveReusableAssetLibrary(assets);
     return entry;
   }
 
   syncReusableAssetLibraryFromProjects() {
+    const assets = this.readReusableAssetLibrary();
     for (const summary of this.listProjects()) {
       let project;
       try { project = this.getProject(summary.id); } catch { continue; }
       const selected = (project.candidates || []).filter(candidate => candidate.selected === true && candidate.stale !== true);
       for (const candidate of selected) {
-        const supported = (candidate.entityType === "character" && ["character_sheet", "character_intro", "character_three_view"].includes(candidate.stage))
-          || (candidate.entityType === "scene" && candidate.stage === "scene_asset");
+        const supported = (candidate.entityType === "character" && ["character_sheet", "character_intro", "character_three_view", "character_video", "character_voice"].includes(candidate.stage))
+          || (candidate.entityType === "scene" && candidate.stage === "scene_asset")
+          || (candidate.entityType === "library" && ["prop_asset", "wardrobe_asset"].includes(candidate.stage))
+          || (candidate.entityType === "shot" && ["storyboard_start", "storyboard_end", "storyboard_sheet", "shot_video"].includes(candidate.stage));
         if (!supported || !candidate.filePath || !fs.existsSync(candidate.filePath)) continue;
-        try { this.depositReusableAssetFromCandidate(project.id, candidate.id); }
+        try { this.depositReusableAssetFromCandidate(project.id, candidate.id, { project, libraryAssets: assets, deferSave: true }); }
         catch (error) { console.warn(`[workbench-store] reusable asset sync skipped ${candidate.id}: ${error?.message || error}`); }
       }
+      if (project.product?.imagePath && fs.existsSync(project.product.imagePath)) {
+        try {
+          this.importReusableAsset(project.product.imagePath, {
+            kind: "product",
+            mediaType: "image",
+            stage: "product_asset",
+            label: project.product.name || `${project.title || "项目"}商品`,
+            description: project.product.sellingPoints || project.product.description || "跨项目商品原图",
+            qualityAudit: { ok: true, source: "project-product" },
+            libraryAssets: assets,
+            deferSave: true
+          });
+        } catch (error) { console.warn(`[workbench-store] product library sync skipped ${project.id}: ${error?.message || error}`); }
+      }
     }
-    return this.readReusableAssetLibrary();
+    this.reusableAssetLibraryHydrated = true;
+    return this.saveReusableAssetLibrary(assets);
   }
 
   listReusableAssets(kind = "") {
     const normalizedKind = String(kind || "").trim();
-    if (normalizedKind && !["character", "scene", "image", "video", "audio"].includes(normalizedKind)) {
+    if (normalizedKind && !["character", "scene", "prop", "wardrobe", "product", "image", "video", "audio"].includes(normalizedKind)) {
       throw Object.assign(new Error("可复用资产类型无效"), { code: "REUSABLE_ASSET_KIND_INVALID" });
     }
-    const assets = this.syncReusableAssetLibraryFromProjects()
+    const assets = (this.reusableAssetLibraryHydrated ? this.readReusableAssetLibrary() : this.syncReusableAssetLibraryFromProjects())
       .filter(item => !normalizedKind || item.kind === normalizedKind)
       .sort((left, right) => String(right.lastUsedAt || right.updatedAt || right.createdAt || "").localeCompare(String(left.lastUsedAt || left.updatedAt || left.createdAt || "")));
     return assets;
@@ -1772,7 +1838,21 @@ class WorkbenchStore {
   }
 
   listProjects() {
-    return this.readIndex().projects.slice().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    const indexed = this.readIndex().projects.slice();
+    if (!this.foundryKernel?.runtime?.listProjectStates) return indexed.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    const byId = new Map(indexed.map(item => [item.id, item]));
+    for (const row of this.foundryKernel.runtime.listProjectStates()) {
+      // A real project folder is the lifecycle boundary. Deleted projects are
+      // moved out of this directory, while a crash between the SQLite commit
+      // and JSON mirror write still leaves the newly created folder recoverable.
+      if (!row.projectId || !fs.existsSync(this.projectDir(row.projectId))) continue;
+      byId.set(row.projectId, this.projectSummary({
+        ...(row.project || {}),
+        id: row.projectId,
+        updatedAt: row.updatedAt || row.project?.updatedAt
+      }));
+    }
+    return [...byId.values()].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
 
   projectSummary(project = {}, fallbackUpdatedAt = now()) {
@@ -1900,6 +1980,7 @@ class WorkbenchStore {
       videoProviderKind: providerKind
     };
     fs.mkdirSync(this.projectDir(project.id), { recursive: true });
+    this.foundryKernel?.commitProject(project, { eventType: "project.created", actor: "user", source: "create_project" });
     atomicWriteJson(this.projectPath(project.id), project);
     const index = this.readIndex();
     index.projects.unshift(this.projectSummary(project));
@@ -1910,12 +1991,14 @@ class WorkbenchStore {
 
   getProject(projectId) {
     const filePath = this.projectPath(projectId);
-    if (!fs.existsSync(filePath)) throw Object.assign(new Error("漫剧项目不存在"), { code: "PROJECT_NOT_FOUND" });
-    const project = readJsonFile(filePath, {
-      validate: value => value?.id === String(projectId || ""),
-      errorCode: "PROJECT_FILE_CORRUPTED",
-      errorMessage: "项目文件已损坏，且没有可用备份"
-    });
+    if (!fs.existsSync(this.projectDir(projectId))) throw Object.assign(new Error("漫剧项目不存在"), { code: "PROJECT_NOT_FOUND" });
+    const runtimeProject = this.foundryKernel?.loadProject(projectId) || null;
+    if (!runtimeProject && !fs.existsSync(filePath)) throw Object.assign(new Error("漫剧项目不存在"), { code: "PROJECT_NOT_FOUND" });
+    const project = runtimeProject || readJsonFile(filePath, {
+        validate: value => value?.id === String(projectId || ""),
+        errorCode: "PROJECT_FILE_CORRUPTED",
+        errorMessage: "项目文件已损坏，且没有可用备份"
+      });
     const storeBaseline = deepCloneJson(project);
     project.version = PROJECT_VERSION;
     project.productionRevision = project.productionRevision || "";
@@ -1993,8 +2076,8 @@ class WorkbenchStore {
     project.promptIntake = normalizePromptIntake(project.promptIntake);
     applyPromptIntakeToMaterializedEntities(project);
     const filePath = this.projectPath(project.id);
-    let diskProject = null;
-    if (fs.existsSync(filePath)) {
+    let diskProject = this.foundryKernel?.loadProject(project.id) || null;
+    if (!diskProject && fs.existsSync(filePath)) {
       diskProject = readJsonFile(filePath, {
         validate: value => value?.id === project.id,
         errorCode: "PROJECT_FILE_CORRUPTED",
@@ -2011,6 +2094,12 @@ class WorkbenchStore {
       voices: Array.isArray(merged.assetLibraries?.voices) ? merged.assetLibraries.voices : []
     };
     merged.updatedAt = now();
+    this.foundryKernel?.commitProject(merged, {
+      eventType: "project.saved",
+      actor: "system",
+      source: "workbench_store",
+      payload: { previousUpdatedAt: String(diskProject?.updatedAt || "") }
+    });
     atomicWriteJson(filePath, merged);
     if (Array.isArray(this.activeVideoJobsCache)) {
       this.activeVideoJobsCache = [
@@ -2027,6 +2116,34 @@ class WorkbenchStore {
     Object.assign(project, merged);
     attachStoreBaseline(project, merged);
     return merged;
+  }
+
+  migrateFoundryRuntime() {
+    if (!this.foundryKernel) return { migrated: 0, existing: 0, failures: [] };
+    let migrated = 0;
+    let existing = 0;
+    const failures = [];
+    for (const summary of this.listProjects()) {
+      try {
+        if (this.foundryKernel.loadProject(summary.id)) {
+          existing += 1;
+          continue;
+        }
+        const filePath = this.projectPath(summary.id);
+        const project = readJsonFile(filePath, {
+          validate: value => value?.id === summary.id,
+          errorCode: "PROJECT_FILE_CORRUPTED",
+          errorMessage: "旧项目无法迁移到 V2 运行时"
+        });
+        this.foundryKernel.importLegacyProject(project);
+        atomicWriteJson(filePath, project);
+        migrated += 1;
+      } catch (error) {
+        failures.push({ projectId: summary.id, code: String(error?.code || "FOUNDRY_MIGRATION_FAILED"), message: String(error?.message || error) });
+      }
+    }
+    this.foundryKernel.runtime.setMeta("legacy-migration", { completedAt: now(), migrated, existing, failures });
+    return { migrated, existing, failures };
   }
 
   beginCostEntry(projectId, entry) {
@@ -2369,14 +2486,50 @@ class WorkbenchStore {
     return candidate;
   }
 
-  confirmCandidate(projectId, candidateId, discardOthers = true) {
+  confirmCandidate(projectId, candidateId, discardOthers = true, options = {}) {
     const project = this.getProject(projectId);
     const settings = this.getSettings();
-    const selected = project.candidates.find(item => item.id === candidateId);
+    let selected = project.candidates.find(item => item.id === candidateId);
     if (!selected) throw Object.assign(new Error("抽卡候选不存在"), { code: "CANDIDATE_NOT_FOUND" });
-    const selectedRevision = selected.productionRevision || "";
+    let selectedRevision = selected.productionRevision || "";
     if (selectedRevision !== (project.productionRevision || "")) {
-      throw Object.assign(new Error("旧制作版本只能回看，不能覆盖当前版本的已选资产"), { code: "CANDIDATE_REVISION_ARCHIVED" });
+      const collection = selected.entityType === "character" ? project.characters : selected.entityType === "scene" ? project.scenes : project.shots;
+      if (selected.entityType !== "library" && !collection.some(item => item.id === selected.entityId)) {
+        throw Object.assign(new Error("历史版本对应的当前对象已经不存在，无法恢复为当前版本"), { code: "CANDIDATE_ENTITY_MISSING" });
+      }
+      const restored = {
+        ...selected,
+        id: makeId("card"),
+        createdAt: now(),
+        updatedAt: now(),
+        productionRevision: project.productionRevision || "",
+        restoredFromCandidateId: selected.id,
+        restoredFromRevision: selectedRevision,
+        selected: false,
+        stale: false,
+        staleAt: "",
+        staleReason: "",
+        manualSelectionOverride: options?.forceManualSelection === true,
+        manualSelectedAt: options?.forceManualSelection === true ? now() : ""
+      };
+      const restoredSnapshot = dependencySnapshot(project, restored);
+      restored.dependencyManifest = restoredSnapshot.dependencies;
+      restored.dependencyFingerprint = restoredSnapshot.fingerprint;
+      if (restoredSnapshot.product) restored.productDependency = restoredSnapshot.product;
+      project.candidates.unshift(restored);
+      selected = restored;
+      selectedRevision = restored.productionRevision || "";
+    }
+    selected.stale = false;
+    selected.staleAt = "";
+    selected.staleReason = "";
+    if (options?.forceManualSelection === true) {
+      selected.manualSelectionOverride = true;
+      selected.manualSelectedAt = now();
+      const selectedSnapshot = dependencySnapshot(project, selected);
+      selected.dependencyManifest = selectedSnapshot.dependencies;
+      selected.dependencyFingerprint = selectedSnapshot.fingerprint;
+      if (selectedSnapshot.product) selected.productDependency = selectedSnapshot.product;
     }
     const moduleName = selected.stage === "shot_video"
       ? "videos"
@@ -2388,14 +2541,56 @@ class WorkbenchStore {
     const masterEnabled = settings?.generation?.qualityGatesEnabled === true;
     const moduleEnabled = settings?.generation?.qualityGateModules?.[moduleName] === true;
     const qualityRequired = masterEnabled && moduleEnabled;
-    if (qualityRequired && selected.qualityAudit?.ok === false) {
+    // “选中此镜/资产” is an explicit human decision. It must remain usable for
+    // every media stage, including storyboard videos, while preserving the
+    // original audit as an override record when review is enabled.
+    const forceQuality = qualityRequired
+      && (options?.forceQuality === true || options?.forceManualSelection === true);
+    if (qualityRequired && selected.qualityAudit?.ok === false && !forceQuality) {
       throw Object.assign(new Error("该候选未通过资产质检，不能确认为成片资产"), { code: "CANDIDATE_QUALITY_FAILED" });
     }
-    if (qualityRequired && ["shot_video", "character_video"].includes(selected.stage) && selected.qualityAudit?.ok !== true) {
+    if (qualityRequired && ["shot_video", "character_video"].includes(selected.stage) && selected.qualityAudit?.ok !== true && !forceQuality) {
       const isShot = selected.stage === "shot_video";
       throw Object.assign(new Error(isShot ? "分镜视频尚未完成音画与首帧资产质检，不能确认" : "人物视频尚未完成声音与首帧资产质检，不能确认"), { code: isShot ? "SHOT_VIDEO_QUALITY_REQUIRED" : "CHARACTER_VIDEO_QUALITY_REQUIRED" });
     }
-    if (!qualityRequired && selected.qualityAudit?.ok !== true) {
+    if (forceQuality && selected.qualityAudit?.ok !== true) {
+      const originalAudit = selected.qualityAudit && typeof selected.qualityAudit === "object"
+        ? JSON.parse(JSON.stringify(selected.qualityAudit))
+        : { ok: null, failures: [] };
+      const automaticAdvisory = options?.qualityOverrideMode === "advisory_continue";
+      selected.qualityAudit = {
+        ...originalAudit,
+        ok: true,
+        verdict: automaticAdvisory ? "advisory_continue" : "ignored",
+        accepted: true,
+        overridden: true,
+        mode: automaticAdvisory ? "advisory_continue" : "human_override",
+        overriddenAt: now(),
+        originalOk: originalAudit.ok,
+        originalFailures: Array.isArray(originalAudit.failures) ? originalAudit.failures : [],
+        failures: [],
+        note: automaticAdvisory
+          ? "系统已保留质检提醒；蓝图仅作建议，原资产继续进入后续流程"
+          : "用户已查看质检提醒，并人工确认忽略后继续使用原资产"
+      };
+      project.activity = Array.isArray(project.activity) ? project.activity : [];
+      project.activity.unshift({
+        id: makeId("activity"),
+        at: now(),
+        type: "quality_warning_overridden",
+        summary: automaticAdvisory
+          ? `${selected.stage} 质检提醒已保留为建议，原资产继续使用`
+          : `${selected.stage} 质检提醒已由用户人工忽略，原资产已确认使用`
+      });
+      project.activity = project.activity.slice(0, 300);
+    }
+    if (!qualityRequired && options?.recordDisabledAudit !== true && selected.qualityAudit?.ok !== true) {
+      selected.qualityAuditHistory = Array.isArray(selected.qualityAuditHistory) ? selected.qualityAuditHistory : [];
+      if (selected.qualityAudit) selected.qualityAuditHistory.unshift({ ...selected.qualityAudit, disabledAt: now() });
+      selected.qualityAuditHistory = selected.qualityAuditHistory.slice(0, 20);
+      selected.qualityAudit = null;
+    }
+    if (options?.recordDisabledAudit === true && !qualityRequired && selected.qualityAudit?.ok !== true) {
       selected.qualityAudit = {
         ok: true,
         skipped: true,
@@ -2417,7 +2612,16 @@ class WorkbenchStore {
     selected.contentFingerprint = candidateContentFingerprint(selected);
     const selectionChanged = previousCandidateId !== selected.id;
     const contentChanged = Boolean(previousContentFingerprint && previousContentFingerprint !== selected.contentFingerprint);
-    for (const item of siblings) item.selected = item.id === candidateId;
+    // A historical restore creates a fresh candidate id in the current revision.
+    // Always select/delete relative to that new id, never the archived source id.
+    for (const item of siblings) item.selected = item.id === selected.id;
+    if (selected.entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(selected.stage)) {
+      const character = (project.characters || []).find(item => item.id === selected.entityId);
+      if (character) {
+        character.activeIdentityCandidateId = selected.id;
+        character.activeIdentitySelectedAt = now();
+      }
+    }
     if (selectionChanged || contentChanged) {
       const invalidation = invalidateCandidateDependencies(project, selected, selectionChanged ? previousCandidateId : selected.id);
       project.activity = Array.isArray(project.activity) ? project.activity : [];
@@ -2430,7 +2634,7 @@ class WorkbenchStore {
       project.activity = project.activity.slice(0, 300);
     }
     if (discardOthers) {
-      const rejected = siblings.filter(item => item.id !== candidateId);
+      const rejected = siblings.filter(item => item.id !== selected.id);
       for (const item of rejected) {
         this.moveFileToTrash(item.filePath, this.projectDir(projectId), "candidate-replaced");
       }
@@ -2439,8 +2643,10 @@ class WorkbenchStore {
     }
     this.saveProject(project);
     if (selected.source !== "reusable-asset-library"
-      && ((selected.entityType === "character" && ["character_sheet", "character_intro", "character_three_view"].includes(selected.stage))
-        || (selected.entityType === "scene" && selected.stage === "scene_asset"))) {
+      && ((selected.entityType === "character" && ["character_sheet", "character_intro", "character_three_view", "character_video", "character_voice"].includes(selected.stage))
+        || (selected.entityType === "scene" && selected.stage === "scene_asset")
+        || (selected.entityType === "library" && ["prop_asset", "wardrobe_asset"].includes(selected.stage))
+        || (selected.entityType === "shot" && ["storyboard_start", "storyboard_end", "storyboard_sheet", "shot_video"].includes(selected.stage)))) {
       try {
         this.depositReusableAssetFromCandidate(projectId, selected.id);
       } catch (error) {
@@ -2466,12 +2672,14 @@ class WorkbenchStore {
 
   discardFailedRecords(projectId, scope = null) {
     const project = this.getProject(projectId);
+    const settings = this.getSettings();
+    const qualityMasterEnabled = settings?.generation?.qualityGatesEnabled === true;
     const inScope = item => !scope?.entityType || (item.entityType === scope.entityType && item.entityId === scope.entityId);
     const failed = project.candidates.filter(item => {
       if (!inScope(item)) return false;
       if (item.selected) return false;
-      if (item.qualityAudit?.ok === false) return true;
-      if (["shot_video", "character_video"].includes(item.stage) && item.qualityAudit && item.qualityAudit.ok !== true) return true;
+      if (qualityMasterEnabled && item.qualityAudit?.ok === false) return true;
+      if (qualityMasterEnabled && ["shot_video", "character_video"].includes(item.stage) && item.qualityAudit && item.qualityAudit.ok !== true) return true;
       return false;
     });
     for (const item of failed) {

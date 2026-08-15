@@ -5,12 +5,12 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, safeStorage, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol, safeStorage, shell } = require("electron");
 const { BridgeClient } = require("./bridge-client");
 const { contractFor, providerDisplayName } = require("./puream-video-adapters");
 const { testProvider } = require("./ai-provider");
 const { stageSubmissionMedia } = require("./media-staging");
-const { WorkbenchStore, defaultPromptTemplates } = require("./workbench-store");
+const { WorkbenchStore, atomicWriteJson, defaultPromptTemplates } = require("./workbench-store");
 const { WorkbenchWorkflow, projectRequiresFaceMesh, hasOssCredentials } = require("./workbench-workflow");
 const {
   PROMPT_SCOPE_STAGES,
@@ -22,6 +22,11 @@ const {
 const { DramaLicenseClient, licenseBypassAllowed, DEFAULT_LICENSE_BASE_URL } = require("./license-gate");
 const { createIntegrityGuard } = require("./integrity-guard");
 const { isActiveVideoJob } = require("./workbench-status");
+const { installAssetProtocol, registerAssetScheme } = require("./secure-asset-protocol");
+const { AdaptiveDramaKernel } = require("./foundry/kernel");
+const { relocateCopiedWorkbenchData } = require("./foundry/storage-relocation");
+const { McpAppController } = require("./mcp/app-controller");
+const { startControlGateway } = require("./mcp/control-gateway");
 const {
   hydratePureamDefaults: applyPureamAuthorization,
   findStoredPureamAuthorization,
@@ -30,6 +35,11 @@ const {
 
 const APP_USER_MODEL_ID = "cn.puream.drama.slotmachine";
 const APP_ICON_PATH = path.join(__dirname, "assets", "app.ico");
+
+// Register before ready. Local media is served through a constrained secure
+// scheme instead of durable file:// URLs, whose origin/security behavior can
+// change across Electron upgrades and break otherwise valid customer assets.
+registerAssetScheme(protocol);
 
 // Keep the Windows taskbar identity aligned with the packaged app and desktop shortcut.
 if (process.platform === "win32") app.setAppUserModelId(APP_USER_MODEL_ID);
@@ -45,9 +55,197 @@ const integrityGuard = createIntegrityGuard({ app });
 let mainWindow;
 let workbenchStore;
 let workbenchWorkflow;
+let foundryKernel;
+let mcpControlGateway;
 let accountSwitchRequest = null;
 let videoJobSyncRequest = null;
 let rendererCrashReloads = 0;
+let activeWorkbenchDataRoot = "";
+const UPDATE_MANIFEST_URL = "https://puream.cn/api/drama-slot/version";
+let updateDownloadRequest = null;
+let updateState = {
+  status: "idle",
+  currentVersion: app.getVersion(),
+  latestVersion: "",
+  progress: 0,
+  message: "尚未检查更新",
+  installerPath: ""
+};
+
+function storageLocationConfigPath() {
+  return path.join(app.getPath("userData"), "storage-location.json");
+}
+
+function defaultWorkbenchDataRoot() {
+  return path.join(app.getPath("userData"), "workbench");
+}
+
+function configuredWorkbenchDataRoot() {
+  if (process.env.DRAMA_SLOT_DATA_ROOT) return path.resolve(process.env.DRAMA_SLOT_DATA_ROOT);
+  try {
+    const saved = JSON.parse(fs.readFileSync(storageLocationConfigPath(), "utf8"));
+    const root = String(saved?.workbenchDataRoot || "").trim();
+    if (root && path.isAbsolute(root)) return path.resolve(root);
+  } catch {}
+  return defaultWorkbenchDataRoot();
+}
+
+function persistWorkbenchDataRoot(rootDir) {
+  const configPath = storageLocationConfigPath();
+  const tempPath = `${configPath}.tmp`;
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(tempPath, JSON.stringify({ version: 1, workbenchDataRoot: path.resolve(rootDir), updatedAt: new Date().toISOString() }, null, 2), "utf8");
+  fs.renameSync(tempPath, configPath);
+}
+
+function semverParts(value) {
+  return String(value || "0.0.0").split(".").slice(0, 4).map(item => Number.parseInt(item, 10) || 0);
+}
+
+function versionIsNewer(candidate, current) {
+  const left = semverParts(candidate);
+  const right = semverParts(current);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    if ((left[index] || 0) !== (right[index] || 0)) return (left[index] || 0) > (right[index] || 0);
+  }
+  return false;
+}
+
+function publishUpdateState(patch = {}) {
+  updateState = { ...updateState, ...patch, currentVersion: app.getVersion(), updatedAt: new Date().toISOString() };
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("app:update-status", updateState);
+  return { ...updateState };
+}
+
+function normalizeUpdateManifest(payload = {}) {
+  const data = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+  const latestVersion = String(data?.version || "").trim();
+  if (!/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(latestVersion)) {
+    throw Object.assign(new Error("官网更新信息缺少有效版本号"), { code: "UPDATE_MANIFEST_INVALID" });
+  }
+  const download = new URL(String(data?.downloadUrl || "/api/drama-slot/download"), UPDATE_MANIFEST_URL);
+  if (download.protocol !== "https:" || !["puream.cn", "www.puream.cn"].includes(download.hostname)) {
+    throw Object.assign(new Error("官网更新下载地址无效"), { code: "UPDATE_DOWNLOAD_URL_REJECTED" });
+  }
+  const sha256 = String(data?.sha256 || "").trim().toUpperCase();
+  if (!/^[A-F0-9]{64}$/.test(sha256)) {
+    throw Object.assign(new Error("官网更新信息缺少安装包校验值"), { code: "UPDATE_CHECKSUM_REQUIRED" });
+  }
+  return {
+    latestVersion,
+    downloadUrl: download.href,
+    sha256,
+    size: Math.max(0, Number(data?.size) || 0)
+  };
+}
+
+async function checkForAppUpdate({ notify = true } = {}) {
+  if (notify) publishUpdateState({ status: "checking", progress: 0, message: "正在检查官网最新版" });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await net.fetch(UPDATE_MANIFEST_URL, {
+      method: "GET",
+      headers: { accept: "application/json", "cache-control": "no-cache" },
+      signal: controller.signal
+    });
+    if (!response.ok) throw Object.assign(new Error(`官网更新接口返回 ${response.status}`), { code: "UPDATE_MANIFEST_HTTP_ERROR" });
+    const manifest = normalizeUpdateManifest(await response.json());
+    const available = versionIsNewer(manifest.latestVersion, app.getVersion());
+    return publishUpdateState({
+      status: available ? "available" : "latest",
+      latestVersion: manifest.latestVersion,
+      progress: available ? 0 : 100,
+      message: available ? `发现 ${manifest.latestVersion}，点击版本号可覆盖更新` : "当前已经是最新版",
+      installerPath: available && updateState.latestVersion === manifest.latestVersion ? updateState.installerPath : "",
+      manifest
+    });
+  } catch (error) {
+    return publishUpdateState({
+      status: "error",
+      progress: 0,
+      message: controller.signal.aborted ? "官网更新检查超时，点击可重试" : "暂时无法检查更新，点击可重试",
+      code: controller.signal.aborted ? "UPDATE_MANIFEST_TIMEOUT" : (error?.code || "UPDATE_CHECK_FAILED")
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function downloadAppUpdate() {
+  if (updateDownloadRequest) return updateDownloadRequest;
+  updateDownloadRequest = (async () => {
+    const checked = updateState.status === "available" && updateState.manifest
+      ? updateState
+      : await checkForAppUpdate();
+    if (checked.status === "latest") return checked;
+    if (checked.status !== "available" || !checked.manifest) {
+      throw Object.assign(new Error(checked.message || "暂时无法获取更新"), { code: checked.code || "UPDATE_NOT_AVAILABLE" });
+    }
+    const manifest = checked.manifest;
+    const updateDir = path.join(app.getPath("userData"), "updates");
+    fs.mkdirSync(updateDir, { recursive: true });
+    const installerPath = path.join(updateDir, `PureamDramaSlot-${manifest.latestVersion}.exe`);
+    const partialPath = `${installerPath}.part`;
+    fs.rmSync(partialPath, { force: true });
+    publishUpdateState({ status: "downloading", progress: 0, message: `正在下载 ${manifest.latestVersion}` });
+    try {
+      const response = await net.fetch(manifest.downloadUrl, { method: "GET", headers: { accept: "application/octet-stream" } });
+      if (!response.ok || !response.body) throw Object.assign(new Error(`安装包下载返回 ${response.status}`), { code: "UPDATE_DOWNLOAD_FAILED" });
+      const expectedSize = manifest.size || Number(response.headers.get("content-length")) || 0;
+      const writer = fs.createWriteStream(partialPath, { flags: "wx" });
+      let writerFailure = null;
+      let notifyWriterFailure;
+      const writerFailureSignal = new Promise(resolve => { notifyWriterFailure = resolve; });
+      writer.on("error", error => {
+        writerFailure = error;
+        notifyWriterFailure(error);
+      });
+      const hash = crypto.createHash("sha256");
+      let received = 0;
+      let lastProgress = -1;
+      try {
+        for await (const chunk of response.body) {
+          const buffer = Buffer.from(chunk);
+          hash.update(buffer);
+          received += buffer.length;
+          if (!writer.write(buffer)) {
+            const writeResult = await Promise.race([
+              new Promise(resolve => writer.once("drain", () => resolve(null))),
+              writerFailureSignal
+            ]);
+            if (writeResult) throw writeResult;
+          }
+          if (writerFailure) throw writerFailure;
+          const progress = expectedSize ? Math.min(99, Math.floor((received / expectedSize) * 100)) : 0;
+          if (progress !== lastProgress) {
+            lastProgress = progress;
+            publishUpdateState({ status: "downloading", progress, message: `正在下载 ${manifest.latestVersion} · ${progress}%` });
+          }
+        }
+      } finally {
+        if (!writer.destroyed) writer.end();
+        const closeResult = writerFailure || await Promise.race([
+          new Promise(resolve => writer.once("finish", () => resolve(null))),
+          writerFailureSignal
+        ]);
+        if (closeResult) throw closeResult;
+      }
+      const actualHash = hash.digest("hex").toUpperCase();
+      if ((expectedSize && received !== expectedSize) || actualHash !== manifest.sha256) {
+        throw Object.assign(new Error("安装包完整性校验未通过，已取消覆盖安装"), { code: "UPDATE_INTEGRITY_FAILED" });
+      }
+      fs.rmSync(installerPath, { force: true });
+      fs.renameSync(partialPath, installerPath);
+      return publishUpdateState({ status: "ready", progress: 100, installerPath, message: `${manifest.latestVersion} 已下载，点击即可覆盖安装` });
+    } catch (error) {
+      fs.rmSync(partialPath, { force: true });
+      publishUpdateState({ status: "error", progress: 0, message: "更新下载失败，点击可重试", code: error?.code || "UPDATE_DOWNLOAD_FAILED" });
+      throw error;
+    }
+  })().finally(() => { updateDownloadRequest = null; });
+  return updateDownloadRequest;
+}
 
 function hydratePureamDefaults(store, activationCode = "") {
   return applyPureamAuthorization(store, activationCode, { bridge });
@@ -101,8 +299,8 @@ const MEDIA_RULES = {
   image: {
     maxCount: 9,
     maxBytes: 30 * 1024 * 1024,
-    extensions: ["png", "jpg", "jpeg", "webp"],
-    filters: [{ name: "参考图片", extensions: ["png", "jpg", "jpeg", "webp"] }]
+    extensions: ["png", "jpg", "jpeg", "jfif", "webp", "bmp", "gif", "tif", "tiff", "avif", "heic", "heif"],
+    filters: [{ name: "参考图片", extensions: ["png", "jpg", "jpeg", "jfif", "webp", "bmp", "gif", "tif", "tiff", "avif", "heic", "heif"] }]
   },
   video: {
     maxCount: 3,
@@ -136,7 +334,10 @@ function publicError(error) {
   return {
     ok: false,
     code: error?.code || "UNEXPECTED_ERROR",
-    message: sanitizePublicMessage(error?.message)
+    message: sanitizePublicMessage(error?.message),
+    errorKind: error?.kind || "",
+    retryable: error?.retryable === true,
+    userAction: error?.userAction || ""
   };
 }
 
@@ -629,13 +830,18 @@ function createWindow() {
             const libraryResults = [];
             for (const button of document.querySelectorAll('.library-nav-button')) {
               button.click();
-              await wait(30);
+              await wait(100);
               libraryResults.push({
                 library: button.dataset.library,
                 active: button.classList.contains('active'),
                 panelVisible: !document.querySelector('#sidebarLibraryPanel')?.classList.contains('hidden'),
-                title: document.querySelector('#sidebarLibraryTitle')?.textContent || ''
+                dialogOpen: document.querySelector('#reusableAssetDialog')?.open === true,
+                title: document.querySelector('#reusableAssetDialog')?.open
+                  ? (document.querySelector('#reusableAssetDialogTitle')?.textContent || '')
+                  : (document.querySelector('#sidebarLibraryTitle')?.textContent || '')
               });
+              document.querySelector('#reusableAssetDialog')?.close();
+              await wait(30);
             }
             document.querySelector('#closeSidebarLibrary')?.click();
             document.querySelector('#newProject')?.click();
@@ -650,20 +856,23 @@ function createWindow() {
             await wait(30);
             const blueprintOpened = !document.querySelector('#qualityBlueprintMenu')?.classList.contains('hidden');
             document.querySelector('#qualityBlueprintToggle')?.click();
-            const firstHelp = document.querySelector('button .info-dot');
+            const firstHelp = document.querySelector('button[data-tooltip]');
             firstHelp?.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
             await wait(30);
             const tooltipVisible = document.querySelector('#infoTooltipLayer')?.classList.contains('is-visible') === true
               && Boolean(document.querySelector('#infoTooltipLayer')?.textContent?.trim());
             firstHelp?.dispatchEvent(new PointerEvent('pointerout', { bubbles: true }));
+            document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+            document.querySelector('.stage-button[data-stage="script"]')?.click();
+            await wait(60);
             const buttons = [...document.querySelectorAll('button')].map((button, index) => ({
               index,
               id: button.id || '',
               action: button.dataset.action || '',
               label: String(button.innerText || button.textContent || button.getAttribute('aria-label') || '').replace(/!/g, '').replace(/\\s+/g, ' ').trim(),
               disabled: Boolean(button.disabled),
-              hasHelp: Boolean(button.querySelector(':scope > .info-dot')),
-              tooltip: String(button.dataset.tooltip || button.querySelector(':scope > .info-dot')?.dataset.tooltip || '').trim()
+              hasHelp: Boolean(button.dataset.tooltip),
+              tooltip: String(button.dataset.tooltip || '').trim()
             }));
             return {
               buttonCount: buttons.length,
@@ -674,6 +883,10 @@ function createWindow() {
               libraryResults,
               dialogs: { newProjectOpened, strategyOpened, blueprintOpened },
               tooltipVisible,
+              visibleInfoDotCount: [...document.querySelectorAll('.info-dot')].filter(node => {
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+              }).length,
               horizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth + 1,
               viewport: { width: innerWidth, height: innerHeight, zoom: ${captureZoom} },
               localComponents: {
@@ -695,7 +908,7 @@ function createWindow() {
               await wait(50);
             }
             const expected = {
-              script: ['importScriptFile', 'import-prompt-batch', 'download-prompt-suggestions'],
+              script: ['importScriptFile', 'importDialogueRewrite', 'import-prompt-batch', 'download-prompt-suggestions'],
               assets: ['import-prompt-batch', 'download-prompt-suggestions', 'open-independent-library'],
               shots: ['import-prompt-batch', 'download-prompt-suggestions', 'importStoryboardBatch'],
               videos: ['importShotPromptsBatch', 'download-prompt-suggestions', 'importShotVideosBatch'],
@@ -765,6 +978,36 @@ function createWindow() {
             };
           })()`);
           await new Promise(resolve => setTimeout(resolve, 180));
+        }
+        if (captureScenario === "promptsettings") {
+          captureResult = await mainWindow.webContents.executeJavaScript(`(async () => {
+            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+            for (let attempt = 0; attempt < 100; attempt += 1) {
+              if (document.body.dataset.workbenchReady === 'true' && document.querySelector('#promptEditor')) break;
+              await wait(50);
+            }
+            document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+            document.querySelector('.stage-button[data-stage="settings"]')?.click();
+            await wait(180);
+            const card = document.querySelector('.prompt-library-card');
+            const stage = document.querySelector('.main-stage');
+            if (stage && card) stage.scrollTop = Math.max(0, card.offsetTop - 18);
+            await wait(160);
+            const cards = [...document.querySelectorAll('.prompt-editor-card')].map(cardNode => ({
+              name: cardNode.querySelector('.prompt-editor-card-head label')?.textContent?.trim() || '',
+              purpose: cardNode.querySelector('.prompt-purpose-main')?.textContent?.trim() || '',
+              fields: [...cardNode.querySelectorAll('.prompt-purpose span')].map(node => node.textContent.trim()),
+              promptKey: cardNode.querySelector('[data-prompt-key]')?.dataset.promptKey || '',
+              exampleActions: cardNode.querySelectorAll('[data-action="view-prompt-example"], [data-action="download-prompt-example"]').length
+            }));
+            return {
+              activeStage: document.querySelector('.stage-panel.active')?.dataset.panel || '',
+              cardCount: cards.length,
+              cards,
+              horizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth + 1
+            };
+          })()`);
+          await new Promise(resolve => setTimeout(resolve, 120));
         }
         if (captureScenario === "resumestate") {
           const targetProjectId = String(process.env.DRAMA_SLOT_CAPTURE_PROJECT_ID || "").trim();
@@ -1024,10 +1267,66 @@ function readAvMetadata(filePath) {
   });
 }
 
+function nativeImageMetadata(filePath) {
+  try {
+    const image = nativeImage.createFromPath(filePath);
+    if (image.isEmpty()) return null;
+    const size = image.getSize();
+    return size.width > 0 && size.height > 0 ? { duration: null, width: size.width, height: size.height } : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeImageForImport(filePath, extension) {
+  const browserSafe = new Set(["png", "jpg", "jpeg", "webp"]);
+  const direct = nativeImageMetadata(filePath);
+  if (direct && browserSafe.has(extension)) return Promise.resolve({ ...direct, importPath: filePath, normalized: false });
+  const ffmpeg = locateFfmpeg();
+  if (!ffmpeg) {
+    if (direct) return Promise.resolve({ ...direct, importPath: filePath, normalized: false });
+    return Promise.reject(Object.assign(new Error("图片暂时无法读取，请重新选择；本地图片兼容组件不可用"), { code: "IMAGE_DECODE_FAILED" }));
+  }
+  const targetDir = path.join(app.getPath("temp"), "puream-image-import");
+  fs.mkdirSync(targetDir, { recursive: true });
+  const targetPath = path.join(targetDir, `${Date.now()}-${crypto.randomUUID().slice(0, 8)}.png`);
+  return new Promise((resolve, reject) => {
+    let stderr = "";
+    let settled = false;
+    const child = spawn(ffmpeg, ["-hide_banner", "-loglevel", "error", "-i", filePath, "-map", "0:v:0", "-frames:v", "1", "-vf", "format=rgba", "-y", targetPath], {
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        try { fs.rmSync(targetPath, { force: true }); } catch {}
+        reject(error);
+      } else resolve(value);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch {}
+      finish(Object.assign(new Error("图片兼容转换超时，请确认文件没有损坏"), { code: "IMAGE_NORMALIZE_TIMEOUT" }));
+    }, 60_000);
+    child.stderr.on("data", chunk => { if (stderr.length < 16_000) stderr += chunk.toString("utf8"); });
+    child.on("error", error => finish(Object.assign(error, { code: error?.code || "IMAGE_NORMALIZE_FAILED" })));
+    child.on("close", code => {
+      const metadata = code === 0 && fs.existsSync(targetPath) ? nativeImageMetadata(targetPath) : null;
+      if (!metadata) {
+        finish(Object.assign(new Error("图片文件已损坏或不包含可读取画面"), { code: "IMAGE_DECODE_FAILED", detail: stderr.slice(-1000) }));
+        return;
+      }
+      finish(null, { ...metadata, importPath: targetPath, normalized: true });
+    });
+  });
+}
+
 async function describeMedia(filePath, type) {
   const rule = MEDIA_RULES[type];
   const extension = path.extname(filePath).slice(1).toLowerCase();
-  if (!rule || !rule.extensions.includes(extension)) {
+  if (!rule || (type !== "image" && !rule.extensions.includes(extension))) {
     const error = new Error(`${type === "image" ? "图片" : type === "video" ? "视频" : "音频"}格式不受支持`);
     error.code = "UNSUPPORTED_MEDIA_FORMAT";
     throw error;
@@ -1040,13 +1339,7 @@ async function describeMedia(filePath, type) {
     throw Object.assign(new Error(`${type === "image" ? "图片" : type === "video" ? "视频" : "音频"}超过允许大小`), { code: "MEDIA_FILE_TOO_LARGE" });
   }
   const metadata = type === "image"
-    ? (() => {
-        const image = nativeImage.createFromPath(filePath);
-        if (image.isEmpty()) throw Object.assign(new Error("图片无法解码，请重新导出后上传"), { code: "IMAGE_DECODE_FAILED" });
-        const size = image.getSize();
-        if (!size.width || !size.height) throw Object.assign(new Error("图片尺寸无效"), { code: "IMAGE_DIMENSIONS_INVALID" });
-        return { duration: null, width: size.width, height: size.height };
-      })()
+    ? await normalizeImageForImport(filePath, extension)
     : await readAvMetadata(filePath);
   if (type === "video" && (!Number.isFinite(metadata.duration) || metadata.duration <= 0 || !metadata.width || !metadata.height)) {
     throw Object.assign(new Error("视频无法完整解码或缺少有效画面"), { code: "VIDEO_DECODE_FAILED" });
@@ -1099,7 +1392,8 @@ async function importCandidateFromPath(projectId, entityType, entityId, stage, s
   if (stage === "character_voice" && Number(described.duration) > 15.05) {
     throw Object.assign(new Error("单个音色参考不能超过 15 秒"), { code: "AUDIO_DURATION_INVALID" });
   }
-  const imported = workflow.importAsset(projectId, manualAssetCategory(entityType, mediaType), sourcePath, `${stage}-manual`);
+  const importPath = described.importPath || sourcePath;
+  const imported = workflow.importAsset(projectId, manualAssetCategory(entityType, mediaType), importPath, `${stage}-manual`);
   let candidate = store.addCandidate(projectId, {
     entityType,
     entityId,
@@ -1126,9 +1420,18 @@ async function importCandidateFromPath(projectId, entityType, entityId, stage, s
     candidate = store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
   }
   if (candidate.qualityAudit?.ok !== false) {
-    candidate = store.confirmCandidate(projectId, candidate.id, false);
+    candidate = store.confirmCandidate(projectId, candidate.id, false, { forceManualSelection: true });
   }
   let libraryWarning = "";
+  let extractedVoice = null;
+  if (entityType === "character" && stage === "character_video") {
+    try {
+      extractedVoice = await workflow.extractCharacterVoice(projectId, entityId, { track: false });
+    } catch (error) {
+      libraryWarning = sanitizePublicMessage(error?.message || "人物视频已保存，但音色自动提取失败");
+      store.addActivity(projectId, "voice_extract_warning", `人物视频已保存；音色自动提取失败：${libraryWarning}`);
+    }
+  }
   if (entityType === "character" && stage === "character_voice") {
     try {
       workflow.depositCharacterVoiceToLibrary(projectId, entityId, candidate);
@@ -1138,19 +1441,33 @@ async function importCandidateFromPath(projectId, entityType, entityId, stage, s
       store.addActivity(projectId, "asset_library_warning", `音色已保存到项目；独立音色库入库失败：${libraryWarning}`);
     }
   }
-  return { candidate, described, warning: libraryWarning };
+  return { candidate, described, extractedVoice, warning: libraryWarning };
 }
 
 async function importProductFromPath(projectId, sourcePath, source = "manual-upload", reusableAssetId = "") {
   const { store, workflow } = requireWorkbench();
-  await describeMedia(sourcePath, "image");
-  const imported = workflow.importAsset(projectId, "product", sourcePath, "product-manual");
+  const described = await describeMedia(sourcePath, "image");
+  const imported = workflow.importAsset(projectId, "product", described.importPath || sourcePath, "product-manual");
   const project = store.replaceProductAsset(projectId, {
     imagePath: imported.path,
     publicUrl: "",
     source,
     reusableAssetId: reusableAssetId || ""
   });
+  if (source !== "reusable-asset-library") {
+    try {
+      store.importReusableAsset(imported.path, {
+        kind: "product",
+        mediaType: "image",
+        stage: "product_asset",
+        label: project.product?.name || path.basename(sourcePath, path.extname(sourcePath)),
+        description: project.product?.sellingPoints || project.product?.description || "跨项目商品原图",
+        qualityAudit: { ok: true, source: "manual-product-upload" }
+      });
+    } catch (error) {
+      store.addActivity(projectId, "asset_library_warning", `商品图已保存到项目；自动加入全局商品库失败：${sanitizePublicMessage(error?.message || "未知错误")}`);
+    }
+  }
   return { asset: imported, project: store.getProject(projectId) };
 }
 
@@ -1186,7 +1503,77 @@ async function importFinalVideoFromPath(projectId, sourcePath, source = "manual-
     message: "用户手动上传完整成片；尚未运行自动媒体终审"
   };
   store.saveProject(project);
+  if (source !== "reusable-asset-library") {
+    try {
+      store.importReusableAsset(imported.path, {
+        kind: "video",
+        mediaType: "video",
+        stage: "final_video",
+        label: `${project.title || "项目"} · 完整成片`,
+        description: "手动上传的跨项目完整成片",
+        duration: described.duration,
+        width: described.width,
+        height: described.height,
+        qualityAudit: { ok: true, source: "manual-final-upload" }
+      });
+    } catch (error) {
+      store.addActivity(projectId, "asset_library_warning", `完整成片已保存到项目；自动加入全局视频库失败：${sanitizePublicMessage(error?.message || "未知错误")}`);
+    }
+  }
   return { asset: imported, described, project: store.getProject(projectId) };
+}
+
+async function importVoiceLibraryFromPath(sourcePath) {
+  const { store, workflow } = requireWorkbench();
+  const described = await describeMedia(sourcePath, "audio");
+  if (Number(described.duration) > 15.05) {
+    throw Object.assign(new Error("单个音色参考不能超过音频总上限 15 秒"), { code: "AUDIO_DURATION_INVALID" });
+  }
+  const entryId = require("./workbench-store").makeId("voice");
+  const sourceExtension = `.${described.extension}`;
+  const target = path.join(store.voiceLibraryFilesDir, `${entryId}${sourceExtension}`);
+  fs.mkdirSync(store.voiceLibraryFilesDir, { recursive: true });
+  fs.copyFileSync(sourcePath, target);
+  const baseName = path.basename(sourcePath, path.extname(sourcePath));
+  const entry = store.upsertVoiceLibraryEntry({
+    id: entryId,
+    label: baseName || entryId,
+    characterName: baseName,
+    gender: "",
+    ageBand: "",
+    voiceDescription: "",
+    identityHints: "",
+    tags: [baseName].filter(Boolean),
+    filePath: target,
+    fileUrl: pathToFileURL(target).href,
+    duration: Number(described.duration) || 0,
+    audioSpec: sourceExtension === ".wav"
+      ? { container: "wav", codec: "pcm_s16le", channels: 1, sampleRate: 44100 }
+      : { container: described.extension, codec: "", channels: null, sampleRate: null },
+    audioAudit: { ok: true, source: "manual-import" },
+    mediaProbeVerified: true,
+    fingerprint: `manual|${baseName}|${entryId}`,
+    source: { projectId: "", projectTitle: "", characterId: "", characterName: baseName, candidateId: "" },
+    useCount: 0
+  });
+  return { entry, voices: workflow.listVoiceLibrary() };
+}
+
+function reusableAssetsForRenderer(kind = "") {
+  const { store, workflow } = requireWorkbench();
+  const normalizedKind = String(kind || "").trim();
+  const assets = normalizedKind === "voice" ? [] : store.listReusableAssets(normalizedKind);
+  if (normalizedKind && normalizedKind !== "voice") return assets;
+  const voices = workflow.listVoiceLibrary().map(item => ({
+    ...item,
+    kind: "voice",
+    mediaType: "audio",
+    stage: "character_voice",
+    description: item.voiceDescription || item.identityHints || "跨项目人物音色",
+    source: item.source || { projectTitle: "长期音色库" },
+    librarySource: "voice"
+  }));
+  return [...assets, ...voices].sort((left, right) => String(right.lastUsedAt || right.updatedAt || right.createdAt || "").localeCompare(String(left.lastUsedAt || left.updatedAt || left.createdAt || "")));
 }
 
 function shotNumberFromFile(filePath) {
@@ -1519,6 +1906,35 @@ ipcMain.handle("app:defaults", () => {
     }
   };
 });
+ipcMain.handle("app:check-update", async () => checkForAppUpdate());
+ipcMain.handle("app:install-update", async () => {
+  try {
+    const ready = updateState.status === "ready" && updateState.installerPath
+      ? updateState
+      : await downloadAppUpdate();
+    if (ready.status === "latest") return { ok: true, state: ready, latest: true };
+    if (ready.status !== "ready" || !ready.installerPath || !fs.existsSync(ready.installerPath)) {
+      throw Object.assign(new Error("新版安装包尚未准备完成"), { code: "UPDATE_INSTALLER_NOT_READY" });
+    }
+    const answer = await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title: "覆盖更新纯梦短剧老虎机",
+      message: `即将安装 ${ready.latestVersion} 并自动关闭当前软件。`,
+      detail: "项目、历史记录和全局资产库保存在用户数据目录，不会被安装程序删除。",
+      buttons: ["立即覆盖安装", "稍后"],
+      defaultId: 0,
+      cancelId: 1
+    });
+    if (answer.response !== 0) return { ok: true, canceled: true, state: ready };
+    publishUpdateState({ status: "installing", progress: 100, message: "正在启动覆盖安装" });
+    const child = spawn(ready.installerPath, ["/S"], { detached: true, stdio: "ignore", windowsHide: true });
+    child.unref();
+    setTimeout(() => app.quit(), 350);
+    return { ok: true, installing: true, state: updateState };
+  } catch (error) {
+    return publicError(error);
+  }
+});
 ipcMain.handle("video:submit", async (_event, payload) => {
   let staged;
   let lease;
@@ -1568,6 +1984,23 @@ ipcMain.handle("file:reveal", async (_event, targetPath) => {
 function requireWorkbench() {
   if (!workbenchStore || !workbenchWorkflow) throw Object.assign(new Error("漫剧工作台尚未初始化"), { code: "WORKBENCH_NOT_READY" });
   return { store: workbenchStore, workflow: workbenchWorkflow };
+}
+
+function projectForRenderer(projectId, { reconcile = true } = {}) {
+  const { store, workflow } = requireWorkbench();
+  if (reconcile) workflow.reconcileDetachedAutomations(projectId);
+  const project = store.getProject(projectId);
+  const activeVideoJobs = store.listActiveVideoJobs(projectId);
+  const activeOperation = workflow.hasActiveOperation(projectId);
+  return {
+    ...project,
+    runtime: {
+      active: activeOperation || activeVideoJobs.length > 0,
+      activeOperation,
+      activeVideoJobCount: activeVideoJobs.length,
+      checkedAt: new Date().toISOString()
+    }
+  };
 }
 
 function publicPendingJobs(records) {
@@ -1774,7 +2207,11 @@ ipcMain.handle("workbench:cancel-account-switch", async () => {
 });
 
 ipcMain.handle("workbench:list-projects", () => {
-  try { return { ok: true, projects: requireWorkbench().store.listProjects() }; }
+  try {
+    const { store, workflow } = requireWorkbench();
+    workflow.reconcileDetachedAutomations();
+    return { ok: true, projects: store.listProjects() };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:create-project", (_event, title, options) => {
@@ -1783,7 +2220,7 @@ ipcMain.handle("workbench:create-project", (_event, title, options) => {
     const project = store.createProject(title, options || {});
     const settings = store.getSettings();
     bridge.configure(settings.videoProvider);
-    return { ok: true, project, settings: redactSettingsForRenderer(settings) };
+    return { ok: true, project: projectForRenderer(project.id, { reconcile: false }), settings: redactSettingsForRenderer(settings) };
   }
   catch (error) { return publicError(error); }
 });
@@ -1802,25 +2239,88 @@ ipcMain.handle("workbench:list-deleted-projects", () => {
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:restore-project", (_event, archiveId) => {
-  try { return { ok: true, project: requireWorkbench().store.restoreProject(archiveId) }; }
+  try {
+    const restored = requireWorkbench().store.restoreProject(archiveId);
+    return { ok: true, project: projectForRenderer(restored.id) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:get-project", (_event, projectId) => {
   try {
-    // Project selection is read-only. A switch must never arbitrate whether a
-    // background/recovered task is alive; explicit task sync/resume owns that
-    // state transition and has the upstream evidence needed to decide safely.
-    return { ok: true, project: requireWorkbench().store.getProject(projectId) };
+    // The main process owns the authoritative task registry. Reconcile stale
+    // persisted flags before rendering so a killed process can never leave the
+    // UI showing “运行中” while no local operation or remote job exists.
+    return { ok: true, project: projectForRenderer(projectId) };
   }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:patch-project", (_event, projectId, patch) => {
-  try { return { ok: true, project: requireWorkbench().store.patchProject(projectId, patch || {}) }; }
+  try {
+    requireWorkbench().store.patchProject(projectId, patch || {});
+    return { ok: true, project: projectForRenderer(projectId, { reconcile: false }) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:get-settings", () => {
   try { return { ok: true, settings: redactSettingsForRenderer(requireWorkbench().store.getSettings()) }; }
   catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:get-storage-location", () => {
+  try {
+    const rootDir = path.resolve(activeWorkbenchDataRoot || requireWorkbench().store.rootDir);
+    return { ok: true, rootDir, isDefault: rootDir === path.resolve(defaultWorkbenchDataRoot()) };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:foundry-status", () => {
+  try {
+    return { ok: true, status: foundryKernel?.health?.() || { ok: false, message: "V2 内核未初始化" } };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:choose-storage-location", async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "选择纯梦短剧项目与素材保存位置",
+      buttonLabel: "保存到这里",
+      properties: ["openDirectory", "createDirectory"]
+    });
+    if (result.canceled || !result.filePaths?.[0]) return { ok: true, canceled: true };
+    const sourceRoot = path.resolve(activeWorkbenchDataRoot || requireWorkbench().store.rootDir);
+    const targetRoot = path.resolve(result.filePaths[0], "纯梦短剧老虎机数据");
+    if (targetRoot === sourceRoot) return { ok: true, canceled: false, rootDir: sourceRoot, unchanged: true };
+    const relativeTarget = path.relative(sourceRoot, targetRoot);
+    const relativeSource = path.relative(targetRoot, sourceRoot);
+    if ((!relativeTarget.startsWith("..") && !path.isAbsolute(relativeTarget)) || (!relativeSource.startsWith("..") && !path.isAbsolute(relativeSource))) {
+      throw Object.assign(new Error("新旧保存目录不能互相包含，请选择另一个独立文件夹"), { code: "STORAGE_LOCATION_NESTED" });
+    }
+    if (fs.existsSync(path.join(targetRoot, "projects.json"))) {
+      throw Object.assign(new Error("目标位置已有另一套项目数据。为防止覆盖，请选择空文件夹"), { code: "STORAGE_LOCATION_NOT_EMPTY" });
+    }
+    // The handler is synchronous from this point until the copy finishes, so
+    // no project write can race this WAL checkpoint and directory snapshot.
+    foundryKernel?.runtime?.checkpoint?.();
+    fs.mkdirSync(targetRoot, { recursive: true });
+    if (fs.existsSync(sourceRoot)) {
+      for (const entry of fs.readdirSync(sourceRoot, { withFileTypes: true })) {
+        fs.cpSync(path.join(sourceRoot, entry.name), path.join(targetRoot, entry.name), { recursive: true, force: false, errorOnExist: true });
+      }
+    }
+    const relocatedKernel = new AdaptiveDramaKernel({ rootDir: targetRoot });
+    let relocation;
+    try {
+      relocation = relocateCopiedWorkbenchData({ sourceRoot, targetRoot, kernel: relocatedKernel, writeJson: atomicWriteJson });
+      if (relocation.criticalSkippedJson.length) {
+        throw Object.assign(new Error(`保存位置迁移发现 ${relocation.criticalSkippedJson.length} 个无法校验的核心数据文件，已停止切换并保留原目录`), {
+          code: "STORAGE_RELOCATION_JSON_INVALID",
+          details: relocation.criticalSkippedJson.slice(0, 20)
+        });
+      }
+    } finally {
+      relocatedKernel.close();
+    }
+    persistWorkbenchDataRoot(targetRoot);
+    setTimeout(() => { app.relaunch(); app.exit(0); }, 300);
+    return { ok: true, canceled: false, rootDir: targetRoot, restartRequired: true, relocation };
+  } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:save-settings", (_event, settings) => {
   try {
@@ -2058,10 +2558,10 @@ ipcMain.handle("workbench:import-final-video", async (_event, projectId) => {
 ipcMain.handle("workbench:import-reusable-asset", async (_event, kind) => {
   try {
     const normalizedKind = String(kind || "").trim();
-    const mediaType = ["character", "scene", "image"].includes(normalizedKind) ? "image" : normalizedKind;
-    if (!["character", "scene", "image", "video", "audio"].includes(normalizedKind)) throw Object.assign(new Error("独立资产类型无效"), { code: "REUSABLE_ASSET_KIND_INVALID" });
+    const mediaType = ["character", "scene", "prop", "wardrobe", "product", "image"].includes(normalizedKind) ? "image" : normalizedKind === "voice" ? "audio" : normalizedKind;
+    if (!["character", "scene", "prop", "wardrobe", "product", "image", "video", "audio", "voice"].includes(normalizedKind)) throw Object.assign(new Error("独立资产类型无效"), { code: "REUSABLE_ASSET_KIND_INVALID" });
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: `上传${normalizedKind === "character" ? "人物图" : normalizedKind === "scene" ? "场景图" : mediaType === "image" ? "通用图片" : mediaType === "video" ? "视频" : "音频"}到独立资产库`,
+      title: `上传${({ character: "人物图", scene: "场景图", prop: "道具图", wardrobe: "服装图", product: "商品图", voice: "人物音色" })[normalizedKind] || (mediaType === "image" ? "通用图片" : mediaType === "video" ? "视频" : "音频")}到独立资产库`,
       properties: ["openFile", "multiSelections"],
       filters: MEDIA_RULES[mediaType].filters
     });
@@ -2069,8 +2569,12 @@ ipcMain.handle("workbench:import-reusable-asset", async (_event, kind) => {
     const { store } = requireWorkbench();
     const entries = [];
     for (const filePath of result.filePaths) {
+      if (normalizedKind === "voice") {
+        entries.push((await importVoiceLibraryFromPath(filePath)).entry);
+        continue;
+      }
       const described = await describeMedia(filePath, mediaType);
-      entries.push(store.importReusableAsset(filePath, {
+      entries.push(store.importReusableAsset(described.importPath || filePath, {
         kind: normalizedKind,
         mediaType,
         label: path.basename(filePath, path.extname(filePath)),
@@ -2080,36 +2584,44 @@ ipcMain.handle("workbench:import-reusable-asset", async (_event, kind) => {
         qualityAudit: { ok: true, mode: "manual-probe", checkedAt: new Date().toISOString() }
       }));
     }
-    return { ok: true, entries, assets: store.listReusableAssets() };
+    return { ok: true, entries, assets: reusableAssetsForRenderer() };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:delete-reusable-asset", (_event, assetId) => {
   try {
     const { store } = requireWorkbench();
-    const removed = store.deleteReusableAsset(assetId);
-    return { ok: true, removed, assets: store.listReusableAssets() };
+    const voice = store.getVoiceLibraryEntry(assetId);
+    const removed = voice ? store.deleteVoiceLibraryEntry(assetId) : store.deleteReusableAsset(assetId);
+    return { ok: true, removed, assets: reusableAssetsForRenderer() };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:bind-library-asset", async (_event, projectId, target, assetId) => {
   try {
-    const { store } = requireWorkbench();
-    const entry = store.readReusableAssetLibrary().find(item => item.id === assetId);
+    const { store, workflow } = requireWorkbench();
+    const voiceEntry = store.getVoiceLibraryEntry(assetId);
+    const entry = voiceEntry || store.readReusableAssetLibrary().find(item => item.id === assetId);
     if (!entry?.filePath || !fs.existsSync(entry.filePath)) throw Object.assign(new Error("所选独立资产不存在或文件已丢失"), { code: "REUSABLE_ASSET_NOT_FOUND" });
     const entityType = String(target?.entityType || "");
     const stage = String(target?.stage || "");
-    const mediaType = entry.mediaType || (["character", "scene", "image"].includes(entry.kind) ? "image" : entry.kind);
+    const mediaType = voiceEntry ? "audio" : entry.mediaType || (["character", "scene", "prop", "wardrobe", "product", "image"].includes(entry.kind) ? "image" : entry.kind);
     const expectedType = entityType === "product" ? "image" : entityType === "final" ? "video" : manualStageMediaType(stage);
     if (!expectedType || mediaType !== expectedType) throw Object.assign(new Error("该独立资产不能用于当前目标"), { code: "REUSABLE_ASSET_KIND_MISMATCH" });
     let payload;
-    if (entityType === "product") payload = await importProductFromPath(projectId, entry.filePath, "reusable-asset-library", entry.id);
+    if (voiceEntry && entityType === "character" && ["character_voice", "voice_asset"].includes(stage)) {
+      payload = { candidate: workflow.bindCharacterVoiceLibrary(projectId, String(target?.entityId || ""), entry.id) };
+    } else if (entityType === "product") payload = await importProductFromPath(projectId, entry.filePath, "reusable-asset-library", entry.id);
     else if (entityType === "final") payload = await importFinalVideoFromPath(projectId, entry.filePath, "reusable-asset-library", entry.id);
     else payload = await importCandidateFromPath(projectId, entityType, String(target?.entityId || ""), stage, entry.filePath, "reusable-asset-library", entry.id);
-    store.touchReusableAssetUse(entry.id);
-    return { ok: true, ...payload, project: store.getProject(projectId) };
+    if (!voiceEntry) store.touchReusableAssetUse(entry.id);
+    return { ok: true, ...payload, project: projectForRenderer(projectId, { reconcile: false }) };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:analyze-script", async (_event, projectId) => {
   try { return { ok: true, project: await requireWorkbench().workflow.analyzeScript(projectId) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:rewrite-dialogue-script", async (_event, projectId, sourceText) => {
+  try { return { ok: true, project: await requireWorkbench().workflow.rewriteDialogueScript(projectId, sourceText) }; }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-topics", async (_event, projectId) => {
@@ -2126,6 +2638,14 @@ ipcMain.handle("workbench:control-script-generation", (_event, projectId, intent
 });
 ipcMain.handle("workbench:resume-script-generation", async (_event, projectId) => {
   try { return { ok: true, result: await requireWorkbench().workflow.resumeScriptGeneration(projectId) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:repair-production-contracts", async (_event, projectId) => {
+  try { return { ok: true, result: await requireWorkbench().workflow.repairProductionContracts(projectId) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:repair-character-references", async (_event, projectId) => {
+  try { return { ok: true, result: requireWorkbench().workflow.repairCharacterReferences(projectId) }; }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:run-idea-pipeline", async (_event, projectId) => {
@@ -2173,7 +2693,7 @@ ipcMain.handle("workbench:list-voice-library", () => {
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:list-reusable-assets", (_event, kind) => {
-  try { return { ok: true, assets: requireWorkbench().store.listReusableAssets(kind || "") }; }
+  try { return { ok: true, assets: reusableAssetsForRenderer(kind || "") }; }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:bind-reusable-asset", (_event, projectId, entityType, entityId, assetId) => {
@@ -2200,40 +2720,8 @@ ipcMain.handle("workbench:import-voice-library", async () => {
       filters: MEDIA_RULES.audio.filters
     });
     if (result.canceled) return { ok: true, canceled: true };
-    const { store, workflow } = requireWorkbench();
     const sourcePath = result.filePaths[0];
-    const described = await describeMedia(sourcePath, "audio");
-    if (Number(described.duration) > 15.05) {
-      throw Object.assign(new Error("单个音色参考不能超过音频总上限 15 秒"), { code: "AUDIO_DURATION_INVALID" });
-    }
-    const entryId = require("./workbench-store").makeId("voice");
-    const sourceExtension = `.${described.extension}`;
-    const target = path.join(store.voiceLibraryFilesDir, `${entryId}${sourceExtension}`);
-    fs.mkdirSync(store.voiceLibraryFilesDir, { recursive: true });
-    fs.copyFileSync(sourcePath, target);
-    const baseName = path.basename(sourcePath, path.extname(sourcePath));
-    const entry = store.upsertVoiceLibraryEntry({
-      id: entryId,
-      label: baseName || entryId,
-      characterName: baseName,
-      gender: "",
-      ageBand: "",
-      voiceDescription: "",
-      identityHints: "",
-      tags: [baseName].filter(Boolean),
-      filePath: target,
-      fileUrl: pathToFileURL(target).href,
-      duration: Number(described.duration) || 0,
-      audioSpec: sourceExtension === ".wav"
-        ? { container: "wav", codec: "pcm_s16le", channels: 1, sampleRate: 44100 }
-        : { container: described.extension, codec: "", channels: null, sampleRate: null },
-      audioAudit: { ok: true, source: "manual-import" },
-      mediaProbeVerified: true,
-      fingerprint: `manual|${baseName}|${entryId}`,
-      source: { projectId: "", projectTitle: "", characterId: "", characterName: baseName, candidateId: "" },
-      useCount: 0
-    });
-    return { ok: true, entry, voices: workflow.listVoiceLibrary() };
+    return { ok: true, ...(await importVoiceLibraryFromPath(sourcePath)) };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-shot-video", async (_event, projectId, shotId, mode) => {
@@ -2274,10 +2762,11 @@ ipcMain.handle("workbench:pause-pipeline", (_event, projectId, intent) => {
 });
 ipcMain.handle("workbench:list-projects-overview", () => {
   try {
-    const { store } = requireWorkbench();
+    const { store, workflow } = requireWorkbench();
+    workflow.reconcileDetachedAutomations();
     const { listProjectsOverview } = require("./project-overview");
     const projects = store.listProjects().map(summary => {
-      try { return store.getProject(summary.id); }
+      try { return projectForRenderer(summary.id, { reconcile: false }); }
       catch { return summary; }
     });
     return { ok: true, projects: listProjectsOverview(projects, store.getSettings()) };
@@ -2287,15 +2776,50 @@ ipcMain.handle("workbench:generate-library-asset", async (_event, projectId, lib
   try { return { ok: true, candidate: await requireWorkbench().workflow.generateLibraryAssetImage(projectId, libraryType, assetId) }; }
   catch (error) { return publicError(error); }
 });
-ipcMain.handle("workbench:confirm-candidate", (_event, projectId, candidateId, discardOthers) => {
+ipcMain.handle("workbench:confirm-candidate", async (_event, projectId, candidateId, discardOthers) => {
   try {
     const { store, workflow } = requireWorkbench();
     const candidate = store.confirmCandidate(projectId, candidateId, discardOthers !== false);
+    let extractedVoice = null;
+    let warning = "";
+    if (candidate?.entityType === "character" && candidate?.stage === "character_video") {
+      try {
+        extractedVoice = await workflow.extractCharacterVoice(projectId, candidate.entityId, { track: false });
+      } catch (error) {
+        warning = sanitizePublicMessage(error?.message || "人物视频已确认，但音色自动提取失败");
+        store.addActivity(projectId, "voice_extract_warning", `人物视频已确认；音色自动提取失败：${warning}`);
+      }
+    }
     if (candidate?.entityType === "character" && candidate?.stage === "character_voice") {
       workflow.invalidateShotVideosForVoiceChange(projectId, candidate.entityId, candidate);
     }
-    return { ok: true, candidate };
+    return { ok: true, candidate, extractedVoice, warning };
   }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:restore-candidate", async (_event, projectId, candidateId) => {
+  try {
+    const { store, workflow } = requireWorkbench();
+    const candidate = store.confirmCandidate(projectId, candidateId, false, { forceManualSelection: true });
+    let extractedVoice = null;
+    let warning = "";
+    if (candidate?.entityType === "character" && candidate?.stage === "character_video") {
+      try {
+        extractedVoice = await workflow.extractCharacterVoice(projectId, candidate.entityId, { track: false });
+      } catch (error) {
+        warning = sanitizePublicMessage(error?.message || "人物视频已恢复，但音色自动提取失败");
+        store.addActivity(projectId, "voice_extract_warning", `人物视频已恢复；音色自动提取失败：${warning}`);
+      }
+    }
+    if (candidate?.entityType === "character" && candidate?.stage === "character_voice") {
+      workflow.invalidateShotVideosForVoiceChange(projectId, candidate.entityId, candidate);
+    }
+    return { ok: true, candidate, extractedVoice, warning };
+  }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:accept-quality-warnings", (_event, projectId, options) => {
+  try { return { ok: true, result: requireWorkbench().workflow.acceptQualityWarnings(projectId, options || {}) }; }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:discard-candidate", (_event, projectId, candidateId) => {
@@ -2354,8 +2878,11 @@ if (!app.requestSingleInstanceLock()) {
     // ready. Constructing the client at module load made the `safe:` ciphertext
     // look like a live token and caused every restart to report SESSION_EXPIRED.
     dramaLicense = new DramaLicenseClient();
-    const dataRoot = process.env.DRAMA_SLOT_DATA_ROOT || path.join(app.getPath("userData"), "workbench");
+    const dataRoot = configuredWorkbenchDataRoot();
+    activeWorkbenchDataRoot = dataRoot;
+    foundryKernel = new AdaptiveDramaKernel({ rootDir: dataRoot });
     workbenchStore = new WorkbenchStore(dataRoot, {
+      foundryKernel,
       encode: value => {
         if (!value) return "";
         if (!safeStorage.isEncryptionAvailable()) {
@@ -2370,6 +2897,9 @@ if (!app.requestSingleInstanceLock()) {
         catch { return ""; }
       }
     });
+    foundryKernel.settingsProvider = () => workbenchStore?.getSettings?.() || {};
+    const foundryMigration = workbenchStore.migrateFoundryRuntime();
+    if (foundryMigration.failures.length) console.warn("[foundry] legacy migration retained failures", foundryMigration.failures);
     integrityGuard.start();
     hydratePureamDefaults(workbenchStore, dramaLicense.storedActivationCode());
     workbenchWorkflow = new WorkbenchWorkflow({
@@ -2378,9 +2908,40 @@ if (!app.requestSingleInstanceLock()) {
       locateFfmpeg,
       stagingRoot: path.join(process.env.LOCALAPPDATA || app.getPath("temp"), "PureamDramaSlot", "staging"),
       licenseClient: licenseBypassAllowed() ? null : dramaLicense,
-      integrityGuard
+      integrityGuard,
+      foundryKernel
     });
+    try {
+      const mcpController = new McpAppController({
+        appVersion: app.getVersion(),
+        dataRoot: () => activeWorkbenchDataRoot,
+        store: workbenchStore,
+        workflow: workbenchWorkflow,
+        license: dramaLicense,
+        projectView: projectId => projectForRenderer(projectId),
+        importProductPath: (projectId, filePath) => importProductFromPath(projectId, filePath, "mcp-import"),
+        importCandidatePath: (projectId, entityType, entityId, stage, filePath) => importCandidateFromPath(projectId, entityType, entityId, stage, filePath, "mcp-import")
+      });
+      mcpControlGateway = startControlGateway({
+        controller: mcpController,
+        appVersion: app.getVersion(),
+        connectionFile: path.join(app.getPath("userData"), "mcp-control.json")
+      });
+    } catch (error) {
+      // MCP is an optional control surface.  A gateway startup failure must not
+      // alter or block the existing desktop production workflow.
+      console.error("[mcp-control] optional gateway unavailable", error?.message || error);
+    }
+    installAssetProtocol(protocol, net, () => activeWorkbenchDataRoot);
+    // Resolve stale persisted “running” flags before the first renderer paint.
+    // This is local state reconciliation only; it never submits or bills work.
+    workbenchWorkflow.reconcileDetachedAutomations();
     createWindow();
   });
   app.on("window-all-closed", () => app.quit());
+  app.on("before-quit", () => {
+    try { mcpControlGateway?.close?.(); } catch {}
+    try { foundryKernel?.runtime?.checkpoint?.(); } catch {}
+    try { foundryKernel?.close?.(); } catch {}
+  });
 }

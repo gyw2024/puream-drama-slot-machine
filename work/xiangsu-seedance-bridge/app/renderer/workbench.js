@@ -55,6 +55,7 @@ const state = {
   ,walletLastRefreshAt: 0
   ,rechargeOrder: null
   ,rechargePollTimer: null
+  ,update: { status: "idle", currentVersion: "", latestVersion: "", progress: 0, message: "尚未检查更新" }
 };
 
 const DEFAULT_QUALITY_GATE_MODULES = Object.freeze({
@@ -264,14 +265,52 @@ const promptExampleSamples = Object.freeze({
   hailuoPromptCompiler: { prompt: "Use English for all production instructions. Keep Chinese dialogue only inside <d>[Chinese]... </d>. Use one or two speaking characters per shot, explicit time windows, synchronized sound and a motivated cut." }
 });
 
+function promptDefinitionForKey(key) {
+  const name = promptLabels[key] || key;
+  const definitions = [
+    [/corpusForensics/i, "参考分析", "系统设置", "分析参考成片的镜头、节奏、声音和剪辑证据", "参考视频或逐镜记录", "可复用的结构与视听规律"],
+    [/topicIdeation/i, "选题", "剧本与商品", "生成可选择的故事题材，不直接写正式剧本", "受众、题材方向、商品信息与参考风格", "互不重复的候选选题"],
+    [/scriptBlueprint|scriptStoryBible|storyCore|reversalMatrix|tragedyShot|faceSlapShot|misunderstandingArc|docxFusionStoryBible|docxFusionShotPlan|referenceParityShotPlan/i, "故事规划", "剧本与商品", "约束故事因果、人物动机、反转与目标时长", "选题、人物关系、商品信息和目标时长", "故事圣经、段落职责与事件顺序"],
+    [/scriptPlanBatch|scriptUnitGeneration|dialogueRewrite|dialogueUnitMold|dialogueEmotion|eyelineConversation|docxFusionUnits|referenceParityUnits/i, "剧本写作", "剧本与商品", "把故事规划写成可表演、可拆镜的对白与动作", "故事圣经、前后文、说话人、语气和商品节点", "带完整对白、语气、表演和时间节拍的剧本单元"],
+    [/scriptAnalysis|scriptSemanticReview|scriptRepair|continuityAudit|qualityReview|deliveryAcceptance|docxFusion.*Review|referenceParityAcceptance/i, "拆解与审核", "剧本与商品 / 合成与交付", "拆解剧本或检查指定质量项；只有审核蓝图开启时审核项才会拦截", "完整剧本、逐句对白账本、项目模式与已开启审核项", "人物、场景、分镜结构或定向修订建议"],
+    [/characterSheet|characterThreeView|characterIntro|characterVideo|CharacterAssetImage|CharacterPortraitImage|FaceMesh/i, "人物资产", "角色与场景", "生成或校验跨镜稳定的人物形象与单人表演资产", "人物身份、外形、服装、声音和项目视频模式", "人物合板、三视图、介绍图或人物视频提示词"],
+    [/sceneAsset|SceneAssetImage/i, "场景资产", "角色与场景", "生成同一空间的 2×2 四视图并锁定空间拓扑", "场景结构、时段、光向、门窗家具与剧情用途", "同一场景四个角度的资产图提示词"],
+    [/productAsset|wardrobeAsset|propAsset|ObjectAssetImage/i, "物件资产", "角色与场景", "生成商品、服装或道具的一致性资产", "用户商品原图与卖点，或服装/道具的材质和状态", "可被分镜引用的物件资产提示词"],
+    [/PromptCompiler|continuationVideo|keyframeVideo|storyboardSheetVideo|SeedanceVideo|HailuoVideo|generationPhysics|InModelMix/i, "分镜视频", "分镜视频", "编译视频模型实际提交稿，保留说话人、听者、语气、表情和完整对白", "当前分镜、人物/场景/商品资产、参考帧和视频模式", "与所选云端或本地模式匹配的视频提示词"],
+    [/storyboard/i, "分镜图", "分镜工作台", "把剧本单元转换为单帧、首尾帧或逐秒合图", "镜头动作、人物状态、场景四视图和项目制作模式", "与当前分镜模式严格对应的图片提示词"],
+    [/postEdit|postSound/i, "后期制作", "合成与交付", "生成剪辑、转场、字幕或声音混合的后期工单", "已完成镜头、声音设计和交付要求", "剪辑清单或混音清单"],
+    [/referenceParity|docxFusion/i, "参考增强", "对应基础模块", "为同名基础提示词叠加参考成片或文档规则，不单独发起任务", "基础模块输入与参考规则", "传递给同名基础模块的增强约束"]
+  ];
+  const matched = definitions.find(([pattern]) => pattern.test(key)) || [null, "通用生产", "对应生产页面", "约束该阶段的输入、输出和格式", "当前项目与上游阶段结果", "该阶段可继续执行的结构化结果"];
+  return {
+    key,
+    name,
+    module: matched[1],
+    screen: matched[2],
+    purpose: matched[3],
+    input: matched[4],
+    output: matched[5]
+  };
+}
+
 let libraryNodesMoved = false;
 let activeSidebarLibrary = "";
 
 function promptExampleForKey(key) {
-  return JSON.stringify(promptExampleSamples[key] || {
-    purpose: promptLabels[key] || key,
-    instruction: "Write one concrete production example with a single objective, clear visible action, motivated transition, explicit sound and no unexplained character entrance.",
-    output: { id: "S01", duration: 8, shotFunction: "冷开场", visibleCharacterIds: ["C01"], action: "主角完成一个可见动作", transitionReason: "动作完成后切到反应特写" }
+  const definition = promptDefinitionForKey(key);
+  return JSON.stringify({
+    promptKey: key,
+    promptName: definition.name,
+    module: definition.module,
+    screen: definition.screen,
+    purpose: definition.purpose,
+    expectedInput: definition.input,
+    expectedOutput: definition.output,
+    example: promptExampleSamples[key] || {
+      instruction: `只处理“${definition.name}”这一项，不替代其他模块；按当前项目事实输出${definition.output}。`,
+      input: { projectMode: "当前项目制作模式", source: definition.input },
+      output: { id: "S01", duration: 8, action: "完成一个可见动作", dialogue: "说话人（语气，对听者）：完整对白", transitionReason: "动作或反应完成后再切镜" }
+    }
   }, null, 2);
 }
 
@@ -294,7 +333,8 @@ function openPromptExample(key) {
   dialog.dataset.promptKey = key;
   delete dialog.dataset.downloadFilename;
   $("#promptExampleDialogTitle").textContent = `${promptLabels[key] || key} · 示例`;
-  $("#promptExampleMeta").textContent = "这是可下载、可复制的最小示例，不会覆盖当前模板。";
+  const definition = promptDefinitionForKey(key);
+  $("#promptExampleMeta").textContent = `${definition.module} · 用于${definition.screen}：${definition.purpose}。示例与当前提示词键一一对应，不会覆盖模板。`;
   $("#promptExampleText").value = maskSpecificModelText(promptExampleForKey(key));
   if (!dialog.open) dialog.showModal();
 }
@@ -357,6 +397,13 @@ function renderVoiceBindingGrid() {
 async function openSidebarLibrary(type) {
   const panel = $("#sidebarLibraryPanel");
   if (!panel) return;
+  const filterKinds = ({ characters: ["character"], props: ["prop"], scenes: ["scene"], products: ["product"] })[type];
+  if (filterKinds) {
+    panel.classList.add("hidden");
+    activeSidebarLibrary = type;
+    $$(".library-nav-button").forEach(button => button.classList.toggle("active", button.dataset.library === type));
+    return openIndependentAssetLibrary({ entityType: "manager", filterKinds, libraryLabel: ({ characters: "人物形象库", props: "全局道具库", scenes: "全局场景库", products: "全局产品库" })[type] });
+  }
   if (activeSidebarLibrary === type && !panel.classList.contains("hidden")) {
     panel.classList.add("hidden");
     activeSidebarLibrary = "";
@@ -368,7 +415,6 @@ async function openSidebarLibrary(type) {
   setTextIfChanged($("#sidebarLibraryTitle"), titles[type] || "独立资产库");
   $$("[data-library-section]").forEach(section => section.classList.toggle("active", section.dataset.librarySection === type));
   $$(".library-nav-button").forEach(button => button.classList.toggle("active", button.dataset.library === type));
-  if (type === "characters") await loadReusableCharacterLibrary();
 }
 
 function decorateFeatureHelp() {
@@ -385,6 +431,7 @@ function decorateFeatureHelp() {
     generateAllVideos: "按镜头计划生成视频并保留可恢复任务。",
     stitchVideo: "按镜头时长和顺序拼接最终成片。",
     importScriptFile: "可上传自然语言、分场剧本或系统 JSON，软件会先归一化。",
+    importDialogueRewrite: "上传 A：内容、B：内容格式的对白稿。A/B 等代号自动重构为人物名，逐句轻改并生成完整剧本；剧情、顺序、关系、结局和商品节点不变。",
     saveScript: "保存当前剧本文字与商品信息，不会自动重写。",
     analyzeScript: "把当前剧本拆成可执行的故事、镜头和对白结构。",
     refreshScriptPrompts: "更新剧本阶段使用的提示词模板。",
@@ -417,6 +464,7 @@ function decorateFeatureHelp() {
     "select-topic": "选中这个故事题材，后续剧本会围绕它展开。",
     "open-asset": "打开当前图片、音频或视频资产进行查看。",
     "confirm-candidate": "把这个候选确认为当前项目实际使用的资产版本。",
+    "restore-candidate": "复制这份历史资产到当前制作版本并立即选中；旧版本和原文件仍会保留。",
     "discard-candidate": "删除当前失败或旧版本候选，不影响已确认资产。",
     "focus-candidates": "只查看当前角色、场景或镜头的所有资产版本。",
     "clear-candidate-filter": "取消当前资产筛选，重新查看全部候选。",
@@ -460,8 +508,6 @@ function decorateFeatureHelp() {
   });
   document.querySelectorAll("button").forEach(node => {
     if (node.closest("#infoTooltipLayer")) return;
-    const isActionButton = Boolean(node.id || node.dataset.action || node.dataset.tooltip || node.classList.contains("stage-button") || node.classList.contains("library-nav-button"));
-    if (!isActionButton) return;
     const label = String(node.innerText || node.textContent || node.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
     if (!label) return;
     const commonHelp = (() => {
@@ -562,19 +608,19 @@ function installInfoTooltipLayer() {
     featureHelpObserver.observe(document.body, { childList: true, characterData: true, attributes: true, attributeFilter: ["title", "aria-label", "data-tooltip"], subtree: true });
   }
   document.addEventListener("pointerover", event => {
-    const anchor = event.target?.closest?.("button[data-tooltip], .info-dot");
+    const anchor = event.target?.closest?.("[data-tooltip]");
     if (anchor) showInfoTooltip(anchor);
   });
   document.addEventListener("pointerout", event => {
-    const anchor = event.target?.closest?.("button[data-tooltip], .info-dot");
+    const anchor = event.target?.closest?.("[data-tooltip]");
     if (anchor && !anchor.contains(event.relatedTarget)) hideInfoTooltip(anchor);
   });
   document.addEventListener("focus", event => {
-    const anchor = event.target?.closest?.("button[data-tooltip], .info-dot");
+    const anchor = event.target?.closest?.("[data-tooltip]");
     if (anchor) showInfoTooltip(anchor);
   }, true);
   document.addEventListener("blur", event => {
-    const anchor = event.target?.closest?.("button[data-tooltip], .info-dot");
+    const anchor = event.target?.closest?.("[data-tooltip]");
     if (anchor) hideInfoTooltip(anchor);
   }, true);
   window.addEventListener("resize", () => positionInfoTooltip(activeInfoDot));
@@ -582,7 +628,9 @@ function installInfoTooltipLayer() {
 }
 
 function maskSpecificModelText(value) {
+  const upstreamInfrastructureName = new RegExp(["auto", "d", "l"].join("\\s*[-_.]?\\s*"), "gi");
   return String(value || "")
+    .replace(upstreamInfrastructureName, "纯梦云端节点")
     .replace(/puream[-_]?hailuo[-_]?h3/gi, "纯梦云端算力")
     .replace(/minimax[\s_-]*h3/gi, "纯梦云端算力")
     .replace(/hailuo[\s_-]*h3|海螺\s*h3|\bh3\b/gi, "纯梦云端算力")
@@ -657,6 +705,83 @@ function projectRenderSignature(project) {
   return JSON.stringify(project, (key, value) => volatileProjectKeys.has(key) ? undefined : value);
 }
 
+function liveEditorControlKey(control, index) {
+  const attributes = [
+    "data-shot-prompt",
+    "data-character-field",
+    "data-scene-field",
+    "data-shot-field",
+    "name",
+    "id"
+  ];
+  for (const name of attributes) {
+    const value = control.getAttribute(name);
+    if (value) return `${name}:${value}`;
+  }
+  return `${control.tagName.toLowerCase()}:${index}`;
+}
+
+function captureLiveEditorState() {
+  const active = document.activeElement;
+  const panels = $$('details.creator-panel[data-editor-key]').filter(panel => panel.open || panel.contains(active));
+  if (!panels.length) return null;
+  const snapshot = { panels: [], active: null };
+  for (const panel of panels) {
+    const panelKey = String(panel.dataset.editorKey || "");
+    if (!panelKey) continue;
+    const controls = [...panel.querySelectorAll("input, textarea, select")];
+    const entry = {
+      key: panelKey,
+      open: panel.open,
+      scrollTop: panel.scrollTop,
+      controls: controls.map((control, index) => ({
+        key: liveEditorControlKey(control, index),
+        value: control.value,
+        checked: "checked" in control ? Boolean(control.checked) : undefined,
+        scrollTop: control.scrollTop || 0
+      }))
+    };
+    snapshot.panels.push(entry);
+    const activeIndex = controls.indexOf(active);
+    if (activeIndex >= 0) {
+      snapshot.active = {
+        panelKey,
+        controlKey: liveEditorControlKey(active, activeIndex),
+        selectionStart: typeof active.selectionStart === "number" ? active.selectionStart : null,
+        selectionEnd: typeof active.selectionEnd === "number" ? active.selectionEnd : null,
+        scrollTop: active.scrollTop || 0
+      };
+    }
+  }
+  return snapshot.panels.length ? snapshot : null;
+}
+
+function restoreLiveEditorState(snapshot) {
+  if (!snapshot?.panels?.length) return;
+  let activeControl = null;
+  for (const entry of snapshot.panels) {
+    const panel = $$('details.creator-panel[data-editor-key]').find(item => item.dataset.editorKey === entry.key);
+    if (!panel) continue;
+    panel.open = Boolean(entry.open);
+    panel.scrollTop = Number(entry.scrollTop) || 0;
+    const controls = [...panel.querySelectorAll("input, textarea, select")];
+    for (const saved of entry.controls || []) {
+      const control = controls.find((item, index) => liveEditorControlKey(item, index) === saved.key);
+      if (!control) continue;
+      control.value = saved.value;
+      if (typeof saved.checked === "boolean" && "checked" in control) control.checked = saved.checked;
+      control.scrollTop = Number(saved.scrollTop) || 0;
+      if (snapshot.active?.panelKey === entry.key && snapshot.active.controlKey === saved.key) activeControl = control;
+    }
+  }
+  if (!activeControl) return;
+  activeControl.focus({ preventScroll: true });
+  if (snapshot.active.selectionStart !== null && typeof activeControl.setSelectionRange === "function") {
+    try { activeControl.setSelectionRange(snapshot.active.selectionStart, snapshot.active.selectionEnd); } catch {}
+  }
+  activeControl.scrollTop = Number(snapshot.active.scrollTop) || 0;
+}
+
 function setStateProject(project) {
   const previousId = state.project?.id || "";
   state.project = project;
@@ -715,9 +840,20 @@ function currentAssetLabel(value) {
 
 function fileUrl(filePath) {
   if (!filePath) return "";
-  return encodeURI(`file:///${String(filePath).replace(/\\/g, "/")}`)
-    .replace(/#/g, "%23")
-    .replace(/\?/g, "%3F");
+  return `puream-asset://local/${encodeURIComponent(String(filePath))}`;
+}
+
+function candidateMediaUrl(candidate) {
+  if (candidate?.filePath) return fileUrl(candidate.filePath);
+  const legacy = String(candidate?.fileUrl || "");
+  if (!legacy.startsWith("file:")) return "";
+  try {
+    let pathname = decodeURIComponent(new URL(legacy).pathname || "");
+    if (/^\/[A-Za-z]:\//.test(pathname)) pathname = pathname.slice(1);
+    return fileUrl(pathname.replace(/\//g, "\\"));
+  } catch {
+    return "";
+  }
 }
 
 function mediaKind(filePath, fallback = "image") {
@@ -821,7 +957,7 @@ function assetActionAttributes(candidate, title, kind = "", aspectRatio = "") {
   return `data-action="open-asset" data-path="${escapeHtml(candidate.filePath)}" data-title="${escapeHtml(title)}" data-kind="${escapeHtml(kind || mediaKind(candidate.filePath))}" data-aspect="${escapeHtml(aspectRatio)}"`;
 }
 
-function assetStageTile(candidate, title, kind = "image", aspectRatio = "") {
+function assetStageTile(candidate, title, kind = "image", aspectRatio = "", workState = null) {
   const resolvedKind = candidate?.filePath ? mediaKind(candidate.filePath, kind) : kind;
   const moduleName = candidate?.stage === "shot_video"
     ? "videos"
@@ -832,12 +968,12 @@ function assetStageTile(candidate, title, kind = "image", aspectRatio = "") {
   const invalid = qualityRequired && candidate?.qualityAudit?.ok === false;
   const gatedUnverified = qualityRequired && ["character_video", "shot_video"].includes(candidate?.stage) && candidate?.qualityAudit?.ok !== true;
   const preview = candidate?.filePath && resolvedKind === "image"
-    ? `<img src="${escapeHtml(candidate.fileUrl || fileUrl(candidate.filePath))}" alt="">`
+    ? `<img src="${escapeHtml(candidateMediaUrl(candidate))}" alt="">`
     : `<img class="asset-stage-icon" src="../assets/icons/${resolvedKind === "audio" ? "audio" : resolvedKind === "video" ? "video" : "image"}.png" alt="">`;
   const meshRequired = qualityBlueprintModuleEnabled("assets") && projectRequiresFaceMeshUi() && candidate?.entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(candidate?.stage);
   const meshMissing = meshRequired && candidate?.faceMesh?.applied !== true;
-    const status = invalid ? "质检失败 · 点击查看" : meshMissing ? "原图待一致性检查 · 云端算力不可用" : gatedUnverified ? "待质检 · 仅可查看" : candidate?.filePath ? "点击打开" : "尚未生成";
-  return `<button class="asset-stage-tile ${candidate?.filePath ? "ready" : "missing"}${invalid || gatedUnverified || meshMissing ? " quality-invalid" : ""}" ${assetActionAttributes(candidate, title, resolvedKind, aspectRatio)}>${preview}<span>${escapeHtml(title)}${candidate?.faceMesh?.applied ? '<b class="mesh-badge">全脸网格</b>' : ""}</span><small>${status}</small></button>`;
+  const status = workState?.label || (invalid ? "质检失败 · 点击查看" : meshMissing ? "原图待一致性检查 · 云端算力不可用" : gatedUnverified ? "待质检 · 仅可查看" : candidate?.filePath ? "点击打开" : "尚未生成");
+  return `<button class="asset-stage-tile ${candidate?.filePath ? "ready" : "missing"}${invalid || gatedUnverified || meshMissing ? " quality-invalid" : ""}${workState?.active ? " is-loading" : ""}${workState?.status === "failed" ? " work-failed" : ""}" ${workState?.active ? "disabled" : assetActionAttributes(candidate, title, resolvedKind, aspectRatio)}>${preview}${workState?.active ? '<i class="asset-tile-spinner" aria-hidden="true"></i>' : ""}<span>${escapeHtml(title)}${candidate?.faceMesh?.applied ? '<b class="mesh-badge">全脸网格</b>' : ""}</span><small role="status" aria-live="polite">${escapeHtml(status)}</small></button>`;
 }
 
 function showToast(message, kind = "info") {
@@ -864,6 +1000,8 @@ function candidates(entityType, entityId, stage) {
 
 function chosenCandidate(entityType, entityId, stage) {
   const allMatches = candidates(entityType, entityId, stage);
+  const manuallySelected = allMatches.find(item => item.selected === true && item.manualSelectionOverride === true && item.filePath);
+  if (manuallySelected) return manuallySelected;
   const meshRequired = qualityBlueprintModuleEnabled("assets") && projectRequiresFaceMeshUi() && entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(stage);
   const currentMatches = allMatches.filter(item => item.stale !== true);
   const meshed = meshRequired ? currentMatches.filter(item => item.faceMesh?.applied === true) : currentMatches;
@@ -884,8 +1022,22 @@ function chosenCandidate(entityType, entityId, stage) {
 }
 
 function chosenCharacterIdentity(characterId) {
-  return chosenCandidate("character", characterId, "character_sheet")
-    || chosenCandidate("character", characterId, "character_intro")
+  const identityStages = new Set(["character_sheet", "character_three_view", "character_intro"]);
+  const character = (state.project?.characters || []).find(item => item.id === characterId);
+  const activeRevision = state.project?.productionRevision || "";
+  const available = (state.project?.candidates || [])
+    .filter(item => item.entityType === "character" && item.entityId === characterId && identityStages.has(item.stage))
+    .filter(item => (item.productionRevision || "") === activeRevision && item.stale !== true && item.filePath);
+  const active = available.find(item => item.id === character?.activeIdentityCandidateId);
+  if (active) return active;
+  const byRecency = (left, right) => String(right.manualSelectedAt || right.updatedAt || right.createdAt || "")
+    .localeCompare(String(left.manualSelectedAt || left.updatedAt || left.createdAt || ""));
+  const manual = available.filter(item => item.selected === true && item.manualSelectionOverride === true).sort(byRecency)[0];
+  if (manual) return manual;
+  const selected = available.filter(item => item.selected === true).sort(byRecency)[0];
+  if (selected) return selected;
+  return chosenCandidate("character", characterId, "character_intro")
+    || chosenCandidate("character", characterId, "character_sheet")
     || chosenCandidate("character", characterId, "character_three_view");
 }
 
@@ -966,11 +1118,7 @@ function resolveSceneForShot(project, shot) {
 }
 
 function characterHasVisualAsset(characterId) {
-  return !!(
-    chosenCandidate("character", characterId, "character_sheet")?.filePath
-    || chosenCandidate("character", characterId, "character_intro")?.filePath
-    || chosenCandidate("character", characterId, "character_three_view")?.filePath
-  );
+  return Boolean(chosenCharacterIdentity(characterId)?.filePath);
 }
 
 function libraryAssetReady(entityId, stage) {
@@ -1172,7 +1320,7 @@ function renderScriptTask() {
   $("#pauseScriptGeneration").classList.toggle("hidden", !task.active || task.status !== "running");
   $("#resumeScriptGeneration").classList.toggle("hidden", !task.paused && !task.recoverableFailure);
   $("#resumeScriptGeneration").textContent = task.recoverableFailure
-    ? (task.recoveryKind === "direct" ? "只补失败剧本段" : task.recoveryKind === "plan" ? "重写失败批次" : task.recoveryKind === "unit" ? "复用失败批次并继续" : task.recoveryKind === "analysis" ? "从拆镜断点继续" : "按终审报告继续修订")
+    ? (task.recoveryKind === "direct" ? "只补失败剧本段" : task.recoveryKind === "plan" ? "重写失败批次" : task.recoveryKind === "unit" ? "复用失败批次并继续" : task.recoveryKind === "analysis" ? "从拆镜断点继续" : "AI 一键改错")
     : "继续写作";
   if (task.recoveryKind === "generation") $("#resumeScriptGeneration").textContent = `从 S${String(task.checkpointPlanCount + 1).padStart(2, "0")} 继续写作`;
   $("#stopScriptGeneration").classList.toggle("hidden", !task.active && !task.paused);
@@ -1257,6 +1405,7 @@ function setBusy(busy, message = "", projectId = state.project?.id || "") {
     "#generateCompleteScript",
     "#runIdeaPipeline",
     "#analyzeScript",
+    "#importDialogueRewrite",
     "#generateAllAssets",
     "#generateAllStoryboards",
     "#generateAllVideos",
@@ -1454,6 +1603,7 @@ async function loadProject(projectId, fullRender = true) {
   }
   const nextSignature = projectRenderSignature(project);
   const projectChanged = state.project?.id !== project?.id || state.projectRenderSignature !== nextSignature;
+  const liveEditorState = state.project?.id === project?.id ? captureLiveEditorState() : null;
   setStateProject(project);
   if (fullRender) {
     renderAll();
@@ -1467,11 +1617,12 @@ async function loadProject(projectId, fullRender = true) {
     if (state.stage === "shots") renderShots();
     if (state.stage === "videos") refreshVideos();
     if (state.stage === "final") renderFinal();
-  } else if (["running", "pausing", "stopping"].includes(project?.automation?.status)) {
+  } else if (automationIsActive(project)) {
     renderJobs();
     if (state.stage === "shots") renderShots();
     if (state.stage === "assets") renderAssets(true);
   }
+  restoreLiveEditorState(liveEditorState);
   return projectChanged;
 }
 
@@ -1536,7 +1687,11 @@ function renderScript() {
   const durationLabel = project.shots?.length
     ? ` · 目标 ${targetSeconds}秒 · 分镜合计 ${plannedSeconds}秒 · ${plannedSeconds === targetSeconds ? "时长已锁定" : "需要重新拆镜"}`
     : ` · 目标 ${targetSeconds}秒`;
-  $("#analysisSummary").textContent = project.script?.analyzedAt ? `上次拆解：${new Date(project.script.analyzedAt).toLocaleString()}${durationLabel}` : `尚未拆解${durationLabel}`;
+  const sceneReport = project.script?.sceneRecognitionReport;
+  const sceneContractLabel = sceneReport?.declaredSceneCount
+    ? ` · 原稿场景账本 ${sceneReport.declaredSceneCount} 个地点 / ${sceneReport.occurrenceCount} 次出现`
+    : "";
+  $("#analysisSummary").textContent = project.script?.analyzedAt ? `上次拆解：${new Date(project.script.analyzedAt).toLocaleString()}${durationLabel}${sceneContractLabel}` : `尚未拆解${durationLabel}`;
   $("#analysisStats").innerHTML = [
     ["识别人物", project.characters.length],
     ["识别场景", project.scenes.length],
@@ -1592,7 +1747,11 @@ function renderIdeation() {
     } else if (String(project.script?.modeSynopsis || "").trim()) {
       banner.hidden = false;
       banner.classList.remove("danger");
-      banner.innerHTML = `<b>剧情简介 · ${project.script?.detectedFormat === "timed_storyboard" ? "秒级分镜成片稿" : "上传原稿"}</b><span>${escapeHtml(project.script.modeSynopsis)}</span>`;
+      const sceneReport = project.script?.sceneRecognitionReport;
+      const sceneBadge = sceneReport?.declaredSceneCount
+        ? ` · 已锁定 ${sceneReport.declaredSceneCount} 个场景、${sceneReport.occurrenceCount} 次场景出现`
+        : "";
+      banner.innerHTML = `<b>剧情简介 · ${project.script?.detectedFormat === "timed_storyboard" ? "秒级分镜成片稿" : "上传原稿"}${sceneBadge}</b><span>${escapeHtml(project.script.modeSynopsis)}</span>`;
     } else {
       banner.hidden = true;
       banner.innerHTML = "";
@@ -1600,10 +1759,12 @@ function renderIdeation() {
   }
 }
 
-function assetPreview(candidate, placeholder) {
-  return candidate?.filePath
-    ? `<img class="asset-avatar" src="${escapeHtml(candidate.fileUrl || fileUrl(candidate.filePath))}" alt="">`
+function assetPreview(candidate, placeholder, workState = null) {
+  const image = candidate?.filePath && placeholder !== "audio"
+    ? `<img class="asset-avatar" src="${escapeHtml(candidateMediaUrl(candidate))}" alt="">`
     : `<img class="asset-avatar placeholder" src="../assets/icons/${placeholder}.png" alt="">`;
+  if (!workState) return image;
+  return `<span class="asset-avatar-shell status-${escapeHtml(workState.status || "idle")}">${image}<span class="asset-avatar-work" role="status" aria-live="polite"><i aria-hidden="true"></i><b>${escapeHtml(workState.label || "处理中")}</b></span></span>`;
 }
 
 async function loadVoiceLibrary(forceRender = false) {
@@ -1631,6 +1792,8 @@ function renderVoiceLibraryGrid() {
   const count = $("#voiceLibraryCount");
   if (!grid || !count) return;
   const voices = state.voiceLibrary || [];
+  const characters = state.project?.characters || [];
+  const characterOptions = characters.map(character => `<option value="${escapeHtml(character.id)}">${escapeHtml(character.name || character.id)}</option>`).join("");
   count.textContent = String(voices.length);
   grid.innerHTML = voices.length ? voices.map(item => `
     <article class="asset-card">
@@ -1646,6 +1809,8 @@ function renderVoiceLibraryGrid() {
       </div>
       <div class="card-actions">
         <button class="mini-button asset-open-button" data-action="open-asset" data-path="${escapeHtml(item.filePath || "")}" data-title="${escapeHtml(item.label || "音色")}" data-kind="audio">试听/打开</button>
+        <select class="voice-card-character-select" data-voice-target-character aria-label="选择要绑定此音色的角色" ${characters.length ? "" : "disabled"}><option value="">${characters.length ? "选择当前项目角色" : "当前项目暂无角色"}</option>${characterOptions}</select>
+        <button class="mini-button accent" data-action="bind-voice-card" data-id="${escapeHtml(item.id)}" ${characters.length ? "" : "disabled"}>绑定给角色</button>
         <button class="mini-button danger-button" data-action="delete-voice-library" data-id="${escapeHtml(item.id)}">删除</button>
       </div>
     </article>
@@ -1719,6 +1884,7 @@ function renderAssets(force = false) {
       name: character.name,
       description: character.description,
       voiceLibraryId: character.voiceLibraryId || "",
+      activeIdentity: character.activeIdentityCandidateId || "",
       sheet: chosenCandidate("character", character.id, "character_sheet")?.id || "",
       three: chosenCandidate("character", character.id, "character_three_view")?.id || "",
       intro: chosenCandidate("character", character.id, "character_intro")?.id || "",
@@ -1772,6 +1938,16 @@ function renderAssets(force = false) {
       path: project.product?.imagePath || "",
       publicUrl: project.product?.publicUrl || ""
     },
+    automation: {
+      status: project.automation?.status || "",
+      operation: project.automation?.operation || "",
+      items: (project.automation?.progress?.items || []).map(item => ({
+        key: item.key || "",
+        status: item.status || "",
+        message: item.message || "",
+        errorCode: item.errorCode || ""
+      }))
+    },
     drawing: [...(state.drawingScopes || [])].filter(key => key.startsWith(`${project.id}|`)),
     engine: project.generation?.engine || "",
     aspect: project.generation?.aspectRatio || ""
@@ -1784,7 +1960,7 @@ function renderAssets(force = false) {
     const sheet = chosenCandidate("character", character.id, "character_sheet");
     const portrait = chosenCandidate("character", character.id, "character_three_view");
     const intro = chosenCandidate("character", character.id, "character_intro");
-    const identity = sheet || intro || portrait;
+    const identity = chosenCharacterIdentity(character.id);
     const video = chosenCandidate("character", character.id, "character_video");
     const voice = chosenCandidate("character", character.id, "character_voice");
     const latestVideoJob = videoStatusApi.latestVideoJobs(project).find(job => job.type === "character_video" && job.entityType === "character" && job.entityId === character.id) || null;
@@ -1795,11 +1971,16 @@ function renderAssets(force = false) {
     const portraitGridSource = cloudSeedanceMesh ? unmeshedGridSource(character.id, "character_three_view") : null;
     const introGridSource = cloudSeedanceMesh ? unmeshedGridSource(character.id, "character_intro") : null;
     const boundVoice = (state.voiceLibrary || []).find(item => item.id === character.voiceLibraryId);
-    return `<article class="asset-card${isEntityDrawing("character", character.id) || (visibleVideoJob && videoStatusApi.isActiveVideoJob(visibleVideoJob)) ? " is-drawing" : ""}">
-      <div class="drawing-banner" aria-hidden="true"><i></i><span>正在抽卡</span></div>
-      <div class="asset-card-head">${assetPreview(identity, "image")}<div><h4>${escapeHtml(character.name)}</h4><p>${escapeHtml(character.description || "暂无人物外貌设定")}</p></div></div>
+    const entityDrawing = isEntityDrawing("character", character.id);
+    const headerWork = assetBatchWorkState(["character_sheet", "character_three_view", "character_intro", "character_video", "character_voice"], character.id, entityDrawing);
+    const sheetWork = assetBatchWorkState("character_sheet", character.id, isStageDrawing("character_sheet", character.id));
+    const videoWork = assetBatchWorkState("character_video", character.id, isStageDrawing("character_video", character.id) || Boolean(visibleVideoJob && videoStatusApi.isActiveVideoJob(visibleVideoJob)));
+    const voiceWork = assetBatchWorkState("character_voice", character.id, isStageDrawing("character_voice", character.id));
+    return `<article class="asset-card${headerWork?.active || (visibleVideoJob && videoStatusApi.isActiveVideoJob(visibleVideoJob)) ? " is-drawing" : ""}${headerWork?.status === "failed" ? " has-work-failure" : ""}">
+      <div class="drawing-banner" role="status" aria-live="polite"><i aria-hidden="true"></i><span>${escapeHtml(headerWork?.label || "正在抽卡")}</span></div>
+      <div class="asset-card-head">${assetPreview(identity, "image", headerWork)}<div><h4>${escapeHtml(character.name)}</h4><p>${escapeHtml(character.description || "暂无人物外貌设定")}</p></div></div>
       <div class="asset-tags"><span>合板 ${candidates("character", character.id, "character_sheet").length}</span><span>视频 ${candidates("character", character.id, "character_video").length}</span><span>音色 ${candidates("character", character.id, "character_voice").length}</span>${boundVoice ? `<span>库音色已绑定</span>` : ""}${cloudSeedanceMesh ? `<span class="mesh-required-tag">云端算力 · 一致性检查</span>` : '<span>本地像塑 · 无需网格</span>'}</div>
-      <details class="creator-panel">
+      <details class="creator-panel" data-editor-key="character:${escapeHtml(character.id)}:settings">
         <summary>角色设定与提示词（点击展开）</summary>
         <div class="creator-panel-body">
           <div class="creator-grid">
@@ -1819,17 +2000,17 @@ function renderAssets(force = false) {
         </div>
       </details>
       <div class="asset-stage-grid">
-        ${assetStageTile(identity, `${character.name} · 人物合板`, "image")}
-        ${assetStageTile(video, `${character.name} · 人物视频`, "video", project.generation?.aspectRatio || "9:16")}
-        ${assetStageTile(voice, `${character.name} · 人物音色`, "audio")}
+        ${assetStageTile(identity, `${character.name} · 人物合板`, "image", "", sheetWork)}
+        ${assetStageTile(video, `${character.name} · 人物视频`, "video", project.generation?.aspectRatio || "9:16", videoWork)}
+        ${assetStageTile(voice, `${character.name} · 人物音色`, "audio", "", voiceWork)}
       </div>
       ${visibleVideoJob ? `<div class="asset-video-task">${videoJobProgressMarkup(visibleVideoJob)}${visibleVideoJob.message ? `<p>${escapeHtml(visibleVideoJob.message)}</p>` : ""}</div>` : ""}
       <div class="card-actions">
-        <button class="mini-button draw-button" data-long-action data-action="generate-image" data-stage="character_sheet" data-id="${character.id}">抽卡：人物合板</button>
+        <button class="mini-button draw-button${sheetWork?.active ? " is-loading" : ""}" data-long-action data-action="generate-image" data-stage="character_sheet" data-id="${character.id}" ${sheetWork?.active ? "disabled" : ""}>${sheetWork?.active ? "生成中…" : "抽卡：人物合板"}</button>
         ${cloudSeedanceMesh ? `<button class="mini-button draw-button mesh-draw-button" data-long-action data-action="remesh-character" data-id="${character.id}" data-candidate-id="${escapeHtml(meshSource?.id || "")}" ${meshSource ? "" : "disabled"}>抽卡：全脸网格版</button>` : ""}
         ${cloudSeedanceMesh ? `<button class="mini-button grid-draw-button" data-long-action data-action="apply-grid" data-id="${character.id}" data-portrait-id="${escapeHtml(sheetGridSource?.id || portraitGridSource?.id || "")}" data-intro-id="${escapeHtml(introGridSource?.id || "")}" ${sheetGridSource || portraitGridSource || introGridSource ? "" : "disabled"} title="本地检测真实人脸后添加棋盘网格，不调用付费模型">一键检测并加网格</button>` : ""}
-        <button class="mini-button draw-button" data-long-action data-action="character-video" data-id="${character.id}">抽卡：人物视频</button>
-        <button class="mini-button" data-long-action data-action="extract-voice" data-id="${character.id}">提取音色</button>
+        <button class="mini-button draw-button${videoWork?.active ? " is-loading" : ""}" data-long-action data-action="character-video" data-id="${character.id}" ${videoWork?.active ? "disabled" : ""}>${videoWork?.active ? "生成中…" : "抽卡：人物视频"}</button>
+        <button class="mini-button${voiceWork?.active ? " is-loading" : ""}" data-long-action data-action="extract-voice" data-id="${character.id}" ${voiceWork?.active ? "disabled" : ""}>${voiceWork?.active ? "提取中…" : "提取音色"}</button>
         <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_sheet" data-id="${character.id}">上传人物合板</button>
         <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_three_view" data-id="${character.id}">上传人物三视图</button>
         <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_intro" data-id="${character.id}">上传人物介绍图</button>
@@ -1847,9 +2028,7 @@ function renderAssets(force = false) {
   if ($("#propCount")) $("#propCount").textContent = props.length;
   if ($("#wardrobeGrid")) {
     const baseCards = (project.characters || []).map(character => {
-      const sheet = chosenCandidate("character", character.id, "character_sheet")
-        || chosenCandidate("character", character.id, "character_intro")
-        || chosenCandidate("character", character.id, "character_three_view");
+      const sheet = chosenCharacterIdentity(character.id);
       const outfitText = String(character.description || character.identitySignature || "基础服装已由人物合板锁定").trim();
       return `<article class="asset-card">
         <div class="asset-card-head">${assetPreview(sheet, "image")}<div><h4>${escapeHtml(character.name || character.id)} · 基础服装</h4><p>${escapeHtml(outfitText)}</p></div></div>
@@ -1860,7 +2039,8 @@ function renderAssets(force = false) {
     const changeCards = wardrobes.map(item => {
       const candidate = chosenCandidate("library", item.id, "wardrobe_asset");
       const drawing = isEntityDrawing("library", item.id, ["wardrobe_asset"]) || isStageDrawing("wardrobe_asset", item.id);
-      return `<article class="asset-card${drawing ? " is-drawing" : ""}"><div class="drawing-banner" aria-hidden="true"><i></i><span>正在抽卡</span></div><div class="asset-card-head">${assetPreview(candidate, "image")}<div><h4>${escapeHtml(item.name)}</h4><p>${escapeHtml(item.description || "剧情服装参考")}</p></div></div><div class="asset-tags"><span>${escapeHtml(item.characterName || "未绑定角色")}</span><span>${escapeHtml(item.changeReason || "剧情换装")}</span><span>${(item.units || []).length ? `出现 ${(item.units || []).join("、")}` : "换装镜头"}</span><span>候选 ${candidates("library", item.id, "wardrobe_asset").length}</span></div><div class="asset-stage-grid single">${assetStageTile(candidate, `${item.name} · 换装图`, "image")}</div><div class="card-actions"><button class="mini-button draw-button${drawing ? " is-loading" : ""}" data-long-action data-action="generate-library" data-library-type="wardrobes" data-id="${item.id}" ${drawing ? "disabled" : ""}>${drawing ? "抽卡中…" : "抽卡：换装图"}</button><button class="mini-button" data-action="import-candidate" data-entity-type="library" data-stage="wardrobe_asset" data-id="${item.id}">上传服装图</button><button class="mini-button" data-action="select-independent-asset" data-entity-type="library" data-stage="wardrobe_asset" data-id="${item.id}">从独立库选择</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="library" data-id="${item.id}">打开换装库</button></div></article>`;
+      const work = assetBatchWorkState("wardrobe_asset", item.id, drawing);
+      return `<article class="asset-card${work?.active ? " is-drawing" : ""}${work?.status === "failed" ? " has-work-failure" : ""}"><div class="drawing-banner" role="status" aria-live="polite"><i aria-hidden="true"></i><span>${escapeHtml(work?.label || "正在抽卡")}</span></div><div class="asset-card-head">${assetPreview(candidate, "image", work)}<div><h4>${escapeHtml(item.name)}</h4><p>${escapeHtml(item.description || "剧情服装参考")}</p></div></div><div class="asset-tags"><span>${escapeHtml(item.characterName || "未绑定角色")}</span><span>${escapeHtml(item.changeReason || "剧情换装")}</span><span>${(item.units || []).length ? `出现 ${(item.units || []).join("、")}` : "换装镜头"}</span><span>候选 ${candidates("library", item.id, "wardrobe_asset").length}</span></div><div class="asset-stage-grid single">${assetStageTile(candidate, `${item.name} · 换装图`, "image", "", work)}</div><div class="card-actions"><button class="mini-button draw-button${work?.active ? " is-loading" : ""}" data-long-action data-action="generate-library" data-library-type="wardrobes" data-id="${item.id}" ${work?.active ? "disabled" : ""}>${work?.active ? "生成中…" : "抽卡：换装图"}</button><button class="mini-button" data-action="import-candidate" data-entity-type="library" data-stage="wardrobe_asset" data-id="${item.id}">上传服装图</button><button class="mini-button" data-action="select-independent-asset" data-entity-type="library" data-stage="wardrobe_asset" data-id="${item.id}">从独立库选择</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="library" data-id="${item.id}">打开换装库</button></div></article>`;
     }).join("");
     $("#wardrobeCount").textContent = String((project.characters || []).length + wardrobes.length);
     $("#wardrobeGrid").innerHTML = (baseCards + changeCards) || `<div class="empty-hint">先完成人物合板后，这里会显示每个人的基础服装锁定状态；只有真实换装才会出现独立换装卡。</div>`;
@@ -1890,14 +2070,16 @@ function renderAssets(force = false) {
     $("#propGrid").innerHTML = props.length ? props.map(item => {
       const candidate = chosenCandidate("library", item.id, "prop_asset");
       const drawing = isEntityDrawing("library", item.id, ["prop_asset"]) || isStageDrawing("prop_asset", item.id);
-      return `<article class="asset-card${drawing ? " is-drawing" : ""}"><div class="drawing-banner" aria-hidden="true"><i></i><span>正在抽卡</span></div><div class="asset-card-head">${assetPreview(candidate, "image")}<div><h4>${escapeHtml(item.name)}</h4><p>${escapeHtml(item.description || "剧情道具参考")}</p></div></div><div class="asset-tags"><span>${escapeHtml(item.holder || "持有人未定")}</span><span>${(item.units || []).length ? `出现 ${(item.units || []).join("、")}` : "全剧道具"}</span><span>候选 ${candidates("library", item.id, "prop_asset").length}</span></div><div class="asset-stage-grid single">${assetStageTile(candidate, `${item.name} · 道具图`, "image")}</div><div class="card-actions"><button class="mini-button draw-button${drawing ? " is-loading" : ""}" data-long-action data-action="generate-library" data-library-type="props" data-id="${item.id}" ${drawing ? "disabled" : ""}>${drawing ? "抽卡中…" : "抽卡：道具图"}</button><button class="mini-button" data-action="import-candidate" data-entity-type="library" data-stage="prop_asset" data-id="${item.id}">上传道具图</button><button class="mini-button" data-action="select-independent-asset" data-entity-type="library" data-stage="prop_asset" data-id="${item.id}">从独立库选择</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="library" data-id="${item.id}">打开道具库</button></div></article>`;
+      const work = assetBatchWorkState("prop_asset", item.id, drawing);
+      return `<article class="asset-card${work?.active ? " is-drawing" : ""}${work?.status === "failed" ? " has-work-failure" : ""}"><div class="drawing-banner" role="status" aria-live="polite"><i aria-hidden="true"></i><span>${escapeHtml(work?.label || "正在抽卡")}</span></div><div class="asset-card-head">${assetPreview(candidate, "image", work)}<div><h4>${escapeHtml(item.name)}</h4><p>${escapeHtml(item.description || "剧情道具参考")}</p></div></div><div class="asset-tags"><span>${escapeHtml(item.holder || "持有人未定")}</span><span>${(item.units || []).length ? `出现 ${(item.units || []).join("、")}` : "全剧道具"}</span><span>候选 ${candidates("library", item.id, "prop_asset").length}</span></div><div class="asset-stage-grid single">${assetStageTile(candidate, `${item.name} · 道具图`, "image", "", work)}</div><div class="card-actions"><button class="mini-button draw-button${work?.active ? " is-loading" : ""}" data-long-action data-action="generate-library" data-library-type="props" data-id="${item.id}" ${work?.active ? "disabled" : ""}>${work?.active ? "生成中…" : "抽卡：道具图"}</button><button class="mini-button" data-action="import-candidate" data-entity-type="library" data-stage="prop_asset" data-id="${item.id}">上传道具图</button><button class="mini-button" data-action="select-independent-asset" data-entity-type="library" data-stage="prop_asset" data-id="${item.id}">从独立库选择</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="library" data-id="${item.id}">打开道具库</button></div></article>`;
     }).join("") : `<div class="empty-hint">剧本里的非商品道具会进入这里。带货商品不会出现在本区，请看上方「带货商品（上传原图）」。</div>`;
   }
   $("#sceneGrid").innerHTML = project.scenes.length ? project.scenes.map(scene => {
     const candidate = chosenCandidate("scene", scene.id, "scene_asset");
     const drawing = isEntityDrawing("scene", scene.id, ["scene_asset"]) || isStageDrawing("scene_asset", scene.id);
-    return `<article class="asset-card${drawing ? " is-drawing" : ""}"><div class="drawing-banner" aria-hidden="true"><i></i><span>正在抽卡</span></div><div class="asset-card-head">${assetPreview(candidate, "folder")}<div><h4>${escapeHtml(scene.name)}</h4><p>${escapeHtml(scene.description || "暂无场景描述")}</p></div></div><div class="asset-tags"><span>${escapeHtml(scene.time || "时间未定")}</span><span>${escapeHtml(scene.atmosphere || "氛围未定")}</span><span>候选 ${candidates("scene", scene.id, "scene_asset").length}</span></div>
-      <details class="creator-panel">
+    const work = assetBatchWorkState("scene_asset", scene.id, drawing);
+    return `<article class="asset-card${work?.active ? " is-drawing" : ""}${work?.status === "failed" ? " has-work-failure" : ""}"><div class="drawing-banner" role="status" aria-live="polite"><i aria-hidden="true"></i><span>${escapeHtml(work?.label || "正在抽卡")}</span></div><div class="asset-card-head">${assetPreview(candidate, "folder", work)}<div><h4>${escapeHtml(scene.name)}</h4><p>${escapeHtml(scene.description || "暂无场景描述")}</p></div></div><div class="asset-tags"><span>${escapeHtml(scene.time || "时间未定")}</span><span>${escapeHtml(scene.atmosphere || "氛围未定")}</span><span>候选 ${candidates("scene", scene.id, "scene_asset").length}</span></div>
+      <details class="creator-panel" data-editor-key="scene:${escapeHtml(scene.id)}:settings">
         <summary>场景设定与提示词（点击展开）</summary>
         <div class="creator-panel-body">
           <div class="creator-grid">
@@ -1911,7 +2093,7 @@ function renderAssets(force = false) {
           </div>
         </div>
       </details>
-      <div class="asset-stage-grid single">${assetStageTile(candidate, `${scene.name} · 场景四视图（2×2）`, "image")}</div><div class="card-actions"><button class="mini-button draw-button${drawing ? " is-loading" : ""}" data-long-action data-action="generate-image" data-stage="scene_asset" data-id="${scene.id}" ${drawing ? "disabled" : ""}>${drawing ? "抽卡中…" : "抽卡：场景四视图"}</button><button class="mini-button" data-action="import-candidate" data-entity-type="scene" data-stage="scene_asset" data-id="${scene.id}">上传场景四视图</button><button class="mini-button" data-action="select-reusable-asset" data-entity-type="scene" data-id="${scene.id}">从独立场景库选择</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="scene" data-id="${scene.id}">当前场景版本</button></div></article>`;
+      <div class="asset-stage-grid single">${assetStageTile(candidate, `${scene.name} · 场景四视图（2×2）`, "image", "", work)}</div><div class="card-actions"><button class="mini-button draw-button${work?.active ? " is-loading" : ""}" data-long-action data-action="generate-image" data-stage="scene_asset" data-id="${scene.id}" ${work?.active ? "disabled" : ""}>${work?.active ? "生成中…" : "抽卡：场景四视图"}</button><button class="mini-button" data-action="import-candidate" data-entity-type="scene" data-stage="scene_asset" data-id="${scene.id}">上传场景四视图</button><button class="mini-button" data-action="select-reusable-asset" data-entity-type="scene" data-id="${scene.id}">从独立场景库选择</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="scene" data-id="${scene.id}">当前场景版本</button></div></article>`;
   }).join("") : `<div class="empty-hint">暂无场景资产。</div>`;
   syncSidebarLibraryMirror("propGrid", "sidebarPropGridHost");
   syncSidebarLibraryMirror("sceneGrid", "sidebarSceneGridHost");
@@ -1951,7 +2133,7 @@ function renderShots() {
           ? (invalid ? `${label} · 质检失败` : `${label} · 打开`)
           : `${label} · 待生成`;
       const buttonText = drawing ? (queued ? "排队中…" : "抽卡中…") : "抽卡";
-      return `<div class="frame-card${drawing ? " is-drawing-frame" : ""}${queued ? " is-queued-frame" : ""}"><button class="frame-preview${invalid ? " quality-invalid" : ""}${drawing ? " is-loading-preview" : ""}" ${assetActionAttributes(candidate, `镜头 ${shot.number} · ${label}`, "image")}>${candidate?.filePath ? `<img src="${escapeHtml(candidate.fileUrl || fileUrl(candidate.filePath))}" alt="">` : `<img class="placeholder" src="../assets/icons/image.png" alt="">`}<span>${statusText}</span>${drawing ? `<i class="frame-loading-spinner" aria-hidden="true"></i>` : ""}</button><button class="mini-button draw-button frame-draw${drawing ? " is-loading" : ""}" data-long-action data-action="generate-image" data-stage="${stage}" data-id="${shot.id}" ${drawing ? "disabled" : ""}>${buttonText}</button></div>`;
+      return `<div class="frame-card${drawing ? " is-drawing-frame" : ""}${queued ? " is-queued-frame" : ""}"><button class="frame-preview${invalid ? " quality-invalid" : ""}${drawing ? " is-loading-preview" : ""}" ${assetActionAttributes(candidate, `镜头 ${shot.number} · ${label}`, "image")}>${candidate?.filePath ? `<img src="${escapeHtml(candidateMediaUrl(candidate))}" alt="">` : `<img class="placeholder" src="../assets/icons/image.png" alt="">`}<span>${statusText}</span>${drawing ? `<i class="frame-loading-spinner" aria-hidden="true"></i>` : ""}</button><button class="mini-button draw-button frame-draw${drawing ? " is-loading" : ""}" data-long-action data-action="generate-image" data-stage="${stage}" data-id="${shot.id}" ${drawing ? "disabled" : ""}>${buttonText}</button></div>`;
     };
     const inheritedStart = `<div class="frame-card frame-inherited"><div class="frame-preview inherited"><img class="placeholder" src="../assets/icons/video.png" alt=""><span>首帧 · 上一镜视频延续</span></div></div>`;
     const framesMarkup = sheetMode
@@ -1980,7 +2162,7 @@ function renderShots() {
         </div>
         <p class="muted" style="margin-top:8px">完整视频提示词请到「04 分镜视频」编辑与提交。</p>
       </div>
-      <details class="creator-panel">
+      <details class="creator-panel" data-editor-key="shot:${escapeHtml(shot.id)}:fields">
         <summary>创作控制 · 拆镜字段可改（点击展开）</summary>
         <div class="creator-panel-body">
           <div class="creator-grid">
@@ -2013,6 +2195,10 @@ function renderJobs() {
   renderAutomationQueue(project);
   const activeJobs = videoStatusApi.activeVideoJobs(project);
   const history = (project.jobs || []).slice().sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || ""))).slice(0, 10);
+  const detailSummary = $("#runDetailSummary");
+  if (detailSummary) detailSummary.textContent = activeJobs.length
+    ? `后端任务 ${activeJobs.length} 个正在同步`
+    : history.length ? `无后端调用 · 保留 ${history.length} 条历史` : "当前没有后端任务";
   if ($("#jobStrip")) {
     $("#jobStrip").innerHTML = activeJobs.length
       ? activeJobs.map(job => `<div class="job-chip ${videoJobStatusClass(job)}"><div class="job-chip-title"><b>${escapeHtml(stageLabels[job.type] || job.type || "生产任务")}${job.entityId ? ` ${escapeHtml(job.entityId)}` : ""}</b><span>${escapePublicText(videoStatusApi.videoJobProvider(job))}实时同步</span></div>${videoJobProgressMarkup(job)}${job.message ? `<p>${escapePublicText(job.message)}</p>` : ""}</div>`).join("")
@@ -2083,7 +2269,7 @@ function videoCardMarkup(project, shot) {
   <div class="video-card-main">
     ${videoState.key === "failed" && video?.filePath ? `<div class="video-quality-warning" role="status"><b>${escapeHtml(videoState.label)}</b><span>${escapeHtml(videoState.detail || "该候选不能进入成片")}</span></div>` : ""}
     ${taskJob ? `<div class="video-card-task">${videoJobProgressMarkup(taskJob)}${taskJob.message ? `<p>${escapeHtml(taskJob.message)}</p>` : ""}</div>` : ""}
-    <details class="creator-panel video-prompt-panel">
+    <details class="creator-panel video-prompt-panel" data-editor-key="shot:${escapeHtml(shot.id)}:video-prompt">
       <summary>创作控制 · 视频提示词（点击展开）</summary>
       <div class="creator-panel-body shot-prompt creator-prompt-block video-prompt-block">
         <div class="prompt-mode"><button type="button" data-action="prompt-mode" data-id="${shot.id}" data-mode="system" class="${shot.promptMode !== "manual" ? "active" : ""}">系统编译稿</button><button type="button" data-action="prompt-mode" data-id="${shot.id}" data-mode="manual" class="${shot.promptMode === "manual" ? "active" : ""}">手动改写</button></div>
@@ -2354,6 +2540,33 @@ function qualityBlueprintModuleEnabled(moduleName = "script") {
   return modules[moduleName] === true;
 }
 
+function qualityWarningPending(project = state.project) {
+  if (!project || state.settings?.generation?.qualityGatesEnabled !== true) return false;
+  if (qualityBlueprintModuleEnabled("script") && project.productionContractAudit?.ok === false && project.productionContractAudit?.ignored !== true) return true;
+  const code = String(project.automation?.errorCode || "").toUpperCase();
+  if (/(?:QUALITY|SEMANTIC_REVIEW|PRODUCTION_HARD_CONTRACT|REFERENCE_SPEC)/.test(code)) return true;
+  return (project.candidates || []).some(item => {
+    if (item.qualityAudit?.ok !== false || !item.filePath || item.stale === true) return false;
+    const moduleName = item.stage === "shot_video"
+      ? "videos"
+      : item.stage.startsWith("storyboard_")
+        ? "storyboards"
+        : item.stage === "final"
+          ? "delivery"
+          : "assets";
+    return qualityBlueprintModuleEnabled(moduleName);
+  });
+}
+
+function characterReferenceRepairPending(project = state.project) {
+  if (!project || automationIsActive(project)) return false;
+  const code = String(project.automation?.errorCode || "").toUpperCase();
+  const message = String(project.automation?.message || "");
+  return /CHARACTER_REFERENCE/.test(code)
+    || /CHARACTER_REFERENCE_NOT_IN_BIBLE/.test(message)
+    || /角色圣经中不存在的人物/.test(message);
+}
+
 function renderOssStatus() {
   const direct = $("#videoStorageMode")?.value === "direct-oss";
   const values = [$("#videoOssAccessKeyId")?.value, $("#videoOssAccessKeySecret")?.value, $("#videoOssBucket")?.value, $("#videoOssEndpoint")?.value];
@@ -2406,14 +2619,25 @@ function renderSettings() {
   $("#promptEditor").innerHTML = promptKeys.map(key => {
     const mode = s.promptModes?.[key] === "custom" ? "custom" : "system";
     const value = mode === "custom" ? String(s.prompts?.[key] || "") : "";
+    const definition = promptDefinitionForKey(key);
     return `<div class="prompt-editor-card ${mode === "system" ? "system-mode" : "custom-mode"}">
-      <div class="prompt-editor-card-head"><label>${escapeHtml(promptLabels[key] || key)}</label><span class="info-dot" tabindex="0" data-tooltip="系统默认正文会隐藏；示例只说明格式，自定义内容由你自己保存。">!</span><div class="prompt-example-actions"><button class="mini-button" type="button" data-action="view-prompt-example" data-prompt-key="${escapeHtml(key)}">查看示例</button><button class="mini-button" type="button" data-action="download-prompt-example" data-prompt-key="${escapeHtml(key)}">下载示例</button></div></div>
+      <div class="prompt-editor-card-head"><label>${escapeHtml(definition.name)}</label><div class="prompt-example-actions"><button class="mini-button" type="button" data-action="view-prompt-example" data-prompt-key="${escapeHtml(key)}" data-tooltip="查看“${escapeHtml(definition.name)}”与当前模块严格对应的输入输出示例。">查看示例</button><button class="mini-button" type="button" data-action="download-prompt-example" data-prompt-key="${escapeHtml(key)}" data-tooltip="下载“${escapeHtml(definition.name)}”的同键示例 JSON。">下载示例</button></div></div>
+      <div class="prompt-purpose"><span class="prompt-purpose-main"><b>作用：</b>${escapeHtml(definition.purpose)}</span><span><b>生效页面：</b>${escapeHtml(definition.screen)}</span><span><b>所属模块：</b>${escapeHtml(definition.module)}</span><span><b>读取：</b>${escapeHtml(definition.input)}</span><span><b>产出：</b>${escapeHtml(definition.output)}</span></div>
       <div class="prompt-template-mode" role="group" aria-label="${escapeHtml(promptLabels[key] || key)}提示词来源"><button class="mini-button ${mode === "system" ? "active" : ""}" type="button" data-action="set-prompt-template-mode" data-prompt-key="${escapeHtml(key)}" data-mode="system">系统默认（隐藏）</button><button class="mini-button ${mode === "custom" ? "active" : ""}" type="button" data-action="set-prompt-template-mode" data-prompt-key="${escapeHtml(key)}" data-mode="custom">自定义填写</button></div>
       ${mode === "system" ? `<div class="system-prompt-mask"><b>系统默认提示词已启用</b><span>正文由软件维护并隐藏，不会显示给用户。</span><i></i><i></i><i></i></div>` : `<textarea data-prompt-key="${escapeHtml(key)}" maxlength="100000" placeholder="填写这一阶段的完整自定义提示词">${escapeHtml(value)}</textarea>`}
     </div>`;
   }).join("");
   applyProductSurfaceLabels();
   decorateFeatureHelp();
+  refreshStorageLocation().catch(() => {});
+}
+
+async function refreshStorageLocation() {
+  const node = $("#storageLocationPath");
+  if (!node || !api.workbench.getStorageLocation) return;
+  const result = await api.workbench.getStorageLocation();
+  node.textContent = result?.ok ? result.rootDir : (result?.message || "无法读取当前保存位置");
+  node.classList.toggle("error", result?.ok !== true);
 }
 
 function renderVideoProviderPolicy() {
@@ -2481,6 +2705,9 @@ function renderProjectStrategy() {
   const mode = projectModeLabel(project.generation?.mode || "continuation");
   const engine = currentVideoEngineName(project);
   const stepExecution = projectUsesStepExecution(project);
+  const handlingLabels = { respect: "尊重原稿", optimize: "智能优化", recreate: "重新创作" };
+  const commerceLabels = { none: "不带货", natural: "自然植入", explicit: "明确带货" };
+  const priorityLabels = { speed: "速度优先", balanced: "均衡", quality: "效果优先" };
   const bar = $("#projectStrategyBar");
   bar.classList.toggle("requires-confirmation", !confirmed);
   $("#projectVideoMode").textContent = confirmed ? `${engine} · ${mode}` : "待确认（视频生产已锁定）";
@@ -2496,10 +2723,17 @@ function renderProjectStrategy() {
     : plan.scriptFormatConfirmed === true
       ? (plan.scriptFormat === "dialogue" ? "简易对白稿" : plan.scriptFormat === "timed_storyboard" ? "秒级分镜成片稿" : "完整制作稿")
       : "请在制作策略中选择";
+  const commerceMode = plan.commerceMode || (project.product?.name ? "natural" : "none");
+  $("#projectCommerceShots").textContent = `${commerceLabels[commerceMode] || "不带货"} · ${priorityLabels[plan.priorityProfile || "balanced"] || "均衡"}${commerceMode === "none" ? "" : ` · ${Math.max(1, Math.round(Number(plan.commerceShotCount) || 3))}镜`}`;
   const targetSeconds = Number(project.generation?.targetDurationSeconds) || 300;
   const plannedSeconds = (project.shots || []).reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
+  const foundryQuality = project.foundry?.quality;
+  const understandingSummary = project.foundry?.scriptUnderstanding?.summary;
+  const foundrySummary = foundryQuality
+    ? `V2 本地预检 L${foundryQuality.achievedLevel}/${foundryQuality.minimumFormalLevel} · ${handlingLabels[plan.scriptHandling || "optimize"] || "智能优化"}${understandingSummary ? ` · 识别${understandingSummary.sceneCount}场/${understandingSummary.dialogueCount}句对白 · 拦截${understandingSummary.suppressedDirectionCount}条越权说明` : ""}`
+    : `V2 内核已启用 · ${handlingLabels[plan.scriptHandling || "optimize"] || "智能优化"}`;
   $("#projectStrategyHelp").textContent = confirmed
-    ? `剧总时长合同 ${targetSeconds} 秒${plannedSeconds ? ` · 当前分镜合计 ${plannedSeconds} 秒` : ""}。${projectRequiresFaceMeshUi(project) ? "云端算力：人物资产会先做一致性检查。" : "本地像塑：不需要全脸网格。"}`
+    ? `剧总时长合同 ${targetSeconds} 秒${plannedSeconds ? ` · 当前分镜合计 ${plannedSeconds} 秒` : ""}。${foundrySummary}。${projectRequiresFaceMeshUi(project) ? "云端算力：人物资产会先做一致性检查。" : "本地像塑：不需要全脸网格。"}`
     : "请先在制作策略确认视频引擎、生成模式、剧本模式与剧总时长；一键制作暂时锁定。";
   const settingsKind = state.settings?.videoProvider?.kind || "local-xiangsu";
   const providerMismatch = Boolean(project) && !videoProviderMatchesProject(settingsKind);
@@ -2551,7 +2785,11 @@ function openProjectStrategyDialog(required = false) {
     input.checked = project.productionPlan?.scriptFormatConfirmed === true
       && input.value === (project.productionPlan?.scriptFormat || "production");
   });
+  if ($("#projectScriptHandling")) $("#projectScriptHandling").value = project.productionPlan?.scriptHandling || (project.productionPlan?.inputMode === "manual" ? "respect" : "optimize");
+  if ($("#projectCommerceMode")) $("#projectCommerceMode").value = project.productionPlan?.commerceMode || (project.product?.name ? "natural" : "none");
+  if ($("#projectPriorityProfile")) $("#projectPriorityProfile").value = project.productionPlan?.priorityProfile || "balanced";
   if ($("#projectTargetDuration")) $("#projectTargetDuration").value = String(project.generation?.targetDurationSeconds || 300);
+  if ($("#projectCommerceShotCount")) $("#projectCommerceShotCount").value = String(Math.max(1, Math.round(Number(project.productionPlan?.commerceShotCount) || 3)));
   syncDurationModeControls("project");
   $("#projectStrategyError").textContent = required ? "请确认视频引擎、生成模式；AI 生成项目还必须选择剧本模式。" : "";
   $("#cancelProjectStrategy").classList.toggle("hidden", required);
@@ -2663,7 +2901,7 @@ function promptSuggestionTemplate(scope = "all") {
   }, null, 2);
 }
 
-const scriptFormatExamples = Object.freeze({
+const legacyScriptFormatExamples = Object.freeze({
   production: `# 完整制作稿示例\n\n## 故事简介\n退休教师林秋月发现儿子隐瞒债务，她必须在保护家庭与揭开真相之间作出选择。\n\n## 人物\n- C01 林秋月：62岁，克制、敏锐；紧张时捏住衣角。\n- C02 周远：35岁，林秋月之子；嘴硬但内疚。\n\n## SC01｜客厅｜傍晚\n【情节】林秋月从旧账本中找到转账记录。\n【动作】她把账本推到周远面前，手指停在日期上。\n【对白】\n- 林秋月（压低声音，失望但保持克制，对周远说）：你告诉我，这一笔钱到底去了哪里？\n- 周远（避开视线，语速加快，心虚地对母亲说）：妈，这件事我能处理，你别再问了。\n【商品节点】只有当剧情需要核对记录时，才让用户提供的商品作为解决问题的工具出现；名称与卖点必须来自用户资料。\n【承接】周远的回避促使林秋月继续追问。`,
   dialogue: `# 简易对白稿示例\n\n【背景】傍晚客厅。林秋月发现旧账本里的异常转账，周远刚进门。\n\n林秋月（压低声音，失望又克制，盯着周远，对周远说）：你告诉我，这一笔钱到底去了哪里？\n\n周远（避开母亲的视线，语速加快，心虚地对林秋月说）：妈，这件事我能处理，你别再问了。\n\n【简单情节】林秋月没有争吵，而是把带日期的凭据推到他面前。周远看到日期后沉默。\n\n林秋月（眼眶发红，语速放慢，忍着怒气对周远说）：我不是怕你欠钱，我怕你连真话都不肯跟我说。\n\n【商品出现规则】如本段确实需要商品，必须使用用户上传的产品名称、图片和卖点，并让商品承担明确剧情作用；不得凭空添加。`,
   timed_storyboard: `# 秒级分镜成片稿示例\n\n## S01｜0.0–8.0秒｜客厅｜中近景转特写\n【人物与位置】林秋月在画面左前景，周远在右后景；两人保持视线轴。\n【0.0–2.0秒】林秋月把旧账本推到桌面中央，手指压住一行日期。表情克制，呼吸变重。\n【2.0–5.2秒｜对白】林秋月（压低声音，失望又克制，盯着周远，对周远说）：你告诉我，这一笔钱到底去了哪里？\n【5.2–8.0秒｜反应】周远先看日期，再避开母亲视线，吞咽一下。\n【声音】纸页摩擦、室内低环境声；对白清晰置前。\n【承接】切到周远近景回答。\n\n## S02｜8.0–15.0秒｜周远近景\n【8.0–11.5秒｜对白】周远（语速加快，心虚，避开视线，对林秋月说）：妈，这件事我能处理，你别再问了。\n【11.5–15.0秒｜反应】林秋月在前景虚焦中收紧手指；周远说完后短暂停顿。\n【商品节点】仅在剧本因果需要时引用用户产品，完整保留用户名称和卖点。`
@@ -2807,8 +3045,8 @@ function renderPipelineLiveStatus(project = state.project) {
   if (!panel || !project) return;
   const automation = project.automation || {};
   const status = String(automation.status || "idle");
-  const active = ["running", "pausing", "stopping"].includes(status);
-  const visible = active || ["failed", "paused_user", "paused_remote", "paused_account", "cancelled", "completed"].includes(status);
+  const active = automationIsActive(project);
+  const visible = active || ["failed", "paused_user", "paused_remote", "paused_account", "cancelled", "stage_completed", "completed"].includes(status);
   panel.hidden = !visible;
   if (!visible) {
     panel.innerHTML = "";
@@ -2827,16 +3065,22 @@ function renderPipelineLiveStatus(project = state.project) {
     paused_user: "已暂停",
     paused_remote: "远端待恢复",
     paused_account: "账号待恢复",
-    failed: "运行失败",
+    failed: "已停在可恢复断点",
     cancelled: "已结束",
+    stage_completed: "本阶段完成",
     completed: "全流程完成"
   })[status] || "状态更新";
-  const tone = status === "failed" ? "danger" : status === "completed" ? "success" : active ? "active" : "paused";
+  // Internal/provider/QC failures are recoverable production states.  Reserve
+  // red validation feedback for an invalid user action at the action control;
+  // the global pipeline banner must not look like a terminal dead end.
+  const tone = ["completed", "stage_completed"].includes(status) ? "success" : active ? "active" : "paused";
   const next = pipelinePhases[phaseIndex + 1];
   const elapsed = formatRunDuration(automation.startedAt);
   const freshness = automationFreshness(automation.updatedAt, active);
   const phaseRail = pipelinePhases.map((item, index) => {
-    const phaseState = status === "completed" || index < phaseIndex ? "done" : index === phaseIndex ? "current" : "future";
+    const phaseState = status === "completed" || index < phaseIndex || (status === "stage_completed" && index === phaseIndex)
+      ? "done"
+      : index === phaseIndex ? "current" : "future";
     return `<li class="${phaseState}"><i>${phaseState === "done" ? "✓" : index + 1}</i><span><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.detail)}</small></span></li>`;
   }).join("");
   const currentProgressMarkup = currentProgress && Number(currentProgress.total) > 0
@@ -2846,6 +3090,26 @@ function renderPipelineLiveStatus(project = state.project) {
   const priorProgressMarkup = priorProgress
     ? `<span class="pipeline-prior-complete">✓ 上一阶段${priorLabel} ${Number(priorProgress.completed) || 0}/${Number(priorProgress.total) || 0} 已完成</span>`
     : "";
+  const scriptTask = scriptWorkflowState(project);
+  const canRepairContract = !active
+    && (automation.errorCode === "PRODUCTION_HARD_CONTRACT_FAILED" || project.productionContractAudit?.ok === false)
+    && state.settings?.generation?.qualityGatesEnabled === true
+    && state.settings?.generation?.qualityGateModules?.script === true
+    && state.settings?.generation?.blueprintAuditChecks?.productionStructure === true;
+  const canRepairCharacters = characterReferenceRepairPending(project);
+  const canIgnoreQuality = !active && qualityWarningPending(project);
+  const repairAction = canRepairCharacters
+    ? `<div class="pipeline-live-actions"><button id="liveRepairCharactersBtn" class="mini-button accent" type="button">一键修复人物并继续</button><span>补齐或重绑缺失人物，保留原对白、分镜和已有资产。</span></div>`
+    : canRepairContract
+    ? `<div class="pipeline-live-actions"><button id="liveRepairContractBtn" class="mini-button accent" type="button">AI 一键改错并复检</button><span>只改失败报告点名的镜头，合格内容和原始证据保留。</span></div>`
+    : scriptTask.recoverableFailure && !active && scriptTask.recoveryKind === "review"
+      ? `<div class="pipeline-live-actions"><button id="liveRepairScriptBtn" class="mini-button accent" type="button">AI 一键改错并复检</button><span>按已保存的终审报告定点修订，不从头重写。</span></div>`
+      : canIgnoreQuality
+        ? `<div class="pipeline-live-actions"><button id="liveRepairQualityBtn" class="mini-button accent" type="button">AI 修复并复检</button><span>按当前质检报告重新生成有问题的内容。</span></div>`
+        : "";
+  const ignoreQualityAction = canIgnoreQuality
+    ? `<div class="pipeline-live-actions"><button id="liveIgnoreQualityBtn" class="mini-button" type="button">忽略并继续执行</button><span>保留原结果作为确定内容，同时保存人工放行记录。</span></div>`
+    : "";
   panel.className = `pipeline-live-status ${tone}`;
   panel.innerHTML = `
     <div class="pipeline-live-heading">
@@ -2853,15 +3117,21 @@ function renderPipelineLiveStatus(project = state.project) {
       <div class="pipeline-live-times"><span>已运行 ${escapeHtml(elapsed)}</span><span>${escapeHtml(freshness)}</span></div>
     </div>
     <p class="pipeline-live-message">${escapePublicText(automation.message || `${phase.label}处理中`)}</p>
-    <div class="pipeline-live-context">${priorProgressMarkup}<span>${next && active ? `下一步：${escapeHtml(next.label)}` : status === "completed" ? "所有阶段已经完成" : "可从当前断点继续"}</span></div>
+    <div class="pipeline-live-context">${priorProgressMarkup}<span>${status === "completed" ? "所有阶段已经完成" : next && (active || status === "stage_completed") ? `下一步：${escapeHtml(next.label)}` : "可从当前断点继续"}</span></div>
     ${currentProgressMarkup}
+    ${repairAction}
+    ${ignoreQualityAction}
     <ol class="pipeline-phase-rail" aria-label="一键全流程阶段">${phaseRail}</ol>`;
+  $("#liveRepairContractBtn")?.addEventListener("click", () => runLong("AI 正按蓝图失败项定点改错并自动复检…", () => api.workbench.repairProductionContracts(project.id)));
+  $("#liveRepairCharactersBtn")?.addEventListener("click", () => repairCharacterReferencesAndContinue(project));
+  $("#liveRepairScriptBtn")?.addEventListener("click", () => runScriptLong("AI 正按终审报告定点改错并自动复检…", () => api.workbench.resumeScriptGeneration(project.id), project.automation?.operation || "idea_script"));
+  $("#liveRepairQualityBtn")?.addEventListener("click", () => continuePipeline(project));
+  $("#liveIgnoreQualityBtn")?.addEventListener("click", () => ignoreQualityAndContinue(project));
 }
 
 function renderOverview() {
   const project = state.project;
   if (!project) return;
-  const selectedCount = project.candidates.filter(item => item.selected && (item.productionRevision || "") === (project.productionRevision || "")).length;
   const videoSummary = videoStatusApi.summarizeShotVideos(project, state.settings);
   const summary = project.costLedger?.summary || {};
   $("#projectStatus").textContent = ({
@@ -2873,17 +3143,17 @@ function renderOverview() {
     media_quality_passed:"镜头质检通过"
   })[project.status] || "生产中";
   $("#progressOverview").innerHTML = [
-    ["人物", `${project.characters.length}`], ["场景", `${project.scenes.length}`],
-    ["分镜", `${project.shots.length}`], ["视频就绪", `${videoSummary.ready}/${project.shots.length}`],
-    ["资产版本", `${project.candidates.length}`], ["已确认", `${selectedCount}`],
-    ["文案费", costCategoryLabel(summary.byCategory?.text, "text")],
-    ["图片费", costCategoryLabel(summary.byCategory?.image, "image")],
-    ["视频费", costCategoryLabel(summary.byCategory?.video, "video")],
-    ["合计", `¥${Number(summary.totalKnownYuan || 0).toFixed(2)}`]
-  ].map(([label,value]) => `<div class="progress-cell"><span>${label}</span><b>${value}</b></div>`).join("");
+    ["人物", `${project.characters.length}`, ""], ["场景", `${project.scenes.length}`, ""],
+    ["分镜", `${project.shots.length}`, ""], ["视频", `${videoSummary.ready}/${project.shots.length}`, ""],
+    ["文案费", costCategoryLabel(summary.byCategory?.text, "text"), costCategoryTitle(summary.byCategory?.text, "文案")],
+    ["图片费", costCategoryLabel(summary.byCategory?.image, "image"), costCategoryTitle(summary.byCategory?.image, "图片")],
+    ["视频费", costCategoryLabel(summary.byCategory?.video, "video"), costCategoryTitle(summary.byCategory?.video, "视频")],
+    ["合计", `已结¥${Number(summary.totalKnownYuan || 0).toFixed(2)}`, `实际已结算 ¥${Number(summary.totalKnownYuan || 0).toFixed(2)}；待官网回执的预估 ¥${Number(summary.totalEstimatedYuan || 0).toFixed(2)} 不计入合计`]
+  ].map(([label,value,title]) => `<div class="progress-cell"${title ? ` title="${escapeHtml(title)}"` : ""}><span>${label}</span><b>${value}</b></div>`).join("");
   renderPipelineVideoStatus(videoSummary);
   renderPipelineLiveStatus(project);
   renderProjectCostBar(project);
+  renderNextActionGuide(project);
 }
 
 function costCategoryLabel(bucket = {}, category = "") {
@@ -2894,10 +3164,17 @@ function costCategoryLabel(bucket = {}, category = "") {
     return `已结¥${known.toFixed(2)}${bucket.pendingCount ? ` · 待实扣 ${bucket.pendingCount}` : ""}`;
   }
   const pending = Number(bucket.pendingCount || 0);
-  if (!known && !estimated) return pending ? `待实扣 ${pending}` : "¥0.00";
-  if (known && estimated) return `已结¥${known.toFixed(2)} / ${pending ? "待实扣·" : ""}估¥${estimated.toFixed(2)}`;
-  if (known) return `已结¥${known.toFixed(2)}${pending ? ` · 待实扣 ${pending}` : ""}`;
-  return `${pending ? "待实扣·" : ""}估¥${estimated.toFixed(2)}`;
+  if (!known && !estimated) return pending ? `待回执 ${pending}` : "¥0.00";
+  if (known && estimated) return `已结¥${known.toFixed(2)}＋预估¥${estimated.toFixed(2)}`;
+  if (known) return `已结¥${known.toFixed(2)}${pending ? `＋待回执${pending}` : ""}`;
+  return `预估¥${estimated.toFixed(2)}`;
+}
+
+function costCategoryTitle(bucket = {}, label = "费用") {
+  const known = Number(bucket.knownYuan || 0);
+  const estimated = Number(bucket.estimatedYuan || 0);
+  const pending = Number(bucket.pendingCount || 0);
+  return `${label}实际已结算 ¥${known.toFixed(2)}${pending ? `；${pending} 笔等待官网实扣回执${estimated ? `，当前本地预估 ¥${estimated.toFixed(2)}` : ""}` : "；无待结算记录"}。预估不计入已结合计。`;
 }
 
 function renderProjectCostBar(project = state.project) {
@@ -2986,7 +3263,7 @@ function renderAssetBatchProgress(project = state.project) {
 
 function mediaHtml(candidate) {
   const extension = String(candidate.filePath || "").split(".").pop().toLowerCase();
-  const url = escapeHtml(candidate.fileUrl || fileUrl(candidate.filePath));
+  const url = escapeHtml(candidateMediaUrl(candidate));
   if (["mp4","mov","webm"].includes(extension)) {
     const aspect = normalizedAspectRatio(state.project?.generation?.aspectRatio || "9:16").replace(":", " / ");
     return `<div class="candidate-video-shell" style="--candidate-aspect:${aspect}"><video class="candidate-thumb" src="${url}" controls preload="metadata" playsinline></video></div>`;
@@ -3082,9 +3359,9 @@ function reusableTargetLabel(target, owner) {
 function reusableAssetPreview(item) {
   const mediaType = reusableAssetMediaType(item);
   const source = escapeHtml(item.fileUrl || fileUrl(item.filePath));
-  if (mediaType === "video") return `<video src="${source}" muted preload="metadata"></video>`;
+  if (mediaType === "video") return `<video src="${source}" muted preload="none"></video>`;
   if (mediaType === "audio") return `<div class="library-audio-preview"><span>♪</span><b>音频素材</b><small>${Number(item.duration || 0) ? `${Number(item.duration).toFixed(1)} 秒` : "可试听/绑定"}</small></div>`;
-  return `<img src="${source}" alt="${escapeHtml(item.label || "已有资产")}">`;
+  return `<img src="${source}" alt="${escapeHtml(item.label || "已有资产")}" loading="lazy" decoding="async">`;
 }
 
 function renderReusableAssetLibrary() {
@@ -3095,22 +3372,27 @@ function renderReusableAssetLibrary() {
   if (!grid || !scope || !target || !owner) return;
   const mediaType = reusableTargetMediaType(target);
   const assets = (state.reusableAssets || []).filter(item => {
-    if (target.entityType === "manager") return true;
+    if (target.entityType === "manager") return !target.filterKinds?.length || target.filterKinds.includes(item.kind);
     if (target.legacy === true) return item.kind === target.entityType;
-    return reusableAssetMediaType(item) === mediaType;
+    const kindForTarget = target.entityType === "product" ? "product"
+      : target.stage === "prop_asset" ? "prop"
+      : target.stage === "wardrobe_asset" ? "wardrobe"
+      : ["character_voice", "voice_asset"].includes(target.stage) ? "voice"
+      : "";
+    return reusableAssetMediaType(item) === mediaType && (!kindForTarget || [kindForTarget, mediaType].includes(item.kind));
   });
   const signature = JSON.stringify({ target, owner: { id: owner.id, name: owner.name }, assets });
   if (signature === state.reusableAssetRenderSignature) return;
   state.reusableAssetRenderSignature = signature;
   const targetLabel = reusableTargetLabel(target, owner);
-  scope.innerHTML = `<div><span>${target.entityType === "manager" ? "ALL MEDIA" : `${mediaType.toUpperCase()} TARGET`}</span><b>${escapeHtml(targetLabel)}</b><small>${target.entityType === "manager" ? "人物、场景、通用图片、视频和音频都保存在本机，可跨项目复用。" : "选择后会复制到当前项目并设为当前版本；原文件和旧版本都保留。"}</small></div><span class="reusable-count">${assets.length} 项</span>`;
+  scope.innerHTML = `<div><span>${target.entityType === "manager" ? "GLOBAL ASSET LIBRARY" : `${mediaType.toUpperCase()} TARGET`}</span><b>${escapeHtml(target.libraryLabel || targetLabel)}</b><small>${target.entityType === "manager" ? "人物、场景、道具、服装、商品、图片、视频、音频和音色均在本机全局保存，可跨项目复用。" : "选择后会复制到当前项目并设为当前版本；原文件和旧版本都保留。"}</small></div><span class="reusable-count">${assets.length} 项</span>`;
   grid.innerHTML = assets.length ? assets.map(item => `
     <article class="reusable-asset-card">
       <button class="reusable-asset-preview" type="button" data-action="open-asset" data-path="${escapeHtml(item.filePath || "")}" data-title="${escapeHtml(item.label || "已有资产")}" data-kind="${escapeHtml(reusableAssetMediaType(item))}">
         ${reusableAssetPreview(item)}
       </button>
       <div class="reusable-asset-copy">
-        <div><span>${escapeHtml(stageLabels[item.stage] || (item.kind === "character" ? "人物形象" : item.kind === "scene" ? "场景四视图" : reusableAssetMediaType(item) === "video" ? "资产视频" : reusableAssetMediaType(item) === "audio" ? "资产音频" : "通用图片"))}</span><b>${escapeHtml(item.label || item.id)}</b></div>
+        <div><span>${escapeHtml(stageLabels[item.stage] || ({ character: "人物形象", scene: "场景四视图", prop: "道具资产", wardrobe: "服装资产", product: "商品资产", voice: "人物音色", video: "资产视频", audio: "资产音频", image: "通用图片" })[item.kind] || "全局资产")}</span><b>${escapeHtml(item.label || item.id)}</b></div>
         <p>${escapeHtml(item.description || "跨项目可复用资产")}</p>
         <small>来源：${escapeHtml(item.source?.projectTitle || "本地资产库")} · 已使用 ${Number(item.useCount || 0)} 次</small>
       </div>
@@ -3145,7 +3427,10 @@ async function openReusableAssetLibrary(entityType, entityId) {
 async function openIndependentAssetLibrary(target = { entityType: "manager" }) {
   state.reusableAssetTarget = target?.entityType ? { ...target } : { entityType: "manager" };
   state.reusableAssetRenderSignature = "";
-  const result = await api.workbench.listReusableAssets();
+  const requestedKind = state.reusableAssetTarget.entityType === "manager" && state.reusableAssetTarget.filterKinds?.length === 1
+    ? state.reusableAssetTarget.filterKinds[0]
+    : "";
+  const result = await api.workbench.listReusableAssets(requestedKind);
   if (!result?.ok) return showToast(result?.message || "读取独立资产库失败", "error");
   state.reusableAssets = Array.isArray(result.assets) ? result.assets : [];
   state.reusableCharacterLibraryLoaded = true;
@@ -3161,11 +3446,15 @@ function closeReusableAssetDialog() {
   if (dialog?.open) dialog.close();
   state.reusableAssetTarget = null;
   state.reusableAssetRenderSignature = "";
+  if (activeSidebarLibrary && activeSidebarLibrary !== "voices") {
+    activeSidebarLibrary = "";
+    $$(".library-nav-button").forEach(button => button.classList.remove("active"));
+  }
 }
 
 function drawingEntityKeys(project = state.project) {
   const keys = new Set();
-  const automationActive = ["running", "pausing", "stopping"].includes(project?.automation?.status);
+  const automationActive = automationIsActive(project);
   // Trust batch chips only while a live automation owns the project.
   if (automationActive) {
     const progress = project?.automation?.progress;
@@ -3201,6 +3490,34 @@ function batchFrameStatus(stage, entityId) {
   return String(item?.status || "");
 }
 
+function assetBatchWorkState(stages, entityId, fallbackDrawing = false) {
+  const wanted = new Set((Array.isArray(stages) ? stages : [stages]).filter(Boolean).map(stage => `${stage}:${entityId}`));
+  const progress = state.project?.automation?.progress;
+  const items = Array.isArray(progress?.items) ? progress.items.filter(item => wanted.has(String(item?.key || ""))) : [];
+  const activeAutomation = automationIsActive(state.project);
+  const ranked = ["running", "queued", "failed"];
+  let item = null;
+  for (const status of ranked) {
+    item = items.find(entry => String(entry?.status || "") === status && (status === "failed" || activeAutomation));
+    if (item) break;
+  }
+  if (!item && fallbackDrawing) {
+    return { status: "running", active: true, label: "生成中", message: "正在提交并同步生成状态" };
+  }
+  if (!item) return null;
+  const status = String(item.status || "");
+  const stage = String(item.kind || String(item.key || "").split(":")[0] || "");
+  const stageLabel = stageLabels[stage] || "资产";
+  const message = String(item.message || "");
+  const checking = /质检|校验|审核|检查/.test(message);
+  const label = status === "running"
+    ? `${stageLabel}${checking ? "校验中" : "生成中"}`
+    : status === "queued"
+      ? `${stageLabel}排队中`
+      : `${stageLabel}失败 · 可重试`;
+  return { status, active: ["running", "queued"].includes(status), label, message };
+}
+
 function isEntityDrawing(entityType, entityId, stages = []) {
   const keys = drawingEntityKeys();
   if (keys.has(`${entityType}:${entityId}`)) return true;
@@ -3223,7 +3540,11 @@ function isStageDrawing(stage, entityId) {
 }
 
 function automationIsActive(project = state.project) {
-  return ["running", "pausing", "stopping"].includes(String(project?.automation?.status || ""));
+  const statusClaimsActive = ["running", "pausing", "stopping"].includes(String(project?.automation?.status || ""));
+  if (project?.runtime && typeof project.runtime.active === "boolean") {
+    return project.runtime.active || (project === state.project && state.busy && statusClaimsActive);
+  }
+  return statusClaimsActive;
 }
 
 function resumeStageForAutomation(project = state.project) {
@@ -3252,9 +3573,29 @@ function projectUsesStepExecution(project = state.project) {
   return String(project?.productionPlan?.executionMode || "step") !== "full";
 }
 
+async function ignoreQualityAndContinue(project = state.project, options = {}) {
+  if (!project) return;
+  if (!window.confirm("确认忽略当前质检提醒并继续执行？原结果会作为确定内容使用，审核明细和人工放行记录仍会保留。")) return;
+  return runLong("正在确认原结果并继续流程…", async () => {
+    const accepted = await api.workbench.acceptQualityWarnings(project.id, options);
+    if (!accepted?.ok) throw new Error(accepted?.message || "人工确认失败");
+    const result = accepted.result || {};
+    if (!result.completed && result.resumeStage) {
+      const resumed = await api.workbench.runPipelineFromStage(project.id, result.resumeStage);
+      if (!resumed?.ok) throw new Error(resumed?.message || "继续任务失败");
+    }
+    return accepted;
+  });
+}
+
 async function continuePipeline(project = state.project) {
   if (!project) return;
-  const stage = resumeStageForAutomation(project);
+  let stage = resumeStageForAutomation(project);
+  const overviewResult = await api.workbench.listProjectsOverview().catch(() => null);
+  const currentOverview = overviewResult?.ok
+    ? (overviewResult.projects || []).find(item => item.id === project.id)
+    : null;
+  if (currentOverview?.nextStage) stage = currentOverview.nextStage;
   if (stage === "script"
     && !String(project?.script?.raw || "").trim()
     && !project?.script?.generationCheckpoint
@@ -3266,6 +3607,18 @@ async function continuePipeline(project = state.project) {
     ? `正在从${resumeStageLabel(stage)}断点继续当前阶段…`
     : `正在从${resumeStageLabel(stage)}断点继续完整流程…`;
   return runLong(message, () => api.workbench.runPipelineFromStage(project.id, stage));
+}
+
+async function repairCharacterReferencesAndContinue(project = state.project) {
+  if (!project) return;
+  return runLong("正在修复人物引用并从断点继续…", async () => {
+    const repaired = await api.workbench.repairCharacterReferences(project.id);
+    if (!repaired?.ok) throw new Error(repaired?.message || "人物引用修复失败");
+    const stage = repaired.result?.resumeStage || resumeStageForAutomation(project);
+    const resumed = await api.workbench.runPipelineFromStage(project.id, stage);
+    if (!resumed?.ok) throw new Error(resumed?.message || "修复后继续任务失败");
+    return resumed;
+  });
 }
 
 function renderPipelineControls(project = state.project) {
@@ -3296,7 +3649,16 @@ function renderAutomationQueue(project = state.project) {
   const failedItems = (progress?.items || []).filter(item => item.status === "failed");
   const scriptTask = scriptWorkflowState(project);
   const canResumeScript = scriptTask.recoverableFailure && !active;
-  const queueStateLabel = canResumeScript
+  const canRepairContract = !active
+    && (automation.errorCode === "PRODUCTION_HARD_CONTRACT_FAILED" || project.productionContractAudit?.ok === false)
+    && state.settings?.generation?.qualityGatesEnabled === true
+    && state.settings?.generation?.qualityGateModules?.script === true
+    && state.settings?.generation?.blueprintAuditChecks?.productionStructure === true;
+  const canRepairCharacters = characterReferenceRepairPending(project);
+  const canIgnoreQuality = !active && qualityWarningPending(project);
+  const queueStateLabel = canRepairContract
+    ? "待 AI 定点改错"
+    : canResumeScript
     ? "待继续修订"
     : automation.status === "pausing"
       ? "暂停中"
@@ -3313,12 +3675,26 @@ function renderAutomationQueue(project = state.project) {
               : automation.status === "paused"
                 ? "已暂停 · 可继续"
                 : automation.status === "completed"
-                  ? "已完成"
+                  ? "全流程已完成"
+                  : automation.status === "stage_completed"
+                    ? "本阶段已完成 · 可继续"
                   : resumable ? "待继续" : "空闲";
   const resumeScriptButton = canResumeScript
-    ? `<button class="mini-button accent" id="queueResumeScriptBtn" type="button">${scriptTask.recoveryKind === "direct" ? "只补失败剧本段" : scriptTask.recoveryKind === "plan" ? "重写失败批次" : scriptTask.recoveryKind === "unit" ? "复用失败批次并继续" : scriptTask.recoveryKind === "analysis" ? "从拆镜断点继续" : "按报告继续修订"}</button>`
+    ? `<button class="mini-button accent" id="queueResumeScriptBtn" type="button">${scriptTask.recoveryKind === "direct" ? "只补失败剧本段" : scriptTask.recoveryKind === "plan" ? "重写失败批次" : scriptTask.recoveryKind === "unit" ? "复用失败批次并继续" : scriptTask.recoveryKind === "analysis" ? "从拆镜断点继续" : "AI 一键改错"}</button>`
     : "";
-  const resumePipelineButton = resumable && !canResumeScript
+  const repairContractButton = canRepairContract
+    ? `<button class="mini-button accent" id="queueRepairContractBtn" type="button">AI 一键改错</button>`
+    : "";
+  const repairCharacterButton = canRepairCharacters
+    ? `<button class="mini-button accent" id="queueRepairCharactersBtn" type="button">一键修复人物并继续</button>`
+    : "";
+  const repairQualityButton = canIgnoreQuality && !canResumeScript && !canRepairContract
+    ? `<button class="mini-button accent" id="queueRepairQualityBtn" type="button">AI 修复并复检</button>`
+    : "";
+  const ignoreQualityButton = canIgnoreQuality
+    ? `<button class="mini-button" id="queueIgnoreQualityBtn" type="button">忽略并继续执行</button>`
+    : "";
+  const resumePipelineButton = resumable && !canResumeScript && !canRepairContract && !canIgnoreQuality
     ? `<button class="mini-button accent" id="queueResumePipelineBtn" type="button">继续任务</button>`
     : "";
   const phaseIndex = pipelinePhaseIndex(automation);
@@ -3332,9 +3708,11 @@ function renderAutomationQueue(project = state.project) {
     ${ownsProgress && progress.total ? `<div class="automation-queue-track"><i style="width:${Math.max(0, Math.min(100, progress.percent || 0))}%"></i></div><small>${progress.completed || 0}/${progress.total} 完成${progress.failed ? ` · ${progress.failed} 失败` : ""}</small>` : progress && progress.total ? `<small class="automation-prior-stage">✓ 上一阶段${priorProgressLabel} ${progress.completed || 0}/${progress.total} 已完成</small>` : ""}
     <small class="automation-last-update">${escapeHtml(automationFreshness(automation.updatedAt, active))}</small>
     ${running.length ? `<div class="automation-running-list">${running.slice(0, 8).map(item => `<span class="drawing-chip">${escapeHtml(currentAssetLabel(item.label || item.key))}</span>`).join("")}</div>` : ""}
-    ${failedItems.length ? `<div class="automation-fail-list">${failedItems.slice(0, 6).map(item => `<p title="${escapeHtml(item.message || "")}"><b>${escapeHtml(currentAssetLabel(item.label || item.key))}</b>${escapeHtml(item.message || item.errorCode || "失败")}</p>`).join("")}</div>` : ""}
-    <div class="card-actions">${resumeScriptButton}${resumePipelineButton}${active ? `<button class="mini-button" id="queuePauseBtn" type="button">暂停任务</button><button class="mini-button danger-mini" id="queueStopBtn" type="button">结束任务</button>` : ""}${failedItems.length || (project.jobs || []).some(job => ["failed", "error", "discarded"].includes(String(job.status || ""))) ? `<button class="mini-button danger-mini" id="queueClearFailedBtn" type="button">清理失败记录</button>` : ""}</div>
+    ${failedItems.length ? `<details class="automation-fail-details"><summary>查看 ${failedItems.length} 条失败明细</summary><div class="automation-fail-list">${failedItems.map(item => `<p title="${escapeHtml(item.message || "")}"><b>${escapeHtml(currentAssetLabel(item.label || item.key))}</b>${escapeHtml(item.message || item.errorCode || "失败")}</p>`).join("")}</div></details>` : ""}
+    <div class="card-actions">${repairCharacterButton}${repairContractButton}${resumeScriptButton}${repairQualityButton}${ignoreQualityButton}${resumePipelineButton}${active ? `<button class="mini-button" id="queuePauseBtn" type="button">暂停任务</button><button class="mini-button danger-mini" id="queueStopBtn" type="button">结束任务</button>` : ""}${failedItems.length || (project.jobs || []).some(job => ["failed", "error", "discarded"].includes(String(job.status || ""))) ? `<button class="mini-button danger-mini" id="queueClearFailedBtn" type="button">清理失败记录</button>` : ""}</div>
   </div>`;
+  $("#queueRepairContractBtn")?.addEventListener("click", () => runLong("AI 正按蓝图失败项定点改错并自动复检…", () => api.workbench.repairProductionContracts(project.id)));
+  $("#queueRepairCharactersBtn")?.addEventListener("click", () => repairCharacterReferencesAndContinue(project));
   $("#queueResumeScriptBtn")?.addEventListener("click", () => {
     const operation = project.automation?.operation || "idea_script";
     runScriptLong(scriptTask.recoveryKind === "direct"
@@ -3346,6 +3724,8 @@ function renderAutomationQueue(project = state.project) {
         : "正在按已保存失败报告继续修订…", () => api.workbench.resumeScriptGeneration(project.id), operation);
   });
   $("#queueResumePipelineBtn")?.addEventListener("click", () => continuePipeline(project));
+  $("#queueRepairQualityBtn")?.addEventListener("click", () => continuePipeline(project));
+  $("#queueIgnoreQualityBtn")?.addEventListener("click", () => ignoreQualityAndContinue(project));
   $("#queuePauseBtn")?.addEventListener("click", () => controlPipeline("pause"));
   $("#queueStopBtn")?.addEventListener("click", () => controlPipeline("stop"));
   $("#queueClearFailedBtn")?.addEventListener("click", () => clearAutomationFailures());
@@ -3371,20 +3751,29 @@ function renderCandidateCard(item, stageItems) {
   const owner = candidateOwner(item.entityType, item.entityId);
   const archived = (item.productionRevision || "") !== (state.project?.productionRevision || "");
   const gatedVideo = ["shot_video", "character_video"].includes(item.stage);
-  const qualityBlocked = qualityBlueprintModuleEnabled(item.stage === "shot_video" ? "videos" : item.stage === "character_video" ? "assets" : "script")
+  const qualityModule = item.stage === "shot_video"
+    ? "videos"
+    : item.stage.startsWith("storyboard_")
+      ? "storyboards"
+      : item.stage === "final"
+        ? "delivery"
+        : "assets";
+  const qualityEnabled = qualityBlueprintModuleEnabled(qualityModule);
+  const qualityBlocked = qualityEnabled
     && (item.qualityAudit?.ok === false || (gatedVideo && item.qualityAudit?.ok !== true));
+  const forceSelect = archived || item.stale || qualityBlocked;
   const qualityPassLabel = item.stage === "shot_video" ? "音画与首帧资产质检通过" : item.stage === "character_video" ? "声音与人物首帧质检通过" : "资产质检通过";
   const ordered = stageItems.slice().sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
   const version = Math.max(1, ordered.findIndex(candidate => candidate.id === item.id) + 1);
   return `<article class="candidate-card ${item.selected ? "selected" : ""}${archived ? " archived-revision" : ""}${item.stale ? " stale-revision" : ""}" data-entity-type="${escapeHtml(item.entityType)}" data-entity-id="${escapeHtml(item.entityId)}">
     <div class="candidate-owner"><span>${escapeHtml(owner.typeLabel)}</span><b>${escapeHtml(owner.title)}</b></div>
     ${mediaHtml(item)}
-    <div class="candidate-meta"><b>${escapeHtml(stageLabels[item.stage] || item.stage)} · 第 ${version} 版${archived ? " · 旧制作版" : ""}${item.stale ? " · 待按新上游重抽" : ""}</b><span>${new Date(item.createdAt).toLocaleString()}</span></div>
-    ${item.stale ? `<p class="quality-fail">上游参考已更新：${escapeHtml(item.staleReason || "当前卡仍可回看，但不会再作为有效首尾帧")}。原图文件仍在。</p>` : ""}
+    <div class="candidate-meta"><b>${escapeHtml(stageLabels[item.stage] || item.stage)} · 第 ${version} 版${archived ? " · 历史可用版本" : ""}${item.stale ? " · 可恢复使用" : ""}</b><span>${new Date(item.createdAt).toLocaleString()}</span></div>
+    ${item.stale ? `<p class="quality-fail">参考信息后来发生变化：${escapeHtml(item.staleReason || "此版本仍完整保留")}。你可以继续使用此版，系统不会自动删除。</p>` : ""}
     ${item.postProcessWarning ? `<p class="quality-fail">${escapePublicText(item.postProcessWarning)}</p>` : ""}
-    ${item.qualityAudit ? `<p class="${item.qualityAudit.ok ? "quality-pass" : "quality-fail"}">${item.qualityAudit.ok ? qualityPassLabel : `质检失败：${escapeHtml((item.qualityAudit.failures || []).map(failure => failure.message).join("；"))}`}</p>` : gatedVideo ? `<p class="quality-fail">${item.stage === "shot_video" ? "待完成音画与首帧资产质检" : "待完成人物声音与首帧资产质检"}</p>` : ""}
+    ${qualityEnabled && item.qualityAudit ? `<p class="${item.qualityAudit.ok ? "quality-pass" : "quality-fail"}">${item.qualityAudit.mode === "advisory_continue" ? "质检提醒已保留，原资产继续可用" : item.qualityAudit.overridden ? "已人工忽略质检提醒并确认使用" : item.qualityAudit.ok ? qualityPassLabel : `质检提醒：${escapeHtml((item.qualityAudit.failures || []).map(failure => failure.message).join("；"))}`}</p>` : qualityEnabled && gatedVideo ? `<p class="quality-fail">${item.stage === "shot_video" ? "待完成音画与首帧资产质检" : "待完成人物声音与首帧资产质检"}</p>` : ""}
     <p>${escapeHtml(item.prompt || "无提示词")}</p>
-    <div class="card-actions"><button class="mini-button asset-open-button" data-action="open-asset" data-path="${escapeHtml(item.filePath)}" data-title="${escapeHtml(`${owner.title} · ${stageLabels[item.stage] || item.stage}`)}" data-kind="${escapeHtml(mediaKind(item.filePath))}" data-aspect="${escapeHtml(state.project?.generation?.aspectRatio || "9:16")}">打开资产</button><button class="mini-button accent" data-action="confirm-candidate" data-id="${item.id}" ${item.selected || archived || qualityBlocked || item.stale ? "disabled" : ""}>${archived ? "旧制作版仅回看" : item.stale ? "待重抽不可选" : qualityBlocked ? item.qualityAudit?.ok === false ? "质检失败仅回看" : "待质检不可选" : item.selected ? "已确认" : "选中此卡"}</button>${!item.selected && (item.qualityAudit?.ok === false || qualityBlocked || archived) ? `<button class="mini-button danger-mini" data-action="discard-candidate" data-id="${item.id}">删除失败/旧版</button>` : ""}</div>
+    <div class="card-actions"><button class="mini-button asset-open-button" data-action="open-asset" data-path="${escapeHtml(item.filePath)}" data-title="${escapeHtml(`${owner.title} · ${stageLabels[item.stage] || item.stage}`)}" data-kind="${escapeHtml(mediaKind(item.filePath))}" data-aspect="${escapeHtml(state.project?.generation?.aspectRatio || "9:16")}">打开资产</button><button class="mini-button accent" data-action="${forceSelect ? "restore-candidate" : "confirm-candidate"}" data-id="${item.id}" ${(item.selected && !archived && !item.stale && !qualityBlocked) ? "disabled" : ""}>${item.selected && !archived && !item.stale && !qualityBlocked ? "已确认" : item.entityType === "shot" ? "选中此镜" : "选中此资产"}</button>${qualityBlocked ? `<button class="mini-button" data-action="ignore-quality-candidate" data-id="${item.id}">忽略提醒并继续</button>` : ""}${!item.selected && (qualityBlocked || archived) ? `<button class="mini-button danger-mini" data-action="discard-candidate" data-id="${item.id}">删除此版本</button>` : ""}</div>
   </article>`;
 }
 
@@ -3454,6 +3843,65 @@ function renderActiveStage(force = false) {
   else if (state.stage === "console") renderConsole();
 }
 
+function nextActionForProject(project = state.project) {
+  if (!project) return null;
+  if (automationIsActive(project)) {
+    return { title: "后台正在执行当前任务", detail: "运行详情会按后端真实任务更新；完成前无需重复点击。", selector: "" };
+  }
+  const scriptText = String(project.script?.raw || "").trim();
+  const hasShots = Array.isArray(project.shots) && project.shots.length > 0;
+  if (!scriptText) {
+    if (String(project.productionPlan?.inputMode || "ai") === "manual") {
+      return { title: "第一步：上传剧本或对白稿", detail: "完整剧本点“上传自己的剧本”；A：… / B：… 对白稿点“上传对白稿并轻改”。", stage: "script", selector: "#importScriptFile", selectors: ["#importScriptFile", "#importDialogueRewrite"] };
+    }
+    if (!(project.ideation?.topics || []).length) return { title: "第一步：生成候选选题", detail: "先生成 10 个选题，再选中一个写完整剧本。", stage: "script", selector: "#generateTopics" };
+    if (!project.ideation?.selectedTopicId) return { title: "下一步：选择一个题材", detail: "在选题卡中选中一个故事方向，系统才会按该题材写剧本。", stage: "script", selector: '[data-action="select-topic"]' };
+    return { title: "下一步：生成完整剧本", detail: "将按制作策略里的剧本模式、商品信息和目标时长写作。", stage: "script", selector: "#generateCompleteScript" };
+  }
+  if (!hasShots) return { title: "下一步：解析并拆镜", detail: "原剧本会保留；系统提取人物、场景、逐句对白、语气和镜头。", stage: "script", selector: "#analyzeScript" };
+  const missingAssets = [
+    ...(project.characters || []).filter(item => !["character_sheet", "character_three_view", "character_intro"].some(stage => chosenCandidate("character", item.id, stage))),
+    ...(project.scenes || []).filter(item => !chosenCandidate("scene", item.id, "scene_asset")),
+    ...(project.assetLibraries?.props || []).filter(item => !chosenCandidate("library", item.id, "prop_asset")),
+    ...(project.assetLibraries?.wardrobes || []).filter(item => !chosenCandidate("library", item.id, "wardrobe_asset"))
+  ];
+  if (missingAssets.length) return { title: `下一步：准备资产（还差 ${missingAssets.length} 项）`, detail: "可一键生成，也可在对应卡片上传或从全局资产库绑定。", stage: "assets", selector: "#generateAllAssets" };
+  const mode = String(project.generation?.mode || "keyframe");
+  const missingBoards = (project.shots || []).filter(shot => mode === "storyboard_sheet"
+    ? !chosenCandidate("shot", shot.id, "storyboard_sheet")
+    : !chosenCandidate("shot", shot.id, "storyboard_start") || (mode === "keyframe" && !chosenCandidate("shot", shot.id, "storyboard_end")));
+  if (missingBoards.length) return { title: `下一步：准备分镜图（还差 ${missingBoards.length} 镜）`, detail: "可批量生成，也可从 0 批量上传自己的分镜图。", stage: "shots", selector: "#generateAllStoryboards" };
+  const videoSummary = videoStatusApi.summarizeShotVideos(project, state.settings);
+  if (videoSummary.ready < (project.shots || []).length) return { title: `下一步：生成分镜视频（${videoSummary.ready}/${project.shots.length}）`, detail: "先核对每镜提示词和对白，再一键生成或批量上传视频。", stage: "videos", selector: "#generateAllVideos" };
+  if (!project.finalVideoPath || project.finalVideoStale) return { title: "下一步：合成完整成片", detail: "所有分镜视频已就绪，可按镜头顺序拼接并验收。", stage: "final", selector: "#stitchVideo" };
+  return { title: "本项目已完成", detail: "可播放、定位或重新编辑任一镜头；修改后指引会自动回到对应步骤。", stage: "final", selector: "#revealFinal" };
+}
+
+function renderNextActionGuide(project = state.project) {
+  const guide = $("#nextActionGuide");
+  if (!guide) return;
+  document.querySelectorAll(".guided-next-action").forEach(node => node.classList.remove("guided-next-action"));
+  const action = nextActionForProject(project);
+  if (!action) {
+    guide.hidden = true;
+    guide.innerHTML = "";
+    return;
+  }
+  const stageSelector = action.stage && state.stage !== action.stage ? `.stage-button[data-stage="${action.stage}"]` : "";
+  const selectors = stageSelector ? [stageSelector] : (Array.isArray(action.selectors) && action.selectors.length ? action.selectors : [action.selector || ""]);
+  const targets = selectors.map(selector => selector ? document.querySelector(selector) : null).filter(Boolean);
+  const target = targets[0] || null;
+  targets.forEach(node => { if (!node.disabled && !node.hidden) node.classList.add("guided-next-action"); });
+  guide.hidden = false;
+  guide.innerHTML = `<i aria-hidden="true"></i><div><b>${escapeHtml(action.title)}</b><p>${escapeHtml(action.detail)}</p></div>${target ? `<button type="button" id="goNextAction">带我去操作</button>` : ""}`;
+  $("#goNextAction")?.addEventListener("click", () => {
+    const liveTarget = document.querySelector(selectors[0]);
+    if (!liveTarget || liveTarget.disabled) return;
+    liveTarget.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => liveTarget.click(), 220);
+  });
+}
+
 function renderAll() {
   if (!state.project) return;
   renderActiveStage(true);
@@ -3463,6 +3911,7 @@ function renderAll() {
   renderAccountSwitch();
   renderProjectStrategy();
   renderPipelineControls(state.project);
+  renderNextActionGuide(state.project);
   applyProductSurfaceLabels();
   maskSpecificModelNames();
 }
@@ -3862,6 +4311,11 @@ async function runLong(label, action, candidateScope = null) {
   if (stageKey) state.drawingStages.add(stageKey);
   refreshDrawingUi();
   setBusy(true, label, projectId);
+  // Start project-state polling before awaiting the long IPC call.  The main
+  // process persists per-item queued/running/QC state shortly after submission;
+  // without this immediate poll the renderer kept showing its pre-run snapshot
+  // and individual asset cards looked frozen until the whole batch returned.
+  ensureScriptLivePolling();
   try {
     const result = await action();
     if (!result?.ok) throw Object.assign(new Error(result?.message || "操作失败"), { code: result?.code || "OPERATION_FAILED" });
@@ -4134,6 +4588,16 @@ document.addEventListener("click", async event => {
       return result;
     }, { entityType: "character", entityId: id, stage: "character_voice" });
   }
+  if (action === "bind-voice-card") {
+    const card = button.closest(".asset-card");
+    const characterId = String(card?.querySelector("[data-voice-target-character]")?.value || "").trim();
+    if (!characterId) return showToast("请先在音色卡里选择当前项目角色", "error");
+    return runLong("正在把全局音色绑定到当前角色…", async () => {
+      const result = await api.workbench.bindCharacterVoiceLibrary(state.project.id, characterId, id);
+      await loadVoiceLibrary(false);
+      return result;
+    }, { entityType: "character", entityId: characterId, stage: "character_voice" });
+  }
   if (action === "delete-voice-library") {
     if (!window.confirm("确定从长期音色库删除这条音色？不会删除各项目里已复制的候选文件。")) return;
     const result = await api.workbench.deleteVoiceLibraryEntry(id);
@@ -4149,12 +4613,13 @@ document.addEventListener("click", async event => {
       if (button.dataset.stage === "character_voice") await loadVoiceLibrary(false);
       await loadProject(state.project.id);
       openCandidateLibrary(button.dataset.entityType, id);
+      const qualityRequired = qualityBlueprintModuleEnabled(String(button.dataset.stage || "").startsWith("storyboard_") ? "storyboards" : ["shot_video"].includes(button.dataset.stage) ? "videos" : "assets");
       const message = result.warning
         ? `手动资产已上传并设为当前版本；独立资产库入库失败：${result.warning}`
         : result.candidate?.selected
           ? "手动资产已上传并设为当前版本"
-          : "手动资产已上传；质检未通过，暂未设为当前版本";
-      showToast(message, result.warning ? "warning" : result.candidate?.qualityAudit?.ok === false ? "error" : "success");
+          : qualityRequired ? "手动资产已上传；质检提醒待处理" : "手动资产已上传并设为当前版本";
+      showToast(message, result.warning ? "warning" : qualityRequired && result.candidate?.qualityAudit?.ok === false ? "warning" : "success");
     }
     return;
   }
@@ -4269,15 +4734,47 @@ document.addEventListener("click", async event => {
   }
   if (action === "focus-candidates") return openCandidateLibrary(button.dataset.entityType, id);
   if (action === "clear-candidate-filter") return openCandidateLibrary();
+  if (action === "ignore-quality-candidate") {
+    if (!window.confirm("确认忽略这条质检提醒并继续使用原资产？系统会保留审核明细和人工确认记录。")) return;
+    return runLong("正在确认原资产并继续流程…", async () => {
+      const accepted = await api.workbench.acceptQualityWarnings(state.project.id, { candidateId: id });
+      if (!accepted?.ok) throw new Error(accepted?.message || "人工确认失败");
+      const result = accepted.result || {};
+      if (!result.completed && result.resumeStage) {
+        const resumed = await api.workbench.runPipelineFromStage(state.project.id, result.resumeStage);
+        if (!resumed?.ok) throw new Error(resumed?.message || "继续任务失败");
+      }
+      return accepted;
+    });
+  }
+  if (action === "restore-candidate") {
+    const scope = state.candidateScope ? { ...state.candidateScope } : null;
+    button.disabled = true;
+    button.textContent = "选中中…";
+    const result = await api.workbench.restoreCandidate(state.project.id, id);
+    if (!result?.ok) {
+      if (button.isConnected) {
+        button.disabled = false;
+        button.textContent = "选中此镜";
+      }
+      return showToast(result?.message || "恢复失败", "error");
+    }
+    state.assetsRenderSignature = "";
+    state.candidateRenderSignature = "";
+    await loadProject(state.project.id);
+    if (scope) openCandidateLibrary(scope.entityType, scope.entityId);
+    if (state.stage === "assets") renderAssets(true);
+    if (state.stage === "shots") renderShots(true);
+    return showToast(result.warning ? `已选中；${result.warning}` : "已选中当前镜头资产");
+  }
   if (action === "confirm-candidate") {
-    if (!window.confirm("确认选择这张卡后，同一对象、同一阶段的其他候选记录和文件将被删除。继续吗？")) return;
-    const result = await api.workbench.confirmCandidate(state.project.id, id, true);
+    const result = await api.workbench.confirmCandidate(state.project.id, id, false);
     if (!result.ok) return showToast(result.message, "error");
     state.assetsRenderSignature = "";
     state.candidateRenderSignature = "";
     await loadProject(state.project.id);
     if (state.stage === "assets") renderAssets(true);
-    return showToast("已确认选择，其余同类候选已清理");
+    return showToast(result.warning ? `资产已恢复；${result.warning}` : "已恢复为当前资产，历史版本继续保留");
   }
   if (action === "discard-candidate") {
     if (!window.confirm("删除这条失败/旧版记录及其本地文件？")) return;
@@ -4375,6 +4872,67 @@ $("#importScriptFile")?.addEventListener("click", async () => {
   state.scriptEditorDirty = true;
   await saveScriptFields();
   showToast(`已导入剧本文件${result.fileName ? `：${result.fileName}` : ""}`);
+});
+
+const sevenMinuteExampleSections = Object.freeze([
+  ["社区调解室", "周敏把母亲带来的旧账本推回桌边，拒绝再听解释", ["周敏|压着火气，对母亲说|你今天把钱的去向说清楚，别再拿一句为我好敷衍我。", "李桂兰|克制发抖，对女儿说|我没有拿你的钱，这本账里每一笔都有日期。", "周敏|冷笑后盯住母亲|那就从第一笔开始，一笔都别跳。"]],
+  ["社区调解室", "调解员展开账本，发现三年前的连续转账", ["陈姐|平静明确，对两人说|先别争，我们按日期一条条核对。", "李桂兰|低声，对陈姐说|这三笔都转给了康复中心。", "周敏|突然提高音量，对母亲说|我爸当时根本没住院，你还想骗我？"]],
+  ["旧小区楼道", "三人去取收费单，邻居王叔拦住她们", ["王叔|犹豫后开口，对周敏说|你母亲那几年每天凌晨才回来，不是在打牌。", "周敏|警惕，对王叔说|你知道她把钱给了谁？", "王叔|点头，对周敏说|我只知道她一直替一个年轻人交康复费。"]],
+  ["李桂兰家", "抽屉里的收费单只剩半张，另一半被撕走", ["李桂兰|慌乱翻找，对女儿说|单子一直在这里，昨晚还完整。", "周敏|逼近半步，对母亲说|除了你，谁有钥匙？", "李桂兰|停顿后说|你舅舅上周来过，他说替我修抽屉。"]],
+  ["菜市场后门", "舅舅周强否认拿过单据并抢走账本", ["周强|强硬，对周敏说|老人记性糊涂，你别跟着她闹。", "周敏|拦住去路，对周强说|把账本放下，这是我家的事。", "周强|心虚加速，对周敏说|你先问问她为什么不敢说收款人的名字。"]],
+  ["公交站雨棚", "母亲承认收款人是周敏失联多年的丈夫赵磊", ["李桂兰|含泪克制，对女儿说|那个人是赵磊，他出事后求我别告诉你。", "周敏|愣住后发怒，对母亲说|他抛下我和孩子，你还拿我的钱救他？", "李桂兰|抬眼承受，对女儿说|那不是你的钱，是我卖首饰换来的。"]],
+  ["康复中心前台", "前台记录显示付款人是李桂兰，受益人却不是赵磊", ["前台护士|核对记录，对周敏说|付款人是李桂兰，病人登记名叫周航。", "周敏|困惑，对母亲说|周航是谁？", "李桂兰|闭眼后说|是你弟弟，也是你舅舅一直不肯承认的儿子。"]],
+  ["康复中心走廊", "周强赶来要求销毁记录，真相开始反转", ["周强|压低声音威胁，对李桂兰说|你答应过这件事永远不说。", "周敏|挡在母亲前面，对周强说|你拿走收费单，是怕谁知道？", "周强|失控，对周敏说|那笔赔偿款本来就该归我。"]],
+  ["社区档案室", "陈姐调出赔偿协议与旧监控备份", ["陈姐|严肃，对众人说|协议写明赔偿款由周强代管，只能用于周航康复。", "周敏|看向舅舅，对周强说|你却告诉我，是我妈拿走了钱。", "周强|回避视线，对周敏说|我只是先拿去周转，后来会补上。"]],
+  ["社区调解室", "两份证据互证，母亲多年的沉默代价被看见", ["李桂兰|疲惫，对女儿说|我怕你知道家里这些事，再也不肯回来。", "周敏|眼眶发红，对母亲说|你替所有人扛着，却让我恨了你三年。", "陈姐|坚定，对周强说|现在谈的不是道歉，是返还和责任。"]],
+  ["社区调解室", "周强试图用一句道歉结束，周敏拒绝", ["周强|敷衍，对母女说|都是一家人，我认个错就算了。", "周敏|冷静落锤，对周强说|钱按流水返还，护理费按月支付，写进协议。", "李桂兰|第一次挺直背，对周强说|这次我不替你圆场。"]],
+  ["康复训练室", "周航练习站立，母女共同完成现实补偿", ["周航|吃力但清楚，对李桂兰说|姨，这些年谢谢你。", "李桂兰|温和，对周航说|以后该你父亲承担，我只陪你把今天练完。", "周敏|扶住母亲，对她说|我也从今天开始补回来。"]],
+  ["李桂兰家", "周敏用用户上传商品帮助母亲完成日常动作，不宣称疗效", ["周敏|自然，对母亲说|这是我按你平时走路习惯准备的，你先试试合不合适。", "李桂兰|坐下体验，对女儿说|合适就留下，不合适我们就换，别乱花钱。", "周敏|笑中带泪，对母亲说|这次听你的，也把说明和票据都收好。"]],
+  ["社区公告栏", "执行协议公示，母女并肩离开形成完整收束", ["陈姐|清楚宣布，对众人说|首笔返还已经到账，后续按协议每月执行。", "周强|低头，对李桂兰说|我会把欠下的都还清。", "李桂兰|平静有边界，对周强说|看行动，不看保证。"]]
+]);
+
+function sevenMinuteExampleUnits() {
+  const units = [];
+  for (const [sectionIndex, section] of sevenMinuteExampleSections.entries()) {
+    const [scene, action, lines] = section;
+    for (const [lineIndex, authored] of lines.entries()) {
+      const [speaker, delivery, text] = authored.split("|");
+      const number = units.length + 1;
+      units.push({ number, start: (number - 1) * 10, end: number * 10, scene, action: lineIndex === 0 ? action : `承接上一句，${speaker}的回应让关系与证据继续变化`, speaker, delivery, text, listener: speaker === "周敏" ? "李桂兰或当前对手" : "周敏或当前听者", sectionIndex });
+    }
+  }
+  return units;
+}
+
+function buildSevenMinuteScriptExample(format) {
+  const units = sevenMinuteExampleUnits();
+  const common = `# 七分钟完整上传剧本案例｜《账本里的第二个名字》\n\n【总时长】420秒（42个10秒生产单元）\n【画幅】9:16 写实竖屏\n【成片硬规则】人物介绍、人物小传、故事简介只用于建资产，绝不进入成片；成片禁止字幕、标题、姓名条、价格字、水印与背景音乐，只保留对白、现场环境声和同步动作声。\n【人物】李桂兰，63岁，周敏母亲；周敏，38岁，李桂兰女儿；周强，58岁，李桂兰弟弟；陈姐，45岁，社区调解员；王叔，68岁，邻居；周航，29岁，康复者。\n【场景】社区调解室、旧小区楼道、李桂兰家、菜市场后门、公交站雨棚、康复中心、社区档案室、社区公告栏。\n【故事简介】周敏误以为母亲侵吞赔偿款，沿一本旧账逐笔追查，最终发现舅舅挪用康复款、母亲卖首饰垫付并替家人隐瞒。母女用证据和可执行协议完成清算，商品只在结尾承担自然生活动作。\n`;
+  if (format === "dialogue") return `${common}\n## 正式剧情（以下每段均进入成片）\n${units.map(unit => `\n### ${String(unit.number).padStart(2, "0")}｜${unit.start}-${unit.end}秒｜${unit.scene}\n【背景动作】${unit.action}。\n${unit.speaker}（${unit.delivery}，明确对${unit.listener}说）：${unit.text}\n【听者反应】听者闭口，以视线、呼吸、手部或重心变化回应，不说额外台词。\n【声音】连续现场底噪与可见动作同步声；无背景音乐。`).join("\n")}`;
+  if (format === "timed_storyboard") return `${common}\n## 正式秒级分镜（以下每段均进入成片）\n${units.map(unit => `\n## S${String(unit.number).padStart(2, "0")}｜${unit.start}.0-${unit.end}.0秒｜${unit.scene}\n【${unit.start}.0-${unit.start + 2}.0秒】承接上一镜状态，${unit.action}。\n【${unit.start + 2}.0-${unit.end - 1}.0秒｜对白】${unit.speaker}（${unit.delivery}，对${unit.listener}说）：${unit.text}\n【${unit.end - 1}.0-${unit.end}.0秒｜反应】听者闭口完成可见反应，尾帧形成下一镜起点。\n【声音】现场环境底噪连续，动作声同步；禁止BGM。\n【负向】无字幕、无标题、无文字、无水印、无人物介绍卡。`).join("\n")}`;
+  return `${common}\n## 人物与故事资料（仅供建资产，不得拍成人物介绍）\n人物年龄、关系、固定服装和身份指纹以上述人物表为准。\n\n## 正式制作单元（以下42镜全部进入成片）\n${units.map(unit => `\n## S${String(unit.number).padStart(2, "0")}｜${unit.start}-${unit.end}秒｜${unit.scene}\n【情节任务】${unit.action}。\n【动作与表演】${unit.speaker}先完成与上一镜相连的动作，再对${unit.listener}说话；听者闭口并同步反应。\n【对白】${unit.speaker}（${unit.delivery}）：${unit.text}\n【承接】本句必须改变证据、关系或下一步行动，尾帧自然接 S${String(unit.number + 1).padStart(2, "0")}。\n【声音】现场环境底噪+同步动作声；禁止背景音乐。\n【画面负向】禁止字幕、标题、姓名条、价格字、Logo、水印、人物介绍卡和参考板。`).join("\n")}`;
+}
+
+const scriptFormatExamples = Object.freeze({
+  production: buildSevenMinuteScriptExample("production"),
+  dialogue: buildSevenMinuteScriptExample("dialogue"),
+  timed_storyboard: buildSevenMinuteScriptExample("timed_storyboard")
+});
+$("#importDialogueRewrite")?.addEventListener("click", async () => {
+  if (!state.project) return;
+  const imported = await api.workbench.importTextFile("script");
+  if (!imported?.ok) return showToast(imported?.message || "读取对白稿失败", "error");
+  if (imported.canceled || !String(imported.text || "").trim()) return;
+  if (!window.confirm("将逐句轻改对白并生成完整剧本。A/B 等代号会重构为人物名；故事事实、事件顺序、人物关系、结局、数字和商品出现节点保持不变。确认开始吗？")) return;
+  const result = await runScriptLong(
+    "正在逐句校验对白并生成完整剧本；不合格片段会自动切换本地保真整理…",
+    () => api.workbench.rewriteDialogueScript(state.project.id, String(imported.text || "")),
+    "dialogue_rewrite"
+  );
+  if (result?.ok) {
+    switchStage("script");
+    const fallback = state.project?.script?.dialogueRewrite?.fallback;
+    showToast(fallback ? "完整剧本已生成；部分片段已自动使用本地保真整理，未改变原剧情" : "对白已逐句轻改并生成完整剧本", "success");
+  }
 });
 $("#importStoryboardBatch")?.addEventListener("click", async () => {
   if (!state.project?.shots?.length) return showToast("请先完成拆镜，再批量上传分镜图", "error");
@@ -4812,6 +5370,24 @@ $("#qualityGatesEnabled")?.addEventListener("change", event => {
 });
 $("#videoStorageMode")?.addEventListener("change", renderOssStatus);
 
+$("#chooseStorageLocation")?.addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "正在迁移…";
+  try {
+    const result = await api.workbench.chooseStorageLocation();
+    if (!result?.ok) return showToast(result?.message || "保存位置迁移失败，原数据未改动", "error");
+    if (result.canceled) return;
+    if (result.unchanged) return showToast("当前已经使用这个保存位置");
+    $("#storageLocationPath").textContent = result.rootDir;
+    showToast("现有项目与素材已复制完成，软件正在重启", "success");
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+});
+
 $("#clearVideoOss")?.addEventListener("click", async () => {
   if (!window.confirm("清空当前电脑保存的 OSS AccessKey、Bucket 与 Endpoint？已经生成的本地素材不会删除。")) return;
   ["#videoOssAccessKeyId", "#videoOssAccessKeySecret", "#videoOssBucket", "#videoOssEndpoint"].forEach(selector => { if ($(selector)) $(selector).value = ""; });
@@ -5007,6 +5583,13 @@ $("#newProject").addEventListener("click", () => {
   $$("input[name='newExecutionMode']").forEach(option => { if (option.value === "step") option.checked = true; });
   $$("input[name='newInputMode']").forEach(option => { if (option.value === "ai") option.checked = true; });
   $$("input[name='newScriptFormat']").forEach(option => { option.checked = false; });
+  if ($("#newScriptHandling")) {
+    $("#newScriptHandling").value = "optimize";
+    delete $("#newScriptHandling").dataset.userEdited;
+  }
+  if ($("#newCommerceMode")) $("#newCommerceMode").value = "natural";
+  if ($("#newPriorityProfile")) $("#newPriorityProfile").value = "balanced";
+  if ($("#newCommerceShotCount")) $("#newCommerceShotCount").value = "3";
   syncDurationModeControls("new");
   if (!dialog.open) dialog.showModal();
   const focusProjectName = () => { input.focus({ preventScroll: true }); input.select(); };
@@ -5062,6 +5645,10 @@ $("#newProjectForm").addEventListener("submit", async event => {
       inputMode,
       scriptFormat: scriptFormat || "production",
       scriptFormatConfirmed: inputMode === "ai",
+      scriptHandling: $("#newScriptHandling")?.value || (inputMode === "manual" ? "respect" : "optimize"),
+      commerceMode: $("#newCommerceMode")?.value || "natural",
+      priorityProfile: $("#newPriorityProfile")?.value || "balanced",
+      commerceShotCount: Math.max(1, Math.round(Number($("#newCommerceShotCount")?.value) || 3)),
       targetDurationSeconds: Math.max(30, Math.round(Number($("#newTargetDuration")?.value) || 300))
     });
     if (!result.ok) throw new Error(result.message || "项目创建失败");
@@ -5084,7 +5671,12 @@ $("#newProjectName").addEventListener("input", () => {
   $("#newProjectName").removeAttribute("aria-invalid");
   $("#newProjectError").textContent = "";
 });
-$$("input[name='newInputMode']").forEach(input => input.addEventListener("change", () => syncDurationModeControls("new")));
+$$("input[name='newInputMode']").forEach(input => input.addEventListener("change", event => {
+  syncDurationModeControls("new");
+  const handling = $("#newScriptHandling");
+  if (handling && handling.dataset.userEdited !== "true") handling.value = event.target.value === "manual" ? "respect" : "optimize";
+}));
+$("#newScriptHandling")?.addEventListener("change", event => { event.currentTarget.dataset.userEdited = "true"; });
 $$("input[name='projectInputMode']").forEach(input => input.addEventListener("change", () => syncDurationModeControls("project")));
 $("#cancelNewProject").addEventListener("click", closeNewProjectDialog);
 $("#closeNewProjectDialog").addEventListener("click", closeNewProjectDialog);
@@ -5116,6 +5708,9 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
   const project = requireProject();
   const nextInputMode = $("input[name='projectInputMode']:checked")?.value || "ai";
   const nextScriptFormat = $("input[name='projectScriptFormat']:checked")?.value || "";
+  const nextScriptHandling = $("#projectScriptHandling")?.value || (nextInputMode === "manual" ? "respect" : "optimize");
+  const nextCommerceMode = $("#projectCommerceMode")?.value || (project.product?.name ? "natural" : "none");
+  const nextPriorityProfile = $("#projectPriorityProfile")?.value || "balanced";
   if (nextInputMode === "ai" && !nextScriptFormat) {
     $("#projectStrategyError").textContent = "AI 生成项目请先选择一种剧本模式。";
     $("input[name='projectScriptFormat']")?.focus();
@@ -5124,12 +5719,17 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
   const targetDurationSeconds = nextInputMode === "manual"
     ? Math.max(1, Math.round(Number(project.generation?.targetDurationSeconds) || 300))
     : Math.max(30, Math.round(Number($("#projectTargetDuration")?.value) || project.generation?.targetDurationSeconds || 300));
+  const commerceShotCount = Math.max(1, Math.round(Number($("#projectCommerceShotCount")?.value) || project.productionPlan?.commerceShotCount || 3));
   const strategyChanged = (
     mode !== project.generation?.mode
     || engine !== (project.generation?.engine || "seedance")
     || providerKind !== String(project.generation?.videoProviderKind || "")
     || nextInputMode !== (project.productionPlan?.inputMode || "ai")
     || (nextInputMode === "ai" && nextScriptFormat !== (project.productionPlan?.scriptFormat || "production"))
+    || nextScriptHandling !== (project.productionPlan?.scriptHandling || (project.productionPlan?.inputMode === "manual" ? "respect" : "optimize"))
+    || nextCommerceMode !== (project.productionPlan?.commerceMode || (project.product?.name ? "natural" : "none"))
+    || nextPriorityProfile !== (project.productionPlan?.priorityProfile || "balanced")
+    || commerceShotCount !== Math.max(1, Math.round(Number(project.productionPlan?.commerceShotCount) || 3))
     || targetDurationSeconds !== Number(project.generation?.targetDurationSeconds || 300)
   );
   const hasProductionHistory = project.shots?.length || project.candidates?.length || project.jobs?.length || project.finalVideoPath;
@@ -5151,6 +5751,10 @@ $("#projectStrategyForm").addEventListener("submit", async event => {
         ...(project.productionPlan || {}),
         executionMode: $("input[name='projectExecutionMode']:checked")?.value || "step",
         inputMode: nextInputMode,
+        scriptHandling: nextScriptHandling,
+        commerceMode: nextCommerceMode,
+        priorityProfile: nextPriorityProfile,
+        commerceShotCount,
         scriptFormat: nextInputMode === "ai" ? nextScriptFormat : (project.productionPlan?.scriptFormat || "production"),
         scriptFormatConfirmed: nextInputMode === "ai"
       }
@@ -5450,11 +6054,47 @@ async function createRecharge(event) {
   }
 }
 
+function renderAppUpdateStatus(payload = state.update) {
+  state.update = { ...(state.update || {}), ...(payload || {}) };
+  const button = $("#appVersionUpdate");
+  if (!button) return;
+  const status = String(state.update.status || "idle");
+  const currentVersion = String(state.update.currentVersion || state.appDefaults?.appVersion || "");
+  const latestVersion = String(state.update.latestVersion || "");
+  $("#appVersionText").textContent = currentVersion ? `v${currentVersion}` : "读取中";
+  $("#appUpdateState").textContent = status === "available"
+    ? `发现 v${latestVersion}，点击更新`
+    : status === "ready"
+      ? `v${latestVersion} 已就绪，点击安装`
+      : status === "downloading"
+        ? `下载中 ${Math.max(0, Number(state.update.progress) || 0)}%`
+        : status === "installing"
+          ? "正在启动覆盖安装"
+          : String(state.update.message || (status === "latest" ? "已是最新版" : "点击检查更新"));
+  button.classList.toggle("update-available", ["available", "ready"].includes(status));
+  button.classList.toggle("is-busy", ["checking", "downloading", "installing"].includes(status));
+  button.classList.toggle("update-error", status === "error");
+  button.disabled = ["checking", "downloading", "installing"].includes(status);
+}
+
+async function handleAppUpdateClick() {
+  if (state.captureMode || ["checking", "downloading", "installing"].includes(state.update?.status)) return;
+  const checked = ["available", "ready"].includes(state.update?.status)
+    ? state.update
+    : await api.checkUpdate();
+  renderAppUpdateStatus(checked);
+  if (!["available", "ready"].includes(checked?.status)) return;
+  if (!window.confirm(`发现纯梦短剧老虎机 v${checked.latestVersion}。将下载并覆盖当前安装，项目和全局资产不会删除。现在更新吗？`)) return;
+  const result = await api.installUpdate();
+  if (!result?.ok) showToast(result?.message || "覆盖更新启动失败，请点击版本号重试", "error");
+}
+
 async function bootstrap() {
   const appDefaults = await api.defaults();
   state.captureMode = Boolean(appDefaults?.captureMode);
   state.isPackaged = Boolean(appDefaults?.isPackaged);
   state.appDefaults = appDefaults || {};
+  renderAppUpdateStatus({ status: state.captureMode ? "latest" : "idle", currentVersion: appDefaults?.appVersion || "", message: state.captureMode ? "界面审查模式" : "点击检查更新" });
   if (!state.captureMode) await ensureLicenseGate();
   if (!state.captureMode) await refreshWallet(true);
   const settingsResult = await api.workbench.getSettings();
@@ -5489,7 +6129,7 @@ async function startBackgroundServices() {
         await refreshAccountSwitch(false);
         if (state.accountSwitch?.status === "awaiting_login") await verifyCurrentAccountSwitch(true);
       }
-      const projectRunning = ["running", "pausing", "stopping", "paused_account", "paused_remote"].includes(state.project?.automation?.status);
+      const projectRunning = automationIsActive(state.project) || ["paused_account", "paused_remote"].includes(state.project?.automation?.status);
       const currentHasActiveJob = Array.isArray(syncResult?.jobs) && syncResult.jobs.some(job => job.projectId === state.project?.id);
       if (state.project && (projectRunning || currentHasActiveJob)) {
         const previousOperationStatus = state.project.automation?.status;
@@ -5531,6 +6171,8 @@ function applyCaptureScenario(scenario) {
 
 function bindProductSurfaceEvents() {
   installInfoTooltipLayer();
+  api.onUpdateStatus?.(renderAppUpdateStatus);
+  $("#appVersionUpdate")?.addEventListener("click", () => handleAppUpdateClick().catch(error => showToast(error.message || "更新检查失败", "error")));
   $("#sidebarImportVoiceLibrary")?.addEventListener("click", async () => {
     const result = await api.workbench.importVoiceLibrary();
     if (!result?.ok || result.canceled) return;
@@ -5570,5 +6212,6 @@ bootstrap().then(async () => {
   if (captureStage) await switchStage(captureStage);
   applyCaptureScenario(captureScenario);
   document.body.dataset.workbenchReady = "true";
+  if (!state.captureMode) setTimeout(() => api.checkUpdate().then(renderAppUpdateStatus).catch(() => {}), 1200);
   setTimeout(() => startBackgroundServices().catch(error => console.error("background services failed", error)), 50);
 }).catch(error => showToast(error.message || "工作台初始化失败", "error"));

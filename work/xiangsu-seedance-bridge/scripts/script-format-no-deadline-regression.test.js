@@ -44,7 +44,7 @@ test("legacy populated projects migrate to confirmed original format without int
   fs.writeFileSync(diskPath, JSON.stringify(legacy, null, 2));
 
   const migrated = store.getProject(project.id);
-  assert.equal(migrated.version, 11);
+  assert.equal(migrated.version, 13);
   assert.equal(migrated.productionPlan.scriptFormat, "production");
   assert.equal(migrated.productionPlan.scriptFormatConfirmed, true);
   assert.equal(migrated.script.raw, legacy.script.raw);

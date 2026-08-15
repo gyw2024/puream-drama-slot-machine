@@ -4,8 +4,68 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { assertPublicReferenceUrl, assertPureamCloudRequestUrl, assertResolvedPublicUrl, assertSafeVideoDownloadUrl } = require("./video-provider-policy");
+const {
+  ensureSystemVideoOutputLock,
+  stripSystemVideoOutputLock,
+  systemVideoOutputLockForPrompt
+} = require("./production-mode-matrix");
 const MAX_REMOTE_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_REMOTE_VIDEO_BYTES = 500 * 1024 * 1024;
+const PROVIDER_VIDEO_PROMPT_LIMIT = 1900;
+
+function compactProviderVideoPrompt(prompt, maxLength = PROVIDER_VIDEO_PROMPT_LIMIT) {
+  const original = String(prompt || "").replace(/\r/g, "").trim();
+  const limit = Math.max(400, Math.min(1990, Number(maxLength) || PROVIDER_VIDEO_PROMPT_LIMIT));
+  const lock = systemVideoOutputLockForPrompt(original);
+  const source = stripSystemVideoOutputLock(original);
+  const bodyLimit = Math.max(80, limit - lock.length - 1);
+  if (source.length <= bodyLimit) return ensureSystemVideoOutputLock(source, limit);
+
+  const clauses = source
+    .split(/\n+|[；;]+/)
+    .map(item => item.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const seen = new Set();
+  const unique = clauses.filter(item => {
+    const key = item.toLowerCase().replace(/[，。,.!！?？:\s]+/g, "");
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const highPriority = item => /<d>|speaker\s*:|voice timbre|<audio\s+\d+>|exact line|listener reaction|对白|台词|只说一遍|说话人|听者|语气|表演|口型|delivery\s*:|addresses\s*:/i.test(item);
+  const integrityCritical = item => /<d>[\s\S]*<\/d>|<audio\s+\d+>|(?:speaker|listener|delivery|voice timbre|exact line|addresses)\s*:|(?:说话人|听者|对白原文|台词原文|音色|表演要求)\s*[:：]/i.test(item);
+  const mediumPriority = item => /<picture\s+\d+>|<video\s+\d+>|subject_definitions|summary\s*:|detailed_description|场景|商品|首帧|尾帧|延续|合图|动作|镜头|sound|声音/i.test(item);
+  const ordered = [
+    ...unique.filter(highPriority),
+    ...unique.filter(item => !highPriority(item) && mediumPriority(item)),
+    ...unique.filter(item => !highPriority(item) && !mediumPriority(item))
+  ];
+  const result = [];
+  let used = 0;
+  for (const clause of ordered) {
+    const remaining = bodyLimit - used - (result.length ? 1 : 0);
+    if (remaining <= 0) break;
+    if (clause.length > remaining && integrityCritical(clause)) {
+      throw Object.assign(new Error("Mandatory dialogue/performance content cannot fit beside the final video output lock"), {
+        code: "VIDEO_PROMPT_CONTRACT_BUDGET_EXCEEDED",
+        bodyLimit,
+        limit
+      });
+    }
+    const value = clause.length <= remaining ? clause : clause.slice(0, remaining).trim();
+    if (!value) continue;
+    result.push(value);
+    used += value.length + (result.length > 1 ? 1 : 0);
+  }
+  if (!result.length) {
+    throw Object.assign(new Error("Video prompt cannot be compacted without dropping all authored content"), {
+      code: "VIDEO_PROMPT_BODY_BUDGET_EXCEEDED",
+      bodyLimit,
+      limit
+    });
+  }
+  return ensureSystemVideoOutputLock(result.join("\n"), limit);
+}
 
 async function streamResponseToFile(response, targetPath, maximumBytes, tooLargeCode) {
   const declared = Number(response.headers.get("content-length"));
@@ -489,35 +549,50 @@ function parsePureamSse(sse) {
   };
   const mergeUsage = payload => {
     if (!payload || typeof payload !== "object") return;
-    const rawUsage = payload.usage && typeof payload.usage === "object" ? payload.usage : {};
-    const billing = payload.billing && typeof payload.billing === "object" ? payload.billing : {};
-    const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt : {};
-    const usageBilling = rawUsage.billing && typeof rawUsage.billing === "object" ? rawUsage.billing : {};
-    const inputTokens = finiteValue(rawUsage.inputTokens, rawUsage.input_tokens, rawUsage.prompt_tokens, payload.inputTokens, payload.input_tokens);
-    const outputTokens = finiteValue(rawUsage.outputTokens, rawUsage.output_tokens, rawUsage.completion_tokens, payload.outputTokens, payload.output_tokens);
-    const totalTokens = finiteValue(rawUsage.totalTokens, rawUsage.total_tokens, payload.totalTokens, payload.total_tokens);
-    const chargeCents = finiteValue(
-      rawUsage.chargeCents, rawUsage.charge_cents, rawUsage.totalChargeCents,
-      payload.chargeCents, payload.charge_cents, payload.totalChargeCents,
-      billing.chargeCents, billing.charge_cents, billing.totalChargeCents,
-      receipt.chargeCents, receipt.charge_cents, receipt.totalChargeCents,
-      usageBilling.chargeCents, usageBilling.charge_cents, usageBilling.totalChargeCents
-    );
-    const explicitYuan = finiteValue(
-      rawUsage.chargeYuan, rawUsage.charge_yuan, rawUsage.costYuan, rawUsage.cost_yuan,
-      payload.chargeYuan, payload.charge_yuan, payload.costYuan, payload.cost_yuan,
-      billing.chargeYuan, billing.charge_yuan, billing.costYuan, billing.cost_yuan, billing.amountYuan, billing.amount_yuan,
-      receipt.chargeYuan, receipt.charge_yuan, receipt.costYuan, receipt.cost_yuan, receipt.amountYuan, receipt.amount_yuan,
-      usageBilling.chargeYuan, usageBilling.charge_yuan, usageBilling.costYuan, usageBilling.cost_yuan, usageBilling.amountYuan, usageBilling.amount_yuan
-    );
+    // Desktop relay revisions have used both flat receipts and wrappers such as
+    // {data:{usage,billing}}, {result:{receipt}} and {meta:{settlement}}.  Read
+    // only known receipt containers so a successful paid response cannot be
+    // downgraded to a local estimate merely because its envelope changed.
+    const envelopes = [payload, payload.data, payload.result, payload.response, payload.meta]
+      .filter(item => item && typeof item === "object" && !Array.isArray(item));
+    const records = [];
+    for (const envelope of envelopes) {
+      records.push(envelope);
+      for (const key of ["usage", "billing", "receipt", "settlement", "cost"]) {
+        const record = envelope[key];
+        if (record && typeof record === "object" && !Array.isArray(record)) {
+          records.push(record);
+          if (record.billing && typeof record.billing === "object") records.push(record.billing);
+        }
+      }
+    }
+    const firstFiniteField = keys => finiteValue(...records.flatMap(record => keys.map(key => record[key])));
+    const firstTextField = keys => {
+      for (const record of records) {
+        for (const key of keys) {
+          const value = String(record?.[key] ?? "").trim();
+          if (value) return value;
+        }
+      }
+      return "";
+    };
+    const inputTokens = firstFiniteField(["inputTokens", "input_tokens", "prompt_tokens"]);
+    const outputTokens = firstFiniteField(["outputTokens", "output_tokens", "completion_tokens"]);
+    const totalTokens = firstFiniteField(["totalTokens", "total_tokens"]);
+    const chargeCents = firstFiniteField(["chargeCents", "charge_cents", "totalChargeCents", "actualChargeCents", "chargedCents"]);
+    const explicitYuan = firstFiniteField(["chargeYuan", "charge_yuan", "costYuan", "cost_yuan", "amountYuan", "amount_yuan", "actualChargeYuan", "chargedYuan", "charge_amount"]);
     const chargeYuan = explicitYuan !== null ? explicitYuan : (chargeCents !== null ? Number((chargeCents / 100).toFixed(6)) : null);
-    const billingStatus = String(
-      rawUsage.billingStatus || rawUsage.billing_status || payload.billingStatus || payload.billing_status
-      || billing.billingStatus || billing.billing_status || billing.status
-      || receipt.billingStatus || receipt.billing_status || receipt.status
-      || usageBilling.billingStatus || usageBilling.billing_status || usageBilling.status || ""
-    ).trim();
-    const model = String(payload.modelSlug || payload.model || rawUsage.model || "").trim();
+    let billingStatus = firstTextField(["billingStatus", "billing_status", "settlementStatus", "settlement_status"]);
+    if (!billingStatus) {
+      for (const envelope of envelopes) {
+        for (const key of ["billing", "receipt", "settlement", "cost", "usage"]) {
+          const status = String(envelope?.[key]?.status || "").trim();
+          if (status) { billingStatus = status; break; }
+        }
+        if (billingStatus) break;
+      }
+    }
+    const model = firstTextField(["modelSlug", "model"]);
     usage = {
       ...usage,
       ...(inputTokens !== null ? { inputTokens } : {}),
@@ -550,8 +625,14 @@ function parsePureamSse(sse) {
       streamError = payload?.error?.message || payload?.message || "纯梦文本中转返回错误";
       streamErrorCode = String(payload?.error?.code || payload?.code || "").trim();
     }
-    if (payload?.sessionId) sessionId = String(payload.sessionId);
-    if (currentEvent === "done" || payload?.usage || payload?.billing || payload?.receipt || payload?.charge_cents != null || payload?.charge_yuan != null || payload?.totalChargeCents != null) mergeUsage(payload);
+    const wrapped = payload?.data || payload?.result || payload?.response || payload?.meta || {};
+    if (payload?.sessionId || wrapped?.sessionId) sessionId = String(payload.sessionId || wrapped.sessionId);
+    const hasUsageEnvelope = [payload, payload?.data, payload?.result, payload?.response, payload?.meta].some(item => item && typeof item === "object" && (
+      item.usage || item.billing || item.receipt || item.settlement || item.cost
+      || item.charge_cents != null || item.charge_yuan != null || item.totalChargeCents != null
+      || item.chargeCents != null || item.chargeYuan != null || item.amountYuan != null
+    ));
+    if (currentEvent === "done" || hasUsageEnvelope) mergeUsage(payload);
     events.push({ event: currentEvent || "data", keys: payload && typeof payload === "object" ? Object.keys(payload) : [], textLength: typeof chunk === "string" ? chunk.length : 0, outputTokens: Number(payload?.outputTokens) || 0 });
   }
   return { text, streamError, streamErrorCode, events, sessionId, usage };
@@ -1314,7 +1395,7 @@ function buildQingboVideoRequest(config, prompt, targetPath, options = {}) {
     const engine = ["motion-a-standard", "motion-a-plus"].includes(config.model) ? config.model : "motion-a-plus";
     const resolution = ["480p", "720p"].includes(options.resolution || config.resolution) ? (options.resolution || config.resolution) : "720p";
     const body = {
-      prompt: String(prompt || ""),
+      prompt: compactProviderVideoPrompt(prompt),
       engine,
       duration,
       aspect_ratio: aspectRatio,
@@ -1350,8 +1431,7 @@ function buildQingboVideoRequest(config, prompt, targetPath, options = {}) {
   const videoUrls = suppliedVideoUrls.map(assertPublicReferenceUrl);
   const duration = videoUrls.length ? null : closestAllowedDuration(options.duration, [4, 6, 8, 10], 6);
   const resolution = ["720p", "1080p", "4k"].includes(options.resolution || config.resolution) ? (options.resolution || config.resolution) : "720p";
-  const promptText = String(prompt || "");
-  if (promptText.length > 2000) throw Object.assign(new Error("清波通道 B 提示词不能超过2000字符"), { code: "PROMPT_TOO_LONG" });
+  const promptText = compactProviderVideoPrompt(prompt);
   const billingInput = options.billingDurationSeconds !== undefined
     ? options.billingDurationSeconds
     : options.referenceVideoDuration;
@@ -1602,8 +1682,10 @@ async function testProvider(kind, config) {
 }
 
 module.exports = {
+  PROVIDER_VIDEO_PROMPT_LIMIT,
   collectImageUrls,
   collectVideoUrls,
+  compactProviderVideoPrompt,
   buildQingboVideoRequest,
   qingboCharge,
   generateImage,

@@ -85,6 +85,51 @@ function dialogueMarkers(line, knownNames = []) {
   return markers;
 }
 
+function stripDialogueLinePrefix(value = "") {
+  return String(value || "").replace(/^\s*(?:\[(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?(?:\s*[-–—~至]\s*(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?)?\]\s*)?(?:\d{1,4}[.、)]\s*)?/, "");
+}
+
+function isSceneOrActionLine(value = "") {
+  const line = clean(value);
+  if (!line) return true;
+  return /^(?:#{1,6}\s*)?(?:S\d{1,4}\b|SC\d{1,4}\b|第[一二三四五六七八九十百千\d]+(?:场|幕|镜)|场景\s*[:：]?|INT\.|EXT\.|内景|外景|时间\s*[:：]|地点\s*[:：]|人物\s*[:：]|角色\s*[:：]|FADE\s+(?:IN|OUT)|CUT\s+TO)/i.test(line)
+    || /^【[^】]+】$/.test(line)
+    || /^\[[^\]]+\]$/.test(line)
+    || /^(?:△|▲|●|○|画面[:：]|动作[:：]|镜头[:：])/.test(line);
+}
+
+function standaloneSpeakerLabel(value, knownNames = [], nextLine = "") {
+  const raw = stripDialogueLinePrefix(value).replace(/^[@>]+\s*/, "").trim();
+  const parsed = parseSpeakerLabel(raw, knownNames);
+  if (!parsed || isSceneOrActionLine(raw)) return null;
+  const known = knownNames.map(clean).filter(Boolean);
+  const base = parsed.speakerRaw;
+  const knownMatch = known.includes(parsed.speaker) || known.includes(base);
+  const uppercaseCue = /^[A-Z][A-Z0-9 _.'-]{1,31}$/.test(base);
+  const chineseCue = /^[\u3400-\u9fff]{2,8}$/.test(base)
+    && !/(转身|离开|走来|走去|起身|坐下|看着|拿出|打开|关上|沉默|停顿|画面|字幕|旁白介绍)$/.test(base);
+  const parentheticalNext = /^\s*[（(][^）)]{1,120}[）)]\s*$/.test(String(nextLine || ""));
+  return knownMatch || uppercaseCue || chineseCue || parentheticalNext ? parsed : null;
+}
+
+function detectUploadedScriptFormat(value = "") {
+  const source = String(value || "").replace(/^\uFEFF/, "").replace(/\r/g, "").trim();
+  if (!source) return "empty";
+  if (/^[\[{]/.test(source)) {
+    try {
+      const parsed = JSON.parse(source);
+      if (parsed && typeof parsed === "object") return "json";
+    } catch {}
+  }
+  if (/^\s*\[(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?\s*[-–—~至]/m.test(source)) return "timed_storyboard";
+  if (/^(?:\s*#{1,4}\s*)?(?:S\d{1,4}\b|SC\d{1,4}\b)/mi.test(source)) return "structured_production";
+  if (/^\s*(?:INT\.|EXT\.|INT\/EXT\.|I\/E\.)/mi.test(source)) return "fountain";
+  if (/^\s*(?:#{1,6}\s*)?(?:【\s*场景\s*】|第[一二三四五六七八九十百千零〇\d]+(?:场|幕)|场景\s*[:：]|地点\s*[:：]|内景\s*[:：]|外景\s*[:：])/m.test(source)) return "chinese_screenplay";
+  const inlineTurns = source.split("\n").filter(line => dialogueMarkers(stripDialogueLinePrefix(line)).length).length;
+  if (inlineTurns >= 1) return "dialogue";
+  return "prose";
+}
+
 /**
  * Build the immutable dialogue ledger for user-uploaded scripts whose durable
  * facts are speaker + parenthetical tone/action + exact spoken content.
@@ -92,7 +137,7 @@ function dialogueMarkers(line, knownNames = []) {
  * these three source fields.
  */
 function parseSourceDialogueLedger(value, knownNames = [], options = {}) {
-  const source = String(value || "").replace(/\r/g, "");
+  const source = String(value || "").replace(/^\uFEFF/, "").replace(/\r/g, "");
   const prefix = clean(options.idPrefix || "D").replace(/[^A-Za-z0-9_-]/g, "") || "D";
   const inferredNames = new Set(knownNames.map(clean).filter(Boolean));
   for (const line of source.split("\n")) {
@@ -102,10 +147,35 @@ function parseSourceDialogueLedger(value, knownNames = [], options = {}) {
     if (label) inferredNames.add(label.speaker);
   }
   const ledger = [];
-  const lineMatcher = /[^\n]+/g;
+  const lines = [];
+  const lineMatcher = /[^\n]*/g;
   let lineMatch;
   while ((lineMatch = lineMatcher.exec(source))) {
-    const line = String(lineMatch[0] || "");
+    lines.push({ text: String(lineMatch[0] || ""), start: lineMatch.index });
+    if (lineMatcher.lastIndex === source.length) break;
+    lineMatcher.lastIndex += 1;
+  }
+  const pushEntry = (label, text, sourceStart, sourceEnd) => {
+    const spokenText = clean(text).replace(/^[“\"]|[”\"]$/g, "").trim();
+    if (!spokenText) return;
+    ledger.push({
+      id: `${prefix}${String(ledger.length + 1).padStart(3, "0")}`,
+      order: ledger.length + 1,
+      speaker: label.speaker,
+      speakerRaw: label.speakerRaw,
+      tone: label.tone,
+      text: spokenText,
+      spokenText,
+      metadata: toneMetadata(label.tone),
+      sourceStart,
+      sourceEnd
+    });
+  };
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const lineEntry = lines[lineIndex];
+    const originalLine = lineEntry.text;
+    const line = stripDialogueLinePrefix(originalLine);
+    const prefixLength = originalLine.indexOf(line);
     const markers = dialogueMarkers(line, [...inferredNames]);
     if (!markers.length) continue;
     for (let index = 0; index < markers.length; index += 1) {
@@ -114,21 +184,36 @@ function parseSourceDialogueLedger(value, knownNames = [], options = {}) {
         .replace(/^[；;\s]+|[；;\s]+$/g, "");
       const text = clean(rawText);
       if (!text) continue;
-      const metadata = toneMetadata(marker.tone);
-      ledger.push({
-        id: `${prefix}${String(ledger.length + 1).padStart(3, "0")}`,
-        order: ledger.length + 1,
-        speaker: marker.speaker,
-        speakerRaw: marker.speakerRaw,
-        tone: marker.tone,
-        text,
-        spokenText: text,
-        metadata,
-        sourceStart: lineMatch.index + marker.markerStart,
-        sourceEnd: lineMatch.index + (markers[index + 1]?.markerStart ?? line.length)
-      });
+      pushEntry(marker, text, lineEntry.start + Math.max(0, prefixLength) + marker.markerStart, lineEntry.start + Math.max(0, prefixLength) + (markers[index + 1]?.markerStart ?? line.length));
     }
   }
+  if (options.allowStandaloneCues === false) return ledger;
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = lines[index];
+    if (!clean(current.text) || dialogueMarkers(stripDialogueLinePrefix(current.text), [...inferredNames]).length) continue;
+    const nextNonEmptyIndex = lines.findIndex((item, candidateIndex) => candidateIndex > index && clean(item.text));
+    if (nextNonEmptyIndex < 0) continue;
+    let bodyIndex = nextNonEmptyIndex;
+    let tone = "";
+    const immediate = clean(lines[bodyIndex].text);
+    if (/^[（(][^）)]{1,120}[）)]$/.test(immediate)) {
+      tone = immediate.slice(1, -1).trim();
+      bodyIndex = lines.findIndex((item, candidateIndex) => candidateIndex > bodyIndex && clean(item.text));
+    }
+    if (bodyIndex < 0) continue;
+    const label = standaloneSpeakerLabel(current.text, [...inferredNames], lines[nextNonEmptyIndex]?.text);
+    const body = clean(lines[bodyIndex].text);
+    if (!label || isSceneOrActionLine(body) || dialogueMarkers(stripDialogueLinePrefix(body), [...inferredNames]).length) continue;
+    if (body.length > 500) continue;
+    label.tone = tone || label.tone;
+    pushEntry(label, body, current.start, lines[bodyIndex].start + lines[bodyIndex].text.length);
+    index = bodyIndex;
+  }
+  ledger.sort((left, right) => left.sourceStart - right.sourceStart);
+  ledger.forEach((item, index) => {
+    item.id = `${prefix}${String(index + 1).padStart(3, "0")}`;
+    item.order = index + 1;
+  });
   return ledger;
 }
 
@@ -165,6 +250,7 @@ function parseCompiledDialogueSegments(value, knownNames = []) {
 }
 
 module.exports = {
+  detectUploadedScriptFormat,
   parseCompiledDialogueSegments,
   parseMetadata,
   parseSourceDialogueLedger,

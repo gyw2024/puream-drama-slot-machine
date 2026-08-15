@@ -19,6 +19,25 @@ async function main() {
   const userDataDir = path.join(runDir, "isolated-user-data");
   const workbenchDir = path.join(runDir, "isolated-workbench");
   fs.mkdirSync(userDataDir, { recursive: true });
+  const reusableAssetDir = path.join(workbenchDir, "reusable-asset-library");
+  const reusableFilesDir = path.join(reusableAssetDir, "files");
+  fs.mkdirSync(reusableFilesDir, { recursive: true });
+  const previewPath = path.join(reusableFilesDir, "安装版 人物#预览.png");
+  fs.copyFileSync(path.join(root, "app", "assets", "drama-slot-mark.png"), previewPath);
+  fs.writeFileSync(path.join(reusableAssetDir, "index.json"), JSON.stringify({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    assets: [{
+      id: "installed-image-decode-audit",
+      kind: "character",
+      mediaType: "image",
+      stage: "character_sheet",
+      label: "安装版图片解码验收",
+      filePath: previewPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }]
+  }, null, 2), "utf8");
 
   const licenseSource = process.env.DRAMA_SLOT_AUDIT_LICENSE_SOURCE
     || path.join(process.env.APPDATA || "", packageJson.name, "drama-license.json");
@@ -47,6 +66,7 @@ async function main() {
     const result = await page.evaluate(async () => {
       const api = window.dramaSlot.workbench;
       const defaults = await window.dramaSlot.defaults();
+      const foundryStatus = await api.foundryStatus();
       document.querySelector('.stage-button[data-stage="script"]')?.click();
       const scriptExampleLibrary = document.querySelector("#scriptExampleLibrary");
       document.querySelector('#scriptExampleLibrary [data-script-format-preview="dialogue"]')?.click();
@@ -72,8 +92,27 @@ async function main() {
         const loaded = await api.getProject(summary.id);
         if (loaded.ok) projectStates.push(loaded.project);
       }
+      document.querySelector('.library-nav-button[data-library="characters"]')?.click();
+      await new Promise(resolve => setTimeout(resolve, 250));
+      const installedPreview = document.querySelector("#reusableAssetGrid img");
+      const imageDecode = installedPreview ? {
+        src: installedPreview.src,
+        complete: installedPreview.complete,
+        naturalWidth: installedPreview.naturalWidth,
+        naturalHeight: installedPreview.naturalHeight
+      } : null;
+      document.querySelector("#reusableAssetDialog")?.close();
+      document.querySelector("#newProjectDialog")?.showModal();
+      const foundryIntentControls = [...document.querySelectorAll("#newProjectDialog .foundry-intent-grid select")].map(select => ({
+        id: select.id,
+        value: select.value,
+        height: select.getBoundingClientRect().height
+      }));
+      document.querySelector("#newProjectDialog")?.close();
       return {
         defaults,
+        foundryStatus,
+        foundryIntentControls,
         projectsOk: projects.ok === true,
         projectCount: projects.projects?.length || 0,
         paidJobCount: projectStates.reduce((sum, project) => sum + (project.jobs || []).length, 0),
@@ -88,6 +127,7 @@ async function main() {
         rechargePolicy,
         manualButtons: [
           "#importScriptFile",
+          "#importDialogueRewrite",
           "#importStoryboardBatch",
           "#importShotPromptsBatch",
           "#importShotVideosBatch",
@@ -98,7 +138,8 @@ async function main() {
         ossSettingsFields: ["videoStorageMode", "videoOssAccessKeyId", "videoOssAccessKeySecret", "videoOssBucket", "videoOssEndpoint", "videoReferenceUrlTtl"]
           .map(id => ({ id, present: Boolean(document.getElementById(id)) })),
         pageHorizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
-        visibleInternalModelNames: (document.body.innerText || "").match(/(?:\bH3\b|Hailuo|海螺)/gi) || []
+        visibleInternalModelNames: (document.body.innerText || "").match(/(?:\bH3\b|Hailuo|海螺)/gi) || [],
+        imageDecode
       };
     });
     const screenshotPath = path.join(runDir, "installed-background.png");
@@ -110,13 +151,17 @@ async function main() {
 
     assert.equal(result.defaults.appVersion, packageJson.version, "installed version must match package.json");
     assert.equal(result.defaults.providerKind, "puream-hailuo-h3", "fresh installed data must default to PUREAM cloud");
+    assert.equal(result.foundryStatus?.ok, true, "installed V2 runtime status IPC must respond");
+    assert.equal(result.foundryStatus?.status?.ok, true, "installed V2 SQLite runtime must pass quick_check");
+    assert.deepEqual(result.foundryIntentControls.map(item => item.value), ["optimize", "natural", "balanced"], "installed project dialog must expose the recommended V2 intent defaults");
+    assert.equal(result.foundryIntentControls.some(item => item.height < 43.5), false, "installed V2 intent controls must keep a 44px touch target");
     assert.equal(result.projectsOk, true, "installed project store must open");
     assert.ok(result.projectCount >= 1, "installed app must create or load a project");
     assert.equal(result.paidJobCount, 0, "startup must not submit paid generation jobs");
     assert.equal(result.runningAutomationCount, 0, "startup must not begin a production operation");
     assert.deepEqual(result.manualButtons.filter(item => !item.present), [], "manual entry buttons must be installed");
     assert.deepEqual(new Set(result.businessLibraryKinds), new Set(["characters", "voices", "props", "scenes", "products"]));
-    assert.deepEqual(new Set(result.reusableImportKinds), new Set(["character", "scene", "image", "video", "audio"]));
+    assert.deepEqual(new Set(result.reusableImportKinds), new Set(["character", "scene", "prop", "wardrobe", "product", "image", "video", "audio", "voice"]));
     assert.deepEqual(result.ossSettingsFields.filter(item => !item.present), [], "installed app must expose the optional direct OSS controls");
     assert.deepEqual({
       present: result.scriptExamples.present,
@@ -124,14 +169,19 @@ async function main() {
       downloadCount: result.scriptExamples.downloadCount,
       dialogueOpen: result.scriptExamples.dialogueExample.dialogOpen
     }, { present: true, previewCount: 3, downloadCount: 3, dialogueOpen: true }, "installed script page must expose all three persistent examples");
-    assert.match(result.scriptExamples.dialogueExample.filename, /简易对白稿.*\.txt$/);
-    assert.match(result.scriptExamples.dialogueExample.body, /简易对白稿示例/);
+    assert.match(result.scriptExamples.dialogueExample.filename, /\.txt$/);
+    for (const marker of ["七分钟完整上传剧本案例", "### 01", "### 42", "无背景音乐"]) {
+      assert.ok(result.scriptExamples.dialogueExample.body.includes(marker), `installed dialogue example must include ${marker}`);
+    }
     assert.equal(result.rechargePolicy.inputMin, 50, "installed desktop recharge must start at 50 yuan");
     assert.match(result.rechargePolicy.help, /软件内.*50.*官网.*30/);
     assert.match(result.rechargePolicy.invalidAmountError, /最低 50 元/);
     assert.equal(result.rechargePolicy.orderPanelHidden, true, "invalid installed recharge must not expose an order");
     assert.equal(result.pageHorizontalOverflow, false, "installed main page must not horizontally overflow");
     assert.deepEqual(result.visibleInternalModelNames, [], "installed user-visible system text must mask internal model names");
+    assert.equal(result.imageDecode?.complete, true, "installed character image must finish decoding");
+    assert.ok(result.imageDecode?.naturalWidth > 0 && result.imageDecode?.naturalHeight > 0, "installed character image must decode into real pixels");
+    assert.match(result.imageDecode?.src || "", /^puream-asset:\/\//, "installed local media must use the constrained asset protocol");
 
     const report = { executablePath, runDir, screenshotPath, ...result };
     fs.writeFileSync(path.join(runDir, "audit.json"), `${JSON.stringify(report, null, 2)}\n`);

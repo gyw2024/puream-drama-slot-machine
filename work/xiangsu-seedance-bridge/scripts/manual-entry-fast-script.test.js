@@ -15,6 +15,7 @@ test("every production stage exposes an explicit manual entry", () => {
   const html = source("app/renderer/workbench.html");
   for (const id of [
     "importScriptFile",
+    "importDialogueRewrite",
     "selectProductLibrary",
     "importStoryboardBatch",
     "importShotPromptsBatch",
@@ -40,12 +41,13 @@ test("manual IPC routes are bridged and manual candidates become current", () =>
     "workbench:import-final-video",
     "workbench:import-reusable-asset",
     "workbench:delete-reusable-asset",
-    "workbench:bind-library-asset"
+    "workbench:bind-library-asset",
+    "workbench:rewrite-dialogue-script"
   ]) {
     assert.match(main, new RegExp(channel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(preload, new RegExp(channel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
-  assert.match(main, /candidate = store\.confirmCandidate\(projectId, candidate\.id, false\)/);
+  assert.match(main, /candidate = store\.confirmCandidate\(projectId, candidate\.id, false, \{ forceManualSelection: true \}\)/);
   assert.doesNotMatch(main, /await workflow\.remeshCharacterAsset\(projectId, candidate\.id\)/);
 });
 
@@ -86,7 +88,7 @@ test("turning off the blueprint master disables every quality module globally", 
     assert.equal(isQualityGatesEnabled(settings, moduleName), false);
   }
   const workflowSource = source("app/workbench-workflow.js");
-  assert.match(workflowSource, /!manualPromptActive && this\.qualityGatesEnabled\(settings, "script"\)/);
+  assert.match(workflowSource, /!manualPromptActive && productionStructureGateEnabled\(settings, project\)/);
   assert.match(workflowSource, /if \(engine === "hailuo-h3" && !manualPromptActive\)/);
   assert.match(workflowSource, /if \(!shotUsesManualVideoPrompt\(activeShot\)\)/);
 });
@@ -172,7 +174,10 @@ test("independent asset library accepts direct image video and audio uploads", t
   const cases = [
     { kind: "character", mediaType: "image", name: "role.png" },
     { kind: "scene", mediaType: "image", name: "scene.jpg" },
-    { kind: "image", mediaType: "image", name: "prop.webp" },
+    { kind: "prop", mediaType: "image", name: "prop.webp" },
+    { kind: "wardrobe", mediaType: "image", name: "wardrobe.png" },
+    { kind: "product", mediaType: "image", name: "product.jpg" },
+    { kind: "image", mediaType: "image", name: "storyboard.webp" },
     { kind: "video", mediaType: "video", name: "clip.mp4" },
     { kind: "audio", mediaType: "audio", name: "voice.wav" }
   ];
@@ -181,13 +186,59 @@ test("independent asset library accepts direct image video and audio uploads", t
     fs.writeFileSync(filePath, `manual-${index}`);
     return store.importReusableAsset(filePath, item);
   });
-  assert.equal(store.listReusableAssets().length, 5);
+  assert.equal(store.listReusableAssets().length, 8);
   assert.deepEqual(new Set(entries.map(item => item.kind)), new Set(cases.map(item => item.kind)));
   assert.ok(entries.every(item => fs.existsSync(item.filePath)));
   const touched = store.touchReusableAssetUse(entries[0].id);
   assert.equal(touched.useCount, 1);
-  store.deleteReusableAsset(entries[4].id);
-  assert.equal(store.listReusableAssets().length, 4);
+  store.deleteReusableAsset(entries[7].id);
+  assert.equal(store.listReusableAssets().length, 7);
+});
+
+test("global character scene and voice assets bind into a different project without touching the source", t => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "puream-cross-project-library-"));
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  const sourceDir = path.join(tempRoot, "source");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  const sourceCharacter = path.join(sourceDir, "global-character.png");
+  const sourceScene = path.join(sourceDir, "global-scene.png");
+  const sourceVoice = path.join(sourceDir, "global-voice.wav");
+  fs.writeFileSync(sourceCharacter, "global-character");
+  fs.writeFileSync(sourceScene, "global-scene");
+  fs.writeFileSync(sourceVoice, "global-voice");
+  const store = new WorkbenchStore(path.join(tempRoot, "workbench"));
+  const characterAsset = store.importReusableAsset(sourceCharacter, { kind: "character", mediaType: "image", stage: "character_sheet", label: "全局人物" });
+  const sceneAsset = store.importReusableAsset(sourceScene, { kind: "scene", mediaType: "image", stage: "scene_asset", label: "全局场景" });
+  const voiceEntry = store.upsertVoiceLibraryEntry({
+    id: "voice-global-test",
+    label: "全局音色",
+    filePath: sourceVoice,
+    fileUrl: "",
+    duration: 6,
+    audioAudit: { ok: true, source: "manual-import" },
+    mediaProbeVerified: true,
+    useCount: 0
+  });
+  const target = store.createProject("全局资产目标项目");
+  target.characters = [{ id: "C01", name: "目标人物" }];
+  target.scenes = [{ id: "SC01", name: "目标场景" }];
+  store.saveProject(target);
+  const boundCharacter = store.bindReusableAsset(target.id, "character", "C01", characterAsset.id);
+  const boundScene = store.bindReusableAsset(target.id, "scene", "SC01", sceneAsset.id);
+  const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: tempRoot });
+  const boundVoice = workflow.bindCharacterVoiceLibrary(target.id, "C01", voiceEntry.id);
+  const saved = store.getProject(target.id);
+  assert.equal(boundCharacter.selected, true);
+  assert.equal(boundScene.selected, true);
+  assert.equal(boundVoice.selected, true);
+  assert.ok([boundCharacter, boundScene, boundVoice].every(item => fs.existsSync(item.filePath)));
+  assert.equal(saved.characters[0].visualAssetLibraryId, characterAsset.id);
+  assert.equal(saved.characters[0].voiceLibraryId, voiceEntry.id);
+  assert.equal(saved.scenes[0].visualAssetLibraryId, sceneAsset.id);
+  assert.equal(store.getVoiceLibraryEntry(voiceEntry.id).useCount, 1);
+  assert.equal(fs.readFileSync(sourceCharacter, "utf8"), "global-character");
+  assert.equal(fs.readFileSync(sourceScene, "utf8"), "global-scene");
+  assert.equal(fs.readFileSync(sourceVoice, "utf8"), "global-voice");
 });
 
 test("replacing a product image retires product-dependent storyboard and video assets", t => {
@@ -270,7 +321,7 @@ test("step execution runs only the requested stage and explicit full pipeline ma
   assert.match(renderer, /pipeline_from_stage: "当前阶段续跑"/);
   assert.match(renderer, /不会自动提交视频/);
   assert.match(renderer, /不会自动拼接/);
-  assert.match(manifest.version, /^0\.13\.\d+$/);
+  assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 });
 
 test("step storyboard continuation cannot call video generation or stitching", async () => {

@@ -2,11 +2,13 @@
 
 function latestCandidate(project, entityType, entityId, stage) {
   const activeRevision = project.productionRevision || "";
-  const matches = (project.candidates || [])
+  const revisionMatches = (project.candidates || [])
     .filter(item => item.entityType === entityType && item.entityId === entityId && item.stage === stage)
     .filter(item => (item.productionRevision || "") === activeRevision)
-    .filter(item => item.stale !== true)
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const manualSelection = revisionMatches.find(item => item.selected === true && item.manualSelectionOverride === true && item.filePath);
+  if (manualSelection) return manualSelection;
+  const matches = revisionMatches.filter(item => item.stale !== true);
   return matches.find(item => item.selected) || matches[0] || null;
 }
 
@@ -22,9 +24,30 @@ function latestCandidateIncludingStale(project, entityType, entityId, stage) {
 }
 
 function hasFile(candidate, settings = null, moduleName = "assets") {
-  const qualityRequired = settings?.generation?.qualityGatesEnabled !== false
-    && settings?.generation?.qualityGateModules?.[moduleName] !== false;
-  return Boolean(candidate?.filePath) && (!qualityRequired || candidate.qualityAudit?.ok !== false);
+  const qualityRequired = settings?.generation?.qualityGatesEnabled === true
+    && settings?.generation?.qualityGateModules?.[moduleName] === true;
+  const humanAccepted = candidate?.manualSelectionOverride === true
+    || candidate?.qualityAudit?.accepted === true
+    || candidate?.qualityAudit?.overridden === true
+    || ["manual", "human_override", "advisory_continue"].includes(String(candidate?.qualityAudit?.mode || ""));
+  return Boolean(candidate?.filePath) && (!qualityRequired || humanAccepted || candidate.qualityAudit?.ok !== false);
+}
+
+function characterIdentityCandidate(project, character, settings = null) {
+  const stages = new Set(["character_sheet", "character_three_view", "character_intro"]);
+  const activeRevision = project.productionRevision || "";
+  const matches = (project.candidates || [])
+    .filter(item => item.entityType === "character" && item.entityId === character.id && stages.has(item.stage))
+    .filter(item => (item.productionRevision || "") === activeRevision && item.stale !== true && hasFile(item, settings, "assets"));
+  const active = matches.find(item => item.id === character.activeIdentityCandidateId);
+  if (active) return active;
+  const byRecency = (left, right) => String(right.manualSelectedAt || right.updatedAt || right.createdAt || "")
+    .localeCompare(String(left.manualSelectedAt || left.updatedAt || left.createdAt || ""));
+  return matches.filter(item => item.selected === true && item.manualSelectionOverride === true).sort(byRecency)[0]
+    || matches.filter(item => item.selected === true).sort(byRecency)[0]
+    || latestCandidate(project, "character", character.id, "character_intro")
+    || latestCandidate(project, "character", character.id, "character_sheet")
+    || latestCandidate(project, "character", character.id, "character_three_view");
 }
 
 function stageCounts(project = {}, settings = null) {
@@ -47,10 +70,7 @@ function stageCounts(project = {}, settings = null) {
     }
     return stages.every(stage => hasFile(latestCandidate(project, "shot", shot.id, stage), settings, "storyboards"));
   }).length;
-  const characterReady = characters.filter(character =>
-    hasFile(latestCandidate(project, "character", character.id, "character_sheet"), settings, "assets")
-    || hasFile(latestCandidate(project, "character", character.id, "character_three_view"), settings, "assets")
-  ).length;
+  const characterReady = characters.filter(character => hasFile(characterIdentityCandidate(project, character, settings), settings, "assets")).length;
   const sceneReady = scenes.filter(scene => hasFile(latestCandidate(project, "scene", scene.id, "scene_asset"), settings, "assets")).length;
   const wardrobeReady = wardrobes.filter(item => hasFile(latestCandidate(project, "library", item.id, "wardrobe_asset"), settings, "assets")).length;
   const propReady = props.filter(item => hasFile(latestCandidate(project, "library", item.id, "prop_asset"), settings, "assets")).length;
@@ -90,15 +110,14 @@ function automationLabel(project = {}) {
     interrupted: "已中断",
     completed: "空闲",
     idle: "空闲",
-    failed: "失败",
+    failed: "可恢复断点",
     cancelled: "已取消"
   })[status] || (status || "空闲");
 }
 
 function automationTone(status = "") {
   const value = String(status || "");
-  if (["failed"].includes(value)) return "danger";
-  if (["interrupted", "paused_user", "paused_account", "pausing", "stopping", "cancelled"].includes(value)) return "warn";
+  if (["failed", "interrupted", "paused_user", "paused_account", "pausing", "stopping", "cancelled"].includes(value)) return "warn";
   if (["running"].includes(value)) return "active";
   return "idle";
 }
@@ -122,7 +141,9 @@ function summarizeProjectOverview(project = {}, settings = null) {
       operation: project.automation?.operation || "",
       stage: project.automation?.stage || "",
       message: project.automation?.message || "",
-      active: ["running", "pausing", "stopping"].includes(project.automation?.status)
+      active: typeof project.runtime?.active === "boolean"
+        ? project.runtime.active
+        : ["running", "pausing", "stopping"].includes(project.automation?.status)
     },
     counts,
     activeJobs,

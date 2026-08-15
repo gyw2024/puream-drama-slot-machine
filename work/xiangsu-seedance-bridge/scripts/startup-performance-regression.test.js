@@ -7,6 +7,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { WorkbenchStore } = require("../app/workbench-store");
+const { WorkbenchWorkflow } = require("../app/workbench-workflow");
 
 test("listing known projects trusts the lightweight index instead of reparsing every project payload", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-fast-index-"));
@@ -51,6 +52,33 @@ test("active video job discovery is cached and filtered per project", () => {
 test("project selection is read-only and cannot interrupt background work", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "app", "main.js"), "utf8");
   const handler = source.slice(source.indexOf('ipcMain.handle("workbench:get-project"'), source.indexOf('ipcMain.handle("workbench:patch-project"'));
-  assert.match(handler, /store\.getProject\(projectId\)/);
-  assert.doesNotMatch(handler, /reconcileDetachedAutomations|setAutomation|saveProject/);
+  const projection = source.slice(source.indexOf("function projectForRenderer"), source.indexOf("function publicPendingJobs"));
+  assert.match(handler, /projectForRenderer\(projectId\)/);
+  assert.doesNotMatch(handler, /setAutomation|saveProject/);
+  assert.match(projection, /workflow\.reconcileDetachedAutomations\(projectId\)/);
+  assert.match(projection, /workflow\.hasActiveOperation\(projectId\)/);
+  assert.match(projection, /store\.listActiveVideoJobs\(projectId\)/);
+});
+
+test("startup reconciliation clears a persisted ghost-running state but keeps a real operation active", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-runtime-authority-"));
+  try {
+    const store = new WorkbenchStore(root);
+    const created = store.createProject("运行真值测试");
+    const project = store.getProject(created.id);
+    project.automation = { ...(project.automation || {}), operation: "assets", status: "running", stage: "assets", message: "旧进程遗留运行状态" };
+    store.saveProject(project);
+    const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: root });
+    workflow.reconcileDetachedAutomations(created.id);
+    assert.equal(store.getProject(created.id).automation.status, "interrupted");
+    const active = store.getProject(created.id);
+    active.automation = { ...(active.automation || {}), operation: "assets", status: "running", stage: "assets", message: "真实运行" };
+    store.saveProject(active);
+    workflow.beginActiveOperation(created.id, "op-live");
+    workflow.reconcileDetachedAutomations(created.id);
+    assert.equal(store.getProject(created.id).automation.status, "running");
+    workflow.endActiveOperation(created.id, "op-live");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

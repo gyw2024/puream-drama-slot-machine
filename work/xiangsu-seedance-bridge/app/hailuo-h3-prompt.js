@@ -13,6 +13,8 @@ const REQUIRED_SECTIONS = [
   "overall_soundscape:",
   "non_diegetic_music:"
 ];
+const HAILUO_PROMPT_MAX_LENGTH = 1900;
+const HAILUO_FINAL_OUTPUT_LOCK_EN = "FINAL OUTPUT LOCK: story dialogue, location ambience, visible-action SFX only; no BGM/music/song. No subtitles/captions/titles/dialogue/narration text, labels/prices/names/logos/watermarks/UI/readable text. No character intro/biography/synopsis/identity anchor/multi-view sheet/asset board in story footage.";
 
 function clean(value) {
   return String(value || "").replace(/\r/g, "").trim();
@@ -206,6 +208,26 @@ function withoutDialogue(value) {
 
 function containsCjkOutsideDialogue(value) {
   return CJK_RE.test(withoutDialogue(value));
+}
+
+/**
+ * H3 accepts Chinese only inside dialogue tags. Historical/imported projects can
+ * still carry Chinese stage labels, orphan ids or custom parity notes. Those
+ * metadata leaks must never stop a paid production path: preserve every exact
+ * dialogue block byte-for-byte and remove only CJK text outside the blocks.
+ */
+function sanitizeCjkOutsideDialogue(value) {
+  return String(value || "")
+    .split(/(<d>\s*\[Chinese\][\s\S]*?<\/d>)/gi)
+    .map((part, index) => index % 2 === 1
+      ? part
+      : part
+        .replace(/[\u3400-\u9fff\uf900-\ufaff]+/g, " ")
+        .replace(/[\u3000-\u303f\uff00-\uffef]+/g, " ")
+        .replace(/[^\S\r\n]+/g, " "))
+    .join("")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
 }
 
 function formatTimestamp(seconds) {
@@ -782,7 +804,7 @@ function referenceContext(project, shot, references, mode, dialogueTurns, spec =
     const sourceText = sources.length
       ? sources.join(" and ")
       : "the production brief for this unit";
-    definitions.push(`${subject} is the recurring adult character (${characterId}); preserve face, age, body, hair, wardrobe and distinctive features from ${sourceText}.`);
+    definitions.push(`${subject} is the recurring adult character (${safeIdentifier(characterId, "authored-character")}); preserve face, age, body, hair, wardrobe and distinctive features from ${sourceText}.`);
     const wardrobeLock = wardrobeBinding
       ? ` Wardrobe binding ${safeIdentifier(wardrobeBinding.wardrobeId, "assigned-wardrobe")} belongs only to ${safeIdentifier(characterId, "the assigned character")}${wardrobeBinding.continuity ? " and must follow its supplied continuity state" : ""}.`
       : "";
@@ -992,7 +1014,7 @@ function dramaSpineDirective(shot = {}) {
   const trigger = physicalPerformanceEnglish(arc.trigger || shot?.visualBeat, "the authored irreversible trigger");
   const peak = physicalPerformanceEnglish(arc.peak || shot?.performanceBeats?.voiceDelivery, "peak facial/body/vocal break");
   const aftershock = physicalPerformanceEnglish(arc.aftershock || shot?.stateAfter, "aftershock that leaves a new irreversible state");
-  const stage = clean(shot?.mainlineStage) || "beat";
+  const stage = stageTaskLabel(shot?.mainlineStage).toLowerCase().replace(/\s+task$/, "") || "beat";
   return `Drama spine (${stage}): open on ${start}; hit trigger ${trigger}; peak with ${peak}; close on ${aftershock}. Each editorial beat must add new information; do not hold a static mood.`;
 }
 
@@ -1183,7 +1205,7 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
       visibleIds: new Set(compiled.visibleCharacterIds || []),
       offscreenIds: new Set(compiled.offscreenSpeakerIds || [])
     };
-    const visibleSubjects = [...visibility.visibleIds].map(characterId => context.subjectByCharacterId.get(characterId) || characterId).filter(Boolean);
+    const visibleSubjects = [...visibility.visibleIds].map(characterId => context.subjectByCharacterId.get(characterId) || safeIdentifier(characterId, "an authored subject")).filter(Boolean);
     const occupancy = visibleSubjects.length === 0
       ? "Visible cast: none; no face, reflection, portrait, or extra hand."
       : visibleSubjects.length === 1
@@ -1243,20 +1265,154 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
   const prompt = fillTemplate(template, values);
   const missing = REQUIRED_SECTIONS.filter(section => !prompt.includes(section));
   if (missing.length) throw Object.assign(new Error(`Hailuo H3 prompt template is missing required official sections: ${missing.join(", ")}`), { code: "HAILUO_H3_TEMPLATE_INVALID", missing });
-  if (containsCjkOutsideDialogue(prompt)) {
-    if (skipValidation) {
-      // Gates-off one-pass: strip leaked CJK outside dialogue rather than abort production.
-      const repaired = String(prompt).replace(/<d>\s*\[Chinese\][\s\S]*?<\/d>/gi, (block) => block)
-        .split(/(<d>\s*\[Chinese\][\s\S]*?<\/d>)/gi)
-        .map((part, index) => (index % 2 === 1 ? part : part.replace(/[\u3400-\u9FFF]/g, " ").replace(/[^\S\r\n]+/g, " ")))
-        .join("")
-        .replace(/[ \t]+\n/g, "\n")
-        .trim();
-      if (!containsCjkOutsideDialogue(repaired)) return repaired;
-    }
-    throw Object.assign(new Error("Hailuo H3 prompt contains Chinese outside <d>[Chinese] dialogue blocks"), { code: "HAILUO_H3_PROMPT_LANGUAGE_INVALID" });
+  // Language normalization is a deterministic compiler repair, not a quality
+  // opinion. Apply it regardless of blueprint settings so historical/custom
+  // metadata can never dead-end the user's production run.
+  return containsCjkOutsideDialogue(prompt) ? sanitizeCjkOutsideDialogue(prompt) : prompt;
+}
+
+function hasHailuoFinalOutputLock(prompt = "") {
+  const text = clean(prompt);
+  return /FINAL (?:VIDEO )?OUTPUT LOCK:/i.test(text)
+    && /no BGM|no background music/i.test(text)
+    && /no subtitles|no captions/i.test(text)
+    && /no character intro|never render a character introduction/i.test(text)
+    && /multi-view sheet|four-view sheet/i.test(text)
+    && /asset board/i.test(text);
+}
+
+function assertHailuoFinalPromptIntegrity(prompt = "", maxLength = HAILUO_PROMPT_MAX_LENGTH) {
+  const text = clean(prompt);
+  const limit = Math.max(800, Math.min(1990, Number(maxLength) || HAILUO_PROMPT_MAX_LENGTH));
+  const failures = [];
+  if (!text) failures.push("prompt is empty");
+  if (text.length > limit) failures.push(`prompt length ${text.length} exceeds ${limit}`);
+  for (const sectionName of REQUIRED_SECTIONS) {
+    if (!text.toLowerCase().includes(sectionName)) failures.push(`missing ${sectionName}`);
   }
-  return prompt;
+  if (!hasHailuoFinalOutputLock(text)) failures.push("final output lock is incomplete");
+  if (!/non_diegetic_music:\s*N\/A\s*$/i.test(text)) failures.push("non_diegetic_music must be N/A");
+  if (failures.length) {
+    throw Object.assign(new Error(`Hailuo H3 final prompt integrity failed: ${failures.join("; ")}`), {
+      code: "HAILUO_PROMPT_FINAL_INTEGRITY_FAILED",
+      failures,
+      promptLength: text.length,
+      limit
+    });
+  }
+  return true;
+}
+
+function compactHailuoDialogueContract(value, aggressive = false) {
+  const source = clean(value).replace(/\s+/g, " ");
+  const timePrefix = source.match(/^(From\s+\d+(?:\.\d+)?s\s+to\s+\d+(?:\.\d+)?s,\s*)/i)?.[1] || "";
+  const speaker = source.match(/Speaker:\s*(<Subject\s+\d+>(?:\s*\([^)]+\))?)/i)?.[1] || "";
+  const audio = source.match(/voice\s+timbre\s+referenced\s+by\s*(<Audio\s+\d+>)/i)?.[1] || "";
+  const delivery = source.match(/delivery:\s*([^;]+)/i)?.[1] || "authored emotional stress and breath";
+  const addresses = source.match(/addresses:\s*([^;]+)/i)?.[1] || "the authored listener, never the camera";
+  const exactLine = source.match(/exact line,\s*say once:\s*(<d>[\s\S]*?<\/d>)/i)?.[1] || "";
+  const reaction = source.match(/listener reaction:\s*([^.\n]*)/i)?.[1] || "the listener stays silent and reacts visibly";
+  if (!speaker || !audio || !exactLine) {
+    return source.replace(/;\s*lip sync:\s*exact and once-only,\s*then lips closed/gi, "; lip-sync once");
+  }
+  const shorten = (text, size) => String(text || "").trim().slice(0, size).trim();
+  const deliveryLimit = aggressive ? 52 : 82;
+  const addressLimit = aggressive ? 48 : 72;
+  const reactionLimit = aggressive ? 56 : 88;
+  return `${timePrefix}Speaker: ${speaker}; voice timbre referenced by ${audio}; delivery: ${shorten(delivery, deliveryLimit)}; addresses: ${shorten(addresses, addressLimit)}; exact line, say once: ${exactLine}; lip-sync once; listener reaction: ${shorten(reaction, reactionLimit)}.`;
+}
+
+function compactFullReferencePrompt(prompt, maxLength = HAILUO_PROMPT_MAX_LENGTH) {
+  const original = clean(prompt);
+  const limit = Math.max(800, Math.min(1990, Number(maxLength) || HAILUO_PROMPT_MAX_LENGTH));
+  if (original.length <= limit && hasHailuoFinalOutputLock(original)) {
+    assertHailuoFinalPromptIntegrity(original, limit);
+    return original;
+  }
+
+  const section = name => {
+    const start = original.toLowerCase().indexOf(name);
+    if (start < 0) return "";
+    const bodyStart = start + name.length;
+    const later = REQUIRED_SECTIONS
+      .map(item => original.toLowerCase().indexOf(item, bodyStart))
+      .filter(index => index >= 0);
+    const end = later.length ? Math.min(...later) : original.length;
+    return original.slice(bodyStart, end).trim();
+  };
+  const shorten = (value, size) => String(value || "").replace(/\s+/g, " ").trim().slice(0, Math.max(0, size)).trim();
+  const subjectLines = section("subject_definitions:").split("\n").map(item => shorten(item, 150)).filter(Boolean).slice(0, 8);
+  const summary = shorten(section("summary:"), 220);
+  const retentionLines = section("retention_analysis:").split("\n").map(item => shorten(item, 120)).filter(Boolean).slice(0, 6);
+  const detailed = section("detailed_description:")
+    .replace(/FINAL VIDEO OUTPUT LOCK:[^\n]*/gi, "")
+    .replace(/FINAL OUTPUT LOCK:[^\n]*/gi, "")
+    .trim();
+  const dialogueMatches = [...detailed.matchAll(/(?:From\s+\d+(?:\.\d+)?s\s+to\s+\d+(?:\.\d+)?s,\s*)?Speaker:\s*[\s\S]{0,900}?listener reaction:\s*[^.\n]*\./gi)];
+  const dialogueContracts = dialogueMatches.map(match => compactHailuoDialogueContract(match[0]));
+  const dialogueRanges = dialogueMatches
+    .map(match => [match.index, match.index + match[0].length]);
+  const withoutDialogue = dialogueRanges.length
+    ? [...detailed].filter((_char, index) => !dialogueRanges.some(([start, end]) => index >= start && index < end)).join("")
+    : detailed;
+  const shotBeats = withoutDialogue.split("\n")
+    .map(item => shorten(item, /^\[Shot\s+\d+\]/i.test(item.trim()) ? 230 : 150))
+    .filter(Boolean)
+    .slice(0, 8);
+  const soundscape = shorten(section("overall_soundscape:"), 180) || "Continuous location ambience, exact dialogue, and synchronized visible-action SFX only.";
+
+  const render = (subjects, summaryText, retention, beats, dialogues, sound) => [
+    "subject_definitions:",
+    subjects.join("\n") || "Use the supplied reference subjects exactly.",
+    "summary:",
+    summaryText || "Execute this short-drama beat and end on a visible changed state.",
+    "retention_analysis:",
+    retention.join("\n") || "Retain supplied identity, scene, product, frame, video and voice references only.",
+    "detailed_description:",
+    [HAILUO_FINAL_OUTPUT_LOCK_EN, ...beats, ...dialogues].join("\n") || HAILUO_FINAL_OUTPUT_LOCK_EN,
+    "overall_soundscape:",
+    sound,
+    "non_diegetic_music:",
+    "N/A"
+  ].join("\n").trim();
+
+  let compact = render(subjectLines, summary, retentionLines, shotBeats, dialogueContracts, soundscape);
+  if (compact.length > limit) compact = render(
+    subjectLines.map(item => shorten(item, 95)),
+    shorten(summary, 130),
+    retentionLines.map(item => shorten(item, 75)).slice(0, 4),
+    shotBeats.map(item => shorten(item, 120)).slice(0, 5),
+    dialogueContracts,
+    shorten(soundscape, 100)
+  );
+  if (compact.length > limit) compact = render(
+    subjectLines.map(item => shorten(item, 70)).slice(0, 6),
+    shorten(summary, 90),
+    ["Keep all supplied references bound to their matching subjects."],
+    shotBeats.map(item => shorten(item, 80)).slice(0, 3),
+    dialogueContracts,
+    "Continuous location bed and synchronized visible-action SFX only."
+  );
+  if (compact.length > limit) {
+    compact = render(
+      [],
+      "Execute the authored beat.",
+      ["Bind supplied identity, scene, frame, product and voice references."],
+      [],
+      dialogueContracts.map(item => compactHailuoDialogueContract(item, true)),
+      "Continuous location bed; synchronized SFX only."
+    );
+  }
+  if (compact.length > limit) {
+    throw Object.assign(new Error(`Hailuo H3 dialogue contracts require ${compact.length} characters but the provider limit is ${limit}; refusing to truncate dialogue or output policy`), {
+      code: "HAILUO_PROMPT_DIALOGUE_BUDGET_EXCEEDED",
+      promptLength: compact.length,
+      limit,
+      dialogueCount: dialogueContracts.length
+    });
+  }
+  assertHailuoFinalPromptIntegrity(compact, limit);
+  return compact;
 }
 
 function stripCjkForEnglishField(value, fallback = "") {
@@ -1340,11 +1496,16 @@ function buildFallbackHailuoPromptSpec(shot = {}, options = {}) {
 
 module.exports = {
   HAILUO_PROMPT_SPEC_VERSION,
+  HAILUO_PROMPT_MAX_LENGTH,
+  HAILUO_FINAL_OUTPUT_LOCK_EN,
   REQUIRED_SECTIONS,
+  assertHailuoFinalPromptIntegrity,
   buildFallbackHailuoPromptSpec,
   buildFullReferencePrompt,
+  compactFullReferencePrompt,
   compilerMessages,
   containsCjkOutsideDialogue,
+  hasHailuoFinalOutputLock,
   englishWordCount,
   expandShotCharacterCast,
   visibleShotCharacterCast,
@@ -1354,5 +1515,6 @@ module.exports = {
   legacyPromptFingerprint,
   promptFingerprint,
   repairInstructionEnglish,
+  sanitizeCjkOutsideDialogue,
   validatePromptSpec
 };
