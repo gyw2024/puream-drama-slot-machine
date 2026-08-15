@@ -2,7 +2,7 @@
 
 - 发布任务：`TASK-20260815-DRAMA-HAILUO-PROMPT-INTEGRITY-001`
 - 发布日期：2026-08-15
-- 缺陷编号：`BUG-072`
+- 缺陷编号：`BUG-20260815-001`
 - 结论：桌面正式版、安装升级、真实数据兼容、MCP 控制入口及官网公开下载均已通过验收并发布。
 
 ## 根因与修复边界
@@ -63,19 +63,27 @@ v0.14.2 将长度预算的所有权收敛到供应商编译器：系统生成的
 
 - 产品页：`https://puream.cn/drama-slot-machine`
 - 下载接口：`https://puream.cn/api/drama-slot/download`
-- 正式服务：`puream-workflow-full-api-r90-drama-0142-20260815.service`
-- 端口：3103；Nginx 9 处引用全部指向 3103。
-- Next.js 构建 ID：`r7Vz8cLrRkIVTJk1Mt87z`
+- 正式服务：`puream-workflow-full-api-r91-drama-0142-20260815.service`
+- 端口：3104；Nginx 9 处引用全部指向 3104。
+- Next.js 构建 ID：`OTWZaQJsLsApLTXIWz1nJ`
 - 服务状态：active + enabled，`NRestarts=0`，严重日志计数 0。
-- 旧 r89：inactive + disabled，但服务单元、候选目录和回滚材料保留。
+- 旧 r90：inactive + disabled，但其服务单元、候选目录和回滚材料保留；r90 中并发任务新增的合作方持久密钥能力已完整继承到 r91。
 - 服务器内公网校验：页面 0.14.2；完整下载 126,572,368 字节，SHA-256 与本地构建一致。
-- 客户外部链路复核：`D:\Backup\Documents\官网开发\downloads\TASK-20260815-DRAMA-HAILUO-PROMPT-INTEGRITY-001\纯梦短剧老虎机-安装版-0.14.2-public.exe`，大小与 SHA-256 一致。
+- 客户外部链路复核：`D:\Backup\Documents\官网开发\downloads\TASK-20260815-DRAMA-HAILUO-PROMPT-INTEGRITY-001\纯梦短剧老虎机-安装版-0.14.2-r91-public.exe`，大小与 SHA-256 一致。
 - 无写入探针：旧余额别名 404、聊天 OPTIONS 204、空支付请求未授权 401、模型列表 200；未发起任何生图、生视频或其他计费生成任务。
+- 切流后进行了三轮间隔稳定性审计：`inv-h7dti90gmd`、`inv-m7dtjag1th`、`inv-j7dtkfgqrb`，每轮均确认唯一正式服务为 r91、Nginx 9/9、页面版本、完整下载哈希、四项无写探针、`NRestarts=0` 和严重日志 0。
 
 ## 回滚与保全
 
 - 桌面安装前完整备份：`.codex_backups/releases/TASK-20260815-DRAMA-HAILUO-PROMPT-INTEGRITY-001/pre-install-0.14.0`。
-- 网站发布前文件级备份：`/opt/puream-workflow-platform/.codex_backups/releases/TASK-20260815-DRAMA-HAILUO-PROMPT-INTEGRITY-001/pre-r90-20260815T025103Z`。
-- 一键回滚：上述目录中的 `rollback.sh`，可恢复 r89、原 Nginx 配置和 0.13.23 下载。
-- 云快照：新建快照因腾讯云配额限制返回 `LimitExceeded.SnapshotQuotaLimitExceeded`；未删除任何既有快照。发布记录复用此前已验证为 NORMAL 的 `lhsnap-nj2lp8mg`，并叠加本次精确的 r89 文件级备份和可执行回滚。
+- 网站发布前文件级备份：`/opt/puream-workflow-platform/.codex_backups/releases/TASK-20260815-DRAMA-HAILUO-PROMPT-INTEGRITY-001/pre-r91-20260815T032024Z`。
+- 一键回滚：上述目录中的 `rollback.sh`，可恢复切流前的 r90 合作方功能候选、原 Nginx 配置和上一生产状态。
+- 最终服务器证据：`/opt/puream-workflow-platform/.codex_work/TASK-20260815-DRAMA-HAILUO-PROMPT-INTEGRITY-001/evidence/final-r91-20260815T032817Z`。
+- 云快照：新建快照因腾讯云配额限制返回 `LimitExceeded.SnapshotQuotaLimitExceeded`；未删除任何既有快照。发布记录复用此前已验证为 NORMAL 的 `lhsnap-nj2lp8mg`，并叠加本次精确的 r90 文件级备份和可执行回滚。
 - 临时上传公钥已撤销，服务器匹配密钥计数 0；本地临时私钥和公钥均已删除。
+
+## 并发发布处置
+
+- 首次切流期间发现另一正式任务已把生产从 r88/3099 更新到 r89/3102；本任务停止旧预检，从最新 r89 重建 r90，没有覆盖对方成果。
+- r90 验收后，第二个合法并发任务又在 3103 上发布了合作方持久密钥能力，并把产品页元数据带回 0.13.23。最终外部复核及时发现该竞争状态，本任务没有直接覆盖，而是以该任务的最新 r90 候选为精确基线，仅叠加 `dramaSlotRelease.ts` 的 0.14.2 版本发布改动，构建并切换到 r91。
+- 因此最终 r91 同时保留合作方任务功能和本次短剧 0.14.2 发布内容；连续三轮稳定性审计后才关闭发布。
