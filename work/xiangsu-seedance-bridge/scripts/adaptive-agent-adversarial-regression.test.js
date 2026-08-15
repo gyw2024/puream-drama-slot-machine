@@ -102,7 +102,7 @@ test("workflow owns one adaptive agent and can route an arbitrary API adapter", 
     stagingRoot: "",
     textGenerator: async () => ({})
   });
-  for (const skill of ["provider.text", "provider.image", "provider.video", "provider.video_submit", "provider.video_query", "director.camera_take_plan"]) {
+  for (const skill of ["provider.text", "provider.image", "provider.video", "provider.video_submit", "provider.video_query", "director.continuity_plan", "director.camera_take_plan"]) {
     assert.equal(workflow.adaptiveAgent.hasSkill(skill), true, `${skill} must be registered on the global Agent`);
   }
   workflow.registerAdaptiveAdapter("image", "vendor-x", async payload => ({ vendor: "vendor-x", payload }));

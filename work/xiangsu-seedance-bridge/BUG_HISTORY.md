@@ -81,6 +81,7 @@
 | BUG-072 | 海螺分镜视频大量报 `HAILUO_PROMPT_DIALOGUE_PERFORMANCE_MISSING`，同批只有少数镜头可生成 | 海螺专用编译器已经在 1900 字符内保留完整对白，但统一提交层又追加一套输出禁令并从尾部盲截，导致对白表演合同或禁令被截断；两层单测均通过，却没有组合链路测试 | 0.14.2 | `hailuo-final-submission-integrity.test.js`、`hailuo-prompt-contract.test.js`、`video-prompt-length-regression.test.js`、客户真实 30 分镜最终提交对象逐条审计 | 已验证 |
 | BUG-073 | 对话换人后画面仍停在上一名说话人，人物嘴型和视线对象错位 | 单个供应商视频任务同时承担多名说话人、多个机位和内部切镜；分镜合图又把整张时间轴沿用父镜头第一名主体，提示词无法可靠覆盖模型的单一视觉注意力 | 0.15.0 | `agent-director-contract.test.js`、`agent-director-ffmpeg.test.js`、`prompt-matrix-dialogue-regression.test.js` | 已验证 |
 | BUG-074 | 创作链路的局部失败可能触发固定模板补位，或旧兼容入口绕开全局 Agent | 创意生成、供应商提交和查询仍存在少量分散旁路，失败时“继续流程”优先级高于“保持用户剧情与生产合同” | 0.15.0 | `adaptive-agent-adversarial-regression.test.js`、`dialogue-rewrite-contract.test.js`、`uploaded-analysis-resume-regression.test.js`、`root-contract-regression.test.js` | 已验证 |
+| BUG-075 | 为修复换人不切镜而把每次说话人或机位变化都拆成独立视频任务，导致连续对白节奏割裂、表演不连贯且调用数增加 | v0.15.0 混淆了对白事实、编辑镜头段与供应商任务三层边界；快速剧本编译器还会把多轮对白扁平化到开场人物，旧提示词入口残留相反规则 | 0.15.1 | 连续生成块 v4、付费前原子降级预编译、成片切镜证据审计、`agent-director-contract.test.js`、`agent-director-ffmpeg.test.js`、`direct-fast-script.test.js`、全 H3 入口陈旧规则扫描及打包/安装/真实升级验收 | 已验证 |
 
 ## 维护规则
 

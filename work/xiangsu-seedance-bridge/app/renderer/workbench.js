@@ -262,7 +262,7 @@ const promptExampleSamples = Object.freeze({
   storyboardImage: { prompt: "Vertical cinematic storyboard frame, one clear shot objective, specify framing, eyeline, visible characters, prop state, light direction, action and transition reason. Keep the subject count minimal." },
   storyboardStart: { prompt: "First frame anchor: define the exact starting pose, camera distance, spatial axis, wardrobe and prop placement. No collage, no text, no extra characters." },
   storyboardEnd: { prompt: "End frame anchor: describe the visible path from the start state to the final state, with the final action and reaction clearly landed." },
-  hailuoPromptCompiler: { prompt: "Use English for production instructions and Chinese only inside <d>[Chinese]...</d>. Each provider task has one camera owner, one visible mouth owner and at most one speaker; a speaker change ends the task and hard-cuts to the next camera-owned task. Keep exact dialogue, expressive delivery, synchronized diegetic sound, no music and no text overlays." }
+  hailuoPromptCompiler: { prompt: "Use English for production instructions and Chinese only inside <d>[Chinese]...</d>. Compile each 5–15 second continuity block as one provider task with one to five timed camera segments. A speaker change creates an explicit HARD CUT inside the same task and switches camera and mouth ownership together; at every instant only the current speaker opens their mouth. Keep exact dialogue, expressive delivery, synchronized diegetic sound, no music and no text overlays." }
 });
 
 function promptDefinitionForKey(key) {

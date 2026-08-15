@@ -771,6 +771,57 @@ async function analyzeVisualFile(ffmpeg, filePath, duration, sampleFps = 2) {
   }
 }
 
+async function analyzeTimedHardCuts(ffmpeg, filePath, boundaries = [], duration = 0) {
+  const width = 32;
+  const height = 32;
+  const frameBytes = width * height;
+  const safeDuration = Math.max(0.5, Number(duration) || 5);
+  const readFrame = async time => {
+    const output = await spawnBuffer(ffmpeg, [
+      "-hide_banner", "-loglevel", "error", "-ss", String(Math.max(0, Math.min(safeDuration - 0.04, time))),
+      "-i", filePath, "-frames:v", "1",
+      "-vf", `scale=${width}:${height}:flags=area,format=gray`,
+      "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"
+    ], 180_000, frameBytes * 2);
+    if (output.length < frameBytes) throw new Error(`frame missing at ${time}s`);
+    return output.subarray(0, frameBytes);
+  };
+  try {
+    const records = [];
+    for (const rawBoundary of boundaries) {
+      const boundary = Number(rawBoundary);
+      if (!(boundary > 0.3) || boundary >= safeDuration - 0.3) continue;
+      const [farLeft, nearLeft, nearRight, farRight] = await Promise.all([
+        readFrame(boundary - 0.24),
+        readFrame(boundary - 0.08),
+        readFrame(boundary + 0.08),
+        readFrame(boundary + 0.24)
+      ]);
+      const leftMotion = meanAbsoluteDifference(farLeft, nearLeft);
+      const cutDifference = meanAbsoluteDifference(nearLeft, nearRight);
+      const rightMotion = meanAbsoluteDifference(nearRight, farRight);
+      const threshold = Math.max(4.5, Math.max(leftMotion, rightMotion) * 1.8 + 0.8);
+      records.push({
+        boundary: round(boundary, 3),
+        leftMotion: round(leftMotion),
+        cutDifference: round(cutDifference),
+        rightMotion: round(rightMotion),
+        threshold: round(threshold),
+        present: cutDifference >= threshold
+      });
+    }
+    return {
+      ok: true,
+      expected: records.length,
+      detected: records.filter(item => item.present).length,
+      cutsPresent: records.every(item => item.present),
+      boundaries: records
+    };
+  } catch (error) {
+    return { ok: false, expected: boundaries.length, detected: 0, cutsPresent: false, boundaries: [], error: error.message };
+  }
+}
+
 function assessAudioQuality(audio, { hasDialogue = true, final = false } = {}) {
   const limit = final ? QUALITY_LIMITS.finalAudio : hasDialogue ? QUALITY_LIMITS.dialogueShot : QUALITY_LIMITS.ambienceShot;
   const failures = [];
@@ -835,6 +886,7 @@ module.exports = {
   audibleIntervalsFromSilence,
   selectVoiceExtractPlan,
   analyzeVisualFile,
+  analyzeTimedHardCuts,
   analyzeImageFile,
   analyzeSceneFourViewLayout,
   analyzeImageDimensions,

@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { WorkbenchStore } = require("../app/workbench-store");
+const { buildCameraTakePlan } = require("../app/agent-director");
 const {
   assertDirectFastSegment,
   assertDirectFastStorySpine,
@@ -65,7 +66,7 @@ function strictSegmentPayload(start, end, durations = []) {
   payload.s = payload.s.map(shot => {
     const focus = Number(shot.f);
     const seconds = Math.max(5, Math.min(15, Number(durations[Number(shot.i) - 1]) || 10));
-    const budget = dialogueUnitBudget(seconds, { solo: true });
+    const budget = dialogueUnitBudget(seconds, { solo: false });
     const turns = budget.targetTurns;
     const lines = [...shot.d];
     while (lines.length < turns) lines.push([focus, `第${lines.length + 1}句必须继续推进`]);
@@ -80,9 +81,8 @@ function strictSegmentPayload(start, end, durations = []) {
       remaining -= [...trimmed].length;
       return [speaker, trimmed];
     });
-    if (Number(shot.i) % 2 === 0) return { ...shot, v: [focus], d: dialogue.map(([, text]) => [focus, text]) };
     const other = focus === 1 ? 2 : 1;
-    return { ...shot, v: [focus, other], d: dialogue.map(([, text]) => [focus, text]) };
+    return { ...shot, v: [focus, other], d: dialogue.map(([, text], index) => [index % 2 ? other : focus, text]) };
   });
   return payload;
 }
@@ -211,11 +211,11 @@ test("local fallback compiles strict five and ten minute segment contracts", () 
     const options = { targetDurationSeconds: seconds, expectedUnitCount: schedule.unitCount };
     const storyBible = validateStoryBible(materialized.storyBible, options);
     const blueprint = validateBlueprint({ ...storyBible, shotPlan: materialized.plans }, product.name, options);
-    const assignments = allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 1);
+    const assignments = allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 2);
     const shots = validateShotBatch({ shots: materialized.rawShots }, blueprint.shotPlan, product.name, "hailuo-h3", {
       generationMode: "keyframe",
       characters: blueprint.characters,
-      maxSpeakingCharacters: 1,
+      maxSpeakingCharacters: 2,
       requireReferenceDialogueFlow: true,
       allowedSpeakersByShot: h3AllowedSpeakersByShot(assignments)
     });
@@ -247,6 +247,12 @@ test("the direct compiler supports a real 20-second two-shot smoke drama", () =>
   assert.equal(materialized.plans.reduce((sum, shot) => sum + shot.duration, 0), 20);
   assert.deepEqual(materialized.rawShots.map(shot => shot.id), ["S01", "S02"]);
   assert.equal(materialized.plans.at(-1).mainlineStage, "main_reversal");
+  const firstShot = materialized.rawShots[0];
+  assert.deepEqual([...new Set(firstShot.dialogueTurns.map(turn => turn.speakerId))], ["C01", "C02"]);
+  const cameraPlan = buildCameraTakePlan({ characters: materialized.storyBible.characters }, firstShot, { mode: "storyboard_sheet" });
+  assert.equal(cameraPlan.takes.length, 5, "five alternating dialogue turns must remain five camera segments");
+  assert.equal(cameraPlan.generationBlocks.length, 1, "the same exchange must remain one continuous H3 request");
+  assert.deepEqual(cameraPlan.generationBlocks[0].takeIds, cameraPlan.takes.map(take => take.id));
 });
 
 test("the minimum 30-second AI contract has room for a late reversal and a later product shot", () => {
@@ -300,11 +306,11 @@ test("total film duration is unbounded while every text request stays in five-sh
         shot.dialogueTurns.every(turn => turn.text && turn.delivery && turn.body && turn.listenerBeat)
       )));
       if ([300, 600, 1800].includes(totalSeconds)) {
-        const assignments = allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 1);
+        const assignments = allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 2);
         const shots = validateShotBatch({ shots: materialized.rawShots }, blueprint.shotPlan, product.name, "hailuo-h3", {
           generationMode: "keyframe",
           characters: blueprint.characters,
-          maxSpeakingCharacters: 1,
+          maxSpeakingCharacters: 2,
           requireReferenceDialogueFlow: true,
           allowedSpeakersByShot: h3AllowedSpeakersByShot(assignments)
         });
@@ -464,11 +470,11 @@ test("one-call compact script is locally expanded into a 300-second production-r
   const options = { targetDurationSeconds: 300, expectedUnitCount: filmSchedule.unitCount };
   const storyBible = validateStoryBible(materialized.storyBible, options);
   const blueprint = validateBlueprint({ ...storyBible, shotPlan: materialized.plans }, product.name, options);
-  const assignments = allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 1);
+  const assignments = allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 2);
   const shots = validateShotBatch({ shots: materialized.rawShots }, blueprint.shotPlan, product.name, "hailuo-h3", {
     generationMode: "keyframe",
     characters: blueprint.characters,
-    maxSpeakingCharacters: 1,
+    maxSpeakingCharacters: 2,
     requireReferenceDialogueFlow: true,
     allowedSpeakersByShot: h3AllowedSpeakersByShot(assignments)
   });

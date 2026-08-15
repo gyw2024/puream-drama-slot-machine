@@ -11,6 +11,7 @@ const {
   h3ExactStitchFilter,
   probeMediaStreamDuration
 } = require("../app/workbench-workflow");
+const { analyzeTimedHardCuts } = require("../app/media-quality");
 
 const ffmpeg = path.join(__dirname, "..", "media-tools", "ffmpeg.exe");
 
@@ -76,4 +77,27 @@ test("multi-frame storyboard is cropped into a take-only timeline before video s
   assert.equal(fs.existsSync(result), true);
   assert.ok(fs.statSync(result).size > 100);
   run(["-i", result, "-frames:v", "1", "-f", "null", process.platform === "win32" ? "NUL" : "/dev/null"]);
+});
+
+test("timed hard-cut audit distinguishes a real edit from an unchanged clip", async t => {
+  assert.equal(fs.existsSync(ffmpeg), true, "bundled FFmpeg is required");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-agent-cut-audit-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cut = path.join(root, "cut.mp4");
+  const flat = path.join(root, "flat.mp4");
+  run([
+    "-f", "lavfi", "-i", "color=c=red:s=180x320:r=24:d=1",
+    "-f", "lavfi", "-i", "color=c=blue:s=180x320:r=24:d=1",
+    "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[outv]",
+    "-map", "[outv]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", cut
+  ]);
+  run(["-f", "lavfi", "-i", "color=c=red:s=180x320:r=24:d=2", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", flat]);
+  const present = await analyzeTimedHardCuts(ffmpeg, cut, [1], 2);
+  const missing = await analyzeTimedHardCuts(ffmpeg, flat, [1], 2);
+  assert.equal(present.ok, true);
+  assert.equal(present.cutsPresent, true);
+  assert.equal(present.detected, 1);
+  assert.equal(missing.ok, true);
+  assert.equal(missing.cutsPresent, false);
+  assert.equal(missing.detected, 0);
 });

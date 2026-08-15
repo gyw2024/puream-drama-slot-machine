@@ -11,10 +11,10 @@ const {
 } = require("./script-craft");
 
 /**
- * Production defaults — v23.2 isolated-video.
+ * Production defaults — v24 continuity-block video.
  * Text LLM: full K3. Video models: per-clip facts only. Hailuo: official Subject/Picture tags.
  */
-const PROMPT_LIBRARY_VERSION = "2026.08-agent-camera-take-v32.0";
+const PROMPT_LIBRARY_VERSION = "2026.08-continuity-block-v33.0";
 
 function compactWritingPromptTemplates() {
   return {
@@ -26,17 +26,17 @@ function compactWritingPromptTemplates() {
 
     scriptPlanBatch: `你是写实竖屏短剧的分镜策划。只规划指定连续批次，不改故事圣经、人物、场景、反转、商品事实、镜号和总时长。
 每镜只完成一条不可替代因果链：承接stateBefore→触发动作/台词→产生肉眼不同的stateAfter。填写duration、sceneObjective、shotFunction、transitionReason、visualBeat、声场、三段构图和首尾状态；scenePresence只管在场，visibleCharacterIds严格0–2人，至少一半单人近景，第三人另开相邻反应/入场镜。
-每镜必须写dialogueArc：entryCause=刚发生的事实为何逼出首句；speakerGoalA/B=本镜说话人和画外/闭口听者此刻各要什么；newInformation=本镜唯一新增信息；exitConsequence=末句造成的可见动作/决定。每镜指定唯一cameraOwnerId/mouthOwnerId，dialogueGoal按duration只分配该说话人1–3句。双方攻防用相邻镜头接力，换说话人就换机位所有权；连续两个单元由同一人物说话时必须明显升级信息或行动。禁止同义争吵、解释观众已看见的动作、连续查文件或同一证据重演。
+每镜必须写dialogueArc：entryCause=刚发生的事实为何逼出首句；speakerGoalA/B=两名核心人物此刻各要什么；newInformation=本镜唯一新增信息；exitConsequence=末句造成的可见动作/决定。一个Sxx最多2名说话人；dialogueGoal按duration优先保留完整问答，顶层cameraOwnerId/mouthOwnerId只表示开场机位，换说话人时在dialogueTurns/subshots中同步换机位与嘴型。禁止同义争吵、解释观众已看见的动作、连续查文件或同一证据重演。
 主反转和商品窗口只服从运行时累计时间合同。商品按品类完成情境需求→自然动作→可观察结果→人物决定/关系变化：食品可拆包/食用/分享并拍真实口感反应，书籍翻阅并查看关键内容，百货拍真实操作结果；不能固定成疼痛和试戴。
 只输出JSON，根对象只能有shotPlan：{"shotPlan":[本批项]}，不写Markdown或解释。`,
 
     scriptUnitGeneration: `你是写实短剧分镜编剧和导演。只把锁定计划写成当前连续制作单元，不改镜号、顺序、duration、人物、场景、剧情和商品事实。禁止增删镜头、改变shot id/顺序/duration或篡改蓝图。
 对标参考成片口播与切镜：短锤连打、句句新信息、可见动作每拍不同，禁止说明句和同义复读。开场前20秒内必须完成“谁错待谁”的道德站队（事故钩子也要尽快切入人际指控）。
-每镜先执行dialogueArc，再写dialogueTurns。每个海螺生成单元严格只有1名说话人；该人同时拥有cameraOwnerId和mouthOwnerId，可连续说1–3句短锤，另一人即使可见也全程闭口。回应者必须进入下一相邻单元，并把cameraOwnerId/mouthOwnerId一起切给回应者；前60秒保持问答接力，连续两个单元由同一人发声必须明显升级。beat只用attack/deflect/counter/reveal/decision；每句必须改变信息、权力、证据或行动。第三人的信息若不可替代，必须由上游计划拆成相邻单人反应/入场单元；本镜不得让第三人开口、占音色或补进画面。
+每镜先执行dialogueArc，再写dialogueTurns。一个海螺连续剧情单元允许锁定的2名人物完成2–5轮自然问答；每次speakerId变化都要在subshotNumber/时间顺序上形成硬切点，当前说话人拥有该段cameraOwnerId和mouthOwnerId，听者闭口反应。前60秒优先完成问答而非拆成空洞独白；beat只用attack/deflect/counter/reveal/decision，每句必须改变信息、权力、证据或行动。第三人的信息若不可替代，必须由上游计划拆成相邻单人反应/入场单元；本镜不得让第三人开口、占音色或补进画面。
 text只放真台词，单句优先4–10个可说汉字（冲突锤句可到12字）；禁止解释观众已看见的画面、禁止空壳语气词、禁止省略号顶戏、禁止“我不是故意/你听我说”等注水开场。称谓要带关系刃（妈/爸/亲爹/外公），器物名只在改变权力时出现。
 核心物证、门牌、病历、证书或商品上必须让观众读准的中文写入criticalOnScreenText（text/start/end/anchor/purpose），逐字使用真实汉字；图像和视频模型只拍干净空白承载面，禁止让模型自行画字，应用在成片阶段确定性叠加。非核心装饰文字一律不要生成。
-对白容量按duration动态计算：5–7秒通常1句、8–12秒通常2句、13–15秒通常3句；末句完整并留约20%给呼吸、动作和反应，不得为凑字数把同一句拆碎。
-每镜恰好3个连续subshots，但三段时长禁止等分：它们只表示同一机位、同一cameraOwnerId/mouthOwnerId内的起句蓄力→情绪峰值与重音→余震/动作结果；禁止内部正反打、切听者或换嘴。逐秒合图的secondPanels每格继承同一所有权，只推进表演和动作状态。cutReason只写本镜如何桥接下一原子镜头。五拍打脸必须跨相邻2–3个生成单元完成，不得塞进单镜第三人。
+对白容量按duration动态计算：5–7秒双人通常2句、8–12秒通常3–5句、13–15秒通常4–6句；单人动作短锤按1–3句，末句完整并留约20%给呼吸、动作和反应，不得为凑字数把同一句拆碎。
+每镜恰好3个连续subshots且时长禁止等分：可表示起句→回应/峰值→余震/动作结果；每段只允许当前mouthOwner开口，换speakerId时按时间点硬切正反打并保持180度轴线。逐秒合图的secondPanels按相同时间顺序改变机位和嘴型所有权。五拍打脸仍跨相邻2–3个生成单元完成，不得塞进单镜第三人。
 表演逐句从当下情境推导：赶人/护短要急促高压、重咬字、鼻翼与下颌绷紧；受辱/委屈要低音慢速、断续吸气、尾字发颤或哭腔；知恩懊悔要失声→破音→哭着说完短句、膝软或伸手又缩回。禁止全片平静中速，也禁止无差别吼叫。声音只写连续bed与同步SFX：稳定低存在感bed与画面有来源的一次同步SFX，不要背景音乐、气泡音、电子啁啾、口腔爆音或随机装饰拟音；需要设计抽音静默时写 silenceBeat（起止秒+理由），其余时段禁止干声。首尾帧/延续/合图只改时间锚，口播·切镜·表演·SFX水位同一合同。商品只按锁定窗口与品类动作拍，不得为食品强造疼痛、不得为百货强造饥饿、不得固定写成试戴。relationOrDecisionShift 只能由本镜 visibleCharacterIds 内人物通过可见动作完成。书籍按“翻阅→看到与剧情选择相关的关键内容→认知或行动变化→角色自然推荐”拍。
 只输出符合schema的完整JSON，不输出hailuoPrompt、分析或额外字段；派生图像/视频提示由系统编译。`,
   };
@@ -757,15 +757,15 @@ N/A`,
 Write ONLY facts executable inside THIS one clip. Do not mention whole-film acts, product windows, film-law checklists, cutlists, or post-mix worksheets.
 
 Rules:
-1. Drama-first: summaryEn is an irreversible atomic camera task (because X → does Y → visible new state Z), not a process checklist. visualEn translates emotionBeat/faceAction/bodyAction/voiceDelivery into concrete muscle, body, breath and voice performance BEFORE composition boilerplate. The three authored phases must visibly progress without changing camera or mouth ownership.
-1b. Every clip has exactly one cameraOwnerId and at most one mouthOwnerId/speaker. visualEn must state exact framing, subject IDs (C01…), left/right and foreground/background positions, eyeline, wardrobe, held-prop hand, stateBefore → ONE continuous visible action chain → stateAfter, lighting and end pose. The speaker looks into the listener's eyes, never the camera. A speaker change belongs to the next provider task and is joined by a local hard cut.
-1a. Camera language is natural English in the form "movement type + optional amplitude + optional speed". Use one primary continuous camera setup for the whole clip and at most one gentle operation. Prefer static framing for dense dialogue; use a small slow push-in, pan or track only when it preserves the same camera owner. Never request an internal reverse shot, listener insert, evidence insert, second angle or decorative cut.
-2. Keep the supplied performance-phase count/order. visibleCharacterIds = on-screen only; offscreenSpeakerIds = off-screen speakers. A visible listener stays silent with closed lips; never introduce a second voice or second speaking mouth.
+1. Drama-first: summaryEn is one irreversible 5–15s continuity block (because X → does Y → visible new state Z), not a process checklist. visualEn translates emotionBeat/faceAction/bodyAction/voiceDelivery into concrete muscle, body, breath and voice performance BEFORE composition boilerplate.
+1b. The clip may contain one to five timed camera-owned segments. Every segment has exactly one cameraOwnerId and at most one mouthOwnerId/speaker. A speaker change stays inside this provider task and creates an explicit HARD_CUT time boundary that switches cameraOwnerId and mouthOwnerId together. The current speaker looks into the listener's eyes, never the camera; the listener keeps closed lips.
+1a. Camera language is natural English in the form "movement type + optional amplitude + optional speed". Keep each segment's camera stable; use a small slow push-in, pan or track only inside that segment. Use direct HARD CUT for authored speaker/reaction/evidence angle changes; never dissolve, morph, drift through faces or use a pan as a substitute for the required cut.
+2. Keep the supplied dialogue-turn and performance-phase order. visibleCharacterIds = on-screen only; offscreenSpeakerIds = off-screen speakers. At every instant only the current mouth owner speaks; never introduce an extra voice or a second simultaneously speaking mouth.
 3. keyframe: path from start state to end state with unequal editorial beats and distinct face/body/action per subshot. continuation: continue prior end-state without replay/reset; keep bed continuity across the join. storyboard_sheet: treat contact-sheet panels as an ordered timeline; each panel must show a DIFFERENT visible action/face/body beat; never render grid/gutters/labels/UI as a frame.
 4. Same interior/exterior for the whole unit; no teleport.
 5. soundEn: concrete bed for THIS room + synced SFX on visible actions only (no BGM/underscore). overallSoundscapeEn covers 0.00→duration with no dry-speech holes; if continuation, say the bed continues from the previous unit without head/tail dropout. nonDiegeticMusicEn must always be N/A.
 6. 30–80 English words per visualEn; every word must describe visible performance, physical action, composition, continuity or camera execution. No plot synopsis, moral summary or generic confrontation wording.
-7. All modes share reference-parity drama: irreversible atomic task, short punchy Chinese dialogue inserted later by the app, max two visible faces, one speaking mouth for the entire provider task. Dialogue/eyeline/matched-action/object/entrance/sound motivates only the boundary to the next task; it never authorizes an internal speaker cut.
+7. All modes share reference-parity drama: one irreversible continuity block, short punchy Chinese dialogue inserted later by the app, max two visible faces, and one speaking mouth per timed segment. Dialogue/eyeline/matched-action/object/entrance/sound motivates each HARD CUT inside the block; a new provider task is only a validated local fallback for provider limits or failed cut QC.
 
 Output: {"styleEn":"...","summaryEn":"...","subshots":[{"number":1,"visualEn":"...","soundEn":"...","visibleCharacterIds":["C01"],"offscreenSpeakerIds":[]}],"overallSoundscapeEn":"...","nonDiegeticMusicEn":"..."}`,
 

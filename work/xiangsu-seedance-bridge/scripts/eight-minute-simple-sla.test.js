@@ -85,5 +85,6 @@ test("writing and blueprint review use one shared dialogue contract", () => {
   assert.doesNotMatch(workflowSource, /spokenCharactersPerMinute >= 190/);
   const compiled = compileTextStagePrompt("旧提示：每镜固定6句，每分钟20轮、190字。", {}, "units");
   assert.ok(compiled.lastIndexOf("写作与蓝图审核共享合同") > compiled.indexOf("每分钟20轮"));
-  assert.match(compiled, /旧提示中的多人同镜轮流开口、每镜固定6句\/8句/);
+  assert.match(compiled, /旧提示中的“每S唯一说话人、换人必须下一S、三个subshots固定同一机位”及每镜固定6句\/8句/);
+  assert.ok(compiled.lastIndexOf("H3连续剧情块最终覆盖规则") > compiled.indexOf("参考成片制作单元合同"));
 });

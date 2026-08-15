@@ -9,7 +9,15 @@
  * - the same reference-film contract is shared by writing, images and video.
  */
 
-const REFERENCE_PARITY_PROMPT_VERSION = "2026.08-agent-camera-take-v9";
+const REFERENCE_PARITY_PROMPT_VERSION = "2026.08-continuity-block-v10";
+
+const CONTINUITY_BLOCK_OVERRIDE = `【H3连续剧情块最终覆盖规则】一个Sxx是5–15秒剧情块，不是固定单人机位；最多2名说话人的自然问答保留在同一Sxx。每次speakerId变化都形成明确时间码HARD CUT，并同步切换cameraOwnerId/mouthOwnerId，当前说话人开口、听者闭口。导演Agent把轮次编译为原子机位段后，优先合并成同一个H3视频任务；只有提示过长、上游拒绝或成片缺少预期切镜时，才局部回退为原子任务并精确拼接。禁止BGM、字幕、人物介绍、错嘴、溶解变脸和参考板入片。`;
+const CONTINUITY_OVERRIDE_KEYS = new Set([
+  "referenceParityShotPlan",
+  "referenceParityUnits",
+  "referenceParityHailuoCompiler",
+  "referenceParityHailuoVideo"
+]);
 
 const STAGE_TO_KEY = Object.freeze({
   story_bible: "referenceParityStoryBible",
@@ -84,24 +92,24 @@ function defaultReferenceParityTemplates() {
 
     referenceParitySeedanceVideo: `【十部参考成片同规格·Seedance本镜硬合同·全模式】严格按图/视频/音频编号使用参考：首尾帧、上一视频或逐秒合图只控制本镜时间锚，人物/服装/道具/商品图只控制对应资产，音频只控制同名角色音色；场景图是2×2四角度板，只选与本镜机位匹配的一格来锁门窗家具与光向，最终视频禁止出现四宫格、边框或参考板。完整执行0→duration的动作与对白顺序；说话人看听者且仅其开口，听者闭嘴并给反应，不对镜头。镜头必须从首态推进到肉眼不同的尾态；三段/多格动作·表情·身体必须互异，禁止等分空镜与整板复制。禁止复刻参考板、重复前镜构图、人物换脸换装、空间反转、商品早泄。环境底噪与同步SFX覆盖全段，头尾不得掉声；禁止背景音乐/BGM。首尾帧模式走首→尾因果链；延续模式无缝承接上一视频末态；合图模式按格序演绎且禁止格线序号入成片。`,
 
-    referenceParityHailuoCompiler: `REFERENCE-DIRECTOR PARITY — ATOMIC CAMERA COMPILER (DRAMA FIRST, ALL MODES):
-- Compile one isolated 5–15s irreversible camera-owned task: cause → visible action → new state the viewer can see.
-- Lock exactly one cameraOwnerId and at most one mouthOwnerId/speaker for the entire task. A speaker change ends this task and becomes the next task, joined by a local hard cut.
-- Translate emotionArc/performanceBeats into concrete English face, body, breath and voice performance before continuity boilerplate. Treat subshots/panels as progressive phases of this same continuous camera setup, never as an internal reverse shot.
-- Keep zero-to-two visibleCharacterIds. The visible listener stays silent with closed lips; each panel advances the same speaker's performance/action without changing camera or mouth ownership.
+    referenceParityHailuoCompiler: `REFERENCE-DIRECTOR PARITY — CONTINUITY-BLOCK COMPILER (DRAMA FIRST, ALL MODES):
+- Compile one 5–15s irreversible continuity block: cause → visible action/dialogue exchange → new state the viewer can see.
+- The block may contain one to five timed camera segments. Each segment locks exactly one cameraOwnerId and at most one mouthOwnerId/speaker. Every speaker change creates an explicit HARD CUT inside this same provider task and switches both owners together.
+- Translate emotionArc/performanceBeats into concrete English face, body, breath and voice performance before continuity boilerplate. Subshots/panels may carry an authored reverse shot when the dialogue turn changes; never use dissolves, morphs or decorative cuts.
+- Keep zero-to-two visibleCharacterIds. At every instant the current speaker owns the only moving mouth while the visible listener stays silent with closed lips and reacts.
 - Mode anchors: keyframe = first→last causal chain; continuation = prior end-state without replay/reset; storyboard_sheet = ordered panels, never render grid/UI as a frame.
 - The scene reference is one 2-by-2 four-angle board of the same space. Select only the panel matching the authored camera axis to preserve doors, windows, furniture and light; never render the board, gutters or labels in the video.
 - The speaker looks at the listener, never the camera; only the matching mouth owner opens the mouth.
-- Dialogue/eyeline/matched-action/object/entrance/sound motivates the boundary to the next provider task. Never request an internal cut, reverse angle, listener insert or second speaking mouth. Keep micro-motion through the final frame.
+- Dialogue/eyeline/matched-action/object/entrance/sound motivates each internal HARD CUT. Use a separate provider task only as a validated fallback for prompt/provider limits or missing-cut QC. Keep micro-motion through the final frame.
 - Continuous bed + synced SFX only; nonDiegeticMusicEn always N/A; never BGM/underscore. Product packshot/detail: product 45–75%, no extra face/hand. English JSON only.`,
 
-    referenceParityHailuoVideo: `REFERENCE-DIRECTOR PARITY — FINAL ATOMIC CAMERA TASK (DRAMA FIRST, ALL MODES): render one irreversible live-action beat with rising performance intensity (start→trigger→peak→aftershock). Lock the supplied cameraOwnerId for the full task; allow at most one mouthOwnerId and one exact Chinese voice. A visible listener remains silent with closed lips. Never cut or pan to a second speaker inside this task; speaker change is the next provider task and a local hard cut. Execute authored face/body/voice change, continuous bed/SFX only (no BGM/underscore), and micro-motion through the end. Use only the matching panel of the scene reference to lock doors, windows, furniture and light; never render boards, gutters, labels or UI. Keyframe / continuation / storyboard-sheet only change temporal anchors. Never flatten acting, freeze, show subtitles, add a third face, invent an establishing reset or create an internal reverse shot.`
+    referenceParityHailuoVideo: `REFERENCE-DIRECTOR PARITY — FINAL CONTINUITY BLOCK (DRAMA FIRST, ALL MODES): render one 5–15s irreversible live-action block with rising performance intensity (start→trigger→peak→aftershock). Follow the supplied timed camera segments in order. Each segment has one cameraOwnerId, one mouthOwnerId and one exact Chinese voice; a speaker change is an explicit HARD CUT inside this same task and switches camera and mouth ownership together. At every instant the listener remains silent with closed lips and reacts. Execute authored face/body/voice change, continuous bed/SFX only (no BGM/underscore), and micro-motion through the end. Use only the matching panel of the scene reference to lock doors, windows, furniture and light; never render boards, gutters, labels or UI. Keyframe / continuation / storyboard-sheet only change temporal anchors. Never flatten acting, freeze, show subtitles, add a third face, dissolve, morph or invent an establishing reset.`
   };
   return {
     ...templates,
     referenceParityStoryBible: `【参考成片故事合同】0–8秒用可见危机开场；主线必须能复述为“受难→善举与代价→利益伤害→已铺垫的人/事实清算→行动好结局”。每15–30秒改变风险、信息、资源、证据或站队，每30–75秒换任务或有动机换场。只选一种故事机制；非证据谜题禁止硬加双证、查手机和隐藏身份。唯一主反转位于累计65%–80%。角色脸/体态/声线/动作指纹互异，场景锁空间和主光。商品只在反转后且累计≥65%以品类动作自然进入。`,
-    referenceParityShotPlan: `【参考成片分镜合同】每镜只做一件改变剧情状态的事，并写“因X→说/做Y→导致Z”。scenePresence不等于入画；visibleCharacterIds最多2人，至少一半单人近景，第三人另开反应/入场镜。每镜写dialogueArc、duration对白容量、唯一cameraOwnerId与mouthOwnerId。海螺每镜最多一人发声；双方问答用相邻镜头接力，说话人一变就同步切换机位与嘴型所有权。三个subshots只表示同一机位内的表演递进；台词、视线、动作、物件、入场或声音只负责桥接到下一原子镜头。商品按整体/细节/品类动作/客观结果/受益者反应拆职责。`,
-    referenceParityUnits: `【参考成片制作单元合同·全模式】每镜恰好3个连续subshots，时长禁止等分；海螺三段必须继承同一cameraOwnerId/mouthOwnerId，只推进起句蓄力→情绪峰值→余震/动作结果，禁止内部正反打或切到听者。只用锁定的0–2名可见人物且最多一人开口，听者闭口反应；回应者进入下一相邻镜头。dialogueTurns按dialogueArc形成attack/deflect/counter/reveal/decision，5–15秒通常由同一人说1–3句短锤，句句新增信息或改变权力/行动；开场前20秒完成“谁错待谁”道德站队。text只放台词，delivery合并声音表演，body和listenerBeat写可见反应。bed与同步SFX覆盖全段，禁止背景音乐。逐秒合图的secondPanels每格继承同一所有权，只推进表演、动作与构图状态；禁止整板复制、换嘴或换机位。`
+    referenceParityShotPlan: `【参考成片分镜合同】每个Sxx是5–15秒连续剧情块，只做一条“因X→说/做Y→导致Z”的状态改变。scenePresence不等于入画；visibleCharacterIds最多2人，第三人另开反应/入场剧情块。保留最多2名说话人的自然问答与原始轮次；顶层cameraOwnerId/mouthOwnerId只表示开场机位，不限制整段。每次speakerId变化都必须形成带时间码、cutReason、cameraOwnerId和mouthOwnerId的明确正反打，当前说话人开口、听者闭口反应。导演Agent先编译原子机位段，再优先合并为一个H3连续视频任务；仅在提示过长、上游拒绝或切镜质检失败时局部回退。商品按整体/细节/品类动作/客观结果/受益者反应拆职责。`,
+    referenceParityUnits: `【参考成片制作单元合同·全模式】每个Sxx保留恰好3个不等长宏观subshots；对白轮次可在subshot内部继续细分为带时间码的原子机位段。只用锁定的0–2名可见人物；每个时间段只能有一个mouthOwnerId开口，speakerId变化时同步HARD CUT到对应cameraOwnerId，允许同一Sxx内完成自然正反打。dialogueTurns按attack/deflect/counter/reveal/decision推进，句句新增信息或改变权力/行动；text只放原始台词，delivery、body和listenerBeat写可执行表演。导演Agent将全部机位段编译成一个≤15秒H3连续生成块；逐秒合图随时间继承相应机位和嘴型所有权，不得把参考板、格线或标签带入成片。bed与同步SFX覆盖全段，禁止背景音乐、字幕、人物介绍。`
   };
 }
 
@@ -112,10 +120,15 @@ function referenceParityPromptKey(stage) {
 function referenceParityFor(prompts, stage) {
   const key = referenceParityPromptKey(stage);
   if (!key) return "";
+  let value;
   if (prompts && Object.prototype.hasOwnProperty.call(prompts, key)) {
-    return String(prompts[key] || "").trim();
+    value = String(prompts[key] || "").trim();
+  } else {
+    value = String(defaultReferenceParityTemplates()[key] || "").trim();
   }
-  return String(defaultReferenceParityTemplates()[key] || "").trim();
+  return CONTINUITY_OVERRIDE_KEYS.has(key)
+    ? [value, CONTINUITY_BLOCK_OVERRIDE].filter(Boolean).join("\n\n")
+    : value;
 }
 
 function appendReferenceParity(base, prompts, stage) {
