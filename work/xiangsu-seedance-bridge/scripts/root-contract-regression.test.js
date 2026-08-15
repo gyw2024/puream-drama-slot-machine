@@ -40,6 +40,9 @@ test("final stitch never renders authored text overlays", () => {
   assert.deepEqual(criticalTextOverlayFilters(shot), []);
   assert.equal(finalCriticalTextOverlayFilter([shot]), "");
   assert.doesNotMatch(h3ExactStitchFilter([shot], 10, 24), /drawtext|人物介绍/);
+  const missingAudio = h3ExactStitchFilter([{ duration: 3.5, hasAudio: false }, { duration: 6.5, hasAudio: true }], 10, 24);
+  assert.match(missingAudio, /anullsrc=r=48000:cl=stereo/);
+  assert.match(missingAudio, /\[1:a:0\]aresample=48000/);
 });
 
 test("installer and durable storage are user-selectable without deleting old data", () => {
@@ -58,6 +61,16 @@ test("installer and durable storage are user-selectable without deleting old dat
   assert.doesNotMatch(main.slice(main.indexOf('ipcMain.handle("workbench:choose-storage-location"'), main.indexOf('ipcMain.handle("workbench:save-settings"')), /rmSync|unlinkSync/);
 });
 
+test("legacy video IPC has no provider bypass around the global Agent", () => {
+  const main = fs.readFileSync(path.join(repo, "app", "main.js"), "utf8");
+  const legacySubmit = main.slice(main.indexOf('ipcMain.handle("video:submit"'), main.indexOf('ipcMain.handle("video:query"'));
+  const legacyQuery = main.slice(main.indexOf('ipcMain.handle("video:query"'), main.indexOf('ipcMain.handle("file:reveal"'));
+  assert.match(legacySubmit, /executeAdaptiveCapability\("video_submit"/);
+  assert.doesNotMatch(legacySubmit, /return await bridge\.submit/);
+  assert.match(legacyQuery, /executeAdaptiveCapability\("video_query"/);
+  assert.doesNotMatch(legacyQuery, /await bridge\.query/);
+});
+
 test("all three downloadable examples are complete seven-minute scripts", () => {
   const renderer = fs.readFileSync(path.join(repo, "app", "renderer", "workbench.js"), "utf8");
   assert.match(renderer, /420秒（42个10秒生产单元）/);
@@ -65,6 +78,14 @@ test("all three downloadable examples are complete seven-minute scripts", () => 
   assert.match(renderer, /production: buildSevenMinuteScriptExample\("production"\)/);
   assert.match(renderer, /dialogue: buildSevenMinuteScriptExample\("dialogue"\)/);
   assert.match(renderer, /timed_storyboard: buildSevenMinuteScriptExample\("timed_storyboard"\)/);
+});
+
+test("live upgrade audit preserves recoverable deleted projects as SQLite authority", () => {
+  const audit = fs.readFileSync(path.join(repo, "scripts", "audit-live-upgrade.js"), "utf8");
+  assert.match(audit, /deleted-projects/);
+  assert.match(audit, /recoverableDeletedProjectIds/);
+  assert.match(audit, /expectedAuthoritativeProjectStateCount/);
+  assert.doesNotMatch(audit, /counts\?\.project_state === appState\.projectCount(?:\s|\n)/);
 });
 
 test("character assets use one exact solid background contract", () => {

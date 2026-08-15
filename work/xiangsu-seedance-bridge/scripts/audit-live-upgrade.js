@@ -5,6 +5,26 @@ const path = require("node:path");
 const assert = require("node:assert/strict");
 const { _electron: electron } = require("playwright-core");
 
+function recoverableDeletedProjectIds(databasePath) {
+  const deletedProjectsRoot = path.join(path.dirname(databasePath || ""), "deleted-projects");
+  if (!databasePath || !fs.existsSync(deletedProjectsRoot)) return [];
+  const projectIds = new Set();
+  for (const entry of fs.readdirSync(deletedProjectsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const metadataPath = path.join(deletedProjectsRoot, entry.name, "deleted-project.json");
+    if (!fs.existsSync(metadataPath)) continue;
+    try {
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+      if (typeof metadata.projectId === "string" && metadata.projectId.trim()) {
+        projectIds.add(metadata.projectId.trim());
+      }
+    } catch {
+      // Invalid archive metadata is deliberately not counted as recoverable authority.
+    }
+  }
+  return [...projectIds].sort();
+}
+
 async function settleAssetImages(page) {
   return page.evaluate(async () => {
     const images = [...document.querySelectorAll('img[src^="puream-asset://"]')];
@@ -103,6 +123,10 @@ async function main() {
     await page.evaluate(() => document.querySelector("#reusableAssetDialog")?.close());
     const blankProjectImages = projectMedia.flatMap(project => project.stages.flatMap(stage => stage.blankImages.map(image => ({ projectId: project.projectId, stage: stage.stage, ...image }))));
     const blankReusableImages = reusableImages.filter(image => !image.complete || image.naturalWidth <= 0 || image.naturalHeight <= 0);
+    const recoverableDeletedIds = recoverableDeletedProjectIds(appState.foundryStatus?.status?.databasePath);
+    const visibleProjectIds = new Set(appState.projectIds);
+    const recoverableDeletedOnlyIds = recoverableDeletedIds.filter(projectId => !visibleProjectIds.has(projectId));
+    const expectedAuthoritativeProjectStateCount = appState.projectCount + recoverableDeletedOnlyIds.length;
 
     const screenshotPath = path.join(runDir, "live-upgrade-background.png");
     const pngBase64 = await electronApp.evaluate(async ({ BrowserWindow }) => {
@@ -114,7 +138,7 @@ async function main() {
       ok: appState.version === packageJson.version
         && appState.foundryStatus?.status?.ok === true
         && appState.projectCount === appState.loadCount
-        && appState.foundryStatus?.status?.counts?.project_state === appState.projectCount
+        && appState.foundryStatus?.status?.counts?.project_state === expectedAuthoritativeProjectStateCount
         && appState.activeAutomationCount === 0
         && appState.activeJobCount === 0
         && reusableLibraryOpenMs <= 5_000
@@ -125,6 +149,9 @@ async function main() {
       screenshotPath,
       ...appState,
       projectMedia,
+      recoverableDeletedProjectIds: recoverableDeletedOnlyIds,
+      recoverableDeletedProjectCount: recoverableDeletedOnlyIds.length,
+      expectedAuthoritativeProjectStateCount,
       reusableLibraryOpenMs,
       reusableLibraryBudgetMs: 5_000,
       reusableAssetImageCount: reusableImages.length,

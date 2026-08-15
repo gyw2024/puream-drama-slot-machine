@@ -89,20 +89,20 @@ test("complete dialogue script keeps background anchors, order and lineage", () 
   assert.match(script, /故事事实、事件顺序、人物关系、结局和商品出现节点保持不变/);
 });
 
-test("upstream rewrite failure falls back locally and still produces a complete usable script", async () => {
+test("upstream rewrite failure preserves the original and never substitutes a local creative rewrite", async () => {
   const project = projectFixture();
   const workflow = workflowFixture(project);
   workflow.generateText = async () => { throw Object.assign(new Error("upstream unavailable"), { code: "UPSTREAM_NETWORK_ERROR" }); };
   const original = "A（焦急）：妈，你怎么一个人来了？\nB（喘着气）：我怕你又把药忘在家里。";
-  const result = await workflow.rewriteDialogueScript(project.id, original, { track: false });
-  assert.equal(result.script.dialogueRewrite.fallback, true);
-  assert.equal(result.script.dialogueRewrite.preservedStory, true);
-  assert.equal(result.productionPlan.scriptFormat, "dialogue");
-  assert.equal(result.productionPlan.scriptFormatConfirmed, true);
-  assert.match(result.script.raw, /妈，你怎么一个人来了/);
-  assert.match(result.script.raw, /我怕你又把药忘在家里/);
-  assert.equal(result.currentStage, "script");
-  assert.equal(result.automation, undefined);
+  await assert.rejects(
+    workflow.rewriteDialogueScript(project.id, original, { track: false }),
+    error => error?.code === "DIALOGUE_REWRITE_AGENT_RESULT_REQUIRED"
+      && error?.agentRequired === true
+      && error?.localCreativeFallbackUsed === false
+  );
+  assert.equal(project.script.raw, "");
+  assert.equal(project.script.dialogueRewrite, undefined);
+  assert.equal(project.currentStage, "script");
 });
 
 test("dialogue rewrite UI and IPC expose a direct non-destructive entry", () => {

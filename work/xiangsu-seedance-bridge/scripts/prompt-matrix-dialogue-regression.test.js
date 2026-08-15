@@ -250,6 +250,96 @@ test("asset, storyboard and Xiangsu video prompts share story, dialogue, product
   assert.match(videoPrompt, /xiangsu:keyframe/);
 });
 
+test("storyboard sheets map every panel to an atomic camera and mouth owner without rewriting the authored action", () => {
+  const ledger = parseSourceDialogueLedger(uploadedScript);
+  const baseProject = {
+    ...projectFixture(),
+    generation: {
+      ...projectFixture().generation,
+      engine: "hailuo-h3",
+      videoProviderKind: "puream-hailuo-h3",
+      mode: "storyboard_sheet"
+    }
+  };
+  const bound = bindSourceDialogueLedgerToAnalysis(analysisFixture(ledger), ledger);
+  const normalized = applyUploadedProductBindings(normalizeAnalysis(bound, baseProject), baseProject);
+  const shot = {
+    ...normalized.shots[0],
+    cameraOwnerId: "C01",
+    mouthOwnerId: "C01",
+    action: "林娜跪地攥紧旧账本，带着哭腔重读三十年；秦添站在画外闭口",
+    secondPanels: Array.from({ length: 10 }, (_item, second) => ({
+      second,
+      cameraOwnerId: "C01",
+      mouthOwnerId: "C01",
+      speakerId: "C01",
+      listenerIds: ["C02"],
+      visibleCharacterIds: ["C01"],
+      framing: "林娜单人近景",
+      camera: "同一机位缓慢推进",
+      action: second < 7 ? "林娜跪地攥紧旧账本并说话" : "林娜说完后闭口急喘"
+    }))
+  };
+  const project = {
+    ...baseProject,
+    characters: normalized.characters,
+    scenes: normalized.scenes,
+    shots: [shot],
+    script: { ...baseProject.script, sourceDialogueLedger: ledger }
+  };
+  const prompt = WorkbenchWorkflow.prototype.compileImagePrompt.call({}, project, settingsFixture(), "storyboard_sheet", shot);
+  assert.match(prompt, /Agent原子镜头画格表/);
+  assert.match(prompt, /S01-T01[^\n]*cameraOwnerId=C01，mouthOwnerId=C01/);
+  assert.match(prompt, /S01-T02[^\n]*cameraOwnerId=C02，mouthOwnerId=C02/);
+  assert.match(prompt, /林娜跪地攥紧旧账本/);
+  assert.match(prompt, /前一人立即闭口/);
+  assert.match(prompt, /所有格内禁止序号、角标、字幕/);
+  assert.doesNotMatch(prompt, /允许极小角标/);
+  assert.doesNotMatch(prompt, /和解|鞠躬/);
+});
+
+test("legacy multi-speaker storyboard sheets hard-cut the panel camera at every speaker boundary", () => {
+  const settings = settingsFixture();
+  const project = {
+    ...projectFixture(),
+    generation: {
+      ...projectFixture().generation,
+      engine: "hailuo-h3",
+      videoProviderKind: "puream-hailuo-h3",
+      mode: "storyboard_sheet"
+    },
+    characters: [
+      { id: "C01", name: "林娜" },
+      { id: "C02", name: "秦添" }
+    ]
+  };
+  const shot = {
+    id: "S01",
+    number: 1,
+    duration: 10,
+    visibleCharacterIds: ["C01", "C02"],
+    visibleCharacterNames: ["林娜", "秦添"],
+    action: "林娜先质问，秦添随后回答",
+    subshots: [{
+      start: 0,
+      end: 10,
+      visibleCharacterIds: ["C01", "C02"],
+      dialogueTurns: [
+        { speakerId: "C01", listenerIds: ["C02"], text: "你为什么瞒着我？" },
+        { speakerId: "C02", listenerIds: ["C01"], text: "我怕你知道真相。" }
+      ]
+    }]
+  };
+  project.shots = [shot];
+  const prompt = WorkbenchWorkflow.prototype.compileImagePrompt.call({}, project, settings, "storyboard_sheet", shot);
+  assert.match(prompt, /Agent原子镜头画格表/);
+  assert.match(prompt, /S01-T01[^\n]*cameraOwnerId=C01[^\n]*S01-T02[^\n]*cameraOwnerId=C02/);
+  assert.match(prompt, /说话人变化的边界必须真实硬切到新说话人的反打机位/);
+  assert.match(prompt, /cameraOwner=C01/);
+  assert.match(prompt, /cameraOwner=C02/);
+  assert.match(prompt, /在S01-T02边界硬切并锁定秦添/);
+});
+
 test("dialogue parity rejects omissions, rewrites, duplicates and speaker swaps", () => {
   const ledger = parseSourceDialogueLedger(uploadedScript);
   const project = projectFixture();

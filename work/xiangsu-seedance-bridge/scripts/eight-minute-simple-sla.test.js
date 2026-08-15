@@ -14,7 +14,7 @@ const {
   theoreticalTopicToAssetsUpperBoundMs
 } = require("../app/drama-writing-contract");
 
-test("eight-minute simple mode reaches assets under the fifteen-minute contract even when every upstream text request fails", async t => {
+test("eight-minute simple mode fails closed when the creative Agent is unavailable", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-eight-minute-sla-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -52,43 +52,24 @@ test("eight-minute simple mode reaches assets under the fifteen-minute contract 
     }
   });
 
-  const startedAt = Date.now();
-  const topicsReady = await workflow.generateTopicOptions(created.id);
-  assert.equal(topicsReady.ideation.status, "ready");
-  assert.equal(topicsReady.ideation.generationSource, "local-fallback");
-  assert.equal(topicsReady.ideation.topics.length, 10);
-  assert.ok(new Set(topicsReady.ideation.topics.map(item => item.relationship)).size >= 5);
-  assert.equal(calls.length, 1, "topic fallback must not issue a second billable request");
+  await assert.rejects(
+    workflow.generateTopicOptions(created.id),
+    error => error?.code === "TOPIC_AGENT_RESULT_REQUIRED"
+      && error?.agentRequired === true
+      && error?.localCreativeFallbackUsed === false
+  );
+  const failed = store.getProject(created.id);
+  assert.equal(failed.ideation.status, "failed");
+  assert.equal(failed.ideation.generationSource, "agent");
+  assert.equal(failed.ideation.topics.length, 0);
+  assert.equal(calls.length, 1, "Agent failure must not issue a second billable request or use a fixed local topic batch");
 
-  store.patchProject(created.id, { ideation: { ...topicsReady.ideation, selectedTopicId: topicsReady.ideation.topics[0].id, status: "topic_selected" } });
-  const completed = await workflow.generateCompleteScript(created.id);
-  const elapsedMs = Date.now() - startedAt;
   const schedule = planFilmSchedule(480, "puream-hailuo-h3", { engine: "hailuo-h3" });
-  const segmentCount = Math.ceil(schedule.unitCount / 5);
-  assert.equal(completed.currentStage, "assets");
-  assert.equal(completed.shots.length, schedule.unitCount);
-  assert.equal(completed.shots.reduce((sum, shot) => sum + Number(shot.duration || 0), 0), 480);
-  assert.equal(completed.script.qualityAudit.ok, true, completed.script.qualityAudit.failures?.map(item => item.message).join("；"));
-  assert.equal(completed.script.semanticReview.ok, true);
-  assert.equal(completed.script.semanticReview.skipped, false);
-  assert.equal(completed.script.semanticReview.localDeterministic, true);
   assert.equal(Object.values(store.getSettings().generation.blueprintAuditChecks).every(Boolean), true);
-  const normalizedKey = value => String(value || "").replace(/[A-Z]?\d+/gi, "#").replace(/[\s，。！？、；：,.!?;:]/g, "");
-  const actions = completed.shots.map(shot => normalizedKey(shot.action));
-  const dialogueLines = completed.shots.flatMap(shot => (shot.dialogueTurns || []).map(turn => normalizedKey(turn.text)));
-  assert.ok(new Set(actions).size / actions.length >= 0.9, "local fallback actions must remain visually distinct");
-  assert.ok(new Set(dialogueLines).size / dialogueLines.length >= 0.75, "local fallback dialogue must not repeat stock lines");
-  assert.equal(dialogueLines.filter(line => /[的是在有要把于怎]$/.test(line)).length, 0, "fallback dialogue must never end in a truncated phrase");
-  assert.equal(completed.script.generationPerformance.metTopicToAssetsTarget, true);
-  assert.ok(completed.script.generationPerformance.localFallbackCount >= segmentCount + 1);
-  assert.equal(calls.length, 1 + 1 + segmentCount, "topic, spine and each segment must each have exactly one logical upstream attempt");
-  assert.ok(elapsedMs < 15_000, `all-local adversarial fallback should complete quickly, actual ${elapsedMs}ms`);
-
   const theoretical = theoreticalTopicToAssetsUpperBoundMs(schedule.unitCount);
   assert.equal(TOPIC_REQUEST_TIMEOUT_MS, 45_000);
   assert.equal(TOPIC_TO_ASSETS_SLA_MS, 15 * 60_000);
   assert.ok(theoretical <= TOPIC_TO_ASSETS_SLA_MS, `bounded worst case ${theoretical}ms must fit the 15-minute SLA`);
-  assert.equal(completed.script.generationPerformance.theoreticalUpperBoundSeconds, Math.round(theoretical / 1000));
 });
 
 test("writing and blueprint review use one shared dialogue contract", () => {
@@ -104,5 +85,5 @@ test("writing and blueprint review use one shared dialogue contract", () => {
   assert.doesNotMatch(workflowSource, /spokenCharactersPerMinute >= 190/);
   const compiled = compileTextStagePrompt("旧提示：每镜固定6句，每分钟20轮、190字。", {}, "units");
   assert.ok(compiled.lastIndexOf("写作与蓝图审核共享合同") > compiled.indexOf("每分钟20轮"));
-  assert.match(compiled, /旧提示中的“每镜固定6句\/8句、每分钟20轮或190字/);
+  assert.match(compiled, /旧提示中的多人同镜轮流开口、每镜固定6句\/8句/);
 });

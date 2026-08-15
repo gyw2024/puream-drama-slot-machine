@@ -90,7 +90,7 @@ test("turning off the blueprint master disables every quality module globally", 
   const workflowSource = source("app/workbench-workflow.js");
   assert.match(workflowSource, /!manualPromptActive && productionStructureGateEnabled\(settings, project\)/);
   assert.match(workflowSource, /if \(engine === "hailuo-h3" && !manualPromptActive\)/);
-  assert.match(workflowSource, /if \(!shotUsesManualVideoPrompt\(activeShot\)\)/);
+  assert.match(workflowSource, /ensureAgentCameraTakePlan\(projectId, shotId, mode, settings\)/);
 });
 
 test("manual reroll reaches video submission even when the old storyboard audit failed", async t => {
@@ -277,7 +277,7 @@ test("replacing a product image retires product-dependent storyboard and video a
   assert.match(replaced.finalVideoStaleReason, /商品参考图已替换/);
 });
 
-test("five to ten minute script path matches the relay's two slots and has a local SLA fallback", () => {
+test("five to ten minute script path matches the relay slots and forbids local creative fallbacks", () => {
   const workflow = source("app/workbench-workflow.js");
   assert.match(workflow, /const SCRIPT_FAST_TARGET_SECONDS = 600/);
   assert.match(workflow, /const SCRIPT_FAST_CONCURRENCY = 8/);
@@ -285,12 +285,12 @@ test("five to ten minute script path matches the relay's two slots and has a loc
   assert.match(workflow, /const SCRIPT_DIRECT_SEGMENT_UNITS = 5/);
   assert.match(workflow, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 2/);
   assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = 60_000/);
-  assert.match(workflow, /const SCRIPT_WRITING_SLA_MS = 9 \* 60_000/);
   assert.match(workflow, /model: SCRIPT_FAST_PUREAM_MODEL/);
   assert.match(workflow, /directFastSegmentRanges\(unitCount, SCRIPT_DIRECT_SEGMENT_UNITS\)/);
   assert.match(workflow, /mapWithConcurrency\(pending, SCRIPT_DIRECT_MAX_CONCURRENCY/);
   assert.match(workflow, /directFastSegments:/);
-  assert.match(workflow, /buildDirectFastFallbackSegment/);
+  assert.match(workflow, /agentCreativeOutputRequired/);
+  assert.doesNotMatch(workflow, /buildDirectFastFallbackSegment/);
   assert.match(workflow, /mapWithConcurrency\(planTasks, SCRIPT_FAST_CONCURRENCY/);
   assert.match(workflow, /mapWithConcurrency\(unitTasks, SCRIPT_FAST_CONCURRENCY/);
   assert.match(workflow, /useFastScriptPath\s*\?\s*\{/);

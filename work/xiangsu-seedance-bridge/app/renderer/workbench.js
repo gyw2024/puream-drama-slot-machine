@@ -203,7 +203,7 @@ const promptLabels = {
   hailuoKeyframeVideo: "云端算力首尾帧模式",
   hailuoStoryboardSheetVideo: "云端算力单图多帧视频",
   dialogueRewrite: "对白时长适配",
-  dialogueUnitMold: "10秒双人密对白与三段剪辑模具",
+  dialogueUnitMold: "原子单说话人对白与相邻硬切模具",
   continuityAudit: "跨镜连续性审查",
   qualityReview: "生成结果质检与重抽",
   deliveryAcceptanceChecklist: "完整短剧交付验收清单",
@@ -257,12 +257,12 @@ const promptExampleSamples = Object.freeze({
     scenes: [{ id: "SC01", name: "商场停车场", objective: "制造紧迫救援" }, { id: "SC02", name: "医院走廊", objective: "揭开误解并完成反转" }],
     actPlan: [{ act: 1, duty: "冷开场与救人" }, { act: 2, duty: "误解升级" }, { act: 3, duty: "恩人证据与结局" }]
   },
-  scriptPlanBatch: { shotPlan: [{ id: "S01", duration: 8, scene: "商场停车场", visibleCharacterIds: ["C01", "C02"], shotFunction: "冷开场", action: "C01砸窗救出孩子", dialogueGoal: "C02质问，C01只回应关键事实", transitionReason: "从车内特写切到救人者近景" }] },
-  scriptUnitGeneration: { shots: [{ id: "S01", duration: 8, dialogueTurns: [{ speakerId: "C02", text: "孩子还在里面，快救他！" }, { speakerId: "C01", text: "退后，我马上把门打开。" }], subshots: [{ start: 0, end: 2.5, framing: "车窗特写", action: "孩子拍窗" }, { start: 2.5, end: 5.5, framing: "双人中近景", action: "C01砸窗" }, { start: 5.5, end: 8, framing: "手部特写", action: "解开安全带" }], soundCueSheet: { bed: "停车场远处车流", sfx: ["玻璃裂响", "安全带卡扣声"] } }] },
+  scriptPlanBatch: { shotPlan: [{ id: "S01", duration: 8, scene: "商场停车场", visibleCharacterIds: ["C02", "C01"], cameraOwnerId: "C02", mouthOwnerId: "C02", shotFunction: "求救者近景", action: "C02拍车窗向C01求救", dialogueGoal: "只有C02说出危机；C01闭口", transitionReason: "末句硬切到S02救人者机位" }, { id: "S02", duration: 8, scene: "商场停车场", visibleCharacterIds: ["C01", "C02"], cameraOwnerId: "C01", mouthOwnerId: "C01", shotFunction: "救人者近景", action: "C01抬起破窗锤", dialogueGoal: "只有C01回应并行动；C02闭口", transitionReason: "动作匹配到破窗结果" }] },
+  scriptUnitGeneration: { shots: [{ id: "S01", duration: 8, cameraOwnerId: "C02", mouthOwnerId: "C02", dialogueTurns: [{ speakerId: "C02", text: "孩子还在里面，快救他！" }], subshots: [{ start: 0, end: 2, cameraOwnerId: "C02", mouthOwnerId: "C02", framing: "C02中近景", action: "C02发现孩子被困" }, { start: 2, end: 5.5, cameraOwnerId: "C02", mouthOwnerId: "C02", framing: "同机位缓推", action: "C02拍窗说完求救" }, { start: 5.5, end: 8, cameraOwnerId: "C02", mouthOwnerId: "C02", framing: "同机位保持", action: "C02闭口看向C01等待回应" }], soundCueSheet: { bed: "停车场远处车流", sfx: ["拍窗声"] } }] },
   storyboardImage: { prompt: "Vertical cinematic storyboard frame, one clear shot objective, specify framing, eyeline, visible characters, prop state, light direction, action and transition reason. Keep the subject count minimal." },
   storyboardStart: { prompt: "First frame anchor: define the exact starting pose, camera distance, spatial axis, wardrobe and prop placement. No collage, no text, no extra characters." },
   storyboardEnd: { prompt: "End frame anchor: describe the visible path from the start state to the final state, with the final action and reaction clearly landed." },
-  hailuoPromptCompiler: { prompt: "Use English for all production instructions. Keep Chinese dialogue only inside <d>[Chinese]... </d>. Use one or two speaking characters per shot, explicit time windows, synchronized sound and a motivated cut." }
+  hailuoPromptCompiler: { prompt: "Use English for production instructions and Chinese only inside <d>[Chinese]...</d>. Each provider task has one camera owner, one visible mouth owner and at most one speaker; a speaker change ends the task and hard-cuts to the next camera-owned task. Keep exact dialogue, expressive delivery, synchronized diegetic sound, no music and no text overlays." }
 });
 
 function promptDefinitionForKey(key) {

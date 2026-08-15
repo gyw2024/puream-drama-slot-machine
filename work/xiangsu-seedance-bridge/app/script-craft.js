@@ -65,16 +65,16 @@ function eyelineConversationCraft() {
 人物对话时必须「对着人说话」，禁止「对着镜头/虚空念词」。
 硬规则：
 1. 说话人眼球与面部朝向听者（或听者所在屏幕方向），禁止正脸长时间直视镜头念台词（口播广告除外且本剧禁止口播）。
-2. 对话链默认正反打 / 过肩（OTS）/ 中近景；关系镜建立站位后，说话切说话人，听完必须给听者反应镜。
-3. 每个有对白的 subshot 必须写清：speakerFacing（朝向谁）／listenerFacing（听者是否看说话人）／eyeline（左↔右屏幕方向）／shotType（OTS/正反打/关系镜/反应镜）。
-4. 多人场面先建立 scenePresence；当前生成单元仍只拍0–2人。第三人侧听、见证、插话或改口必须拆成相邻单人反应/入场单元，禁止挤进同一H3画面。
+2. 海螺 H3 的一个生成任务只归一个 cameraOwnerId 和一个 mouthOwnerId；本镜说话人变化=本镜结束，下一相邻任务硬切到回应者机位。禁止把“正反打”写成同一个 H3 任务里的内部切镜愿望。
+3. 每个有对白的 subshot 必须写清：speakerFacing（朝向谁）／listenerFacing（听者是否看说话人）／eyeline（左↔右屏幕方向）／shotType；三个 subshots 只表示同一机位中的起句、情绪峰值、余震，cameraOwnerId/mouthOwnerId 不得变化。
+4. 多人场面先建立 scenePresence；当前生成单元仍只拍0–2人且最多一人开口。第二人回应、第三人侧听、见证、插话或改口必须拆成相邻原子镜头，按说话人切换机位。
 5. 图像/视频提示词必须显式写出英文或中文约束：looks at the listener's eyes / never addresses the camera。
 6.  continuityAudit / qualityReview：出现「正脸对镜念词、眼神漂出画外、说话人与听者视线互不交接」→ 必须重抽。`;
 }
 
 function generationPhysicsCraft() {
   return `【K3·生成物理上限·提示词必须写对职责】
-1. 视频模型一次生成=一个连续单元（合同内 5–15 秒可变，按时长与节拍定，不是全片锁死10秒）。提示词里写「1.5–3秒一切」不能指望模型在单元内真切碎；subshots 的定位是【后期剪辑蓝图】，不是「模型会自动硬切」。
+1. 视频模型一次生成=一个连续原子镜头（合同内 5–15 秒可变，按时长与节拍定，不是全片锁死10秒）。海螺 H3 每个任务只有一个镜头所有者和最多一个说话人；说话人变化必须拆成下一任务并在本地硬切。subshots 只是同一机位的表演阶段，不是“模型会自动正反打”。
 2. 每个生成单元只承担 1 条连续动作链（一个 visualBeat），禁止单元内堆互不相关事件。
 3. 【引擎分流·声音】
    · 海螺 H3：默认「提示词一把做混音」——每个单元必须生成可听的 bed+同步SFX；禁止干声对白、禁止单元内空洞静音；non_diegetic_music 固定 N/A，禁止写 BGM/underscore/非叙事配乐。延续模式必须显式承接上一单元的底噪音色，首尾 0.3 秒不得掉声。
@@ -103,7 +103,7 @@ function hailuoInModelMixCraft() {
 3. nonDiegeticMusicEn：一律输出 N/A（官方六段字段保留，但本产品禁止背景音乐）。
 4. 唯一例外：蓝图标记的全片唯一抽音静默单元，允许 0.5–1.5 秒只留呼吸/心跳，然后重声砸入。
 5. 头尾保护：前 0.2 秒与后 0.3 秒必须有可听 bed 或同步 SFX，禁止淡出到死静音（除非本单元就是设计抽音点）。
-6. 对白完整发声；无台词者不开口但要有听者反应气口；禁止多人同时张嘴抢同一声道。`;
+6. 对白完整发声；整段只能出现本镜 mouthOwnerId 的一条人物声线。无台词者全程闭口，只做同步静默反应；回应者必须进入下一原子镜头，禁止多人抢同一声道。`;
 }
 
 function postSoundMixCraft() {
@@ -118,13 +118,10 @@ Seedance 或其他引擎：生成阶段仍写满 soundCueSheet（bed/sfx，可�
 
 function dialogueUnitMold(durationSeconds = 10) {
   const duration = Math.max(5, Math.min(15, Math.round(Number(durationSeconds) || 10)));
-  const sentenceTarget = duration <= 7 ? 4 : (duration <= 12 ? 6 : 8);
-  const charMin = Math.round(duration * 3.6);
-  const charMax = Math.round(duration * 4.4);
-  return `【${duration}秒对白因果模具】目标${sentenceTarget}句（轮）、${charMin}–${charMax}个可说汉字，末句必须在本镜结束前完整说完，并给反应/动作留约15%。
-先写dialogueArc：entryCause（哪件刚发生的事实逼出首句）→speakerGoalA/B（双方此刻各要什么）→newInformation（本镜新增哪条信息）→exitConsequence（末句造成哪个可见动作或状态变化）。缺一项就不是有效对话。
-只用1人递进独白或固定2人交锋：攻击/质问→防御/否认→反击/揭示→决定/落锤；每句必须改变信息、权力或行动，禁止同义复述、解释观众已看见的动作、空壳语气词和省略号顶戏。
-恰好3个连续subshots：说话人近景→听者反应/反打→动作/物证/结果。逐句只写beat、delivery、body、listenerBeat；delivery合并情绪、音量、语速、重音和气口，禁止把同一表演拆成九个重复字段。`;
+  return `【${duration}秒 Agent 原子对白模具】${dialogueUnitPrompt(duration, { solo: true })}，末句必须在本镜结束前完整说完，并给呼吸、表情与动作结果留约20%。
+先写dialogueArc：entryCause（哪件刚发生的事实逼出首句）→speakerGoalA（本镜说话人要什么）→speakerGoalB（画外/闭口听者要什么）→newInformation（本镜只新增哪条信息）→exitConsequence（末句造成哪个可见动作或状态变化）。缺一项就不是有效对话。
+本镜只允许一个说话人递进发声：攻击/质问、否认/反击、揭示/落锤可选其一至三拍；另一人必须闭口。回应写到下一相邻镜头，并将 cameraOwnerId/mouthOwnerId 一起切给回应者。每句必须改变信息、权力或行动，禁止同义复述、解释观众已看见的动作、空壳语气词和省略号顶戏。
+恰好3个连续subshots：起句蓄力→情绪峰值与重音→余震/动作结果；三段继承同一个 cameraOwnerId/mouthOwnerId，不得内部正反打。逐句只写beat、delivery、body、listenerBeat；delivery合并情绪、音量、语速、重音和气口。`;
 }
 
 function dialogueWorkedExamples() {
@@ -133,20 +130,16 @@ function dialogueWorkedExamples() {
 男人：现在连五十万缺口都来找你。
 女人：连给你提鞋的资格都没有。
 老人：建军回来了。
-【对白正例·10秒六句节奏·可直接模仿】
-王芳：你还敢瞒我？
-李强：什么瞒不瞒的？
-王芳：这张单谁签的？
-李强：医院让签我就签。
-王芳：你当我瞎？
-李强：我没说你瞎，你别逼我。
-【对白正例·带刺短句】
-林妈：你敢当着全屋人说我贪你的钱？
-阿杰：不是贪，是你自己乐意贴。
-林妈：收据呢？
-阿杰：丢了。
-林妈：抽屉最底下那张呢？
-阿杰：……你翻我东西？
+【对白正例·相邻原子镜头完成正反打·可直接模仿】
+S01 cameraOwner=王芳 mouthOwner=王芳：你还敢瞒我？这张单，谁签的？
+S02 cameraOwner=李强 mouthOwner=李强：医院让我签的。你别拿我当贼审。
+S03 cameraOwner=王芳 mouthOwner=王芳：那你看着我说，五十万去哪了？
+S04 cameraOwner=李强 mouthOwner=李强：钱没丢。是我不敢告诉你。
+【对白正例·带刺短句按说话人硬切】
+S05 cameraOwner=林妈 mouthOwner=林妈：你敢当着全屋人，说我贪你的钱？
+S06 cameraOwner=阿杰 mouthOwner=阿杰：不是贪，是你自己乐意贴。
+S07 cameraOwner=林妈 mouthOwner=林妈：收据呢？抽屉最底下那张呢？
+S08 cameraOwner=阿杰 mouthOwner=阿杰：你……翻我东西？
 【逐句情绪编译正例】
 王芳：你还敢瞒我？｜intent=质问定调；emotion=压火→拔尖；volume=拔高；pace=抢半拍；stress=还敢；breath=句前吸气；body=上前半步盯李强眼睛；listenerBeat=李强眼神躲。
 李强：医院让签我就签。｜intent=推诿；emotion=心虚→强撑；volume=压嗓；pace=拖长「签」字；stress=医院；breath=句尾泄气；body=别开脸但仍被王芳视线压住；listenerBeat=王芳冷笑。
@@ -221,7 +214,7 @@ function actBeatGrid(totalSeconds = 300, unitCount = 30) {
 }
 
 function planUnitDialogueGoal(durationSeconds = 10) {
-  return `${dialogueUnitPrompt(durationSeconds)}；dialogueArc必须写entryCause/speakerGoalA/speakerGoalB/newInformation/exitConsequence；每句按attack/deflect/counter/reveal/decision之一推进，写合并delivery、body、listenerBeat；说话人看听者，末句必须在本镜结束前完整说完并造成可见后果`;
+  return `${dialogueUnitPrompt(durationSeconds, { solo: true })}；本镜唯一说话人同时拥有cameraOwnerId/mouthOwnerId，回应者放到下一镜并硬切；dialogueArc必须写entryCause/speakerGoalA/speakerGoalB/newInformation/exitConsequence；每句按attack/deflect/counter/reveal/decision之一推进，写合并delivery、body、listenerBeat；说话人看听者，末句必须在本镜结束前完整说完并造成可见后果`;
 }
 
 function storyCoreCraft() {

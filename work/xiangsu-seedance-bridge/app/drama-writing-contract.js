@@ -6,7 +6,7 @@
  * runtime compilers append this contract so generation and review cannot drift.
  */
 
-const DRAMA_WRITING_CONTRACT_VERSION = "2026.08.14-v1";
+const DRAMA_WRITING_CONTRACT_VERSION = "2026.08.15-agent-camera-v2";
 const TOPIC_TO_ASSETS_SLA_MS = 15 * 60_000;
 const TOPIC_REQUEST_TIMEOUT_MS = 45_000;
 
@@ -57,10 +57,10 @@ function sharedDramaWritingContract(totalSeconds = 300) {
   const targets = dialogueReferenceTargets(totalSeconds);
   return `【写作与蓝图审核共享合同·${DRAMA_WRITING_CONTRACT_VERSION}·冲突时以此为准】
 1. 全剧对白按真实表演容量验收：每分钟至少${targets.turnsPerMinuteMin}轮、优选约${targets.turnsPerMinutePreferred}轮，每分钟至少${targets.spokenCharactersPerMinuteMin}个可说汉字；不得把每一个镜头都强塞成固定6句或8句。
-2. 有人且适合说话的镜头中，至少${Math.round(targets.twoTurnEligibleUnitRatioMin * 100)}%含两轮以上交锋。单人动作/反应镜允许1-3句短锤；双人冲突镜按5-15秒动态写2-6句；商品整体/细节干净镜允许零对白。
-3. 每句必须完整、口语化且只出现一次，正确绑定说话人和听者；语气、表情、身体动作、音量、语速、重音和气口必须由当下事件与人物目的推导。听者有同步可见反应，禁止对镜念稿、同义复读和解释观众已经看见的动作。
-4. 对白、动作和切镜共同留足表演时间；有人子镜允许安静反应或动作落点，全片有人子镜无对白比例上限${Math.round(targets.silentSubshotRatioMax * 100)}%，但不得出现连续空洞镜头。
-5. 生成提示、蓝图审核与本地硬审计必须使用以上同一数值；旧提示中的“每镜固定6句/8句、每分钟20轮或190字、80%镜头两轮且多数镜头五句”等冲突要求一律失效。`;
+2. 有人且适合说话的镜头中，至少${Math.round(targets.twoTurnEligibleUnitRatioMin * 100)}%含两句以上有效推进；每个海螺生成单元只能有1名说话人，允许同一人1-3句短锤。双方攻防通过相邻镜头交替完成：说话人一变，立即进入下一镜并硬切机位。商品整体/细节干净镜允许零对白。
+3. 每句必须完整、口语化且只出现一次，正确绑定唯一说话人和闭口听者；语气、表情、身体动作、音量、语速、重音和气口必须由当下事件与人物目的推导。听者只作同步可见静默反应，禁止对镜念稿、同义复读和解释观众已经看见的动作。
+4. 每镜明确cameraOwnerId与mouthOwnerId，二者都归本镜唯一说话人；3个subshots只是同一连续机位内的起句、峰值、余震表演阶段，禁止内部正反打或切到第二张嘴。全片对白仍按相邻镜头保持自然接力，不能用原子镜头为借口制造空洞独白。
+5. 对白、动作和切镜共同留足表演时间；有人子镜允许安静反应或动作落点，全片有人子镜无对白比例上限${Math.round(targets.silentSubshotRatioMax * 100)}%。生成提示、蓝图审核与本地硬审计必须使用同一数值；旧提示中的多人同镜轮流开口、每镜固定6句/8句等冲突要求一律失效。`;
 }
 
 function theoreticalTopicToAssetsUpperBoundMs(unitCount, options = {}) {

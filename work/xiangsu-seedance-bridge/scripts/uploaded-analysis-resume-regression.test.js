@@ -60,7 +60,7 @@ function responseFor(messages) {
   };
 }
 
-test("uploaded-script analysis locally completes a failed bounded chunk without a second billable request", async t => {
+test("uploaded-script analysis stops without local writing and resumes only the failed Agent chunk", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-analysis-resume-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -101,9 +101,22 @@ test("uploaded-script analysis locally completes a failed bounded chunk without 
     }
   });
 
-  const analyzed = await workflow.analyzeScript(project.id);
-  assert.equal(calls.get(2), 1, "failed chunk must be completed locally without a second upstream request");
+  await assert.rejects(
+    workflow.analyzeScript(project.id),
+    error => error?.code === "UPLOADED_SCRIPT_AGENT_RESULT_REQUIRED"
+      && error?.retryRequiresExplicitResume === true
+      && error?.localCreativeFallbackUsed === false
+  );
+  assert.equal(calls.get(2), 1, "failed chunk must not trigger an automatic second billable request");
   assert.equal(sessions.get(2).length, 1);
+  const paused = store.getProject(project.id);
+  assert.ok(paused.script.analysisCheckpoint.chunks.length >= 2, "successful sibling Agent chunks must remain checkpointed");
+  assert.equal(paused.currentStage, "script");
+
+  const analyzed = await workflow.analyzeScript(project.id);
+  assert.equal(calls.get(2), 2, "explicit resume retries the failed Agent chunk exactly once");
+  assert.equal(calls.get(1), 1, "completed chunk 1 must be reused");
+  assert.equal(calls.get(3), 1, "completed chunk 3 must be reused");
   assert.equal(analyzed.script.analysisCheckpoint, null);
   assert.equal(analyzed.currentStage, "assets");
   assert.equal(analyzed.script.sourceDialogueLedger.length, 24);

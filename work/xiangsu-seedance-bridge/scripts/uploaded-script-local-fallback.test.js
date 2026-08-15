@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const { parseSourceDialogueLedger } = require("../app/dialogue-parser");
 const {
@@ -8,7 +10,7 @@ const {
   localUploadedAnalysisChunk
 } = require("../app/workbench-workflow");
 
-test("uploaded dialogue fallback preserves every speaker, tone and sentence without an upstream JSON result", () => {
+test("uploaded dialogue diagnostic compiler preserves source truth but is unreachable from production", () => {
   const raw = [
     "【场景】客厅",
     "林梅（压低声音，忍着火）：你把那张单子给我。",
@@ -37,4 +39,7 @@ test("uploaded dialogue fallback preserves every speaker, tone and sentence with
     const character = normalized.characters.find(item => item.id === turn.speakerId);
     return character?.name;
   }), ledger.map(item => item.speaker));
+  const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
+  assert.equal((workflowSource.match(/localUploadedAnalysisChunk\(/g) || []).length, 1, "only the diagnostic function definition may remain");
+  assert.match(workflowSource, /UPLOADED_SCRIPT_AGENT_RESULT_REQUIRED/);
 });

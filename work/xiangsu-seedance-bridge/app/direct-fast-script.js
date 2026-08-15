@@ -99,7 +99,7 @@ function directFastResponseSchema() {
       em: "起始情绪→触发→峰值→余震",
       f: 1,
       v: [1, 2],
-      d: [[1, "短台词"], [2, "短台词"]]
+      d: [[1, "同一说话人的短台词"], [1, "同一说话人的递进短台词"]]
     }]
   };
 }
@@ -218,7 +218,7 @@ function assertDirectFastSegment(payload, segmentStart, segmentEnd, options = {}
     const shotNumber = Number(item?.i) || 0;
     const duration = Math.max(5, Math.min(15, Number(options.durations?.[shotNumber - 1]) || 10));
     const productPackshot = shotNumber === Number(options.productStartNumber);
-    const budget = dialogueUnitBudget(duration, { solo: visible.length === 1, productPackshot });
+    const budget = dialogueUnitBudget(duration, { solo: true, productPackshot });
     const legacyMaxTurns = 2 + Math.round(duration * 0.4);
     const legacyMaxChars = Math.round(duration * 4.4);
     const dialogueSpeakers = dialogue.map(line => Number(Array.isArray(line) ? line[0] : 0));
@@ -239,7 +239,7 @@ function assertDirectFastSegment(payload, segmentStart, segmentEnd, options = {}
       turns: dialogue.length >= budget.minTurns && dialogue.length <= Math.max(budget.maxTurns, legacyMaxTurns),
       dialogue: dialogue.every(line => Array.isArray(line) && Number(line[0]) >= 1 && Number(line[0]) <= characters.length && spokenLength(line[1]) >= 3),
       dialogueBudget: totalSpoken >= budget.minChars && totalSpoken <= Math.max(budget.maxChars, legacyMaxChars),
-      speakers: dialogueSpeakers.every(value => Number(item?.i) % 2 === 0 ? value === focus : visible.includes(value)),
+      speakers: dialogueSpeakers.every(value => value === focus),
       unique: dialogue.length === 0 || new Set(spoken).size >= Math.max(1, dialogue.length - 1),
       opening: Number(item?.i) !== 1 || (firstSpokenLength >= 6 && firstSpokenLength <= 12 && /[？?!！]|凭什么|还敢|住手|滚|你也配|谁让|别碰|放开|跪下/.test(firstSpoken))
     };
@@ -271,7 +271,7 @@ function directFastUserPrompt({ topic, product, unitCount, totalSeconds, product
   const durationContract = Array.from({ length: segmentCount }, (_, offset) => {
     const number = start + offset;
     const seconds = Math.max(5, Math.min(15, Number(unitDurations[number - 1]) || Math.round(totalSeconds / unitCount) || 10));
-    return `S${String(number).padStart(2, "0")}=${dialogueUnitPrompt(seconds, { solo: number % 2 === 0, productPackshot: number === productStartNumber })}`;
+    return `S${String(number).padStart(2, "0")}=${dialogueUnitPrompt(seconds, { solo: true, productPackshot: number === productStartNumber })}`;
   }).join("；");
   const beat = directFastBeatForRange(spine, start, end);
   const rootContract = anchor
@@ -285,9 +285,9 @@ function directFastUserPrompt({ topic, product, unitCount, totalSeconds, product
     `商品：${product.name}；卖点：${product.sellingPoints || product.description || "只按用户提供事实"}。`,
     `只输出JSON，${rootContract} 人物序号固定：1=主角，2=与主角发生核心冲突的人，3=关键见证人；s必须恰好${segmentCount}项，i从${start}连续到${end}，不得输出区间外镜头。`,
     anchor ? "b的每一段必须承接上一段ex：en写进入事实，g只写本段新增事实和动作，ex写不可逆结果，h写下一段能直接接拍的动作或悬念；不得重复争吵、重复误会或提前泄露主反转。" : "本段第一镜bf必须承接因果任务en，最后一镜af必须落实ex，末句和末动作必须交出h；不得另起故事、改名、换关系或重复上一段信息。",
-    "每个s只允许t/a/bf/af/em/f/v/d字段：f和v使用c的1起始序号；v最多2人。奇数镜优先双人攻防，偶数镜必须单人近景且d只由f说；商品整体干净镜d为空。保证至少一半镜头为单人，但不得把单人反应镜强塞成解释性长独白。",
-    `每镜d严格按本镜时长写自然可演对白：${durationContract}。每句约4-12个可说汉字，必须说完整，不能同义复述；双人镜严格轮流攻防。em必须写清起始情绪、触发、峰值和余震。a必须是能拍到的独占动作结果，不能写心理说明。`,
-    "S01前2秒必须由伤害动作直接开场，第一句必须是6-12字的质问或制止；前60秒不得连续同一人念词，必须有说话人和听者反应交替。",
+    "每个s只允许t/a/bf/af/em/f/v/d字段：f和v使用c的1起始序号；v最多2人，但d中的每一句只能由f说，另一人全镜闭口反应；商品整体干净镜d为空。相邻镜轮换f来完成双方攻防，说话人变化必须发生在镜号边界。",
+    `每镜d严格按本镜时长写自然可演对白：${durationContract}。每句约4-12个可说汉字，必须完整且改变信息、权力或行动，不能同义复述。em写清起始情绪、触发、峰值和余震；a写唯一可见动作结果。`,
+    "S01前2秒必须由伤害动作直接开场，第一句必须是6-12字的质问或制止；前60秒用相邻镜头交替说话人，每镜只锁一张嘴，听者反应清楚。",
     `唯一主反转固定在约72%位置。${product.name}及任何俗称在S${String(productStartNumber).padStart(2, "0")}之前绝对禁止出现；S${String(productStartNumber).padStart(2, "0")}-S${String(Math.min(unitCount, productStartNumber + 2)).padStart(2, "0")}才用3镜完成真实需求→自然使用→可见合规体验→人物决定，不写治疗、治愈或医疗承诺。最后一镜回到人物行动结局。`,
     scriptFormatDirective,
     "总JSON尽量紧凑，不要解释，不要Markdown，不要输出画面提示词、声音提示词或模型名称。",
@@ -393,11 +393,11 @@ function buildDirectFastFallbackSegment({ spine = {}, topic = {}, segmentStart =
     s: Array.from({ length: end - start + 1 }, (_, offset) => {
       const number = start + offset;
       const duration = Math.max(5, Math.min(15, Number(unitDurations[number - 1]) || 10));
-      // Keep emergency dialogue on the two dramatic leads. The third character
-      // remains a silent witness so H3's two-speaker allocation cannot drift.
+      // Emergency structure still obeys the Agent camera contract: one focus,
+      // one mouth and one voice per provider task. The other lead only reacts.
       const focus = number % 2 === 0 ? 2 : 1;
       const other = focus === 1 ? 2 : 1;
-      const solo = number % 2 === 0;
+      const solo = true;
       const beat = sourceArray(spine.b).find(item => Number(item?.a) <= number && Number(item?.z) >= number) || {};
       const stage = stageFor(number - 1, Math.max(end, unitDurations.length || end));
       const focusName = compact(characters[focus - 1]?.n, `角色${focus}`, 12);
@@ -415,7 +415,7 @@ function buildDirectFastFallbackSegment({ spine = {}, topic = {}, segmentStart =
         af: compact(beat.ex, `第${number}镜结束时关系和证据状态已经改变`, 120),
         em: stage === "main_reversal" ? "压抑→看清证据→情绪崩开→决定承担" : "克制→事实刺激→情绪抬升→压住余震",
         f: focus,
-        v: solo ? [focus] : [focus, other],
+        v: [focus, other],
         d: number === Number(productStartNumber) ? [] : fallbackDialogue(number, duration, focus, other, solo, { stage, beat })
       };
     }),
@@ -643,8 +643,7 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
     const productRole = productMention ? ["product_packshot", "product_use", "product_result"][index - productStartIndex] : "none";
     const visibleCharacterIds = visibleIndexes.map(value => characters[value - 1]?.id).filter(Boolean);
     const focus = characters[authoredFocus - 1] || characters[0];
-    const counterpart = visibleCharacterIds.length > 1 ? characters.find(item => item.id === visibleCharacterIds[1]) : null;
-    const authoredDialogueBudget = dialogueUnitBudget(duration, { solo: visibleCharacterIds.length === 1 || productMention, productPackshot: productRole === "product_packshot" });
+    const authoredDialogueBudget = dialogueUnitBudget(duration, { solo: true, productPackshot: productRole === "product_packshot" });
     const authoredDialogue = sourceArray(source.d);
     // New spine-based responses are validated against the exact per-shot
     // duration and arrive ready to perform. Legacy payloads are still fitted
@@ -653,15 +652,11 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
       ? authoredDialogue.map(item => Array.isArray(item) ? item : [item?.s, item?.x || item?.text])
         .map(([speaker, text]) => ({ speaker: Math.max(1, Number(speaker) || 1), text: safeSentence(text, "", 14) }))
         .filter(item => spokenLength(item.text) >= 2)
-      : fitDialogueLines(authoredDialogue, index === 0, duration, { solo: visibleCharacterIds.length === 1 || productMention, productPackshot: productRole === "product_packshot" });
+      : fitDialogueLines(authoredDialogue, index === 0, duration, { solo: true, productPackshot: productRole === "product_packshot" });
     if (index === 0 && dialogueSource.length && payload?.spineLocked !== true) {
       dialogueSource[0].text = openingSentenceFromSource(dialogueSource[0].text);
     }
-    if (visibleCharacterIds.length === 1 || productMention) dialogueSource = dialogueSource.map(item => ({ ...item, speaker: authoredFocus }));
-    else dialogueSource = dialogueSource.map((item, turnIndex) => ({
-      ...item,
-      speaker: visibleIndexes.includes(item.speaker) ? item.speaker : visibleIndexes[turnIndex % visibleIndexes.length]
-    }));
+    dialogueSource = dialogueSource.map(item => ({ ...item, speaker: authoredFocus }));
     const dialogueVisibleIds = productMention ? visibleCharacterIds.slice(0, 1) : visibleCharacterIds;
     const action = index === 0
       ? compact(source.a || source.action || topic.hook, "对方踢开跪地劳作的人，婚纱裙摆从手中滑落", 88)
@@ -689,6 +684,7 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
       };
     });
     const planVisibleIds = productRole === "product_packshot" ? [] : productMention ? visibleCharacterIds.slice(0, 1) : visibleCharacterIds;
+    const counterpart = planVisibleIds.length > 1 ? characters.find(item => item.id === planVisibleIds[1]) : null;
     const bridge = productMention ? productBridge(product, focus, index) : { situationNeed: "", whyNow: "", action: "", observableOutcome: "", relationOrDecisionShift: "" };
     if (productRole === "product_packshot") bridge.relationOrDecisionShift = "";
     const visualBeat = `${id}独占动作：${action}`;
@@ -710,6 +706,8 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
       visibleCharacterIds: planVisibleIds,
       focusCharacterId: planVisibleIds[0] || "",
       counterpartCharacterId: planVisibleIds[1] || "",
+      cameraOwnerId: planVisibleIds[0] || "",
+      mouthOwnerId: productRole === "product_packshot" ? "" : (planVisibleIds[0] || ""),
       shotFunction: productMention ? productRole : (planVisibleIds.length > 1 ? "two_shot" : "speaker_closeup"),
       scene: scene.name,
       sceneObjective: mainlineBeat,
@@ -723,9 +721,9 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
       stateAfter: after,
       causalLink: index === 0 ? "伤害动作发生，所以首句制止立刻引爆母女冲突" : `因为S${String(index).padStart(2, "0")}留下未解决的动作和事实，所以${action}导致${after}`,
       visualBeat,
-      compositionPlan: `${index % 3 === 0 ? "人物单人近景" : index % 3 === 1 ? "正反打与手部插入" : "侧向中近景轻推"}；保持人物视线朝听者而非镜头`,
+      compositionPlan: `${index % 3 === 0 ? "说话人单人近景" : index % 3 === 1 ? "说话人中近景缓推" : "侧向说话人近景"}；全镜机位和嘴型只归focus，说话人看听者而非镜头`,
       audioPlan: `0-${duration}秒连续室内环境底噪；对白清晰；脚步、衣料摩擦、纸张或器物动作特效声同步；只保留现场声`,
-      dialogueGoal: `${dialogueUnitPrompt(duration, { solo: planVisibleIds.length <= 1, productPackshot: productRole === "product_packshot" })}；只新增一条信息并由末句或末动作触发可见后果`,
+      dialogueGoal: `${dialogueUnitPrompt(duration, { solo: true, productPackshot: productRole === "product_packshot" })}；本镜只有focus说话，只新增一条信息并由末句或末动作触发可见后果`,
       dialogueArc: {
         entryCause: before,
         speakerGoalA: `${focus.name}逼对方正面回应刚发生的事实`,
@@ -763,7 +761,7 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
         ? ["product_use", "product_use", "product_use"]
         : productMention
           ? ["product_result", "product_reaction", "product_reaction"]
-          : ["speaker_closeup", planVisibleIds.length > 1 ? "listener_reaction" : "action_insert", "action_insert"];
+          : ["speaker_hold", "speaker_hold", "speaker_hold"];
     const boundaries = [[0, splitA], [splitA, splitB], [splitB, duration]];
     const subshots = boundaries.map(([start, end], subIndex) => {
       const role = subshotRoles[subIndex];
@@ -773,14 +771,18 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
         start,
         end,
         shotType: role,
-        cutReason: subIndex === 0 ? plan.transitionReason : subIndex === 1 ? "上一句落点后切听者或物件反应" : "手部动作匹配切到结果",
-        framing: cleanProduct ? "无脸商品干净特写" : subIndex === 0 ? "说话人中近景" : subIndex === 1 ? "听者反应近景" : "手部与表情结果特写",
-        camera: subIndex === 1 ? "轻微推进" : "稳定机位",
+        cutReason: subIndex === 0 ? plan.transitionReason : "同一连续机位进入下一表演阶段，不切听者",
+        framing: cleanProduct ? "无脸商品干净特写" : subIndex === 0 ? "说话人中近景" : subIndex === 1 ? "仍锁说话人缓推近景" : "仍锁说话人余震近景",
+        camera: subIndex === 1 ? "同一机位轻微推进" : subIndex === 2 ? "同一机位停止并保持" : "稳定机位开始缓推",
         action: cleanProduct ? `${product.name}整体与用户图片中可见的真实外观细节在干净承载面上清晰呈现` : `${action}；第${subIndex + 1}段完成可见状态变化`,
         dialogueTurns: turns,
         sound: `连续室内环境底噪；${subIndex === 0 ? "衣料摩擦" : subIndex === 1 ? "脚步与急促呼吸" : "纸张或器物轻响"}动作特效声`,
         transition: subIndex === 2 ? "以末句和动作结果桥接下一镜" : "台词与视线接力",
         visibleCharacterIds: cleanProduct ? [] : planVisibleIds,
+        cameraOwnerId: cleanProduct ? "" : focus.id,
+        mouthOwnerId: cleanProduct ? "" : focus.id,
+        speakerIds: cleanProduct ? [] : [focus.id],
+        listenerIds: counterpart ? [counterpart.id] : [],
         speakerFacing: cleanProduct ? "无人脸" : `${focus.name}朝向听者眼睛`,
         listenerFacing: counterpart ? `${counterpart.name}看向说话人` : "听者位于画外轴线方向",
         eyelineDirection: "保持180度轴线，禁止对镜头念词",
@@ -802,6 +804,8 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
       audioPlan: plan.audioPlan,
       dialogueArc: plan.dialogueArc,
       dialogueTurns,
+      cameraOwnerId: plan.cameraOwnerId,
+      mouthOwnerId: plan.mouthOwnerId,
       criticalOnScreenText: [],
       emotion,
       emotionArc: plan.emotionArc,

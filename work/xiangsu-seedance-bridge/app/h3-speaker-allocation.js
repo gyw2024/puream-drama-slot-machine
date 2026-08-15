@@ -71,9 +71,9 @@ function silentReactionCharacters(source = "", mentioned = [], dialogue = []) {
   })).map(item => item.record.id));
 }
 
-function allocateH3ShotSpeakers(plannedShots = [], characters = [], maxSpeakers = 2) {
+function allocateH3ShotSpeakers(plannedShots = [], characters = [], maxSpeakers = 1) {
   const records = characterRecords(characters);
-  const limit = Math.max(1, Math.min(2, Math.round(Number(maxSpeakers) || 2)));
+  const limit = Math.max(1, Math.min(2, Math.round(Number(maxSpeakers) || 1)));
   return (Array.isArray(plannedShots) ? plannedShots : []).map(plan => {
     const plannedVisibleRecords = [
       ...(Array.isArray(plan?.visibleCharacterIds) ? plan.visibleCharacterIds : []),

@@ -23,8 +23,6 @@ const { allocateH3ShotSpeakers, h3AllowedSpeakersByShot } = require("./h3-speake
 const {
   assertDirectFastSegment,
   assertDirectFastStorySpine,
-  buildDirectFastFallbackSegment,
-  buildDirectFastFallbackSpine,
   directFastProductStartIndex,
   directFastSegmentRanges,
   directFastSpineFromLegacyPayload,
@@ -34,6 +32,18 @@ const {
 } = require("./direct-fast-script");
 const { makeId, defaultAssetLibraries } = require("./workbench-store");
 const { AdaptiveProductionAgent, commercePlanDirective, normalizeCommerceShotCount, resolveCommercePlan } = require("./adaptive-production-agent");
+const {
+  AGENT_DIRECTOR_VERSION,
+  assertAgentTakePrompt,
+  buildCameraTakePlan,
+  buildHailuoTakePrompt,
+  cameraTakeCompilerMessages,
+  cameraTakePlanFingerprint,
+  filterReferencesForTake,
+  mergeAgentTakeDraft,
+  takeShotForValidation,
+  validateCameraTakePlan
+} = require("./agent-director");
 const { promptIntakeText } = require("./prompt-intake");
 const { normalizeCloudVideoResolution, normalizeHailuoApiMode, providerEngine } = require("./video-provider-policy");
 const {
@@ -89,7 +99,7 @@ const {
 } = require("./production-mode-matrix");
 const { assetPromptPolicy } = require("./foundry/asset-passport");
 const { compileProductionContract, contractPromptBlock } = require("./foundry/production-contract");
-const { buildNovelTopicBatch, priorTopicTitles, rememberTopicBatch } = require("./foundry/topic-diversity");
+const { priorTopicTitles, rememberTopicBatch } = require("./foundry/topic-diversity");
 const {
   buildFullReferencePrompt,
   compactFullReferencePrompt,
@@ -154,7 +164,6 @@ const SCRIPT_DIRECT_SEGMENT_UNITS = 5;
 // one makes 5-10 minute scripts miss the writing SLA.
 const SCRIPT_DIRECT_MAX_CONCURRENCY = 2;
 const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = 60_000;
-const SCRIPT_WRITING_SLA_MS = 9 * 60_000;
 const IMAGE_BATCH_MAX_CONCURRENCY = 6;
 const VIDEO_BATCH_MAX_CONCURRENCY = 4;
 const AUTHORITY_BATCH_MAX_CONCURRENCY = 64;
@@ -1173,7 +1182,7 @@ function planBatchContractHints(startNumber, endNumber, filmSchedule = {}, prior
     startNumber === 1 ? "本批只要 hook/pressure/early evidence，禁止商品与主反转；S01 前2秒必须动作+道具+带刺对白。" : "",
     endNumber <= productEntry ? `本批结束于商品窗口前，禁止任何 productMention=true。` : `本批可进入商品窗口，但仍须晚于主反转。`,
     `每个单元 duration 必须按本镜节拍自定（合同允许 ${Number(filmSchedule.durationMin) || 5}–${Number(filmSchedule.durationMax) || 15} 秒）：冲突/打脸/主反转尽量贴近上限，抽音/过场贴近下限，加压交锋取中段；禁止整批全写成同一个秒数。对白按共享合同和本镜可见人数动态缩放，为动作、换气和听者反应留足时间。`,
-    `本批每个有人出镜单元按自己的 duration 写 dialogueGoal：${batchSuggestedDurations.map((seconds, index) => `S${String(startNumber + index).padStart(2, "0")}(${seconds}秒)：${planUnitDialogueGoal(seconds)}`).join("；") || "按共享合同动态分配单人短锤或双人攻防，并保证末句完整"}；连续单元换不同加压变量，禁止同义争吵。`
+    `本批每个有人出镜单元按自己的 duration 写 dialogueGoal：${batchSuggestedDurations.map((seconds, index) => `S${String(startNumber + index).padStart(2, "0")}(${seconds}秒)：${planUnitDialogueGoal(seconds)}`).join("；") || "按共享合同给每镜分配唯一说话人，并保证末句完整"}；问答通过相邻镜头接力，换说话人就同步切换cameraOwnerId/mouthOwnerId；连续单元换不同加压变量，禁止同义争吵。`
   ];
   return rules.filter(Boolean).join(" ");
 }
@@ -1580,6 +1589,8 @@ function normalizePlanProductionFields(item = {}, duration = 10) {
     scenePresenceCharacterIds,
     focusCharacterId: focusCharacterId || visibleCharacterIds[0] || "",
     counterpartCharacterId: counterpartCharacterId && counterpartCharacterId !== focusCharacterId ? counterpartCharacterId : "",
+    cameraOwnerId: String(item?.cameraOwnerId || focusCharacterId || visibleCharacterIds[0] || "").trim(),
+    mouthOwnerId: String(item?.mouthOwnerId || focusCharacterId || visibleCharacterIds[0] || "").trim(),
     shotFunction: String(item?.shotFunction || item?.shotType || "").trim(),
     sceneObjective: String(item?.sceneObjective || item?.scenePurpose || "").trim(),
     transitionReason: String(item?.transitionReason || item?.cutReason || "").trim(),
@@ -1629,13 +1640,13 @@ function directorUnitLockPrompt(plannedShots = []) {
     const productShotType = String(shot?.productShotType || "none").trim();
     const sceneObjective = String(shot?.sceneObjective || shot?.mainlineBeat || "").trim();
     const transitionReason = String(shot?.transitionReason || "由台词、视线、动作、物件、入场或声音承接").trim();
-    return `${shotId}: scenePresence=[${presence.join(",")}]; visible=[${visible.join(",")}]; focus=${focus || "none"}; counterpart=${counterpart || "none"}; shotFunction=${shotFunction}; productShotType=${productShotType}; sceneObjective=${sceneObjective}; transitionReason=${transitionReason}`;
+    return `${shotId}: scenePresence=[${presence.join(",")}]; visible=[${visible.join(",")}]; focus=${focus || "none"}; cameraOwner=${focus || "none"}; mouthOwner=${focus || "none"}; silentListener=${counterpart || "none"}; shotFunction=${shotFunction}; productShotType=${productShotType}; sceneObjective=${sceneObjective}; transitionReason=${transitionReason}`;
   });
   return [
     "【逐镜导演锁·这是本批输出前最后执行的画面合同】",
     ...lines,
-    "scenePresence 只是场内连续性，不等于当前画面；每镜及其3个subshots只能从visible列表取0–2名人物，禁止补场内旁观者、被谈论者、家属或第三张脸。visible=1时只拍该人物及其物件；visible=2时只拍固定两人的说话/反应/正反打；visible=[]时不得出现人脸、人体、反射人影或额外手。",
-    "每个subshot必须写shotType、cutReason、唯一主口型speakerIds、可见的faceAction/bodyAction/voiceDelivery，并依次完成说话人近景→听者反应/反打→动作/物证/结果落点；切镜只允许台词接力、视线接力、动作匹配、物件揭示、人物入场或声音桥。尾帧保留呼吸、眨眼、手指或衣料微动，禁止突然定格。",
+    "scenePresence 只是场内连续性，不等于当前画面；每镜只能从visible列表取0–2名人物。海螺单元只有一个cameraOwner和一个mouthOwner，二者必须是本镜唯一说话人；visible中的另一人只作闭口听者，可在画面边缘或画外反应。换说话人必须进入下一镜并把cameraOwner/mouthOwner一并切给回应者。visible=[]时不得出现人脸、人体、反射人影或额外手。",
+    "每镜3个subshots不是3次切镜，而是同一连续机位的起句→情绪峰值→余震三个表演阶段；三段必须继承相同cameraOwnerId、mouthOwnerId和唯一speakerIds，禁止内部正反打、切到听者或动作插入。每段写可见faceAction/bodyAction/voiceDelivery；尾帧保留呼吸、眨眼、手指或衣料微动，禁止突然定格。",
     "product_packshot/product_detail让商品占画面45%–75%且visible=[]；product_use只有唯一操作者，最多再带一名受益者；product_result先拍客观结果，product_reaction再拍受益者单人反应，禁止多人围商品口播。输出前逐镜按上表核对，不得自行改导演名单。"
   ].join("\n");
 }
@@ -1650,7 +1661,7 @@ function h3DialogueBudgetPrompt(plannedShots = [], speakerAssignments = []) {
     const speakers = ids.map((id, speakerIndex) => `${id}${names[speakerIndex] ? `（${names[speakerIndex]}）` : ""}`).join("、") || "无（本镜必须静默）";
     const visible = normalizeStringArray(shot?.visibleCharacterIds);
     const silent = !ids.length || /product_(?:packshot|detail)/i.test(`${shot?.productShotType || ""} ${shot?.shotFunction || ""}`);
-    const budget = dialogueMinimums(shot?.duration, { solo: visible.length <= 1, silent });
+    const budget = dialogueMinimums(shot?.duration, { solo: ids.length <= 1, silent });
     if (!budget.targetTurns) return `${shotId}：allowed speakers=无；本镜为干净商品/静默动作镜，dialogueTurns必须为空。`;
     const minCharactersPerTurn = Math.max(3, Math.floor(budget.characters / Math.max(1, budget.targetTurns)));
     return `${shotId}：allowed speakers=${speakers}；对白${budget.turns}-${budget.maxTurns}轮，优选${budget.targetTurns}轮；硬总字区间=${budget.characters}-${budget.maxCharacters}个中文可说汉字，优选约${budget.targetCharacters}字；每句至少${minCharactersPerTurn}个中文可说汉字且语义完整。`;
@@ -1659,7 +1670,7 @@ function h3DialogueBudgetPrompt(plannedShots = [], speakerAssignments = []) {
     "【逐镜精确对白预算（输出前必须逐句自检）】",
     ...lines,
     "短句完整性：像“爸你听”“我真的”“账本呢”这类残句字数不足且语义不完整，必须扩成达到本镜单句下限、包含明确事实或动作的完整短句。",
-    "统计口径：只统计 dialogueTurns[].text 中演员自然说出口的中文可说汉字；标点、数字、英文、speakerId、动作、情绪、音效及其他元数据均不计。总字数不得超过硬上限，宁可删修饰词；输出前逐句自检每镜轮数、每句中文汉字数和硬总字区间，少一轮、任一句不足或总字数越界都必须先改完。逐句自检通过后再输出 JSON；自检结果不要另加字段，只输出合同 JSON。"
+    "统计口径：只统计 dialogueTurns[].text 中演员自然说出口的中文可说汉字；标点、数字、英文、speakerId、动作、情绪、音效及其他元数据均不计。一个生成单元的全部台词只能属于上表唯一说话人；另一人物的回答必须进入下一生成单元并切换cameraOwnerId/mouthOwnerId。总字数不得超过硬上限；输出前逐句自检后只输出合同 JSON。"
   ].join("\n");
 }
 
@@ -1677,7 +1688,7 @@ function productionShotSchema(mode = "continuation", options = {}) {
   const modelAuthoredOnly = options.modelAuthoredOnly === true;
   const shot = {
     id: "S01", title: "生成单元标题", duration: 10, characters: ["场内角色名"], scenePresenceCharacterIds: ["C01", "C02", "C03"], scene: "场景名",
-    focusCharacterId: "C01", counterpartCharacterId: "C02", shotFunction: "speaker_closeup", sceneObjective: "本镜独占剧情任务", transitionReason: "台词接力/视线接力/动作匹配/物件揭示/入场/声音桥",
+    focusCharacterId: "C01", counterpartCharacterId: "C02", cameraOwnerId: "C01", mouthOwnerId: "C01", shotFunction: "speaker_closeup", sceneObjective: "本镜独占剧情任务", transitionReason: "上一说话人落句后硬切到本镜说话人/视线接力/动作匹配/物件揭示/入场/声音桥",
     action: "本单元总体动作与结果", mainlineStage: "hook/pressure/cost_kindness/evidence/main_reversal/payoff/ending", mainlineBeat: "不可逆主线推进", kindnessCost: "无或具体成本", reversalSetup: "无或证据伏笔", stateBefore: "开始状态", stateAfter: "结束状态", causalLink: "因果承接", visualBeat: "独占画面拍点", compositionPlan: "单人近景或双人正反打，禁止第三张脸", audioPlan: "对白+环境底噪+撕纸特效（不要背景音乐）", dialogue: "由 dialogueTurns 自动序列化，禁止把情绪元数据念出来", shotSize: "中近景", cameraMove: "主机位与运镜", emotion: "压抑→爆发→余震", emotionArc: { start: "压住怒气", trigger: "对方否认", peak: "眼含泪怒声落锤", aftershock: "闭口喘气仍盯听者" }, performanceBeats: { faceAction: "眉心收紧、下颌绷住、泪线形成", bodyAction: "攥单据手背青筋、重心前压", voiceDelivery: "低声压火后破音拔高", listenerReaction: "听者吞咽并避开目光" }, performance: "眉心死皱，下颌绷紧，攥单子手抖，落锤后急喘", soundDesign: "对白与连续环境声+同步特效（不要背景音乐）", transitionIn: "动作/视线/声音承接", transitionOut: "尾帧保留呼吸和眨眼微动作", startFrame: "首帧状态", endFrame: "尾帧状态且人物仍有呼吸/眨眼微动作",
     tragedy: { grammar: "物的控诉/身体证据/压迫构图中的至少两项", irreversibleLoss: "不可逆现实损失" },
     faceSlap: { enabled: false, qualitativeFrame: "定性", evidenceAction: "出证", witnessReaction: "围观反应", antagonistCollapse: "反派失态", consequence: "行动落锤" },
@@ -1688,15 +1699,15 @@ function productionShotSchema(mode = "continuation", options = {}) {
     visibleCharacterIds: ["C01", "C02"], imageReferenceCharacterIds: ["C01", "C02"], videoReferenceCharacterIds: ["C01", "C02"], offscreenSpeakerIds: [],
     wardrobeBindings: [{ characterId: "C01", wardrobeId: "wardrobe_C01", continuity: "本场不换装" }],
     propBindings: [{ propId: "prop_receipt", holderCharacterId: "C01", hand: "左手", stateBefore: "折叠", stateAfter: "摊开", visibleInSubshots: [2, 3] }],
-    dialogueArc: { entryCause: "C02刚否认签过这张单据", speakerGoalA: "C01逼C02当场承认", speakerGoalB: "C02把责任推给医院", newInformation: "签字确由C02完成", exitConsequence: "C01把单据按在桌上堵住退路" },
+    dialogueArc: { entryCause: "上一镜C02刚否认签过这张单据", speakerGoalA: "本镜C01逼C02当场承认", speakerGoalB: "C02的回答留给下一镜并切换机位", newInformation: "签字确由C02完成", exitConsequence: "C01把单据按在桌上堵住退路" },
     sourceDialogueBindings: [{ sourceDialogueId: "D001", listenerIds: ["C02"], subshotNumber: 1, onScreen: true, intent: "质问", emotion: "压着怒火", volume: "先低后高", pace: "短促", body: "攥紧单据前压", listenerBeat: "C02避开视线" }],
     dialogueTurns: [{ speakerId: "C01", listenerIds: ["C02"], text: "你还敢瞒我？", beat: "attack", delivery: "压火起句，重咬瞒字，尾音拔高", body: "攥紧单据", listenerBeat: "C02眼神躲闪", subshotNumber: 1, onScreen: true }],
     criticalOnScreenText: [{ text: "医院复查单", start: 6.5, end: 9.5, anchor: "bottom", purpose: "核心物证准确汉字；图像/视频模型只留干净空白承载面，应用后期精确叠字" }],
     soundCueSheet: { bed: "0-10秒室内底噪", sfx: "2.1秒纸张拍桌", silenceDesign: "非静默单元" },
     subshots: [
-      { start: 0, end: 3, shotType: "speaker_closeup", cutReason: "上一镜视线落到C01后切近", framing: "C01单人中近景", camera: "稳定机位", action: "C01压住怒气逼问，C02在画外", dialogue: "由 sourceDialogueBindings 自动填充原稿台词", sourceDialogueIds: ["D001"], sound: "室内环境底噪+衣料摩擦", transition: "视线接力", visibleCharacterIds: ["C01"], speakerIds: ["C01"], offscreenSpeakerIds: [], speakerFacing: "C01朝画外C02", listenerFacing: "C02画外朝C01", eyelineDirection: "C01屏幕左望右", emotionBeat: "压火", faceAction: "眉心收紧下颌绷住", bodyAction: "攥单据重心前压", voiceDelivery: "低声短句咬重音" },
-      { start: 3, end: 7, shotType: "listener_reaction", cutReason: "C01落锤台词后切C02反应", framing: "C02单人反应近景", camera: "轻微推进", action: "C02冷笑伤人后眼神闪躲", dialogue: "由 dialogueTurns[subshotNumber=2] 自动填充", sound: "室内环境底噪+呼吸加重", transition: "台词接力", visibleCharacterIds: ["C02"], speakerIds: ["C02"], offscreenSpeakerIds: ["C01"], speakerFacing: "C02朝画外C01", listenerFacing: "C01画外", eyelineDirection: "C02屏幕右望左", emotionBeat: "反击", faceAction: "嘴角冷笑后僵住", bodyAction: "肩膀前顶后微退", voiceDelivery: "快而尖锐" },
-      { start: 7, end: 10, shotType: "action_insert", cutReason: "C02手碰单据时动作匹配切特写", framing: "单据与C01手部特写", camera: "稳定机位", action: "C01按住单据完成落锤，C02手停在画外边缘", dialogue: "由 dialogueTurns[subshotNumber=3] 自动填充", sound: "室内环境底噪+纸张拍桌+急促呼吸", transition: "动作匹配", visibleCharacterIds: ["C01"], speakerIds: ["C01"], offscreenSpeakerIds: ["C02"], speakerFacing: "C01朝画外C02", listenerFacing: "C02画外", eyelineDirection: "保持180度轴线", emotionBeat: "峰值后余震", faceAction: "泪线形成仍不移开视线", bodyAction: "手掌压住单据后轻颤", voiceDelivery: "破音落锤后急喘" }
+      { start: 0, end: 3, shotType: "speaker_hold", cutReason: "连续机位起句阶段，不切镜", framing: "C01单人中近景，C02只在画外", camera: "稳定机位开始缓慢推进", cameraOwnerId: "C01", mouthOwnerId: "C01", action: "C01压住怒气逼问，C02在画外闭口", dialogue: "由 sourceDialogueBindings 自动填充原稿台词", sourceDialogueIds: ["D001"], sound: "室内环境底噪+衣料摩擦", transition: "连续表演", visibleCharacterIds: ["C01"], speakerIds: ["C01"], offscreenSpeakerIds: [], speakerFacing: "C01朝画外C02", listenerFacing: "C02画外朝C01", eyelineDirection: "C01屏幕左望右", emotionBeat: "压火", faceAction: "眉心收紧下颌绷住", bodyAction: "攥单据重心前压", voiceDelivery: "低声短句咬重音" },
+      { start: 3, end: 7, shotType: "speaker_hold", cutReason: "同一连续机位进入峰值，不切听者", framing: "仍锁C01中近景", camera: "同一缓慢推进", cameraOwnerId: "C01", mouthOwnerId: "C01", action: "C01情绪抬升，C02只以画外呼吸回应", dialogue: "由 dialogueTurns[subshotNumber=2] 自动填充", sound: "室内环境底噪+呼吸加重", transition: "连续表演", visibleCharacterIds: ["C01"], speakerIds: ["C01"], offscreenSpeakerIds: [], speakerFacing: "C01朝画外C02", listenerFacing: "C02画外", eyelineDirection: "保持180度轴线", emotionBeat: "峰值", faceAction: "泪线形成、重音处表情崩开", bodyAction: "肩颈绷紧后前压", voiceDelivery: "带哭腔并重咬关键词" },
+      { start: 7, end: 10, shotType: "speaker_hold", cutReason: "同一连续机位完成余震，不切动作插入", framing: "仍锁C01近景", camera: "推进停止并保持", cameraOwnerId: "C01", mouthOwnerId: "C01", action: "C01按住单据完成落锤，闭口后保持急喘", dialogue: "由 dialogueTurns[subshotNumber=3] 自动填充", sound: "室内环境底噪+纸张拍桌+急促呼吸", transition: "末句后下一镜硬切回应者", visibleCharacterIds: ["C01"], speakerIds: ["C01"], offscreenSpeakerIds: [], speakerFacing: "C01朝画外C02", listenerFacing: "C02画外", eyelineDirection: "保持180度轴线", emotionBeat: "峰值后余震", faceAction: "闭口后泪线仍在", bodyAction: "手掌压住单据后轻颤", voiceDelivery: "破音落锤后急喘" }
     ],
     productMention: false,
     productShotType: "none/product_packshot/product_detail/product_use/product_result/product_reaction",
@@ -1718,9 +1729,9 @@ function productionShotSchema(mode = "continuation", options = {}) {
   }
   if (sheet) {
     shot.secondPanels = [
-      { second: 0, framing: "双人关系中景", camera: "稳定机位", action: "对峙起始", dialogue: "角色A：质问" },
-      { second: 1, framing: "说话人近景", camera: "推进", action: "伤人真话", dialogue: "角色B：推诿" },
-      { second: 2, framing: "反应近景", camera: "稳定", action: "落锤姿态", dialogue: "角色A：反击" }
+      { second: 0, framing: "C01说话人中近景", camera: "连续缓推", cameraOwnerId: "C01", mouthOwnerId: "C01", speakerId: "C01", listenerIds: ["C02"], visibleCharacterIds: ["C01"], action: "C01压住怒气起句", dialogue: "C01：质问" },
+      { second: 1, framing: "仍锁C01说话人近景", camera: "连续缓推", cameraOwnerId: "C01", mouthOwnerId: "C01", speakerId: "C01", listenerIds: ["C02"], visibleCharacterIds: ["C01"], action: "C01重咬关键词", dialogue: "C01：继续" },
+      { second: 2, framing: "仍锁C01近景", camera: "保持", cameraOwnerId: "C01", mouthOwnerId: "C01", speakerId: "C01", listenerIds: ["C02"], visibleCharacterIds: ["C01"], action: "C01落锤后闭口余震", dialogue: "" }
     ];
   }
   if (includeHailuo) {
@@ -1918,6 +1929,7 @@ function validateShotBatch(data, plannedShots, productName = "", videoEngine = "
         ...normalizeStringArray(subshot.offscreenSpeakerIds),
         ...speakerIds.filter(id => !derivedVisible.includes(id))
       ].filter(Boolean))];
+      const primarySpeakerId = speakerIds[0] || "";
       return {
         number: subIndex + 1,
         start: Math.max(0, Number(subshot.start) || 0),
@@ -1933,6 +1945,9 @@ function validateShotBatch(data, plannedShots, productName = "", videoEngine = "
         transition: String(subshot.transition || subshot.cutReason || planProductionFields.transitionReason || "视线/动作承接").trim(),
         visibleCharacterIds: derivedVisible,
         speakerIds,
+        cameraOwnerId: String(subshot.cameraOwnerId || item.cameraOwnerId || primarySpeakerId || planProductionFields.focusCharacterId || derivedVisible[0] || "").trim(),
+        mouthOwnerId: String(subshot.mouthOwnerId || item.mouthOwnerId || primarySpeakerId).trim(),
+        listenerIds,
         offscreenSpeakerIds,
         speakerFacing: String(subshot.speakerFacing || "").trim(),
         listenerFacing: String(subshot.listenerFacing || "").trim(),
@@ -1989,6 +2004,8 @@ function validateShotBatch(data, plannedShots, productName = "", videoEngine = "
         : (plan.productCausalBridge && typeof plan.productCausalBridge === "object" ? { ...plan.productCausalBridge } : {}),
       dialogue,
       dialogueTurns: dialogueTurnsStructured,
+      cameraOwnerId: String(item.cameraOwnerId || dialogueTurnsStructured[0]?.speakerId || planProductionFields.focusCharacterId || "").trim(),
+      mouthOwnerId: String(item.mouthOwnerId || dialogueTurnsStructured[0]?.speakerId || "").trim(),
       criticalOnScreenText: (Array.isArray(item.criticalOnScreenText) ? item.criticalOnScreenText : [])
         .map(cue => ({
           text: String(cue?.text || "").trim(),
@@ -2044,7 +2061,12 @@ function validateShotBatch(data, plannedShots, productName = "", videoEngine = "
           cameraMove: String(item.cameraMove || ""),
           visualBeat: String(item.visualBeat || plan.visualBeat || item.action || plan.action || ""),
           action: String(item.action || plan.action || "").trim(),
-          dialogue
+          dialogue,
+          cameraOwnerId: String(item.cameraOwnerId || dialogueTurnsStructured[0]?.speakerId || planProductionFields.focusCharacterId || "").trim(),
+          mouthOwnerId: String(item.mouthOwnerId || dialogueTurnsStructured[0]?.speakerId || "").trim(),
+          speakerId: String(dialogueTurnsStructured[0]?.speakerId || "").trim(),
+          listenerIds: normalizeStringArray(dialogueTurnsStructured[0]?.listenerIds),
+          visibleCharacterIds: planProductionFields.visibleCharacterIds
         })
         : (Array.isArray(item.secondPanels) ? normalizeSecondPanels(item.secondPanels, unitDuration, { subshots }) : [])
     };
@@ -2077,7 +2099,7 @@ function validateShotBatch(data, plannedShots, productName = "", videoEngine = "
         contractFailures.push({
           code: maxSpeakingCharacters < 3 ? "HAILUO_AUTOMATIC_SPEAKER_LIMIT" : "HAILUO_AUDIO_REFERENCE_LIMIT",
           shotId: plan.id,
-          message: `${plan.id}共有${speakerNames.size}名说话人，超过当前海螺 H3 ${maxSpeakingCharacters < 3 ? "自动写作每镜最多2名剧情核心说话人" : "单镜最多3条音色参考"}；保持本单元、镜号、顺序和时长不变，其余出镜者改为全镜静默反应，禁止拆分单元或改ID`
+          message: `${plan.id}共有${speakerNames.size}名说话人，超过当前海螺 H3 ${maxSpeakingCharacters === 1 ? "Agent原子镜头每镜唯一说话人" : maxSpeakingCharacters < 3 ? "自动写作说话人上限" : "单镜音色参考上限"}；把回应者放到下一生成单元并切换cameraOwnerId/mouthOwnerId，其余人物在本镜全程闭口`
         });
       }
       if (assignmentSource) {
@@ -2609,7 +2631,7 @@ function shotUsesManualVideoPrompt(shot = {}) {
  * never truncate dialogue, voice bindings, or immutable output policy.
  * Manual and non-shot prompts still use the generic bounded compiler.
  */
-function finalizeVideoPromptForSubmission(project, entityType, entityId, stage, prompt, expectedEngine = projectVideoEngine(project)) {
+function finalizeVideoPromptForSubmission(project, entityType, entityId, stage, prompt, expectedEngine = projectVideoEngine(project), references = {}) {
   const source = String(prompt || "").replace(/\r/g, "").trim();
   if (!source) throw Object.assign(new Error("Video prompt is empty"), { code: "VIDEO_PROMPT_REQUIRED" });
   const shot = entityType === "shot" && stage === "shot_video"
@@ -2617,6 +2639,10 @@ function finalizeVideoPromptForSubmission(project, entityType, entityId, stage, 
     : null;
   const compilerOwned = Boolean(shot && !shotUsesManualVideoPrompt(shot));
   if (!compilerOwned) return compactProviderVideoPrompt(source);
+  if (expectedEngine === "hailuo-h3" && references?.agentTakeShot?.agentTake) {
+    assertAgentTakePrompt(project, references.agentTakeShot, references.agentTakeShot.agentTake, references, source);
+    return source;
+  }
   if (source.length > 1900) {
     throw Object.assign(new Error(`Compiled ${expectedEngine} shot prompt is ${source.length} characters; refusing to truncate an immutable production contract`), {
       code: "VIDEO_PROMPT_COMPILER_BUDGET_EXCEEDED",
@@ -2691,13 +2717,13 @@ function referenceParityTextSideContract() {
 人物对话时必须「对着人说话」，禁止「对着镜头/虚空念词」。
 硬规则：
 1. 说话人眼球与面部朝向听者（或听者所在屏幕方向），禁止正脸长时间直视镜头念台词（口播广告除外且本剧禁止口播）。
-2. 对话链默认正反打/过肩/中近景；说话切说话人，听完必须给听者反应。
-3. 每个有对白的 subshot 写清 speakerFacing / listenerFacing / eyeline / shotType。
+2. 海螺 H3 的每个生成任务只有一个 cameraOwnerId、一个 mouthOwnerId 和最多一个说话人；说话人一变，当前任务立即结束，下一相邻任务硬切到回应者。Seedance 只有在引擎明确支持且蓝图已写出可执行切点时才允许单任务内部剪辑。
+3. 每个有对白的 subshot 写清 speakerFacing / listenerFacing / eyeline / shotType / cameraOwnerId / mouthOwnerId；海螺同一任务的三段只表示同一机位内的起句、峰值、余震，所有权不得漂移。
 【口播与切镜·参考片水位】
 4. 对白短锤连打：单句优先4–10个可说汉字，句句新增信息或改变权力/证据/行动；禁止说明句、同义复读、空壳开场。
-5. 双人交锋同一说话人不得连续超过2轮；开场前20秒内必须让观众完成“谁错待谁”的道德站队（事故钩子也要尽快切入人际指控）。
-6. 每镜恰好3个连续subshots，时长禁止等分（冲突段优先1.5–3秒短切）；三段action/faceAction/bodyAction必须肉眼不同；cutReason写清台词接力/视线/动作匹配/物件揭示/入场/声音桥，禁止只写“硬切”。
-7. 逐秒合图模式：secondPanels每格也必须推进新信息，禁止整板同一动作/同一表情复制。
+5. 双人交锋按相邻原子镜头一问一答；同一说话人连续两镜必须有明确递进理由。开场前20秒内必须让观众完成“谁错待谁”的道德站队。
+6. 每镜恰好3个连续subshots，时长禁止等分；海螺三段action/faceAction/bodyAction必须在同一机位内肉眼递进，cutReason只描述与下一原子镜头的台词、视线、动作、物件或声音接力，不得暗示本任务内部切到另一说话人。
+7. 逐秒合图模式：secondPanels每格必须继承本镜 cameraOwnerId/mouthOwnerId，只推进同一说话人的表演、动作和构图状态；禁止整板复制，也禁止中途换嘴、换机位所有者。
 【声场】
 subshots/editCutPoints 是剪辑蓝图，不是视频模型会自动硬切的承诺。
 海螺/Seedance进模声场：本镜 bed+SFX 必须可执行；non_diegetic_music 固定 N/A；跨镜连续只写清本镜如何承接上一镜末帧/末声；禁止写BGM/underscore。
@@ -2745,7 +2771,7 @@ function textStagePromptForProject(project, settings, promptKey, stage) {
   return `${enginePrompt}\n\n${viewerComprehensionPriorityDirective()}\n\n${scriptFormatDirective(project)}${creatorDirective}\n\n${contractPromptBlock(productionContract)}`;
 }
 
-/** Source-level directive injected into script unit / analysis prompts. The H3 branch deliberately retains the prior contract byte-for-byte. */
+/** Source-level directive injected into script unit / analysis prompts. H3 uses the Agent atomic-camera contract. */
 function generationModeSourceDirective(mode, engine = "hailuo-h3") {
   const normalizedMode = normalizeProjectMode(mode);
   const matrixPrompt = matrixGlobalPrompt(engine === "hailuo-h3" ? "cloud" : "xiangsu", normalizedMode);
@@ -2789,9 +2815,9 @@ ${textSide}`;
 function productionUnitGenerationModeDirective(mode, engine = "hailuo-h3") {
   const normalized = normalizeProjectMode(mode);
   const modeRule = {
-    keyframe: "【当前图像/视频策略·首尾帧模式】每个单元写清可拍的 startFrame 与 endFrame；禁止写成延续上一视频开场或多格分镜板。口播短锤、非等分三切、每拍表演互异、SFX-only 全模式同标。",
-    continuation: "【当前图像/视频策略·视频延续模式】开场单元写 startFrame+endFrame；后续单元重点写 endFrame，并自然承接上一单元尾帧/视频；禁止写成多格分镜板。口播短锤、非等分三切、每拍表演互异、SFX-only 全模式同标。",
-    smart: "【当前图像/视频策略·智能首尾帧+视频延续】同场景连续单元强调 endFrame 与上一镜承接；换场或开场单元写清 startFrame 与 endFrame。口播短锤、非等分三切、每拍表演互异、SFX-only 全模式同标。",
+    keyframe: "【当前图像/视频策略·首尾帧模式】每个单元写清可拍的 startFrame 与 endFrame；禁止写成延续上一视频开场或多格分镜板。三段只写同一机位内的起句、峰值、余震；说话人变化必须进入下一原子镜头并硬切。口播短锤、每段表演互异、SFX-only 全模式同标。",
+    continuation: "【当前图像/视频策略·视频延续模式】开场单元写 startFrame+endFrame；后续单元重点写 endFrame，并自然承接上一单元尾帧/视频；禁止写成多格分镜板。三段只写同一机位内的起句、峰值、余震；说话人变化必须进入下一原子镜头并硬切。口播短锤、每段表演互异、SFX-only 全模式同标。",
+    smart: "【当前图像/视频策略·智能首尾帧+视频延续】同场景连续单元强调 endFrame 与上一镜承接；换场或开场单元写清 startFrame 与 endFrame。三段只写同一机位内的起句、峰值、余震；说话人变化必须进入下一原子镜头并硬切。口播短锤、每段表演互异、SFX-only 全模式同标。",
     storyboard_sheet: "【当前图像/视频策略·单图多帧/逐秒分镜合图】必须输出 secondPanels：长度恰好等于 duration，second 从 0 到 duration-1，每项写清 framing/camera/action/faceAction/bodyAction；startFrame/endFrame 作为首格/末格语义锚点。口播短锤、逐格新信息、SFX-only 全模式同标。"
   }[normalized];
   const source = generationModeSourceDirective(normalized, engine);
@@ -2840,7 +2866,13 @@ function normalizeSecondPanels(rawPanels, durationSeconds, shot = {}) {
       framing: String(hit?.framing || sub?.framing || shot.shotSize || "").trim(),
       camera: String(hit?.camera || sub?.camera || shot.cameraMove || "").trim(),
       action: String(hit?.action || hit?.beat || hit?.description || sub?.action || shot.visualBeat || shot.action || (`第${second}秒推进`)).trim(),
-      dialogue: String(hit?.dialogue || "").trim()
+      dialogue: String(hit?.dialogue || "").trim(),
+      takeId: String(hit?.takeId || sub?.takeId || "").trim(),
+      cameraOwnerId: String(hit?.cameraOwnerId || sub?.cameraOwnerId || shot.cameraOwnerId || "").trim(),
+      mouthOwnerId: String(hit?.mouthOwnerId || sub?.mouthOwnerId || shot.mouthOwnerId || "").trim(),
+      speakerId: String(hit?.speakerId || sub?.speakerIds?.[0] || shot.speakerId || "").trim(),
+      listenerIds: normalizeStringArray(hit?.listenerIds || sub?.listenerIds || shot.listenerIds),
+      visibleCharacterIds: normalizeStringArray(hit?.visibleCharacterIds || sub?.visibleCharacterIds || shot.visibleCharacterIds)
     });
   }
   return result;
@@ -2850,7 +2882,8 @@ function formatSecondPanelBeats(panels) {
   return (Array.isArray(panels) ? panels : []).map(item => {
     const second = Number(item.second);
     const label = Number.isFinite(second) ? `${second.toFixed(1)}s` : "?";
-    return `${label}：${[item.framing, item.camera, item.action, item.dialogue].filter(Boolean).join(" / ")}`;
+    const ownership = [item.cameraOwnerId ? `cameraOwner=${item.cameraOwnerId}` : "", item.mouthOwnerId ? `mouthOwner=${item.mouthOwnerId}` : "", item.speakerId ? `speaker=${item.speakerId}` : ""].filter(Boolean).join(" ");
+    return `${label}：${[ownership, item.framing, item.camera, item.action, item.dialogue].filter(Boolean).join(" / ")}`;
   }).join("；");
 }
 
@@ -2858,7 +2891,8 @@ function formatVisualSecondPanelBeats(panels) {
   return (Array.isArray(panels) ? panels : []).map(item => {
     const second = Number(item.second);
     const label = Number.isFinite(second) ? `${second.toFixed(1)}s` : "?";
-    return `${label}：${[item.framing, item.camera, item.action].filter(Boolean).join(" / ")}`;
+    const ownership = [item.cameraOwnerId ? `cameraOwner=${item.cameraOwnerId}` : "", item.mouthOwnerId ? `mouthOwner=${item.mouthOwnerId}` : "", item.speakerId ? `speaker=${item.speakerId}` : ""].filter(Boolean).join(" ");
+    return `${label}：${[ownership, item.framing, item.camera, item.action].filter(Boolean).join(" / ")}`;
   }).join("；");
 }
 
@@ -5580,6 +5614,28 @@ function isScriptControlError(error) {
   return ["SCRIPT_GENERATION_PAUSED", "SCRIPT_GENERATION_STOPPED"].includes(error?.code);
 }
 
+function agentCreativeOutputRequired(error, code, message, extra = {}) {
+  const causeMessage = String(error?.message || error || "AI 未返回可验证结果").slice(0, 300);
+  return Object.assign(new Error(`${message}：${causeMessage}`), {
+    code,
+    causeCode: String(error?.code || "AGENT_CREATIVE_RESULT_INVALID"),
+    cause: error,
+    agentRequired: true,
+    localCreativeFallbackUsed: false,
+    noAutomaticRetry: true,
+    retryRequiresExplicitResume: true,
+    rawText: error?.rawText,
+    rawTextLength: error?.rawTextLength,
+    rawTextSha256: error?.rawTextSha256,
+    rawTextTruncated: error?.rawTextTruncated,
+    upstreamDone: error?.upstreamDone,
+    upstreamReceipt: error?.upstreamReceipt,
+    sessionId: error?.sessionId,
+    attempt: error?.attempt,
+    ...extra
+  });
+}
+
 function hasRecoverableScriptCheckpoint(project = {}) {
   const checkpoint = project?.script?.generationCheckpoint || {};
   const analysisCheckpoint = project?.script?.analysisCheckpoint || {};
@@ -6679,7 +6735,9 @@ async function probeMediaStreamDuration(ffmpeg, filePath, streamSpecifier = "0:v
   const sink = process.platform === "win32" ? "NUL" : "/dev/null";
   const result = await spawnCapture(ffmpeg, [
     "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
-    "-i", filePath, "-map", streamSpecifier, "-c", "copy", "-f", "null", sink
+    // Decode into the null muxer so progress reports the end of the final
+    // frame/sample, not merely the timestamp of the last compressed packet.
+    "-i", filePath, "-map", streamSpecifier, "-f", "null", sink
   ], 300_000);
   const seconds = parseFfmpegProgressSeconds(result.stdout);
   if (!(seconds > 0)) {
@@ -6728,10 +6786,10 @@ function h3ExactStitchFilter(shots = [], targetSeconds = 0, fps = 24) {
     const duration = Math.max(0.001, Number(shot?.duration) || 0);
     const value = duration.toFixed(3).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
     const textOverlays = criticalTextOverlayFilters(shot);
-    filters.push(
-      `[${index}:v:0]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},tpad=stop_mode=clone:stop_duration=${value},trim=duration=${value},setpts=PTS-STARTPTS,format=yuv420p,setsar=1${textOverlays.length ? `,${textOverlays.join(",")}` : ""}[v${index}]`,
-      `[${index}:a:0]aresample=48000,asetpts=PTS-STARTPTS,apad=pad_dur=${value},atrim=duration=${value},asetpts=PTS-STARTPTS[a${index}]`
-    );
+    filters.push(`[${index}:v:0]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},tpad=stop_mode=clone:stop_duration=${value},trim=duration=${value},setpts=PTS-STARTPTS,format=yuv420p,setsar=1${textOverlays.length ? `,${textOverlays.join(",")}` : ""}[v${index}]`);
+    filters.push(shot?.hasAudio === false
+      ? `anullsrc=r=48000:cl=stereo,atrim=duration=${value},asetpts=PTS-STARTPTS[a${index}]`
+      : `[${index}:a:0]aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,apad=pad_dur=${value},atrim=duration=${value},asetpts=PTS-STARTPTS[a${index}]`);
     concatInputs.push(`[v${index}][a${index}]`);
   });
   const target = Math.max(0.001, Number(targetSeconds) || 0).toFixed(3).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
@@ -8626,6 +8684,8 @@ function semanticReviewPayload(blueprint, shots = []) {
       storyCoreRefs: item.storyCoreRefs,
       reversalRole: item.reversalRole,
       visibleCharacterIds: item.visibleCharacterIds,
+      cameraOwnerId: item.cameraOwnerId,
+      mouthOwnerId: item.mouthOwnerId,
       imageReferenceCharacterIds: item.imageReferenceCharacterIds,
       videoReferenceCharacterIds: item.videoReferenceCharacterIds,
       offscreenSpeakerIds: item.offscreenSpeakerIds,
@@ -8653,6 +8713,8 @@ function semanticReviewPayload(blueprint, shots = []) {
       dialogueGoal: item.dialogueGoal,
       shotSize: item.shotSize,
       cameraMove: item.cameraMove,
+      cameraOwnerId: item.cameraOwnerId,
+      mouthOwnerId: item.mouthOwnerId,
       emotion: item.emotion,
       performance: item.performance,
       audioPlan: item.audioPlan,
@@ -8677,6 +8739,7 @@ function semanticReviewPayload(blueprint, shots = []) {
       propBindings: item.propBindings,
       dialogueTurns: item.dialogueTurns,
       soundCueSheet: item.soundCueSheet,
+      secondPanels: item.secondPanels,
       subshots: (item.subshots || []).map(subshot => ({
         start: subshot.start,
         end: subshot.end,
@@ -8687,6 +8750,10 @@ function semanticReviewPayload(blueprint, shots = []) {
         sound: subshot.sound,
         transition: subshot.transition,
         visibleCharacterIds: subshot.visibleCharacterIds,
+        cameraOwnerId: subshot.cameraOwnerId,
+        mouthOwnerId: subshot.mouthOwnerId,
+        speakerIds: subshot.speakerIds,
+        listenerIds: subshot.listenerIds,
         offscreenSpeakerIds: subshot.offscreenSpeakerIds,
         speakerFacing: subshot.speakerFacing,
         listenerFacing: subshot.listenerFacing,
@@ -8873,9 +8940,73 @@ class WorkbenchWorkflow {
     this.videoSubmissionRecoveryAttempts = 3;
     this.videoSubmissionRecoverySleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     this.videoQueryPollSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    this._accountedGenerateText = this.generateText;
     this.adaptiveAgent = adaptiveAgent instanceof AdaptiveProductionAgent ? adaptiveAgent : new AdaptiveProductionAgent();
     if (!this.adaptiveAgent.hasAdapter("text", "default")) {
-      this.adaptiveAgent.registerAdapter("text", "default", payload => this.generateText(payload.config, payload.messages, payload.options || {}));
+      this.adaptiveAgent.registerAdapter("text", "default", payload => this._accountedGenerateText(payload.config, payload.messages, payload.options || {}));
+    }
+    if (!this.adaptiveAgent.hasAdapter("image", "default")) {
+      this.adaptiveAgent.registerAdapter("image", "default", payload => generateImage(payload.config, payload.prompt, payload.targetPath, payload.options || {}));
+    }
+    if (!this.adaptiveAgent.hasAdapter("video", "default")) {
+      this.adaptiveAgent.registerAdapter("video", "default", payload => generateVideo(payload.config, payload.prompt, payload.targetPath, payload.options || {}));
+    }
+    if (!this.adaptiveAgent.hasAdapter("video_submit", "default")) {
+      this.adaptiveAgent.registerAdapter("video_submit", "default", payload => payload.bridge.submit(payload.stagedPayload));
+    }
+    if (!this.adaptiveAgent.hasAdapter("video_query", "default")) {
+      this.adaptiveAgent.registerAdapter("video_query", "default", payload => payload.bridge.query(payload.taskId));
+    }
+    for (const capability of ["text", "image", "video", "video_submit", "video_query"]) {
+      const skillName = `provider.${capability}`;
+      if (this.adaptiveAgent.hasSkill(skillName)) continue;
+      // One skill boundary owns every provider call. Provider-level retry and
+      // idempotency stay with the specialized caller so image/video work can
+      // never be duplicated merely because the Agent retried a skill.
+      this.adaptiveAgent.registerSkill(skillName, {
+        maxAttempts: 1,
+        run: (envelope, context) => context.agent.execute(
+          capability,
+          envelope.platform || "default",
+          envelope.payload,
+          { ...context, capability }
+        )
+      });
+    }
+    this.generateText = (config, messages, options = {}) => this.executeAdaptiveCapability(
+      "text",
+      config?.kind || "default",
+      { config, messages, options },
+      { projectId: options.costProjectId || "", operation: options.costOperation || "text" }
+    );
+    if (!this.adaptiveAgent.hasSkill("director.camera_take_plan")) {
+      this.adaptiveAgent.registerSkill("director.camera_take_plan", {
+        maxAttempts: 3,
+        run: async (payload, context) => {
+          const raw = await context.agent.execute(
+            "text",
+            payload.textProvider?.kind || "default",
+            { config: payload.textProvider, messages: payload.messages, options: payload.textOptions },
+            { ...context, projectId: payload.projectId, shotId: payload.shot?.id }
+          );
+          return mergeAgentTakeDraft(payload.basePlan, raw, payload.project, payload.shot, { requireAgentAuthored: true });
+        },
+        validate: (plan, payload) => validateCameraTakePlan(plan, payload.project, payload.shot),
+        repairPayload: (payload, error, context) => ({
+          ...payload,
+          messages: [
+            ...payload.messages,
+            {
+              role: "user",
+              content: `Attempt ${context.attempt} failed validation. Repair the full JSON without changing any locked id, time, speaker, camera owner, mouth owner, listener or Chinese dialogue. Failures: ${Array.isArray(error?.failures) ? error.failures.join("; ") : error?.message || error}`
+            }
+          ],
+          textOptions: {
+            ...payload.textOptions,
+            sessionId: `${payload.textOptions.sessionId || `agent-camera-${payload.projectId}-${payload.shot?.id}`}-repair-${context.attempt + 1}`
+          }
+        })
+      });
     }
   }
 
@@ -8885,7 +9016,20 @@ class WorkbenchWorkflow {
   }
 
   executeAdaptiveCapability(capability, platform, payload, context = {}) {
+    const skillName = `provider.${String(capability || "").trim()}`;
+    if (this.adaptiveAgent.hasSkill(skillName)) {
+      return this.adaptiveAgent.runSkill(skillName, { payload, platform: platform || "default" }, context);
+    }
     return this.adaptiveAgent.execute(capability, platform, payload, context);
+  }
+
+  registerAgentSkill(name, definition) {
+    this.adaptiveAgent.registerSkill(name, definition);
+    return this;
+  }
+
+  runAgentSkill(name, payload, context = {}) {
+    return this.adaptiveAgent.runSkill(name, payload, context);
   }
 
   adaptiveProductionPlan(projectId) {
@@ -9710,6 +9854,30 @@ class WorkbenchWorkflow {
           } catch {}
         }
       }
+      if (maxSpeakingCharacters === 1 && speakerNames.size === 1) {
+        const speakerId = [...speakerNames][0];
+        if (String(shot.cameraOwnerId || "").toUpperCase() !== String(speakerId).toUpperCase()
+          || String(shot.mouthOwnerId || "").toUpperCase() !== String(speakerId).toUpperCase()) {
+          contractFailures.push({
+            code: "HAILUO_CAMERA_MOUTH_OWNERSHIP_INVALID",
+            shotId: plan.id,
+            message: `${plan.id}唯一说话人${speakerId}必须同时拥有cameraOwnerId与mouthOwnerId`
+          });
+        }
+        for (const subshot of shot.subshots || []) {
+          const subSpeakers = normalizeStringArray(subshot.speakerIds).map(value => value.toUpperCase());
+          if (subSpeakers.some(value => value !== String(speakerId).toUpperCase())
+            || String(subshot.cameraOwnerId || "").toUpperCase() !== String(speakerId).toUpperCase()
+            || String(subshot.mouthOwnerId || "").toUpperCase() !== String(speakerId).toUpperCase()) {
+            contractFailures.push({
+              code: "HAILUO_SUBSHOT_OWNERSHIP_DRIFT",
+              shotId: plan.id,
+              message: `${plan.id}的3段subshots必须保持唯一说话人${speakerId}的同一cameraOwnerId/mouthOwnerId，禁止内部切到听者`
+            });
+            break;
+          }
+        }
+      }
     }
     for (const key of ["mediaQualityAudit", "finalQualityAudit"]) {
       if (project[key]?.ok === false) project[key] = ignoredQualityAudit(project[key]);
@@ -9931,6 +10099,37 @@ class WorkbenchWorkflow {
         throw Object.assign(new Error("视频任务对应对象已不存在，已拒绝写入当前制作版本"), { code: "VIDEO_JOB_ENTITY_MISSING" });
       }
     }
+    if (job.internalTake === true) {
+      this.store.updateJob(projectId, job.id, {
+        status: "completed",
+        progress: 100,
+        progressSource: "terminal",
+        progressDeterminate: true,
+        message: resumed ? "原子镜头断点恢复完成" : "原子镜头生成完成，等待本地硬切合成",
+        internalTakeFilePath: result.localPath,
+        remoteUrl: result.videoUrl || "",
+        chargeYuan: result.chargeYuan ?? null,
+        settlementStatus: result.settlementStatus || "",
+        timing: result.timing || null,
+        hailuoRequestedMode: job.hailuoApiMode || result.requestedMode || "",
+        hailuoResolvedMode: result.mode || ""
+      });
+      return {
+        id: `internal-take-${job.id}`,
+        internalTake: true,
+        jobId: job.id,
+        taskId: job.taskId,
+        take: job.agentTake || null,
+        filePath: result.localPath,
+        localPath: result.localPath,
+        remoteUrl: result.videoUrl || "",
+        duration: Number(job.duration) || 5,
+        chargeYuan: result.chargeYuan ?? null,
+        settlementStatus: result.settlementStatus || "",
+        referenceManifest: job.referenceManifest || null,
+        prompt: job.prompt || ""
+      };
+    }
     const existing = project.candidates.find(item => item.taskId && item.taskId === job.taskId);
     if (existing) {
       this.store.updateJob(projectId, job.id, { status: "completed", progress: 100, progressSource: "terminal", progressDeterminate: true, message: resumed ? "断点恢复完成" : "生成完成", candidateId: existing.id });
@@ -9956,6 +10155,7 @@ class WorkbenchWorkflow {
       hailuoRequestedMode: job.hailuoApiMode || result.requestedMode || "",
       hailuoResolvedMode: result.mode || "",
       referenceManifest: job.referenceManifest || null,
+      ...(job.agentTake ? { agentTake: { ...job.agentTake } } : {}),
       stale: job.staleByEdit === true,
       staleAt: job.staleByEdit === true ? new Date().toISOString() : "",
       staleReason: job.staleByEdit === true ? (job.staleReason || "任务运行期间分镜内容已修改，结果仅保留历史") : "",
@@ -10039,7 +10239,11 @@ class WorkbenchWorkflow {
       }
       try {
         const savedBeforeQuery = this.store.getProject(record.projectId).jobs.find(item => item.id === record.jobId);
-        const result = await this.videoBridgeForProject(record.projectId, savedBeforeQuery).query(record.taskId);
+        const queryBridge = this.videoBridgeForProject(record.projectId, savedBeforeQuery);
+        const result = await this.executeAdaptiveCapability("video_query", record.providerKind || "default", {
+          bridge: queryBridge,
+          taskId: record.taskId
+        }, { projectId: record.projectId, jobId: record.jobId, stage: "video_reconcile" });
         const job = this.store.getProject(record.projectId).jobs.find(item => item.id === record.jobId);
         if (!job) continue;
         if (result.status === "finished" && result.localPath) {
@@ -10322,25 +10526,22 @@ class WorkbenchWorkflow {
     }
     project = this.store.getProject(projectId);
     const generatedAt = new Date();
-    const localBatch = buildNovelTopicBatch(project, generationIndex);
-    const topics = normalizeTopicOptions({ topics: localBatch.topics });
-    const selectedTopicId = topics.some(item => item.id === project.ideation?.selectedTopicId) ? project.ideation.selectedTopicId : "";
-    rememberTopicBatch(project, topics, "local_diversity_compiler");
+    const failure = agentCreativeOutputRequired(
+      lastError,
+      "TOPIC_AGENT_RESULT_REQUIRED",
+      "选题 Agent 未返回 10 个通过去重合同的选题，已停止，绝不使用固定本地题库冒充 AI"
+    );
     project.ideation = {
       ...(project.ideation || {}),
-      status: "ready",
-      topics,
-      selectedTopicId,
-      generatedAt: generatedAt.toISOString(),
+      status: "failed",
       generationElapsedSeconds: Math.max(0, Math.round((generatedAt.getTime() - requestStartedAt.getTime()) / 1000)),
-      generationSource: "local-fallback",
-      topicBatchNonce: localBatch.nonce,
-      fallbackReason: `${lastError?.code || "TOPIC_RESULT_INVALID"}:${String(lastError?.message || "选题上游暂不可用").slice(0, 180)}`,
-      message: "云端选题暂未按结构返回，已由本地编剧补齐 10 个不同题材；可直接选择并继续，不会重复请求或重复扣费",
-      errorCode: ""
+      generationSource: "agent",
+      message: failure.message,
+      errorCode: failure.code
     };
-    project.activity.unshift({ id: makeId("activity"), at: generatedAt.toISOString(), type: "topics_local_fallback", summary: "本地补齐10个选题，未重复请求上游" });
-    return this.store.saveProject(project);
+    project.activity.unshift({ id: makeId("activity"), at: generatedAt.toISOString(), type: "topics_agent_failed", summary: "选题 Agent 结果未通过合同，未启用本地固定题库" });
+    this.store.saveProject(project);
+    throw failure;
   }
 
   async generateDirectFastScript(projectId, context = {}) {
@@ -10359,12 +10560,6 @@ class WorkbenchWorkflow {
     const productStartNumber = directFastProductStartIndex(unitCount) + 1;
     const segments = directFastSegmentRanges(unitCount, SCRIPT_DIRECT_SEGMENT_UNITS);
     const topicElapsedSeconds = Math.max(0, Number(project.ideation?.generationElapsedSeconds) || 0);
-    const topicToAssetsRemainingMs = Math.max(1_000, TOPIC_TO_ASSETS_SLA_MS - topicElapsedSeconds * 1000);
-    const writingDeadlineAt = Math.min(
-      Date.now() + SCRIPT_WRITING_SLA_MS,
-      (Date.parse(checkpoint.startedAt || "") || Date.now()) + SCRIPT_WRITING_SLA_MS,
-      Date.now() + topicToAssetsRemainingMs
-    );
     checkpoint.directFastSegmentTotal = segments.length;
     checkpoint.topicToAssetsSlaMs = TOPIC_TO_ASSETS_SLA_MS;
     checkpoint.topicElapsedSeconds = topicElapsedSeconds;
@@ -10402,8 +10597,8 @@ class WorkbenchWorkflow {
       stage: "script_direct",
       status: "running",
       message: initiallyCompleted
-        ? `正在从本地断点续写：已保留 ${initiallyCompleted}/${segments.length} 段，只补未完成剧本段；上游异常会立即切换本地编剧`
-        : `八分钟简短剧保障：正文最多九分钟、选题到资产最多十五分钟；每段最多 ${SCRIPT_DIRECT_SEGMENT_UNITS} 镜、${SCRIPT_DIRECT_MAX_CONCURRENCY} 路并发，上游异常立即本地补齐并继续`
+        ? `正在从本地断点续写：已保留 ${initiallyCompleted}/${segments.length} 段，只由编剧 Agent 补未完成剧本段`
+        : `八分钟简短剧保障：正文最多九分钟、选题到资产最多十五分钟；每段最多 ${SCRIPT_DIRECT_SEGMENT_UNITS} 镜、${SCRIPT_DIRECT_MAX_CONCURRENCY} 路并发，所有创作内容只接受编剧 Agent 输出`
     });
     let rawText = "";
     const receipts = checkpoint.directFastSegments.map(item => item.receipt).filter(Boolean);
@@ -10426,7 +10621,6 @@ class WorkbenchWorkflow {
           status: "running",
           message: `正在先锁定全剧人物、场景与 ${segments.length} 段因果骨架，再并发写正文；避免长剧人物串号和剧情漂移`
         });
-        let spineFallbackReason = "";
         try {
           directFastSpine = await this.generateText(scriptTextProvider, [
             {
@@ -10460,19 +10654,19 @@ class WorkbenchWorkflow {
           assertDirectFastStorySpine(directFastSpine, segments);
         } catch (error) {
           if (isScriptControlError(error)) throw error;
-          spineFallbackReason = `${error?.code || "TEXT_RESULT_INVALID"}:${String(error?.message || "").slice(0, 180)}`;
-          directFastSpine = buildDirectFastFallbackSpine({ topic, ranges: segments });
-          assertDirectFastStorySpine(directFastSpine, segments);
+          throw agentCreativeOutputRequired(
+            error,
+            "SCRIPT_AGENT_SPINE_REQUIRED",
+            "编剧 Agent 的全剧因果骨架未通过合同，已保留断点并停止，未使用本地模板编剧情"
+          );
         }
         assertDirectFastStorySpine(directFastSpine, segments);
         checkpoint = this.saveScriptCheckpoint(projectId, {
           ...checkpoint,
           directFastSpine,
-          directFastFallbacks: spineFallbackReason ? [{ kind: "spine", reason: spineFallbackReason }] : [],
+          directFastFallbacks: [],
           directFastFailure: null
-        }, topic, "script_direct_spine", spineFallbackReason
-          ? "上游未按结构返回，已切换本地编剧锁定全剧骨架；不会重复请求"
-          : "全剧人物、场景和因果骨架已保存，开始并发写各段对白正文");
+        }, topic, "script_direct_spine", "全剧人物、场景和因果骨架已保存，开始并发写各段对白正文");
         if (spineReceipt) receipts.push(spineReceipt);
       } else if (!checkpoint.directFastSpine) {
         checkpoint = this.saveScriptCheckpoint(projectId, {
@@ -10488,16 +10682,7 @@ class WorkbenchWorkflow {
       const segmentResults = await mapWithConcurrency(pending, SCRIPT_DIRECT_MAX_CONCURRENCY, async segment => {
         let receipt = null;
         try {
-          const payload = Date.now() >= writingDeadlineAt
-            ? buildDirectFastFallbackSegment({
-                spine: directFastSpine,
-                topic,
-                segmentStart: segment.start,
-                segmentEnd: segment.end,
-                unitDurations: filmSchedule.suggestedDurations,
-                productStartNumber
-              })
-            : await this.generateText(scriptTextProvider, [
+          const payload = await this.generateText(scriptTextProvider, [
             {
               role: "system",
               content: `你是中国现实主义竖屏短剧总编剧。只输出严格紧凑JSON；对白必须口语化、有明确情绪语气、音量速度和听者反应所需的剧情依据；禁止解释、Markdown、背景音乐、模型名称和医疗功效承诺。\n${viewerComprehensionPriorityDirective()}\n${scriptFormatDirective(project)}`
@@ -10558,47 +10743,16 @@ class WorkbenchWorkflow {
           return { status: "fulfilled", segment };
         } catch (error) {
           if (isScriptControlError(error)) throw error;
-          try {
-            const payload = buildDirectFastFallbackSegment({
-              spine: directFastSpine,
-              topic,
-              segmentStart: segment.start,
-              segmentEnd: segment.end,
-              unitDurations: filmSchedule.suggestedDurations,
-              productStartNumber
-            });
-            assertDirectFastSegment(payload, segment.start, segment.end, {
-              characters: directFastSpine.c,
-              scenes: directFastSpine.sc,
-              durations: filmSchedule.suggestedDurations,
-              productStartNumber,
-              strict: true
-            });
-            const saved = {
-              key: segment.key,
-              start: segment.start,
-              end: segment.end,
-              payload,
-              receipt,
-              localFallback: true,
-              fallbackReason: `${error?.code || "TEXT_RESULT_INVALID"}:${String(error?.message || "").slice(0, 180)}`,
-              completedAt: new Date().toISOString()
-            };
-            completedByKey.set(segment.key, saved);
-            checkpoint = this.saveScriptCheckpoint(projectId, {
-              ...checkpoint,
-              directFastSegments: segments.map(([start, end]) => completedByKey.get(segmentKey(start, end))).filter(Boolean),
-              directFastFallbacks: [
-                ...(Array.isArray(checkpoint.directFastFallbacks) ? checkpoint.directFastFallbacks : []),
-                { kind: "segment", range: [segment.start, segment.end], reason: saved.fallbackReason }
-              ],
-              directFastFailure: null
-            }, topic, "script_direct", `S${String(segment.start).padStart(2, "0")}–S${String(segment.end).padStart(2, "0")} 上游未按结构返回，已由本地编剧补齐；继续处理其余段`);
-            if (receipt) receipts.push(receipt);
-            return { status: "fulfilled", segment, localFallback: true };
-          } catch (fallbackError) {
-            return { status: "rejected", segment, error: fallbackError };
-          }
+          return {
+            status: "rejected",
+            segment,
+            error: agentCreativeOutputRequired(
+              error,
+              "SCRIPT_AGENT_SEGMENT_REQUIRED",
+              `编剧 Agent 的 S${String(segment.start).padStart(2, "0")}–S${String(segment.end).padStart(2, "0")} 未通过合同，未用本地模板补写`,
+              { failedSegmentRange: [segment.start, segment.end] }
+            )
+          };
         }
       });
       rawText = [...rawParts.values()].join("\n");
@@ -10620,6 +10774,8 @@ class WorkbenchWorkflow {
           sessionId: firstError.sessionId,
           attempt: firstError.attempt,
           failedSegmentRanges: failedSegments.map(item => [item.segment.start, item.segment.end]),
+          agentRequired: firstError.agentRequired === true,
+          localCreativeFallbackUsed: false,
           retryRequiresExplicitResume: true,
           noAutomaticRetry: true
         });
@@ -10635,9 +10791,9 @@ class WorkbenchWorkflow {
       };
       this.assertOperationActive(projectId);
       this.setAutomation(projectId, {
-        stage: "script_local_compile",
+        stage: "script_agent_compile",
         status: "running",
-        message: "紧凑全剧已返回，正在本地补齐情绪、语气、听者反应、三段子镜头和商品因果链"
+        message: "编剧 Agent 全剧已返回，正在用生产合同校验并编译为资产与分镜结构"
       });
       const compileDirectPayload = payload => {
         const materialized = materializeDirectFastScript({
@@ -10660,7 +10816,7 @@ class WorkbenchWorkflow {
         const blueprint = validateBlueprint({ ...storyBible, shotPlan: materialized.plans }, project.product.name, gateOptions);
         const projectMode = normalizeProjectMode(project.generation?.mode);
         const cloudAutomaticWriting = projectVideoEngine(project) === "hailuo-h3";
-        const speakerAssignments = cloudAutomaticWriting ? allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 2) : [];
+        const speakerAssignments = cloudAutomaticWriting ? allocateH3ShotSpeakers(blueprint.shotPlan, blueprint.characters, 1) : [];
         const shots = validateShotBatch(
           { shots: materialized.rawShots },
           blueprint.shotPlan,
@@ -10671,7 +10827,7 @@ class WorkbenchWorkflow {
             generationMode: projectMode,
             characters: blueprint.characters,
             ...(cloudAutomaticWriting ? {
-              maxSpeakingCharacters: 2,
+              maxSpeakingCharacters: 1,
               requireReferenceDialogueFlow: true,
               allowedSpeakersByShot: h3AllowedSpeakersByShot(speakerAssignments)
             } : {})
@@ -10701,41 +10857,23 @@ class WorkbenchWorkflow {
         compiled = compileDirectPayload(directData);
       } catch (error) {
         if (isScriptControlError(error)) throw error;
-        directData = {
-          c: directFastSpine.c,
-          sc: directFastSpine.sc,
-          b: directFastSpine.b,
-          spineLocked: true,
-          s: segments.flatMap(([start, end]) => buildDirectFastFallbackSegment({
-            spine: directFastSpine,
-            topic,
-            segmentStart: start,
-            segmentEnd: end,
-            unitDurations: filmSchedule.suggestedDurations,
-            productStartNumber
-          }).s)
-        };
-        checkpoint.directFastFallbacks = [
-          ...(Array.isArray(checkpoint.directFastFallbacks) ? checkpoint.directFastFallbacks : []),
-          { kind: "full_local_recompile", reason: `${error?.code || "SCRIPT_LOCAL_AUDIT_FAILED"}:${String(error?.message || "").slice(0, 180)}` }
-        ];
-        this.setAutomation(projectId, {
-          stage: "script_local_compile",
-          status: "running",
-          message: "上游正文未通过本地生产合同，已在本地重新编排全剧；不再请求上游"
-        });
-        compiled = compileDirectPayload(directData);
+        throw agentCreativeOutputRequired(
+          error,
+          "SCRIPT_AGENT_PRODUCTION_CONTRACT_FAILED",
+          "编剧 Agent 全剧未通过生产合同，已停止并保留原始返回，未在本地重写剧情"
+        );
       }
       const { blueprint, normalized, qualityAudit } = compiled;
       const semanticReview = {
         ok: true,
         skipped: false,
-        localDeterministic: true,
+        agentAuthored: true,
+        deterministicContractValidation: true,
         contractVersion: DRAMA_WRITING_CONTRACT_VERSION,
         verdict: "pass",
         scores: Object.fromEntries(SEMANTIC_SCORE_FIELDS.map(field => [field, 100])),
         hardFailures: [],
-        summary: "单次紧凑全剧已通过本地生产合同、情绪语气和参考片规格硬审计",
+        summary: "编剧 Agent 全剧已通过生产合同、情绪语气和参考片规格硬审计",
         repairDirectives: [],
         phase: "full"
       };
@@ -10762,7 +10900,7 @@ class WorkbenchWorkflow {
         raw,
         analysis: blueprint.story,
         analysisChunks: 0,
-        analysisMethod: "global-spine-resumable-five-shot-segments-local-compile-v7",
+        analysisMethod: "global-agent-spine-resumable-five-shot-segments-contract-compile-v8",
         qualityAudit,
         semanticReview,
         promptLibraryVersion: settings.promptLibraryVersion || "",
@@ -10773,7 +10911,7 @@ class WorkbenchWorkflow {
         sourceFingerprint: crypto.createHash("sha256").update(raw).digest("hex"),
         durationContract: normalized.durationContract,
         generationPerformance: {
-          path: "global-spine-resumable-bounded-segments-fast-v7",
+          path: "global-agent-spine-resumable-bounded-segments-v8",
           targetSeconds: SCRIPT_FAST_TARGET_SECONDS,
           elapsedSeconds,
           metTarget: elapsedSeconds !== null ? elapsedSeconds <= SCRIPT_FAST_TARGET_SECONDS : null,
@@ -10785,7 +10923,7 @@ class WorkbenchWorkflow {
           writingContractVersion: DRAMA_WRITING_CONTRACT_VERSION,
           finishedAt: finishedAt.toISOString(),
           upstreamModel: scriptTextProvider.model,
-          localFallbackCount: (Array.isArray(checkpoint.directFastFallbacks) ? checkpoint.directFastFallbacks : []).length,
+          localFallbackCount: 0,
           upstreamReceipts: receipts.filter(Boolean).map(item => ({ requestId: item.requestId || "", billingStatus: item.billingStatus || item.billing_status || "" }))
         },
         generationCheckpoint: null,
@@ -11522,13 +11660,13 @@ class WorkbenchWorkflow {
           const { unitStartIndex, plannedShots, unitStartNumber, unitEndNumber, previousPlan } = task;
           const projectMode = normalizeProjectMode(project.generation?.mode);
           const hailuoAutomaticWriting = projectVideoEngine(project) === "hailuo-h3";
-          const h3SpeakerAssignments = hailuoAutomaticWriting ? allocateH3ShotSpeakers(plannedShots, blueprint.characters, 2) : [];
+          const h3SpeakerAssignments = hailuoAutomaticWriting ? allocateH3ShotSpeakers(plannedShots, blueprint.characters, 1) : [];
           const unitValidationOptions = {
             ...scriptQualityGateOptions(settings),
             generationMode: projectMode,
             characters: blueprint.characters,
             ...(hailuoAutomaticWriting ? {
-              maxSpeakingCharacters: 2,
+              maxSpeakingCharacters: 1,
               requireReferenceDialogueFlow: true,
               allowedSpeakersByShot: h3AllowedSpeakersByShot(h3SpeakerAssignments)
             } : {})
@@ -11548,8 +11686,8 @@ class WorkbenchWorkflow {
                 `本批锁定计划：${JSON.stringify(plannedShots)}`,
                 `当前图像/视频策略：${projectMode}（${generationModeLabel(projectMode)}）。必须以该策略写 startFrame / endFrame${projectMode === "storyboard_sheet" ? " / secondPanels" : ""}，禁止混用其他模式的图像结构。`,
                 productionUnitGenerationModeDirective(projectMode, projectVideoEngine(project)),
-                hailuoAutomaticWriting ? `【逐镜说话人硬白名单】${JSON.stringify(h3SpeakerAssignments)}。每镜只能使用本镜 allowedSpeakerIds/allowedSpeakerNames；第三人及以后全镜静默。` : "",
-                `当前视频引擎：${hailuoAutomaticWriting ? "海螺 H3；只写中文对白、表演和声音，不输出 hailuoPrompt。每镜严格只允许1人独白或2人正反对话。" : "Seedance；不要输出 hailuoPrompt。"}`,
+                hailuoAutomaticWriting ? `【逐镜说话人硬白名单】${JSON.stringify(h3SpeakerAssignments)}。每镜只能由唯一 allowedSpeakerId 说话；其他人全镜闭口静默。需要另一人回应时，必须放到下一镜并把下一镜 cameraOwnerId/mouthOwnerId 切给回应者。` : "",
+                `当前视频引擎：${hailuoAutomaticWriting ? "海螺 H3；只写中文对白、表演和声音，不输出 hailuoPrompt。每个生成单元严格只有1名说话人和1个嘴型所有权；换说话人必须进入下一生成单元并硬切机位。" : "Seedance；不要输出 hailuoPrompt。"}`,
                 productFacts,
                 "按锁定dialogueArc写对白：事实逼出首句→目的攻防→新增一条信息→末句触发可见状态变化；禁止复述。同场景轴线连续；商品窗口前禁止商品名；audioPlan含环境底噪和同步特效，禁止BGM。",
                 previousPlan ? `上一批计划尾状态：${previousPlan.endFrame || previousPlan.stateAfter || previousPlan.action}。本批第一镜必须自然承接该状态和站位轴线。` : "本批从全剧开场开始。",
@@ -11635,14 +11773,14 @@ class WorkbenchWorkflow {
         const projectMode = normalizeProjectMode(project.generation?.mode);
         const hailuoAutomaticWriting = projectVideoEngine(project) === "hailuo-h3";
         const h3SpeakerAssignments = hailuoAutomaticWriting
-          ? allocateH3ShotSpeakers(plannedShots, blueprint.characters, 2)
+          ? allocateH3ShotSpeakers(plannedShots, blueprint.characters, 1)
           : [];
         const unitValidationOptions = {
           ...scriptQualityGateOptions(settings),
           generationMode: projectMode,
           characters: blueprint.characters,
           ...(hailuoAutomaticWriting ? {
-            maxSpeakingCharacters: 2,
+            maxSpeakingCharacters: 1,
             requireReferenceDialogueFlow: true,
             allowedSpeakersByShot: h3AllowedSpeakersByShot(h3SpeakerAssignments)
           } : {})
@@ -11691,13 +11829,13 @@ class WorkbenchWorkflow {
                 `本批锁定计划：${JSON.stringify(plannedShots)}`,
                 `当前图像/视频策略：${projectMode}（${generationModeLabel(projectMode)}）。必须以该策略写 startFrame / endFrame${projectMode === "storyboard_sheet" ? " / secondPanels" : ""}，禁止混用其他模式的图像结构。`,
                 productionUnitGenerationModeDirective(projectMode, projectVideoEngine(project)),
-                hailuoAutomaticWriting ? `【逐镜说话人硬白名单】${JSON.stringify(h3SpeakerAssignments)}。每镜 dialogueTurns.speakerId、subshots.dialogue 的说话人及 offscreenSpeakerIds 只能来自该镜 allowedSpeakerIds/allowedSpeakerNames；名单1人就只写连续独白，名单2人就只写这2人的正反对话。第三人及以后无论是否出镜都必须全镜静默，只能写表情、视线、肢体或道具反应。` : "",
-                `当前视频引擎：${hailuoAutomaticWriting ? "海螺 H3。本批不要输出 hailuoPrompt（系统后续自动编译英文镜头）；把中文对白、表演、声音写满即可。自动写作每镜严格只能1人连续说或2人完成正反对话，禁止第三人开口；更多出镜人物全部保留为静默表情/视线/肢体/道具反应。绝不拆分单元、增删镜头、改shot id、顺序或duration。H3技术兼容链的3条音色上限不等于创作目标。" : "Seedance。hailuoPrompt 不要输出。"}`,
+                hailuoAutomaticWriting ? `【逐镜说话人硬白名单】${JSON.stringify(h3SpeakerAssignments)}。每镜 dialogueTurns.speakerId 只能是唯一 allowedSpeakerId；其他人物即使入画也必须闭口，只做表情、视线、肢体或道具反应。另一人回应必须写进下一锁定镜。` : "",
+                `当前视频引擎：${hailuoAutomaticWriting ? "海螺 H3。本批不要输出 hailuoPrompt；每镜严格只有1名说话人、1个cameraOwnerId和1个mouthOwnerId，3段subshots只是同一连续机位内的表演阶段，禁止内部正反打。说话人变化必须发生在相邻生成单元边界并切换机位所有权；绝不增删镜头、改ID、顺序或duration。" : "Seedance。hailuoPrompt 不要输出。"}`,
                 productFacts,
                 "按锁定dialogueArc写对白：刚发生的事实逼出首句→双方目的发生攻防→只新增一条关键信息→末句触发可见动作/状态变化；禁止复述已知事实。同场景人物左右站位连续；窗口前禁止商品名俗称；audioPlan必须含环境底噪+同步特效，禁止BGM。",
                 shots.length ? `上一单元尾帧：${shots.at(-1).endFrame}。本批第一单元必须自然承接且站位轴线连续。` : "本批从全剧开场开始。",
                 draftAttempt > 1 ? `上一版全剧终审未通过：${semanticReview?.summary || "质量不足"}；硬伤：${(semanticReview?.hardFailures || []).map(item => `${item.code}:${item.message}`).join("；")}；修复指令：${(semanticReview?.repairDirectives || []).join("；")}。必须按模具重写本批，禁止只改形容词。` : "",
-                `【本批完整输出硬合同】根对象只能有shots，必须恰好${plannedShots.length}项并严格对应锁定计划；JSON总字符不得超过${STRUCTURED_TEXT_MAX_CHARS}。所有人物ID只能复用锁定计划和角色圣经中已经存在的ID，禁止新增任何Cxx、临时医生、店员、证人或画外说话人。每镜保留dialogueArc五项；subshots恰好3段并连续覆盖整镜，只能使用计划锁定的0–2名visibleCharacterIds，每段仅一个主口型。dialogueTurns.text只放真台词；beat只选attack/deflect/counter/reveal/decision，delivery合并情绪、音量、语速、重音和气口，另写body、listenerBeat、subshotNumber。每句必须改变信息、权力或行动，禁止逐字/同义复述；双人对话同一人不得连续超过2轮。声音写soundCueSheet；商品和secondPanels继续服从schema。不得输出分析、dialogueBeats、hailuoPrompt、派生图像/视频提示或素材引用计划；接近上限先压缩措辞，绝不能截断JSON。`,
+                `【本批完整输出硬合同】根对象只能有shots，必须恰好${plannedShots.length}项并严格对应锁定计划；JSON总字符不得超过${STRUCTURED_TEXT_MAX_CHARS}。所有人物ID只能复用锁定计划和角色圣经中已经存在的ID。每镜保留dialogueArc五项；subshots恰好3段并连续覆盖整镜，只能使用计划锁定的0–2名visibleCharacterIds。海螺镜每镜所有dialogueTurns只能属于唯一说话人；cameraOwnerId与mouthOwnerId锁定该说话人，3段subshots继承同一所有权并保持连续机位。dialogueTurns.text只放真台词；beat只选attack/deflect/counter/reveal/decision，delivery合并情绪、音量、语速、重音和气口，另写body、listenerBeat、subshotNumber。每句必须改变信息、权力或行动；声音写soundCueSheet；商品和secondPanels继续服从schema。不得输出分析、dialogueBeats、hailuoPrompt、派生提示或素材引用计划；接近上限先压缩措辞，绝不能截断JSON。`,
                 attempt > 1 ? `上一版批次失败原因：${batchError?.message}。完整按对白模具重写本批，输出严格 JSON，不能截断。` : ""
               ], [
                 directorUnitLockPrompt(plannedShots),
@@ -12078,11 +12216,6 @@ class WorkbenchWorkflow {
         tone: item.tone,
         dialogue: item.text
       }));
-      const localFallback = reason => ({
-        lines: localDialogueRewriteLines(chunk, nameMap),
-        fallback: true,
-        fallbackReason: String(reason?.code || reason || "LOCAL_DIALOGUE_PRESERVATION")
-      });
       try {
         const data = await this.generateText(settings.textProvider, [
           {
@@ -12107,14 +12240,16 @@ class WorkbenchWorkflow {
         return { lines: validateDialogueRewriteLines(chunk, data?.lines, nameMap), fallback: false, fallbackReason: "" };
       } catch (error) {
         if (isScriptControlError(error)) throw error;
-        return localFallback(error);
+        throw agentCreativeOutputRequired(
+          error,
+          "DIALOGUE_REWRITE_AGENT_RESULT_REQUIRED",
+          `对白改写 Agent 的第 ${chunkIndex + 1}/${chunks.length} 段未通过逐句保真合同，已保留用户原稿且未使用本地模板改写`,
+          { chunkIndex: chunkIndex + 1 }
+        );
       }
     });
     const rewrittenLines = rewrittenChunks.flatMap(item => item.lines);
     const completeScript = renderDialogueRewriteScript(parserSource, sourceLedger, rewrittenLines, nameMap);
-    const fallbackChunks = rewrittenChunks
-      .map((item, index) => ({ ...item, chunkIndex: index + 1 }))
-      .filter(item => item.fallback);
     beginProductionRevision(project);
     project.productionPlan = {
       ...(project.productionPlan || {}),
@@ -12137,8 +12272,9 @@ class WorkbenchWorkflow {
         rewrittenAt: new Date().toISOString(),
         nameMap,
         lineage: rewrittenLines,
-        fallback: fallbackChunks.length > 0,
-        fallbackChunks: fallbackChunks.map(item => ({ index: item.chunkIndex, reason: item.fallbackReason })),
+        fallback: false,
+        fallbackChunks: [],
+        authoredBy: "dialogue-editor-agent",
         preservedStory: true,
         immutableContracts: ["story_facts", "event_order", "relationships", "ending", "numbers", "product_appearance_nodes"]
       }
@@ -12149,9 +12285,7 @@ class WorkbenchWorkflow {
       id: makeId("activity"),
       at: new Date().toISOString(),
       type: "dialogue_rewrite",
-      summary: fallbackChunks.length
-        ? `对白稿已生成完整剧本；${fallbackChunks.length} 个云端不合格片段已自动使用本地保真整理`
-        : `对白稿已完成逐句轻改并生成完整剧本，共 ${rewrittenLines.length} 句`
+      summary: `对白改写 Agent 已完成逐句轻改并生成完整剧本，共 ${rewrittenLines.length} 句`
     });
     this.store.saveProject(project);
     return this.store.getProject(projectId);
@@ -12475,7 +12609,6 @@ class WorkbenchWorkflow {
       const requestChars = JSON.stringify(messages).length;
       const control = this.operationControls.get(projectId);
       let bound;
-      let fallbackReason = "";
       try {
         const partial = await this.generateText(settings.textProvider, messages, {
           json: true,
@@ -12503,24 +12636,26 @@ class WorkbenchWorkflow {
         bound = enforceSourceSceneLedger(bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger), chunk.sourceSceneLedger, chunk.sourceDialogueLedger);
       } catch (error) {
         if (isScriptControlError(error)) throw error;
-        fallbackReason = `${error?.code || "TEXT_RESULT_INVALID"}:${String(error?.message || "").slice(0, 180)}`;
-        bound = localUploadedAnalysisChunk(chunk, project);
-      }
-      partials[chunk.index] = bound;
-      saveCompletedAnalysisChunk(chunk, {
-        ...bound,
-        ...(fallbackReason ? { localFallback: true, fallbackReason } : {})
-      }, requestChars);
-      if (fallbackReason) {
+        const failure = agentCreativeOutputRequired(
+          error,
+          "UPLOADED_SCRIPT_AGENT_RESULT_REQUIRED",
+          `剧本理解 Agent 的第 ${chunk.index + 1}/${chunks.length} 段未通过剧情、人物、场景和对白保真合同，已保留原稿与已完成断点，未使用本地模板拆镜`,
+          { chunkIndex: chunk.index + 1, chunkCount: chunks.length }
+        );
         const latest = this.store.getProject(projectId);
         latest.automation = {
           ...(latest.automation || {}),
           stage: "script_analysis",
-          message: `第 ${chunk.index + 1}/${chunks.length} 段上游未按结构返回，已在本地按原稿台词拆镜；不会重复请求或重复扣费`,
+          message: failure.message,
+          errorCode: failure.code,
+          recoverableFailure: true,
           updatedAt: new Date().toISOString()
         };
         this.store.saveProject(latest);
+        throw failure;
       }
+      partials[chunk.index] = bound;
+      saveCompletedAnalysisChunk(chunk, { ...bound, authoredBy: "script-understanding-agent", localFallback: false }, requestChars);
       return bound;
     });
     const data = enforceSourceSceneLedger(mergeAnalysisChunks(partials), productionSceneLedger, sourceDialogueLedger);
@@ -12659,11 +12794,29 @@ class WorkbenchWorkflow {
     if (stage === "character_intro") return finalize(`${fillTemplate(settings.prompts.characterIntro, values)}${characterBackgroundLock}${mesh}\n${assetStoryContext}\n${matrixImageDirective}`);
     if (stage === "scene_asset") return finalize(`${fillTemplate(settings.prompts.sceneAsset, values)}\n${assetStoryContext}\n${matrixImageDirective}`);
     const base = fillTemplate(settings.prompts.storyboardImage, values);
+    let storyboardTakePlan = null;
+    if (["storyboard_start", "storyboard_end", "storyboard_sheet"].includes(stage) && projectVideoEngine(project) === "hailuo-h3") {
+      try {
+        storyboardTakePlan = buildCameraTakePlan(project, entity || {}, { mode: project?.generation?.mode });
+      } catch {
+        // The production video gate rebuilds and validates the same plan before
+        // any paid submission. Image compilation remains usable for incomplete
+        // manual drafts while still carrying the explicit fallback owner below.
+      }
+    }
+    const storyboardTakes = Array.isArray(storyboardTakePlan?.takes) ? storyboardTakePlan.takes : [];
+    const stageTake = stage === "storyboard_end" ? storyboardTakes.at(-1) : storyboardTakes[0];
+    const fallbackCameraOwnerId = entity?.cameraOwnerId || entity?.focusCharacterId || "none";
+    const fallbackMouthOwnerId = entity?.mouthOwnerId || (uniqueDialogueTurns(project, entity || {})[0]?.speakerId || "none");
+    const ownershipDirective = stage === "storyboard_sheet" && storyboardTakes.length > 1
+      ? `【Agent原子镜头画格表】${storyboardTakes.map(take => `${take.id} ${Number(take.start).toFixed(1)}-${Number(take.end).toFixed(1)}秒：cameraOwnerId=${take.cameraOwnerId || "none"}，mouthOwnerId=${take.mouthOwnerId || "none"}，speakerId=${take.speakerId || "silent"}`).join("；")}。每个原子镜头内部保持同一机位和唯一嘴型；说话人变化的边界必须真实硬切到新说话人的反打机位，前一人立即闭口，禁止把整张合图都锁在第一个人身上。`
+      : `【Agent镜头所有权】cameraOwnerId=${stageTake?.cameraOwnerId || fallbackCameraOwnerId}；mouthOwnerId=${stageTake?.mouthOwnerId || fallbackMouthOwnerId}。本图所有画格必须继承该机位与嘴型所有权；第二人即使可见也闭口，只作视线、表情和身体反应。说话人变化必须属于下一分镜，禁止在本合图中偷偷换嘴或切到回应者机位。`;
     const shotAnchor = [
       matrixImageDirective,
       `【本镜强制人物】只允许出现：${values.shotCharacters || "无人"}。人物性别、年龄、脸、发型和整套服装必须逐一匹配对应角色参考图；不得用其他人物代替，不得改变性别，不得漏掉承担本帧动作的人物。`,
-      storyboardDialogueVisualDirective(project, entity || {}),
+      ownershipDirective,
       productPromptDirective(project, entity || {}),
+      storyboardDialogueVisualDirective(project, entity || {}),
       // Static image prompts (start/end/sheet) must not carry full dialogue metadata.
       values.performance && stage === "storyboard_sheet"
         ? `【表演依据】${String(values.performance).replace(/【(?:对白|beat|delivery|body|listenerBeat)】[^\n；;]*/gi, "").slice(0, 120)}`
@@ -12675,20 +12828,33 @@ class WorkbenchWorkflow {
     if (stage === "storyboard_sheet") {
       const sheetValues = { ...values, dialogue: "" };
       const sheetGrid = storyboardSheetGrid(panelCount);
-      const rawStoryboardSafetyText = JSON.stringify({
-        title: entity?.title || "",
-        action: entity?.action || "",
-        performance: entity?.performance || "",
-        startFrame: entity?.startFrame || "",
-        endFrame: entity?.endFrame || "",
-        secondPanels: entity?.secondPanels || []
-      });
-      if (/跪行|跪地|跪着|跪姿|磕头|额头触地|额头落地|膝盖挪地|按地前行/.test(rawStoryboardSafetyText)) {
-        return finalize(`Create one fictional cinematic storyboard contact sheet for a ${durationSeconds}-second reconciliation scene. Canvas aspect ratio ${sheetGrid.canvasAspectRatio}, grid ${sheetGrid.columns} columns by ${sheetGrid.rows} rows, exactly ${panelCount} chronological panels with clear gutters; every individual panel is a complete portrait 9:16 frame. Every subject is a fully clothed fictional adult matching the supplied identity and wardrobe references. Keep the supplied interior layout, lighting, screen direction and character positions consistent. Visual sequence: the group stands apart; one adult woman walks toward another while remaining upright; she lowers her gaze and gives a sincere formal bow; the other woman reaches out gently; they hold each other's forearms; both return upright; the group relaxes; finish with the two women standing side by side in a calm, respectful family arrangement. Use varied medium and close shots while preserving faces and continuity. Natural restrained emotion, cinematic lighting, realistic fabric, clean frames. No captions, speech bubbles, logos, watermarks or extra people.`);
-      }
-      const authoredPanels = Array.isArray(entity?.secondPanels) && entity.secondPanels.length
+      let authoredPanels = Array.isArray(entity?.secondPanels) && entity.secondPanels.length
         ? entity.secondPanels
         : normalizeSecondPanels([], durationSeconds, entity || {});
+      if (storyboardTakes.length) {
+        let previousTakeId = "";
+        authoredPanels = authoredPanels.map((panel, panelIndex) => {
+          const second = Number.isFinite(Number(panel?.second)) ? Number(panel.second) : panelIndex;
+          const midpoint = second + 0.5;
+          const take = storyboardTakes.find(item => midpoint >= Number(item.start) - 1e-6 && midpoint < Number(item.end) - 1e-6)
+            || storyboardTakes.at(-1);
+          const changed = previousTakeId && previousTakeId !== take.id;
+          previousTakeId = take.id;
+          const owner = take.speakerName || take.cameraOwnerId || "当前机位人物";
+          return {
+            ...panel,
+            takeId: take.id,
+            cameraOwnerId: take.cameraOwnerId,
+            mouthOwnerId: take.mouthOwnerId,
+            speakerId: take.speakerId,
+            listenerIds: take.listenerIds,
+            visibleCharacterIds: take.visibleCharacterIds,
+            framing: `${owner}主导的说话人中近景/反打；${String(panel?.framing || take.framing || "").trim()}`,
+            camera: `${changed ? `在${take.id}边界硬切并锁定${owner}` : `保持${take.id}唯一机位`}；${String(panel?.camera || take.camera || "").trim()}`,
+            action: String(panel?.action || take.action || "").trim()
+          };
+        });
+      }
       const panelBeats = authoredPanels.length
         ? formatVisualSecondPanelBeats(authoredPanels)
         : Array.isArray(entity?.subshots) && entity.subshots.length
@@ -12708,10 +12874,8 @@ ${shotAnchor}
 - 格子之间必须有清晰深色或浅灰分隔缝（gutter），肉眼一眼能数出恰好 ${panelCount} 个独立小画面。
 - 每个小格是不同瞬间：站位/手势/道具状态/表情至少有一项相对前一格发生变化；禁止 ${panelCount} 格内容雷同。
 - 严禁输出铺满整张画布的单一电影画面、竖屏单帧、人物三视图设定板、资产卡。
-- 格内不要大字幕；允许极小角标 1..${panelCount} 帮助区分时间顺序。`);
-      return /跪行|跪地|跪着|跪姿|磕头|额头触地|额头落地|膝盖挪地|按地前行/.test(compiledSheetPrompt)
-        ? sanitizePromptAgainstSafetyFilters(compiledSheetPrompt, 1, stage)
-        : compiledSheetPrompt;
+ - 所有格内禁止序号、角标、字幕、气泡、标题、Logo、水印、UI和任何可读文字；时间顺序只靠从左到右、从上到下的版式表达。`);
+      return compiledSheetPrompt;
     }
     if (stage === "storyboard_start") {
       return limitStaticStoryboardImagePrompt(finalize(`${base}\n${shotAnchor}\n【本张首帧强制状态】${values.startFrame || values.shotDescription || "动作尚未发生的起始站位"}\n${fillTemplate(settings.prompts.storyboardStart, values)}\n【输出形态硬限制】只输出一张真实电影画面；禁止人物三视图、正侧背排排站、灰底棚拍、角色设定板、资产卡、拼图、分栏或参考素材展示。`));
@@ -12816,14 +12980,26 @@ ${shotAnchor}
     let shot = project.shots.find(item => item.id === shotId);
     if (!shot) throw Object.assign(new Error("分镜不存在"), { code: "SHOT_NOT_FOUND" });
     const mode = normalizeProjectMode(project.generation?.mode);
+    let agentBundle = null;
+    let agentReferences = null;
     if (projectVideoEngine(project) === "hailuo-h3" && !shotUsesManualVideoPrompt(shot)) {
-      await this.ensureHailuoPromptSpec(projectId, shotId, mode, settings);
+      await this.ensureAgentCameraTakePlan(projectId, shotId, mode, settings);
+      project = annotateProjectShotStrategies(this.store.getProject(projectId));
+      shot = project.shots.find(item => item.id === shotId);
+      agentReferences = this.shotReferences(project, shot, mode);
+      const agentStrategy = resolveShotVideoStrategy(project, shot).strategy;
+      agentReferences.hailuoApiMode = resolveHailuoApiModeForStrategy(
+        agentStrategy,
+        settings.videoProvider?.hailuoApiMode,
+        agentReferences.audios.length > 0
+      );
+      agentBundle = await this.prepareHailuoAgentShotTakes(projectId, project, shot, settings, mode, agentReferences);
       project = annotateProjectShotStrategies(this.store.getProject(projectId));
       shot = project.shots.find(item => item.id === shotId);
     }
     const strategy = resolveShotVideoStrategy(project, shot);
-    const references = this.shotReferences(project, shot, mode);
-    const full = this.buildShotPrompt(project, settings, shot, mode, references);
+    const references = agentReferences || this.shotReferences(project, shot, mode);
+    const full = agentBundle?.promptManifest || this.buildShotPrompt(project, settings, shot, mode, references);
     if (projectVideoEngine(project) === "hailuo-h3" && shot.promptMode !== "manual" && String(shot.systemVideoPrompt || "") !== full) {
       const latestProject = this.store.getProject(projectId);
       latestProject.shots = latestProject.shots.map(item => item.id === shotId
@@ -12879,13 +13055,24 @@ ${shotAnchor}
     const settings = this.store.getSettings();
     const mode = normalizeProjectMode(project.generation?.mode);
     const overwriteManual = options.overwriteManual === true;
-    if (projectVideoEngine(project) === "hailuo-h3") {
+    const agentH3 = projectVideoEngine(project) === "hailuo-h3";
+    if (agentH3) {
       for (const shot of project.shots) {
         try {
-          await this.ensureHailuoPromptSpec(projectId, shot.id, mode, settings);
+          await this.ensureAgentCameraTakePlan(projectId, shot.id, mode, settings);
+          const currentProject = this.store.getProject(projectId);
+          const currentShot = currentProject.shots.find(item => item.id === shot.id);
+          const references = this.shotReferences(currentProject, currentShot, mode);
+          const strategy = resolveShotVideoStrategy(currentProject, currentShot).strategy;
+          references.hailuoApiMode = resolveHailuoApiModeForStrategy(
+            strategy,
+            settings.videoProvider?.hailuoApiMode,
+            references.audios.length > 0
+          );
+          await this.prepareHailuoAgentShotTakes(projectId, currentProject, currentShot, settings, mode, references);
         } catch (error) {
-          throw Object.assign(new Error(`镜头 ${shot.number} 海螺英文提示词编译失败：${error.message}`), {
-            code: error.code || "HAILUO_H3_PROMPT_COMPILE_FAILED"
+          throw Object.assign(new Error(`镜头 ${shot.number} 导演 Agent 提示词编排失败：${error.message}`), {
+            code: error.code || "AGENT_CAMERA_TAKE_COMPILE_FAILED"
           });
         }
       }
@@ -12895,14 +13082,19 @@ ${shotAnchor}
       const references = this.shotReferences(project, shot, mode);
       let compiled = "";
       try {
-        compiled = this.buildShotPrompt(project, settings, {
-          ...shot,
-          promptMode: "system",
-          systemVideoPrompt: "",
-          manualVideoPrompt: ""
-        }, mode, references);
+        compiled = agentH3
+          ? String(shot.systemVideoPrompt || "").trim()
+          : this.buildShotPrompt(project, settings, {
+            ...shot,
+            promptMode: "system",
+            systemVideoPrompt: "",
+            manualVideoPrompt: ""
+          }, mode, references);
+        if (agentH3 && !compiled) {
+          throw Object.assign(new Error("导演 Agent 未生成原子镜头提示词"), { code: "AGENT_CAMERA_TAKE_PROMPT_REQUIRED" });
+        }
       } catch (error) {
-        if (this.qualityGatesEnabled(settings, "storyboards")) throw error;
+        if (agentH3 || this.qualityGatesEnabled(settings, "storyboards")) throw error;
         // Gates-off: never abort full refresh on a single Hailuo language/spec edge case.
         compiled = String(shot.systemVideoPrompt || shot.manualVideoPrompt || "").trim()
           || `Generate a ${Number(shot.duration) || 10}-second vertical short-drama unit with dense dialogue, readable performance, continuous ambience and synced SFX only (no BGM/underscore).`;
@@ -13430,7 +13622,12 @@ ${shotAnchor}
     const maxPolicyAttempts = 3;
     for (let policyAttempt = 1; policyAttempt <= maxPolicyAttempts; policyAttempt += 1) {
       try {
-        generated = await generateImage(settings.imageProvider, activePrompt, targetPath, imageGenerationOptions(project, stage, readyReferences, entity, this.operationControls.get(projectId)?.controller?.signal));
+        generated = await this.executeAdaptiveCapability("image", settings.imageProvider?.kind || "default", {
+          config: settings.imageProvider,
+          prompt: activePrompt,
+          targetPath,
+          options: imageGenerationOptions(project, stage, readyReferences, entity, this.operationControls.get(projectId)?.controller?.signal)
+        }, { projectId, stage, entityType, entityId });
         prompt = activePrompt;
         break;
       } catch (error) {
@@ -13453,7 +13650,12 @@ ${shotAnchor}
           readyReferences = [];
           activePrompt += `\n\n【注意】上游拒绝了参考图链接，已自动改为纯文字重试。`;
           try {
-            generated = await generateImage(settings.imageProvider, activePrompt, targetPath, imageGenerationOptions(project, stage, [], entity, this.operationControls.get(projectId)?.controller?.signal));
+            generated = await this.executeAdaptiveCapability("image", settings.imageProvider?.kind || "default", {
+              config: settings.imageProvider,
+              prompt: activePrompt,
+              targetPath,
+              options: imageGenerationOptions(project, stage, [], entity, this.operationControls.get(projectId)?.controller?.signal)
+            }, { projectId, stage, entityType, entityId, retry: "without_reference" });
           } catch (retryError) {
             try {
               this.settleImageFailure(projectId, {
@@ -14033,7 +14235,10 @@ ${shotAnchor}
       await this.videoQueryPollSleep(5_000);
       let result;
       try {
-        result = await taskBridge.query(taskId);
+        result = await this.executeAdaptiveCapability("video_query", initialJob?.providerKind || "default", {
+          bridge: taskBridge,
+          taskId
+        }, { projectId, jobId, stage: "video_poll", attempt });
       } catch (error) {
         if (!error.taskId) error.taskId = taskId;
         if (error.remoteGenerationCompleted !== true && isTransientProviderError(error)) {
@@ -14091,7 +14296,7 @@ ${shotAnchor}
     const expectedEngine = assertVideoProviderAligned(project, settings);
     // Compiler-owned shot prompts are immutable here. Manual, character, and
     // other prompts still receive the generic bounded output-policy compiler.
-    const executionPrompt = finalizeVideoPromptForSubmission(project, entityType, entityId, stage, prompt, expectedEngine);
+    const executionPrompt = finalizeVideoPromptForSubmission(project, entityType, entityId, stage, prompt, expectedEngine, references);
     const providerKind = expectedEngine === "hailuo-h3"
       ? "puream-hailuo-h3"
       : (projectVideoProviderKind(project, settings) || settings.videoProvider?.kind || "local-xiangsu");
@@ -14165,12 +14370,14 @@ ${shotAnchor}
       ? normalizeCloudVideoResolution(requestedCloudVideoResolution || settings.videoProvider?.cloudVideoResolution)
       : "480";
     if (expectedEngine === "hailuo-h3" && entityType === "shot" && stage === "shot_video") {
-      const activeShot = (project.shots || []).find(item => item.id === entityId);
-      if (!activeShot) throw Object.assign(new Error("分镜不存在，禁止提交海螺 H3 任务"), { code: "SHOT_NOT_FOUND" });
-      if (!shotUsesManualVideoPrompt(activeShot)) {
+      const parentShot = (project.shots || []).find(item => item.id === entityId);
+      if (!parentShot) throw Object.assign(new Error("分镜不存在，禁止提交海螺 H3 任务"), { code: "SHOT_NOT_FOUND" });
+      const activeShot = references?.agentTakeShot || parentShot;
+      if (!shotUsesManualVideoPrompt(parentShot)) {
         const checkedReferences = { ...references, hailuoApiMode };
         assertHailuoDialogueVoiceReferences(project, activeShot, checkedReferences, { requireMultimodal: true });
-        assertHailuoPromptVoiceBindings(project, activeShot, checkedReferences, prompt);
+        if (activeShot.agentTake) assertAgentTakePrompt(project, activeShot, activeShot.agentTake, checkedReferences, prompt);
+        else assertHailuoPromptVoiceBindings(project, activeShot, checkedReferences, prompt);
       }
     }
     const manifestHashCache = new Map();
@@ -14224,7 +14431,8 @@ ${shotAnchor}
         characterName: item.characterName || "",
         duration: item.duration,
         remoteUrl: item.remoteUrl || ""
-      })))
+      }))),
+      ...(references.agentTake ? { agentTake: { ...references.agentTake } } : {})
     };
     const fingerprint = submissionFingerprint || await videoSubmissionFingerprint(
       project,
@@ -14299,7 +14507,12 @@ ${shotAnchor}
       cloudVideoResolution,
       submissionFingerprint: fingerprint,
       clientRequestId,
-      ownerInstanceId: this.instanceId
+      ownerInstanceId: this.instanceId,
+      ...(references.agentTake ? {
+        agentTake: { ...references.agentTake },
+        internalTake: references.agentTake.internal === true,
+        agentTakeShot: references.agentTakeShot || null
+      } : {})
     });
     if (equivalentJob) {
       this.store.updateJob(projectId, job.id, {
@@ -14318,6 +14531,11 @@ ${shotAnchor}
         submissionFingerprint: fingerprint,
         clientRequestId,
         ownerInstanceId: this.instanceId,
+        ...(references.agentTake ? {
+          agentTake: { ...references.agentTake },
+          internalTake: references.agentTake.internal === true,
+          agentTakeShot: references.agentTakeShot || null
+        } : {}),
         errorCode: ""
       });
     }
@@ -14329,7 +14547,10 @@ ${shotAnchor}
         : 1;
       for (let submitAttempt = 1; submitAttempt <= maxSubmitAttempts; submitAttempt += 1) {
         try {
-          submitted = await submissionBridge.submit(staged.payload);
+          submitted = await this.executeAdaptiveCapability("video_submit", providerKind || "default", {
+            bridge: submissionBridge,
+            stagedPayload: staged.payload
+          }, { projectId, stage, entityType, entityId, submitAttempt });
           break;
         } catch (error) {
           const responseUnknown = error?.remoteSubmissionUnknown === true
@@ -14434,6 +14655,23 @@ ${shotAnchor}
   async resumeVideoJob(projectId, jobId, prompt, duration, bridgeClient = null) {
     const project = this.store.getProject(projectId);
     const job = project.jobs.find(item => item.id === jobId);
+    if (job?.internalTake === true && job.internalTakeFilePath && fs.existsSync(job.internalTakeFilePath)) {
+      return {
+        id: `internal-take-${job.id}`,
+        internalTake: true,
+        jobId: job.id,
+        taskId: job.taskId,
+        take: job.agentTake || null,
+        filePath: job.internalTakeFilePath,
+        localPath: job.internalTakeFilePath,
+        remoteUrl: job.remoteUrl || "",
+        duration: Number(duration || job.duration) || 5,
+        chargeYuan: job.chargeYuan ?? null,
+        settlementStatus: job.settlementStatus || "",
+        referenceManifest: job.referenceManifest || null,
+        prompt: prompt || job.prompt || ""
+      };
+    }
     if (!job?.taskId) throw Object.assign(new Error("待恢复的视频任务没有 taskId"), { code: "VIDEO_TASK_ID_REQUIRED" });
     const costEntry = this.ensureVideoCostEntry(projectId, job);
     const jobWithCost = { ...job, costEntryId: job.costEntryId || costEntry.id };
@@ -14452,7 +14690,7 @@ ${shotAnchor}
       const result = await this.waitForSeedance(job.taskId, projectId, job.id, bridgeClient);
       const candidate = this.finalizeVideoJob(projectId, { ...jobWithCost, prompt: prompt || job.prompt, duration: duration || job.duration }, result, true);
       this.settleVideoCost(projectId, jobWithCost, result);
-      return this.auditRecoveredVideoCandidate(projectId, candidate);
+      return candidate?.internalTake ? candidate : this.auditRecoveredVideoCandidate(projectId, candidate);
     } catch (error) {
       const receipt = {
         taskId: error.taskId || job.taskId,
@@ -14596,16 +14834,21 @@ ${shotAnchor}
       const costEntry = this.ensureVideoCostEntry(projectId, job);
       this.store.updateJob(projectId, job.id, { costEntryId: costEntry.id });
       try {
-        const generated = await generateVideo(providerConfig, prompt, targetPath, {
-          referenceUrls: [referenceUrl],
-          duration: characterVideoDuration,
-          aspectRatio: project.generation.aspectRatio || "9:16",
-          resumeTaskId: recoverableCloudJob?.taskId || "",
-          onTaskId: async taskId => {
-            this.store.updateJob(projectId, job.id, { taskId, status: "running", progress: 10, message: "清波任务已提交，正在等待上游" });
-            this.store.updateCostEntry(projectId, costEntry.id, { taskId, jobId: job.id });
+        const generated = await this.executeAdaptiveCapability("video", providerConfig.kind || "default", {
+          config: providerConfig,
+          prompt,
+          targetPath,
+          options: {
+            referenceUrls: [referenceUrl],
+            duration: characterVideoDuration,
+            aspectRatio: project.generation.aspectRatio || "9:16",
+            resumeTaskId: recoverableCloudJob?.taskId || "",
+            onTaskId: async taskId => {
+              this.store.updateJob(projectId, job.id, { taskId, status: "running", progress: 10, message: "清波任务已提交，正在等待上游" });
+              this.store.updateCostEntry(projectId, costEntry.id, { taskId, jobId: job.id });
+            }
           }
-        });
+        }, { projectId, stage: "character_video", entityType: "character", entityId: characterId });
         const preservedCharge = Number(recoverableCloudJob?.chargeYuan ?? costEntry?.amountYuan);
         const preservedSettlement = recoverableCloudJob?.settlementStatus || (costEntry?.status === "settled" ? "charged" : "");
         this.settleVideoCost(projectId, { ...job, costEntryId: costEntry.id, providerKind: stageProvider, duration: characterVideoDuration }, {
@@ -15455,7 +15698,8 @@ ${shotAnchor}
     const videoAudioCharacterIds = speakingCharacterIds.length
       ? speakingCharacterIds
       : explicitAudioCharacterIds;
-    if (videoAudioCharacterIds.length > 3) {
+    const agentAtomicH3 = projectVideoEngine(project) === "hailuo-h3" && !shotUsesManualVideoPrompt(shot);
+    if (!agentAtomicH3 && videoAudioCharacterIds.length > 3) {
       throw Object.assign(new Error(`镜头 ${shot.id || shot.number} 有 ${videoAudioCharacterIds.length} 名说话人，超过单镜最多3条独立音频的硬限制；保持本单元、镜号和时长不变，仅保留最多3名推动主线的说话人，其余出镜者改为全镜静默反应，禁止拆分单元或改ID`), {
         code: "SHOT_AUDIO_REFERENCE_LIMIT_EXCEEDED",
         shotId: shot.id,
@@ -15489,7 +15733,7 @@ ${shotAnchor}
           audit: audioAudit
         });
       }
-      if (audioDuration + duration > 15) {
+      if (!agentAtomicH3 && audioDuration + duration > 15) {
         throw Object.assign(new Error(`镜头 ${shot.id || shot.number} 的参考音频真实总长 ${(audioDuration + duration).toFixed(2)} 秒，超过15秒；请裁短每人音色或拆镜`), {
           code: "SHOT_AUDIO_DURATION_EXCEEDED",
           shotId: shot.id,
@@ -15509,6 +15753,291 @@ ${shotAnchor}
       audioDuration += duration;
     }
     return { images, imageRoles, audios };
+  }
+
+  async ensureAgentCameraTakePlan(projectId, shotId, mode, settings = this.store.getSettings()) {
+    let project = this.store.getProject(projectId);
+    let shot = (project.shots || []).find(item => item.id === shotId);
+    if (!shot) throw Object.assign(new Error("分镜不存在"), { code: "SHOT_NOT_FOUND" });
+    const fingerprint = cameraTakePlanFingerprint(project, shot, mode);
+    if (shot.agentCameraTakePlan?.version === AGENT_DIRECTOR_VERSION && shot.agentCameraTakePlan.sourceFingerprint === fingerprint) {
+      try {
+        validateCameraTakePlan(shot.agentCameraTakePlan, project, shot);
+        return shot.agentCameraTakePlan;
+      } catch {
+        // Re-author invalid historical plans through the Director Agent below.
+      }
+    }
+    const basePlan = buildCameraTakePlan(project, shot, { mode });
+    this.setAutomation(projectId, {
+      stage: "agent_camera_plan",
+      message: `导演 Agent 正在锁定 S${String(shot.number).padStart(2, "0")} 的说话人机位与嘴型所有权`
+    });
+    let plan;
+    try {
+      plan = await this.runAgentSkill("director.camera_take_plan", {
+        projectId,
+        project,
+        shot,
+        basePlan,
+        textProvider: settings.textProvider,
+        messages: cameraTakeCompilerMessages(project, shot, basePlan),
+        textOptions: {
+          json: true,
+          sessionId: `agent-camera-${projectId}-${shotId}-${fingerprint.slice(0, 12)}`,
+          signal: this.operationControls.get(projectId)?.controller?.signal,
+          costProjectId: projectId,
+          costOperation: "agent_camera_take_direction",
+          entityType: "shot",
+          entityId: shotId
+        }
+      }, { projectId, shotId, stage: "director_camera_plan" });
+    } catch (error) {
+      if (isOperationControlError(error)) throw error;
+      throw Object.assign(new Error(`导演 Agent 无法生成可执行的说话人切镜方案：${error.message || error}`), {
+        code: "AGENT_CAMERA_TAKE_COMPILE_FAILED",
+        shotId,
+        cause: error,
+        trace: error?.trace || []
+      });
+    }
+    project = this.store.getProject(projectId);
+    shot = (project.shots || []).find(item => item.id === shotId);
+    if (!shot || cameraTakePlanFingerprint(project, shot, mode) !== fingerprint) {
+      throw Object.assign(new Error("导演 Agent 编排期间分镜已被修改，请重新生成本镜"), { code: "AGENT_CAMERA_TAKE_STALE", shotId });
+    }
+    const persisted = { ...plan, sourceFingerprint: fingerprint, version: AGENT_DIRECTOR_VERSION };
+    project.shots = project.shots.map(item => item.id === shotId ? { ...item, agentCameraTakePlan: persisted } : item);
+    this.store.saveProject(project);
+    return persisted;
+  }
+
+  async cropStoryboardTakeSheet(projectId, shot, take, references = {}) {
+    const sheetIndex = (references.imageRoles || []).findIndex(role => ["storyboard_sheet", "storyboard_take_sheet"].includes(String(role?.type || "")));
+    if (sheetIndex < 0) return "";
+    const sourcePath = references.images?.[sheetIndex];
+    if (!sourcePath || !fs.existsSync(sourcePath)) {
+      throw Object.assign(new Error(`${take.id} 的父分镜合图不可读，已在付费视频提交前停止`), { code: "AGENT_TAKE_SHEET_REQUIRED", takeId: take.id });
+    }
+    const ffmpeg = typeof this.locateFfmpeg === "function" ? this.locateFfmpeg() : "";
+    if (!ffmpeg) throw Object.assign(new Error("未找到 FFmpeg，无法把父分镜合图裁成说话人专属时间轴"), { code: "FFMPEG_NOT_FOUND" });
+    const parentGrid = storyboardSheetGrid(shot.duration || 10);
+    const panelIndices = [...new Set((take.panelIndices || []).map(Number).filter(index => Number.isInteger(index) && index >= 0 && index < parentGrid.panelCount))];
+    if (!panelIndices.length) throw Object.assign(new Error(`${take.id} 没有可用的分镜画格`), { code: "AGENT_TAKE_PANEL_REQUIRED", takeId: take.id });
+    const takeColumns = panelIndices.length <= 2 ? panelIndices.length : panelIndices.length <= 4 ? 2 : 3;
+    const takeRows = Math.ceil(panelIndices.length / takeColumns);
+    const sourceHash = fileSha256(sourcePath).slice(0, 12);
+    const targetPath = path.join(
+      this.store.assetDir(projectId, "storyboards"),
+      `agent-take-sheet-${slug(shot.id)}-${slug(take.id)}-${panelIndices.join("-")}-${sourceHash}.png`
+    );
+    if (fs.existsSync(targetPath)) return targetPath;
+    const sourceLabels = panelIndices.map((_panel, index) => `src${index}`);
+    const panelLabels = panelIndices.map((_panel, index) => `panel${index}`);
+    const filters = [];
+    if (panelIndices.length > 1) filters.push(`[0:v]split=${panelIndices.length}${sourceLabels.map(label => `[${label}]`).join("")}`);
+    panelIndices.forEach((panelIndex, index) => {
+      const column = panelIndex % parentGrid.columns;
+      const row = Math.floor(panelIndex / parentGrid.columns);
+      const input = panelIndices.length > 1 ? `[${sourceLabels[index]}]` : "[0:v]";
+      filters.push(`${input}crop=iw/${parentGrid.columns}:ih/${parentGrid.rows}:${column}*iw/${parentGrid.columns}:${row}*ih/${parentGrid.rows},scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:(ow-iw)/2:(oh-ih)/2:black[${panelLabels[index]}]`);
+    });
+    let outputLabel = panelLabels[0];
+    if (panelIndices.length > 1) {
+      const layout = panelIndices.map((_panel, index) => `${(index % takeColumns) * 360}_${Math.floor(index / takeColumns) * 640}`).join("|");
+      filters.push(`${panelLabels.map(label => `[${label}]`).join("")}xstack=inputs=${panelIndices.length}:layout=${layout}:fill=black[out]`);
+      outputLabel = "out";
+    }
+    try {
+      await spawnCapture(ffmpeg, [
+        "-hide_banner", "-loglevel", "error", "-y", "-i", sourcePath,
+        "-filter_complex", filters.join(";"), "-map", `[${outputLabel}]`,
+        "-frames:v", "1", "-compression_level", "6", targetPath
+      ], 180_000);
+    } catch (error) {
+      try { fs.rmSync(targetPath, { force: true }); } catch {}
+      throw Object.assign(new Error(`${take.id} 专属分镜合图裁切失败：${error.message || error}`), {
+        code: "AGENT_TAKE_SHEET_CROP_FAILED",
+        takeId: take.id,
+        cause: error
+      });
+    }
+    return targetPath;
+  }
+
+  async prepareHailuoAgentShotTakes(projectId, project, shot, settings, mode, references, options = {}) {
+    const plan = shot.agentCameraTakePlan;
+    validateCameraTakePlan(plan, project, shot);
+    const multiTake = plan.takes.length > 1;
+    const internalTake = multiTake || plan.takes.some(take => Math.abs(Number(take.providerDuration) - Number(take.authoredDuration)) > 0.002);
+    const prepared = [];
+    for (const take of plan.takes) {
+      this.assertOperationActive(projectId);
+      const takeSheetPath = multiTake ? await this.cropStoryboardTakeSheet(projectId, shot, take, references) : "";
+      const takeReferences = filterReferencesForTake(references, take, {
+        multiTake,
+        internalTake,
+        takeCount: plan.takes.length,
+        takeSheetPath
+      });
+      takeReferences.hailuoApiMode = take.dialogueTurns.length
+        ? "multimodal_to_video"
+        : normalizeHailuoApiMode(takeReferences.hailuoApiMode || settings.videoProvider?.hailuoApiMode);
+      const takeShot = takeShotForValidation(shot, take);
+      takeReferences.agentTakeShot = takeShot;
+      await this.verifyHailuoVoiceReferences(project, takeShot, takeReferences);
+      assertHailuoDialogueVoiceReferences(project, takeShot, takeReferences, { requireMultimodal: take.dialogueTurns.length > 0 });
+      const prompt = buildHailuoTakePrompt(project, takeShot, take, takeReferences);
+      assertAgentTakePrompt(project, takeShot, take, takeReferences, prompt);
+      prepared.push({ take, takeShot, references: takeReferences, prompt });
+    }
+    const promptManifest = prepared.map(item => `[${item.take.id} ${item.take.start}-${item.take.end}s speaker=${item.take.speakerId || "silent"} camera=${item.take.cameraOwnerId || "none"}]\n${item.prompt}`).join("\n\n");
+    const latest = this.store.getProject(projectId);
+    const latestShot = (latest.shots || []).find(item => item.id === shot.id);
+    if (!latestShot || cameraTakePlanFingerprint(latest, latestShot, mode) !== plan.sourceFingerprint) {
+      throw Object.assign(new Error("提示词生成期间父分镜已变化，已在视频付费提交前停止"), { code: "AGENT_CAMERA_TAKE_STALE", shotId: shot.id });
+    }
+    if (options.persist !== false) {
+      latest.shots = latest.shots.map(item => item.id === shot.id
+        ? {
+          ...item,
+          systemVideoPrompt: promptManifest,
+          agentCameraTakePlan: {
+            ...plan,
+            executionStatus: "ready",
+            takes: plan.takes.map((take, index) => ({ ...take, providerPrompt: prepared[index].prompt }))
+          }
+        }
+        : item);
+      this.store.saveProject(latest);
+    }
+    return { plan, prepared, promptManifest, multiTake, internalTake };
+  }
+
+  async stitchAgentCameraTakes(projectId, shot, plan, prepared, results) {
+    const ffmpeg = typeof this.locateFfmpeg === "function" ? this.locateFfmpeg() : "";
+    if (!ffmpeg) throw Object.assign(new Error("未找到 FFmpeg，无法把原子镜头硬切合成为完整分镜"), { code: "FFMPEG_NOT_FOUND" });
+    if (results.length !== plan.takes.length || results.some(item => !item?.filePath || !fs.existsSync(item.filePath))) {
+      throw Object.assign(new Error("原子镜头结果不完整，禁止生成伪完成候选"), { code: "AGENT_TAKE_RESULTS_INCOMPLETE", shotId: shot.id });
+    }
+    const currentProject = this.store.getProject(projectId);
+    const currentShot = (currentProject.shots || []).find(item => item.id === shot.id);
+    if (!currentShot || cameraTakePlanFingerprint(currentProject, currentShot, plan.mode) !== plan.sourceFingerprint) {
+      throw Object.assign(new Error("原子镜头生成期间父分镜已变化，结果保留在任务历史但不写入当前候选"), { code: "AGENT_CAMERA_TAKE_STALE", shotId: shot.id });
+    }
+    const outputPath = path.join(this.store.assetDir(projectId, "videos"), `agent-camera-${slug(shot.id)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.mp4`);
+    const inputArgs = results.flatMap(item => ["-i", item.filePath]);
+    const takeStreams = await Promise.all(plan.takes.map(async (take, index) => {
+      try {
+        await probeMediaStreamDuration(ffmpeg, results[index].filePath, "0:a:0");
+        return { duration: take.authoredDuration, hasAudio: true };
+      } catch {
+        return { duration: take.authoredDuration, hasAudio: false };
+      }
+    }));
+    const filter = h3ExactStitchFilter(takeStreams, Number(shot.duration) || plan.duration, 24);
+    const commonArgs = [
+      "-hide_banner", "-loglevel", "error", "-y", ...inputArgs,
+      "-filter_complex", filter, "-map", "[outv]", "-map", "[outa]",
+      "-r", "24", "-c:a", "aac", "-b:a", "192k", "-t", String(Number(shot.duration) || plan.duration),
+      "-movflags", "+faststart"
+    ];
+    let encoded = false;
+    let lastError = null;
+    for (const codec of [["-c:v", "h264_mf", "-b:v", "4500k"], ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]]) {
+      try {
+        await spawnCapture(ffmpeg, [...commonArgs, ...codec, outputPath], 1_800_000);
+        encoded = true;
+        break;
+      } catch (error) {
+        lastError = error;
+        try { fs.rmSync(outputPath, { force: true }); } catch {}
+      }
+    }
+    if (!encoded) throw Object.assign(new Error(`原子镜头本地硬切失败：${lastError?.message || "视频编码器不可用"}`), { code: "AGENT_TAKE_STITCH_FAILED", cause: lastError });
+    const promptManifest = prepared.map(item => `[${item.take.id} ${item.take.start}-${item.take.end}s speaker=${item.take.speakerId || "silent"} camera=${item.take.cameraOwnerId || "none"}]\n${item.prompt}`).join("\n\n");
+    const numericCharges = results.map(item => Number(item.chargeYuan)).filter(Number.isFinite);
+    const candidate = this.store.addCandidate(projectId, {
+      entityType: "shot",
+      entityId: shot.id,
+      stage: "shot_video",
+      productionRevision: currentProject.productionRevision || "",
+      prompt: promptManifest,
+      filePath: outputPath,
+      fileUrl: pathToFileURL(outputPath).href,
+      remoteUrl: "",
+      taskId: `agent-stitch-${crypto.createHash("sha256").update(results.map(item => item.taskId || item.jobId).join("|")).digest("hex").slice(0, 32)}`,
+      model: "MiniMax Hailuo H3 · Director Agent atomic camera takes",
+      duration: Number(shot.duration) || plan.duration,
+      sourceJobIds: results.map(item => item.jobId).filter(Boolean),
+      sourceTaskIds: results.map(item => item.taskId).filter(Boolean),
+      providerKind: "puream-hailuo-h3",
+      chargeYuan: numericCharges.length === results.length ? Number(numericCharges.reduce((sum, value) => sum + value, 0).toFixed(4)) : null,
+      settlementStatus: results.every(item => item.settlementStatus === "charged") ? "charged" : "",
+      agentDirectorVersion: AGENT_DIRECTOR_VERSION,
+      agentCameraTakePlan: plan,
+      referenceManifest: {
+        agentDirectorVersion: AGENT_DIRECTOR_VERSION,
+        takes: results.map((item, index) => ({
+          id: plan.takes[index].id,
+          jobId: item.jobId,
+          taskId: item.taskId,
+          authoredDuration: plan.takes[index].authoredDuration,
+          providerDuration: plan.takes[index].providerDuration,
+          referenceManifest: item.referenceManifest || null
+        }))
+      }
+    });
+    const latest = this.store.getProject(projectId);
+    latest.shots = latest.shots.map(item => item.id === shot.id
+      ? { ...item, systemVideoPrompt: promptManifest, agentCameraTakePlan: { ...plan, executionStatus: "completed", candidateId: candidate.id } }
+      : item);
+    this.store.saveProject(latest);
+    return candidate;
+  }
+
+  async generateHailuoAgentShotVideo(projectId, project, shot, settings, mode, references, options = {}) {
+    const { plan, prepared, promptManifest, internalTake } = await this.prepareHailuoAgentShotTakes(
+      projectId,
+      project,
+      shot,
+      settings,
+      mode,
+      references
+    );
+
+    const results = [];
+    for (const item of prepared) {
+      this.setAutomation(projectId, {
+        stage: "agent_camera_take_video",
+        message: `S${String(shot.number).padStart(2, "0")} ${item.take.id}：镜头与嘴型锁定 ${item.take.speakerId || "静默动作"}（${item.take.index}/${plan.takes.length}）`
+      });
+      const result = await withTransientProviderRetries(
+        () => this.submitVideo(projectId, "shot", shot.id, "shot_video", item.prompt, item.references, item.take.providerDuration),
+        {
+          attempts: 5,
+          baseDelayMs: 4000,
+          label: `${item.take.id} 原子镜头`,
+          onRetry: async (error, retryAttempt, maxRetryAttempts) => {
+            this.setAutomation(projectId, {
+              stage: "agent_camera_take_retry",
+              message: `${item.take.id} 上游抖动（${error.status || error.code || "transient"}），${4 * retryAttempt}s 后第 ${retryAttempt + 1}/${maxRetryAttempts} 次恢复同一幂等任务`
+            });
+          }
+        }
+      );
+      results.push(result);
+    }
+    if (!internalTake) {
+      const candidate = results[0];
+      this.store.updateCandidate(projectId, candidate.id, {
+        agentDirectorVersion: AGENT_DIRECTOR_VERSION,
+        agentCameraTakePlan: plan,
+        prompt: promptManifest
+      });
+      return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+    }
+    return this.stitchAgentCameraTakes(projectId, shot, plan, prepared, results);
   }
 
   async ensureHailuoPromptSpec(projectId, shotId, mode, settings) {
@@ -15923,7 +16452,7 @@ ${shotAnchor}
     }
     let refreshedProject = this.store.getProject(projectId);
     if (projectVideoEngine(refreshedProject) === "hailuo-h3" && !manualPromptActive) {
-      await this.ensureHailuoPromptSpec(projectId, shotId, mode, settings);
+      await this.ensureAgentCameraTakePlan(projectId, shotId, mode, settings);
       refreshedProject = this.store.getProject(projectId);
     }
     const activeShot = refreshedProject.shots.find(item => item.id === shotId);
@@ -15961,10 +16490,6 @@ ${shotAnchor}
       videoAudios: [],
       aspectRatio: refreshedProject.generation.aspectRatio || settings.generation.aspectRatio || "9:16"
     };
-    if (engine === "hailuo-h3" && !manualPromptActive) {
-      // Run before mode filtering so a missing speaker voice reports the real cause instead of silently falling back to image_to_video.
-      assertHailuoDialogueVoiceReferences(refreshedProject, activeShot, combinedReferences, { requireMultimodal: false });
-    }
     // Same-scene continuation keeps end-frame (+ shot refs); do not strip to pure video_to_video.
     // Keyframe always keeps start+end images; auto/image_to_video upgrades to multimodal when voices exist.
     const hailuoModeForRefs = engine === "hailuo-h3"
@@ -15977,13 +16502,25 @@ ${shotAnchor}
     const references = engine === "hailuo-h3"
       ? selectHailuoReferencesForMode(combinedReferences, hailuoModeForRefs)
       : combinedReferences;
-    if (engine === "hailuo-h3" && !manualPromptActive) {
-      await this.verifyHailuoVoiceReferences(refreshedProject, activeShot, references);
-      assertHailuoDialogueVoiceReferences(refreshedProject, activeShot, references, { requireMultimodal: true });
-    }
     assertShotReferenceBundle(refreshedProject, activeShot, mode, references, previousVideo, gateSettings);
     const requestedDuration = Number(activeShot.duration) || Number(project.generation.shotDuration) || 5;
     const outputDuration = this.resolveVideoDuration(refreshedProject, settings, requestedDuration);
+    if (engine === "hailuo-h3" && !manualPromptActive) {
+      let candidate = await this.generateHailuoAgentShotVideo(
+        projectId,
+        refreshedProject,
+        activeShot,
+        settings,
+        mode,
+        references,
+        options
+      );
+      if (options.audit !== false && this.qualityGatesEnabled(settings, "videos")) {
+        await this.auditShotCandidate(projectId, activeShot.id, candidate.id);
+        candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+      }
+      return candidate;
+    }
     const promptShot = outputDuration === requestedDuration ? activeShot : {
       ...activeShot,
       duration: outputDuration,
@@ -16387,33 +16924,66 @@ ${shotAnchor}
           requireMultimodal: uniqueDialogueTurns(project, shot).length > 0
         });
       }
-      // Compile every final six-section H3 prompt and verify its exact Audio N
-      // binding before the first paid video submit in every generation mode.
-      // Continuation/smart used to submit early shots first and discover a late
-      // prompt defect only after money had already been spent.
+      // Let the Director Agent author and validate every atomic camera take,
+      // crop every take-only storyboard timeline, and compile every final H3
+      // prompt before the first paid video submission. A late-shot defect must
+      // never be discovered only after earlier shots consumed credits.
       const compileConcurrency = Math.max(1, Math.min(4, imageBatchConcurrency(project)));
       this.setAutomation(projectId, {
         stage: "shot_videos",
-        message: `正在预编译整部海螺英文提示词（并发 ${compileConcurrency}，共 ${shots.length} 镜）`
+        message: `导演 Agent 正在预编排整部说话人切镜与 H3 提示词（并发 ${compileConcurrency}，共 ${shots.length} 镜）`
       });
       await mapWithConcurrency(shots, compileConcurrency, async shot => {
         this.assertOperationActive(projectId);
-        await this.ensureHailuoPromptSpec(projectId, shot.id, mode, settings);
+        await this.ensureAgentCameraTakePlan(projectId, shot.id, mode, settings);
       });
-      const compiledProject = this.store.getProject(projectId);
-      for (const shot of compiledProject.shots.slice().sort((a, b) => a.number - b.number)) {
-        const references = this.shotReferences(compiledProject, shot, mode);
-        const strategy = resolveShotVideoStrategy(compiledProject, shot).strategy;
-        references.hailuoApiMode = resolveHailuoApiModeForStrategy(
-          strategy,
-          settings.videoProvider?.hailuoApiMode,
-          references.audios.length > 0
-        );
-        const prompt = this.buildShotPrompt(compiledProject, settings, shot, mode, references);
-        if (uniqueDialogueTurns(compiledProject, shot).length) {
-          assertHailuoPromptVoiceBindings(compiledProject, shot, references, prompt);
+      const plannedProject = this.store.getProject(projectId);
+      const preparedShots = await mapWithConcurrency(
+        plannedProject.shots.slice().sort((a, b) => a.number - b.number),
+        compileConcurrency,
+        async plannedShot => {
+          this.assertOperationActive(projectId);
+          const references = this.shotReferences(plannedProject, plannedShot, mode);
+          const strategy = resolveShotVideoStrategy(plannedProject, plannedShot).strategy;
+          references.hailuoApiMode = resolveHailuoApiModeForStrategy(
+            strategy,
+            settings.videoProvider?.hailuoApiMode,
+            references.audios.length > 0
+          );
+          const bundle = await this.prepareHailuoAgentShotTakes(
+            projectId,
+            plannedProject,
+            plannedShot,
+            settings,
+            mode,
+            references,
+            { persist: false }
+          );
+          return { shotId: plannedShot.id, ...bundle };
         }
-      }
+      );
+      const latestProject = this.store.getProject(projectId);
+      const preparedById = new Map(preparedShots.map(item => [item.shotId, item]));
+      latestProject.shots = latestProject.shots.map(latestShot => {
+        const bundle = preparedById.get(latestShot.id);
+        if (!bundle) return latestShot;
+        if (cameraTakePlanFingerprint(latestProject, latestShot, mode) !== bundle.plan.sourceFingerprint) {
+          throw Object.assign(new Error(`S${String(latestShot.number).padStart(2, "0")} 在整片预检期间被修改，未提交任何付费视频`), {
+            code: "AGENT_CAMERA_TAKE_STALE",
+            shotId: latestShot.id
+          });
+        }
+        return {
+          ...latestShot,
+          systemVideoPrompt: bundle.promptManifest,
+          agentCameraTakePlan: {
+            ...bundle.plan,
+            executionStatus: "ready",
+            takes: bundle.plan.takes.map((take, index) => ({ ...take, providerPrompt: bundle.prepared[index].prompt }))
+          }
+        };
+      });
+      this.store.saveProject(latestProject);
     }
     if (mode === "continuation" || mode === "smart") {
       const results = [];
@@ -17239,7 +17809,12 @@ ${shotAnchor}
     const targetPath = path.join(this.store.assetDir(projectId, category), `${stage}-${slug(asset.name)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.png`);
     let generated;
     try {
-      generated = await generateImage(settings.imageProvider, prompt, targetPath, imageGenerationOptions(project, stage, referenceInputs, null, this.operationControls.get(projectId)?.controller?.signal));
+      generated = await this.executeAdaptiveCapability("image", settings.imageProvider?.kind || "default", {
+        config: settings.imageProvider,
+        prompt,
+        targetPath,
+        options: imageGenerationOptions(project, stage, referenceInputs, null, this.operationControls.get(projectId)?.controller?.signal)
+      }, { projectId, stage, entityType: "asset", entityId: asset.id || asset.name });
     } catch (error) {
       try {
         this.settleImageFailure(projectId, {

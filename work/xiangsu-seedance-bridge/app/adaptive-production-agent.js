@@ -61,6 +61,7 @@ function nextProductionStage(project = {}) {
 class AdaptiveProductionAgent {
   constructor() {
     this.adapters = new Map();
+    this.skills = new Map();
   }
 
   registerAdapter(capability, platform, handler) {
@@ -79,6 +80,65 @@ class AdaptiveProductionAgent {
     const handler = this.adapters.get(`${capability}:${platform}`) || this.adapters.get(`${capability}:default`);
     if (!handler) throw Object.assign(new Error(`未配置 ${capability}/${platform} 平台适配器`), { code: "AGENT_ADAPTER_NOT_CONFIGURED" });
     return handler(payload, context);
+  }
+
+  registerSkill(name, definition) {
+    const key = String(name || "").trim();
+    if (!key) throw new TypeError("agent skill name is required");
+    const source = typeof definition === "function" ? { run: definition } : { ...(definition || {}) };
+    if (typeof source.run !== "function" && !String(source.capability || "").trim()) {
+      throw new TypeError("agent skill needs run or capability");
+    }
+    this.skills.set(key, {
+      ...source,
+      maxAttempts: Math.max(1, Math.min(5, Math.round(Number(source.maxAttempts) || 1)))
+    });
+    return this;
+  }
+
+  hasSkill(name) {
+    return this.skills.has(String(name || "").trim());
+  }
+
+  async runSkill(name, payload, context = {}) {
+    const key = String(name || "").trim();
+    const skill = this.skills.get(key);
+    if (!skill) throw Object.assign(new Error(`未注册 Agent Skill：${key}`), { code: "AGENT_SKILL_NOT_CONFIGURED", skill: key });
+    const trace = [];
+    let currentPayload = payload;
+    let lastError = null;
+    for (let attempt = 1; attempt <= skill.maxAttempts; attempt += 1) {
+      try {
+        const platform = typeof skill.platform === "function"
+          ? skill.platform(currentPayload, context)
+          : (skill.platform || currentPayload?.platform || "default");
+        const result = typeof skill.run === "function"
+          ? await skill.run(currentPayload, { ...context, attempt, skill: key, agent: this })
+          : await this.execute(skill.capability, platform, currentPayload, { ...context, attempt, skill: key });
+        if (typeof skill.validate === "function") {
+          const verdict = await skill.validate(result, currentPayload, { ...context, attempt, skill: key });
+          if (verdict !== true && verdict !== undefined) {
+            const details = Array.isArray(verdict) ? verdict : [verdict || "skill validation failed"];
+            throw Object.assign(new Error(details.map(String).join("; ")), { code: "AGENT_SKILL_VALIDATION_FAILED", details });
+          }
+        }
+        trace.push({ attempt, status: "completed" });
+        return result;
+      } catch (error) {
+        lastError = error;
+        trace.push({ attempt, status: "failed", code: String(error?.code || "AGENT_SKILL_ATTEMPT_FAILED"), message: String(error?.message || error) });
+        if (attempt >= skill.maxAttempts) break;
+        if (typeof skill.repairPayload === "function") {
+          currentPayload = await skill.repairPayload(currentPayload, error, { ...context, attempt, skill: key, trace: [...trace] });
+        }
+      }
+    }
+    throw Object.assign(new Error(`Agent Skill ${key} 执行失败：${lastError?.message || "unknown error"}`), {
+      code: "AGENT_SKILL_FAILED",
+      skill: key,
+      trace,
+      cause: lastError
+    });
   }
 
   plan(project = {}) {

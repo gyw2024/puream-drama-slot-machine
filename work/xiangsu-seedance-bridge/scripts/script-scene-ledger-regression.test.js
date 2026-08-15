@@ -125,7 +125,7 @@ test("explicit source scenes fail closed when a later stage drops them", () => {
   );
 });
 
-test("real manual analysis reaches assets with the same six-scene contract when the model fails", async t => {
+test("real manual analysis preserves the six-scene source contract and stops when the Agent fails", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-scene-ledger-flow-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -149,11 +149,19 @@ test("real manual analysis reaches assets with the same six-scene contract when 
       throw Object.assign(new Error("simulated invalid upstream result"), { code: "TEXT_RESULT_INVALID" });
     }
   });
-  const analyzed = await workflow.analyzeScript(project.id);
+  await assert.rejects(
+    workflow.analyzeScript(project.id),
+    error => error?.code === "UPLOADED_SCRIPT_AGENT_RESULT_REQUIRED"
+      && error?.agentRequired === true
+      && error?.localCreativeFallbackUsed === false
+  );
   assert.ok(calls >= 1);
-  assert.equal(analyzed.currentStage, "assets");
-  assert.equal(analyzed.script.detectedFormat, "chinese_screenplay");
-  assert.deepEqual(analyzed.scenes.map(item => item.name), [
+  const preserved = store.getProject(project.id);
+  assert.equal(preserved.currentStage, "script");
+  assert.equal(preserved.script.raw, CUSTOMER_PATTERN);
+  assert.equal(preserved.automation.errorCode, "UPLOADED_SCRIPT_AGENT_RESULT_REQUIRED");
+  const ledger = buildSourceSceneLedger(preserved.script.raw);
+  assert.deepEqual(ledger.catalogue.map(item => item.name), [
     "高档公寓客厅",
     "大平层公寓走廊",
     "总裁办公室",
@@ -161,9 +169,5 @@ test("real manual analysis reaches assets with the same six-scene contract when 
     "豪华公寓门口",
     "集团总部"
   ]);
-  assert.equal(analyzed.script.sceneRecognitionReport.declaredSceneCount, 6);
-  assert.ok(analyzed.shots.every(item => !/[\/→]|剧情主要空间/.test(item.scene)));
-  const dialogueByText = new Map(analyzed.script.sourceDialogueLedger.map(item => [item.text, item.sourceSceneName]));
-  assert.equal(dialogueByText.get("小李，通知中介来我办公室。"), "大平层公寓走廊");
-  assert.equal(dialogueByText.get("秦总，房产证取出来了。"), "总裁办公室");
+  assert.equal(ledger.catalogue.length, 6);
 });

@@ -79,6 +79,8 @@
 | BUG-070 | 多次一键写选题在更多轮次后仍可能回到固定池 | 旧方案只更换请求会话和少量静态备选，没有把历史标题与批次指纹作为持久多样性约束 | 0.14.0 | 历史禁用集、批次指纹、确定性多池轮换及连续三批零重复回归 | 已验证 |
 | BUG-071 | 更新后打开人物形象库长时间卡住，看起来像图片无法显示 | 旧实现每次启动都遍历全部项目；对每个候选又重读项目、哈希和复制文件并重写完整索引，界面一次拉取全部媒体并预读视频元数据，音色 WAV 还被错误挂到隐藏图片标签 | 0.14.0 | 权威持久索引、每项目单次读取、批量一次写入、按类型 IPC、图片懒解码、视频零预载、音频专用占位及真实安装态 5 秒打开门槛 | 已验证 |
 | BUG-072 | 海螺分镜视频大量报 `HAILUO_PROMPT_DIALOGUE_PERFORMANCE_MISSING`，同批只有少数镜头可生成 | 海螺专用编译器已经在 1900 字符内保留完整对白，但统一提交层又追加一套输出禁令并从尾部盲截，导致对白表演合同或禁令被截断；两层单测均通过，却没有组合链路测试 | 0.14.2 | `hailuo-final-submission-integrity.test.js`、`hailuo-prompt-contract.test.js`、`video-prompt-length-regression.test.js`、客户真实 30 分镜最终提交对象逐条审计 | 已验证 |
+| BUG-073 | 对话换人后画面仍停在上一名说话人，人物嘴型和视线对象错位 | 单个供应商视频任务同时承担多名说话人、多个机位和内部切镜；分镜合图又把整张时间轴沿用父镜头第一名主体，提示词无法可靠覆盖模型的单一视觉注意力 | 0.15.0 | `agent-director-contract.test.js`、`agent-director-ffmpeg.test.js`、`prompt-matrix-dialogue-regression.test.js` | 已验证 |
+| BUG-074 | 创作链路的局部失败可能触发固定模板补位，或旧兼容入口绕开全局 Agent | 创意生成、供应商提交和查询仍存在少量分散旁路，失败时“继续流程”优先级高于“保持用户剧情与生产合同” | 0.15.0 | `adaptive-agent-adversarial-regression.test.js`、`dialogue-rewrite-contract.test.js`、`uploaded-analysis-resume-regression.test.js`、`root-contract-regression.test.js` | 已验证 |
 
 ## 维护规则
 

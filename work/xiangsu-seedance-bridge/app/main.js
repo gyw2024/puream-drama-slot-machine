@@ -1956,7 +1956,13 @@ ipcMain.handle("video:submit", async (_event, payload) => {
         providerKind: bridge.config.kind || ""
       });
     }
-    return await bridge.submit(staged.payload);
+    if (!workbenchWorkflow) {
+      throw Object.assign(new Error("导演 Agent 尚未初始化"), { code: "WORKBENCH_NOT_READY" });
+    }
+    return await workbenchWorkflow.executeAdaptiveCapability("video_submit", bridge.config.kind || "default", {
+      bridge,
+      stagedPayload: staged.payload
+    }, { stage: "legacy_video_submit", leaseTaskId });
   } catch (error) {
     return publicError(error);
   } finally {
@@ -1968,7 +1974,13 @@ ipcMain.handle("video:submit", async (_event, payload) => {
 });
 ipcMain.handle("video:query", async (_event, taskId) => {
   try {
-    const result = await bridge.query(taskId);
+    if (!workbenchWorkflow) {
+      throw Object.assign(new Error("导演 Agent 尚未初始化"), { code: "WORKBENCH_NOT_READY" });
+    }
+    const result = await workbenchWorkflow.executeAdaptiveCapability("video_query", bridge.config.kind || "default", {
+      bridge,
+      taskId
+    }, { stage: "legacy_video_query", taskId });
     if (result.localPath) result.fileUrl = pathToFileURL(result.localPath).href;
     return result;
   } catch (error) {

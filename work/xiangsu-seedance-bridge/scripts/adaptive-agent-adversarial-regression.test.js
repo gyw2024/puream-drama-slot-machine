@@ -77,6 +77,22 @@ test("adaptive agent accepts arbitrary platform adapters without replacing exist
   await assert.rejects(() => agent.execute("video", "missing", {}), error => error.code === "AGENT_ADAPTER_NOT_CONFIGURED");
 });
 
+test("agent skills validate, repair and retry creative structure without duplicating provider policy", async () => {
+  let calls = 0;
+  const agent = new AdaptiveProductionAgent().registerSkill("script.atomic", {
+    maxAttempts: 2,
+    run: async payload => {
+      calls += 1;
+      return { cameraOwnerId: payload.cameraOwnerId, speakerIds: calls === 1 ? ["C01", "C02"] : [payload.cameraOwnerId] };
+    },
+    validate: result => result.speakerIds.length === 1 ? true : ["one atomic task may contain only one speaker"],
+    repairPayload: payload => ({ ...payload, repaired: true })
+  });
+  const result = await agent.runSkill("script.atomic", { cameraOwnerId: "C01" });
+  assert.deepEqual(result.speakerIds, ["C01"]);
+  assert.equal(calls, 2);
+});
+
 test("workflow owns one adaptive agent and can route an arbitrary API adapter", async () => {
   const project = { id: "P01", script: { raw: "" }, shots: [], productionPlan: { commerceShotCount: 6 }, product: { name: "sample" } };
   const workflow = new WorkbenchWorkflow({
@@ -86,10 +102,18 @@ test("workflow owns one adaptive agent and can route an arbitrary API adapter", 
     stagingRoot: "",
     textGenerator: async () => ({})
   });
+  for (const skill of ["provider.text", "provider.image", "provider.video", "provider.video_submit", "provider.video_query", "director.camera_take_plan"]) {
+    assert.equal(workflow.adaptiveAgent.hasSkill(skill), true, `${skill} must be registered on the global Agent`);
+  }
   workflow.registerAdaptiveAdapter("image", "vendor-x", async payload => ({ vendor: "vendor-x", payload }));
   assert.deepEqual(await workflow.executeAdaptiveCapability("image", "vendor-x", { prompt: "A：你来了吗？ B：来了！" }), {
     vendor: "vendor-x",
     payload: { prompt: "A：你来了吗？ B：来了！" }
+  });
+  workflow.registerAdaptiveAdapter("video_query", "vendor-x", async payload => ({ status: "running", taskId: payload.taskId }));
+  assert.deepEqual(await workflow.executeAdaptiveCapability("video_query", "vendor-x", { taskId: "task-01" }), {
+    status: "running",
+    taskId: "task-01"
   });
   assert.equal(workflow.adaptiveProductionPlan("P01").nextStage, "script");
 });

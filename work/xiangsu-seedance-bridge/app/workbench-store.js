@@ -254,7 +254,7 @@ function shotFingerprint(shot = {}, kind = "video") {
   const frameKeys = [
     "id", "number", "title", "duration", "characterIds", "characterNames", "characters", "scene", "sceneName",
     "mainlineStage", "mainlineBeat", "kindnessCost", "reversalSetup", "action", "stateBefore", "stateAfter", "causalLink",
-    "visualBeat", "compositionPlan", "shotSize", "cameraMove", "emotion", "performance", "startFrame", "endFrame",
+    "visualBeat", "compositionPlan", "shotSize", "cameraMove", "cameraOwnerId", "mouthOwnerId", "speakerId", "listenerIds", "emotion", "performance", "startFrame", "endFrame",
     "imagePrompt", "systemImagePrompt", "manualImagePrompt", "imagePromptSource", "subshots", "secondPanels",
     "wardrobeId", "propNames", "productMention", "productCausalBridge", "generationStrategy", "strategy"
   ];
