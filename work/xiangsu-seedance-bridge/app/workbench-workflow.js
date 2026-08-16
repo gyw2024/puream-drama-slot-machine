@@ -13788,7 +13788,19 @@ ${shotAnchor}
     let agentBundle = null;
     let agentReferences = null;
     if (projectVideoEngine(project) === "hailuo-h3" && !shotUsesManualVideoPrompt(shot)) {
-      await this.ensureAgentCameraTakePlan(projectId, shotId, mode, settings);
+      const fingerprint = cameraTakePlanFingerprint(project, shot, mode);
+      if (!(shot.agentCameraTakePlan?.version === AGENT_DIRECTOR_VERSION && shot.agentCameraTakePlan.sourceFingerprint === fingerprint)) {
+        const previewPlan = {
+          ...buildCameraTakePlan(project, shot, { mode }),
+          authoredBy: "deterministic-local-preview-compiler",
+          authoredAt: new Date().toISOString(),
+          sourceFingerprint: fingerprint,
+          version: AGENT_DIRECTOR_VERSION
+        };
+        validateCameraTakePlan(previewPlan, project, shot);
+        project.shots = project.shots.map(item => item.id === shotId ? { ...item, agentCameraTakePlan: previewPlan } : item);
+        this.store.saveProject(project);
+      }
       project = annotateProjectShotStrategies(this.store.getProject(projectId));
       shot = project.shots.find(item => item.id === shotId);
       agentReferences = this.shotReferences(project, shot, mode);
