@@ -45,6 +45,12 @@ function safeSentence(value, fallback, maxChars = 10) {
   return `${chars.slice(0, Math.max(2, maxChars)).join("")}。`;
 }
 
+function authoredSpeech(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return /[。！？!?…]$/.test(text) ? text : `${text}。`;
+}
+
 function openingSentenceFromSource(value) {
   const text = compact(value, "", 30).replace(/[，。！？!?；;：:…]+$/g, "");
   const chars = [...text];
@@ -102,7 +108,7 @@ function directFastResponseSchema() {
       em: "起始情绪→触发→峰值→余震",
       f: 1,
       v: [1, 2],
-      d: [[1, "同一说话人的短台词"], [1, "同一说话人的递进短台词"]]
+      d: [[1, "完整口语台词", "压着火气，重音落在关键事实，句尾留气口", "下颌绷紧，手指扣住道具", "听者闭口，眼神躲开并后退半步"], [2, "回应台词", "先防御后松动，尾音发虚", "肩膀收紧，视线短暂回避", "前一说话人闭口，盯住对方等待回应"]]
     }]
   };
 }
@@ -289,8 +295,9 @@ function directFastUserPrompt({ topic, product, unitCount, totalSeconds, product
     `商品：${product.name}；卖点：${product.sellingPoints || product.description || "只按用户提供事实"}。`,
     `只输出JSON，${rootContract} 人物序号固定：1=主角，2=与主角发生核心冲突的人，3=关键见证人；s必须恰好${segmentCount}项，i从${start}连续到${end}，不得输出区间外镜头。`,
     anchor ? "b的每一段必须承接上一段ex：en写进入事实，g只写本段新增事实和动作，ex写不可逆结果，h写下一段能直接接拍的动作或悬念；不得重复争吵、重复误会或提前泄露主反转。" : "本段第一镜bf必须承接因果任务en，最后一镜af必须落实ex，末句和末动作必须交出h；不得另起故事、改名、换关系或重复上一段信息。",
-    "每个s只允许t/a/bf/af/em/f/v/d字段：f和v使用c的1起始序号；v最多2人，f只是本单元开场焦点，不是全段唯一说话人；d中每句的说话人序号必须来自v，同一S可由两人自然问答。说话人变化时要按对白顺序形成明确正反打切点；商品整体干净镜d为空。",
-    `每镜d严格按本镜时长写自然可演对白：${durationContract}。每句约4-12个可说汉字，必须完整且改变信息、权力或行动，不能同义复述。em写清起始情绪、触发、峰值和余震；a写唯一可见动作结果。`,
+    "每个s只允许t/a/bf/af/em/f/v/d字段：f和v使用c的1起始序号；v最多2人，f只是本单元开场焦点，不是全段唯一说话人；d每项严格为[说话人序号,完整台词,语气与气口,面部/身体动作,听者反应]，说话人序号必须来自v，同一S可由两人自然问答。说话人变化时按对白顺序形成明确正反打切点；商品整体干净镜d为空。",
+    `每镜d严格按本镜时长写自然可演对白：${durationContract}。每句约4-12个可说汉字，必须完整且改变信息、权力或行动，不能同义复述；语气、情绪、身体动作必须逐句不同并随冲突升级。em写清起始情绪、触发、峰值和余震；a写唯一可见动作结果。`,
+    "对白质量优先级固定为：对白内容＞语气＞情绪＞场景＞运镜＞其他。禁止把时间码、场景标题、动作说明、商品说明、制作说明写进d；禁止连续使用‘核准/作证/不是误会/为何被藏’等模板词填充全剧，禁止每句套用同一套情绪描述。",
     "S01前2秒必须由伤害动作直接开场，第一句必须是6-12字的质问或制止；前60秒优先在同一连续S单元内完成短句问答，当前说话人开口、听者闭口反应，换人即按时间点硬切到回应者机位，禁止错嘴。",
     `唯一主反转固定在约72%位置。${product.name}及任何俗称在S${String(productStartNumber).padStart(2, "0")}之前绝对禁止出现；S${String(productStartNumber).padStart(2, "0")}-S${String(Math.min(unitCount, productStartNumber + 2)).padStart(2, "0")}才用3镜完成真实需求→自然使用→可见合规体验→人物决定，不写治疗、治愈或医疗承诺。最后一镜回到人物行动结局。`,
     scriptFormatDirective,
@@ -339,21 +346,25 @@ function fallbackDialogue(number, duration, focus, other, solo, context = {}) {
   const budget = dialogueUnitBudget(seconds, { solo });
   const count = budget.targetTurns;
   const stage = String(context.stage || "pressure");
-  const details = ["旧物夹层", "当天日期", "那笔汇款", "门口监控", "邻居证词", "签字笔迹", "工作记录", "通话时间", "银行回单", "手写账页", "钥匙去向", "收据背面", "照片落款", "快递签收", "抽屉封条", "衣角旧痕"];
-  const shortDetails = ["夹层", "日期", "汇款", "监控", "证词", "笔迹", "记录", "通话", "回单", "账页", "钥匙", "收据", "照片", "签收", "封条", "衣痕"];
-  const detailAt = offset => details[(number * 5 + offset * 3) % details.length];
-  const shortAt = offset => shortDetails[(number * 7 + offset * 5) % shortDetails.length];
+  const topic = context.topic || {};
+  const proofItems = String(topic.proofChain || topic.themeObject || "当年的证据")
+    .split(/[、，,；;\/／]+/).map(item => compact(item, "", 10)).filter(Boolean);
+  const proofAt = offset => proofItems[(number + offset) % Math.max(1, proofItems.length)] || compact(topic.themeObject, "当年的证据", 10);
+  const theme = compact(topic.themeObject, "这件旧物", 10);
+  const harm = compact(String(topic.hook || "").replace(/[。！？!?]+$/g, ""), "你不能再伤人", 18);
+  const reversal = compact(topic.reversal, "事情根本不是你说的那样", 18);
+  const payoff = compact(topic.emotionalPayoff, "把欠下的用行动补回来", 18);
   const banks = {
-    hook: ["住手别再伤人", "先把手放下来", "你先看清楚", "这事当面说清", "谁都别再躲开"],
-    pressure: [`${detailAt(0)}对上${shortAt(1)}`, `${shortAt(2)}为何被藏`, `${shortAt(3)}不是误会`, `先把${shortAt(4)}交出`, `让${shortAt(5)}当场作证`, `${shortAt(6)}现在核准`],
-    cost_kindness: [`${detailAt(0)}记着代价`, `${shortAt(1)}不是偶然`, `她用${shortAt(2)}护家`, `${shortAt(3)}替她作证`, `先听她把话说完`, `这份亏欠要还`],
-    evidence: [`核对${detailAt(0)}`, `${shortAt(1)}对上${shortAt(2)}`, `${shortAt(3)}前后相合`, `别再改动${shortAt(4)}`, `让${shortAt(5)}当场作证`, `${shortAt(6)}已经核准`],
-    main_reversal: [`我看懂${detailAt(0)}了`, `${shortAt(1)}证明我错`, `${shortAt(2)}不是伪造`, `道歉不能抵账`, `欠下的马上归还`, `让她自己决定`],
-    payoff: [`先落实${detailAt(0)}`, `${shortAt(1)}一并归还`, `把${shortAt(2)}写进行动`, `用${shortAt(3)}划清边界`, `后果由我承担`, `今天就去兑现`],
-    ending: [`收好${detailAt(0)}`, `${shortAt(1)}留作见证`, `往后共同承担`, `让她安心生活`, `这次不再躲开`, `明天按${shortAt(2)}落实`]
+    hook: ["住手！有话冲我来", harm, "你砸的是一家人的活路", "先把手放下再说", "今天谁也别想躲"],
+    pressure: [`你说他欠钱，${proofAt(0)}呢`, `${theme}一直在他手里`, `别拿亲情逼人认账`, `我已经为这事付出代价`, `你敢不敢当面把账说清`, `砸坏的东西你先赔`],
+    cost_kindness: ["我先护住人，工作丢了也认", "她吃的苦不是一句活该", `为了${theme}，她让掉了退路`, "你可以不领情，不能再伤她", "先让她把真话说完", "这份亏欠我替她记着"],
+    evidence: [`${proofAt(0)}上的时间对不上`, `${proofAt(1)}把前后经过都记下了`, `你刚才说的话和${proofAt(2)}矛盾`, `别碰${theme}，原样放回去`, "现在请你看着我回答", "这不是猜测，是你亲手留下的"],
+    main_reversal: [`原来${reversal}`, "这些年是我错怪她了", "你拿别人的忍让当软弱", "一句道歉抵不了这些损失", "欠下的钱和尊严都要还", "从现在起由她自己决定"],
+    payoff: [`先把${proofAt(0)}交回去`, "损失我今天就补", "该道歉的人一个都不能少", "这次我站在她这边", "后果由我来承担", `我要亲手把${payoff}做成`],
+    ending: [`${theme}收好，别再丢了`, "说过的补偿都已经办完", "往后遇事先听完真话", "这一次我不会再让她退", payoff, "明天我们一起重新开始"]
   };
   const templates = number === 1 ? banks.hook : (banks[stage] || banks.pressure);
-  const selected = Array.from({ length: count }, (_, index) => templates[(number + index - 1) % templates.length]);
+  let selected = Array.from({ length: count }, (_, index) => templates[(number + index - 1) % templates.length]);
   let totalSpoken = selected.reduce((sum, text) => sum + spokenLength(text), 0);
   const completeExtensions = ["你现在说清楚", "请你当面回答", "这次别再回避"];
   for (let index = 0; totalSpoken < budget.targetChars && index < selected.length; index += 1) {
@@ -361,14 +372,37 @@ function fallbackDialogue(number, duration, focus, other, solo, context = {}) {
     selected[index] = `${selected[index]}，${extension}`;
     totalSpoken += spokenLength(extension);
   }
+  if (totalSpoken > budget.maxChars) {
+    selected = selected.map(text => String(text || "").replace(/[，。！？!?；;：:…]+$/g, ""));
+    totalSpoken = selected.reduce((sum, text) => sum + spokenLength(text), 0);
+    while (totalSpoken > budget.maxChars) {
+      const longestIndex = selected.reduce((best, text, index, all) => spokenLength(text) > spokenLength(all[best]) ? index : best, 0);
+      const chars = [...selected[longestIndex]];
+      if (spokenLength(chars.join("")) <= 4) break;
+      chars.pop();
+      selected[longestIndex] = chars.join("");
+      totalSpoken = selected.reduce((sum, text) => sum + spokenLength(text), 0);
+    }
+  }
   if (totalSpoken < budget.minChars || totalSpoken > budget.maxChars) {
     const error = new Error(`本地完整短句预算 ${totalSpoken} 字不在 ${budget.minChars}-${budget.maxChars} 字范围内`);
     error.code = "DIRECT_FAST_FALLBACK_DIALOGUE_BUDGET_INVALID";
     throw error;
   }
+  const deliveries = [
+    "压着急火开口，关键事实逐字加重，句尾短促落下",
+    "先本能防御，听见事实后语速放慢，尾音发虚",
+    "情绪被刺中后拔高半度，重音落在损失和选择上",
+    "声音回落但态度更硬，停半拍后把决定说完"
+  ];
+  const bodies = ["眉心收紧，手掌护住眼前的人或物", "视线躲开一瞬，肩膀收紧后重新对视", "下颌绷紧，身体向前半步逼对方回应", "呼吸停半拍，手部完成归还、阻拦或站队动作"];
+  const reactions = ["闭口倒吸一口气，手停在半空", "闭口盯住说话人，眼神从强硬变迟疑", "闭口后退半步，手指不自觉松开", "闭口消化末句，随后用可见动作作出选择"];
   return selected.map((text, index) => [
     solo || index % 2 === 0 ? focus : other,
-    `${text}${number === 1 && index === 0 ? "！" : "。"}`
+    `${text}${number === 1 && index === 0 ? "！" : "。"}`,
+    deliveries[index % deliveries.length],
+    bodies[index % bodies.length],
+    reactions[index % reactions.length]
   ]);
 }
 
@@ -419,7 +453,7 @@ function buildDirectFastFallbackSegment({ spine = {}, topic = {}, segmentStart =
         em: stage === "main_reversal" ? "压抑→看清证据→情绪崩开→决定承担" : "克制→事实刺激→情绪抬升→压住余震",
         f: focus,
         v: [focus, other],
-        d: number === Number(productStartNumber) ? [] : fallbackDialogue(number, duration, focus, other, solo, { stage, beat })
+        d: number === Number(productStartNumber) ? [] : fallbackDialogue(number, duration, focus, other, solo, { stage, beat, topic })
       };
     }),
     c: characters,
@@ -652,8 +686,8 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
     // duration and arrive ready to perform. Legacy payloads are still fitted
     // locally so old paused tasks remain resumable without rewriting them.
     let dialogueSource = authoredDialogue.length >= authoredDialogueBudget.minTurns && authoredDialogue.length <= authoredDialogueBudget.maxTurns && payload?.spineLocked === true
-      ? authoredDialogue.map(item => Array.isArray(item) ? item : [item?.s, item?.x || item?.text])
-        .map(([speaker, text]) => ({ speaker: Math.max(1, Number(speaker) || 1), text: safeSentence(text, "", 14) }))
+      ? authoredDialogue.map(item => Array.isArray(item) ? item : [item?.s, item?.x || item?.text, item?.delivery, item?.body, item?.listenerBeat])
+        .map(([speaker, text, delivery, body, listenerBeat]) => ({ speaker: Math.max(1, Number(speaker) || 1), text: authoredSpeech(text), delivery: compact(delivery, "按当前冲突自然起伏", 120), body: compact(body, "面部和手部随台词发生可见变化", 120), listenerBeat: compact(listenerBeat, "听者闭口并给出可见反应", 120) }))
         .filter(item => spokenLength(item.text) >= 2)
       : fitDialogueLines(authoredDialogue, index === 0, duration, { solo: intendedSolo, productPackshot: productRole === "product_packshot" });
     if (index === 0 && dialogueSource.length && payload?.spineLocked !== true) {
@@ -678,9 +712,9 @@ function materializeDirectFastScript({ payload, topic, product, filmSchedule }) 
         listenerIds: listener ? [listener.id] : [],
         text: turn.text,
         beat: ["attack", "deflect", "counter", "reveal", "counter", "decision"][turnIndex % 6],
-        delivery: deliveryFor(emotion, turnIndex),
-        body: `${speaker.name}第${turnIndex + 1}句时${turnIndex < 2 ? "手指收紧并稳住重心" : turnIndex < 4 ? "下颌绷住、身体向前半步" : "呼吸停半拍后完成决定动作"}`,
-        listenerBeat: listener ? `${listener.name}听见后眼神一顿，肩颈和手部出现可见反应` : "画外听者屏住呼吸，下一镜承接其反应",
+        delivery: turn.delivery || deliveryFor(emotion, turnIndex),
+        body: turn.body || `${speaker.name}第${turnIndex + 1}句时${turnIndex < 2 ? "手指收紧并稳住重心" : turnIndex < 4 ? "下颌绷住、身体向前半步" : "呼吸停半拍后完成决定动作"}`,
+        listenerBeat: turn.listenerBeat || (listener ? `${listener.name}听见后眼神一顿，肩颈和手部出现可见反应` : "画外听者屏住呼吸，下一镜承接其反应"),
         subshotNumber: Math.min(3, Math.floor(turnIndex * 3 / Math.max(1, dialogueSource.length)) + 1),
         onScreen: dialogueVisibleIds.includes(speaker.id)
       };

@@ -1445,7 +1445,39 @@ function bindSourceDialogueLedgerToAnalysis(data, ledger = []) {
   const characterByName = new Map(characters.map(item => [String(item?.name || "").trim(), item]).filter(([name]) => name));
   const characterById = new Map(characters.map(item => [String(item?.id || "").trim(), item]).filter(([id]) => id));
   const ledgerById = new Map(sourceLedger.map(item => [String(item.id || "").trim(), item]));
-  const rawShots = (Array.isArray(source.shots) ? source.shots : []).map(item => ({ ...item }));
+  const canonicalShotId = value => {
+    const number = Number(String(value || "").match(/\d+/)?.[0]);
+    return Number.isFinite(number) && number > 0 ? `S${String(number).padStart(2, "0")}` : "";
+  };
+  const rawShots = (Array.isArray(source.shots) ? source.shots : []).map((item, index) => ({
+    ...item,
+    id: canonicalShotId(item?.id || item?.number || index + 1) || String(item?.id || `S${String(index + 1).padStart(2, "0")}`)
+  }));
+  const authoredBindingById = new Map();
+  for (const shot of rawShots) {
+    for (const binding of Array.isArray(shot?.sourceDialogueBindings) ? shot.sourceDialogueBindings : []) {
+      const id = String(binding?.sourceDialogueId || binding?.sourceId || binding?.id || "").trim();
+      if (id && !authoredBindingById.has(id)) authoredBindingById.set(id, normalizeSourceDialogueBinding(binding, 1));
+    }
+  }
+  // A structured production script already states the exact Sxx ownership of
+  // every utterance. Treat that source boundary as stronger than a model's
+  // guessed chunk binding and relocate the metadata locally without rewriting
+  // the spoken line.
+  for (const shot of rawShots) {
+    const shotId = canonicalShotId(shot.id || shot.number);
+    const belongsHere = id => {
+      const sourceShotId = canonicalShotId(ledgerById.get(String(id || ""))?.sourceShotId);
+      return !sourceShotId || sourceShotId === shotId;
+    };
+    shot.sourceDialogueBindings = (Array.isArray(shot.sourceDialogueBindings) ? shot.sourceDialogueBindings : [])
+      .filter(item => belongsHere(item?.sourceDialogueId || item?.sourceId || item?.id));
+    shot.sourceDialogueIds = normalizeStringArray(shot.sourceDialogueIds).filter(belongsHere);
+    shot.subshots = (Array.isArray(shot.subshots) ? shot.subshots : []).map(subshot => ({
+      ...subshot,
+      sourceDialogueIds: normalizeStringArray(subshot?.sourceDialogueIds).filter(belongsHere)
+    }));
+  }
   const referencedIds = new Set(rawShots.flatMap(shot => [
     ...(Array.isArray(shot?.sourceDialogueBindings) ? shot.sourceDialogueBindings.map(item => String(item?.sourceDialogueId || item?.sourceId || item?.id || "").trim()) : []),
     ...normalizeStringArray(shot?.sourceDialogueIds),
@@ -1456,10 +1488,21 @@ function bindSourceDialogueLedgerToAnalysis(data, ledger = []) {
   sourceLedger.forEach((item, index) => {
     const id = String(item?.id || "").trim();
     if (!id || referencedIds.has(id) || !rawShots.length) return;
-    const targetIndex = Math.min(rawShots.length - 1, Math.floor(index * rawShots.length / Math.max(1, sourceLedger.length)));
+    const sourceShotId = canonicalShotId(item?.sourceShotId);
+    const exactTargetIndex = sourceShotId
+      ? rawShots.findIndex(shot => canonicalShotId(shot?.id || shot?.number) === sourceShotId)
+      : -1;
+    const targetIndex = exactTargetIndex >= 0
+      ? exactTargetIndex
+      : Math.min(rawShots.length - 1, Math.floor(index * rawShots.length / Math.max(1, sourceLedger.length)));
     const target = rawShots[targetIndex];
     target.sourceDialogueBindings = Array.isArray(target.sourceDialogueBindings) ? target.sourceDialogueBindings : [];
-    target.sourceDialogueBindings.push({ sourceDialogueId: id, subshotNumber: 1, onScreen: true });
+    target.sourceDialogueBindings.push({
+      ...(authoredBindingById.get(id) || {}),
+      sourceDialogueId: id,
+      subshotNumber: Math.max(1, Number(authoredBindingById.get(id)?.subshotNumber) || 1),
+      onScreen: authoredBindingById.get(id)?.onScreen !== false
+    });
     referencedIds.add(id);
   });
   const claimedDialogueIds = new Set();
@@ -1503,6 +1546,17 @@ function bindSourceDialogueLedgerToAnalysis(data, ledger = []) {
         return characterById.get(token)?.id || characterByName.get(token)?.id || token;
       }).filter(id => id && id !== speakerCharacter.id);
       const tone = String(item.tone || "").trim();
+      const sourceListenerName = String(item?.metadata?.listenerName || tone.match(/^对(.{2,12})说(?:；|$)/)?.[1] || "").trim();
+      if (!listenerIds.length && sourceListenerName) {
+        const sourceListener = characterByName.get(sourceListenerName);
+        if (sourceListener?.id && sourceListener.id !== speakerCharacter.id) listenerIds.push(sourceListener.id);
+      }
+      if (!listenerIds.length) {
+        const visibleIds = normalizeStringArray(shot?.visibleCharacterIds || shot?.characterIds || shot?.scenePresenceCharacterIds);
+        const fallbackListener = visibleIds.map(token => characterById.get(token)?.id || characterByName.get(token)?.id || token)
+          .find(id => id && id !== speakerCharacter.id);
+        if (fallbackListener) listenerIds.push(fallbackListener);
+      }
       const delivery = [...new Set([tone, binding.delivery, binding.emotion, binding.volume, binding.pace, binding.stressWord, binding.breath].map(value => String(value || "").trim()).filter(Boolean))].join("；");
       return {
         sourceDialogueId: item.id,
@@ -1576,8 +1630,9 @@ function assertSourceDialogueParity(normalized, sourceLedger = normalized?.sourc
   const characters = Array.isArray(normalized?.characters) ? normalized.characters : [];
   const characterName = new Map(characters.map(item => [String(item?.id || "").trim(), String(item?.name || "").trim()]));
   const turns = (Array.isArray(normalized?.shots) ? normalized.shots : []).flatMap(shot => {
-    if (Array.isArray(shot?.dialogueTurns) && shot.dialogueTurns.length) return shot.dialogueTurns;
-    return (Array.isArray(shot?.subshots) ? shot.subshots : []).flatMap(subshot => Array.isArray(subshot?.dialogueTurns) ? subshot.dialogueTurns : []);
+    const shotId = String(shot?.id || `S${String(shot?.number || "").padStart(2, "0")}`).toUpperCase();
+    if (Array.isArray(shot?.dialogueTurns) && shot.dialogueTurns.length) return shot.dialogueTurns.map(turn => ({ ...turn, __shotId: shotId }));
+    return (Array.isArray(shot?.subshots) ? shot.subshots : []).flatMap(subshot => Array.isArray(subshot?.dialogueTurns) ? subshot.dialogueTurns.map(turn => ({ ...turn, __shotId: shotId })) : []);
   });
   const actualById = new Map();
   const failures = [];
@@ -1592,12 +1647,18 @@ function assertSourceDialogueParity(normalized, sourceLedger = normalized?.sourc
     actualById.set(id, items);
   }
   for (const item of ledger) {
+    if (/^(?:#{1,6}\s*)?(?:S|SC)\d+\b|^(?:\d{1,2}:)?\d{1,2}(?::\d{2})?\s*[-–—~至].*[｜|]|^【(?:背景\/动作|无对白|商品动作|制作说明)/i.test(String(item?.text || "")) || /】\s*$/.test(String(item?.text || ""))) {
+      failures.push(`${item.id} 含有场景/时间码/动作/商品或制作说明，不能进入对白账本`);
+    }
     const actual = actualById.get(item.id) || [];
     if (actual.length !== 1) {
       failures.push(`${item.id} 应出现1次，实际${actual.length}次`);
       continue;
     }
     const turn = actual[0];
+    if (item.sourceShotId && String(turn.__shotId || "").toUpperCase() !== String(item.sourceShotId).toUpperCase()) {
+      failures.push(`${item.id} 原属${item.sourceShotId}，却被绑定到${turn.__shotId || "未知分镜"}`);
+    }
     const speaker = characterName.get(String(turn.speakerId || "").trim()) || String(turn.speakerId || "").trim();
     if (speaker !== String(item.speaker || "").trim()) failures.push(`${item.id} 说话人应为“${item.speaker}”，实际“${speaker}”`);
     if (String(turn.text || "").trim() !== String(item.text || "").trim()) failures.push(`${item.id} 台词原文被改写`);
@@ -4961,6 +5022,80 @@ function uniqueDialogueTurns(project, shot) {
   }
   for (const turn of parseCompiledDialogueSegments(shot?.dialogue || "", names)) push(turn, 1);
   return items;
+}
+
+function renderApprovedVideoPrompt(project = {}, shot = {}) {
+  const duration = Math.max(5, Number(shot?.duration) || 10);
+  const characters = new Map((Array.isArray(project?.characters) ? project.characters : [])
+    .map(item => [String(item?.id || "").trim(), String(item?.name || item?.id || "").trim()]));
+  const scene = (project?.scenes || []).find(item => item.id === shot?.sceneId || item.name === shot?.scene);
+  const turns = uniqueDialogueTurns(project, shot);
+  const characterNames = [...characters.values()].filter(Boolean);
+  const cleanNarrativeAction = value => {
+    const candidate = String(value || "").replace(/^【背景\/动作[:：]?|】$/g, "").trim();
+    if (!candidate) return "";
+    const directSpeakerLabel = characterNames.some(name => candidate.startsWith(`${name}：`) || candidate.startsWith(`${name}:`));
+    const directedSpeakerLabel = characterNames.some(name => (candidate.startsWith(`${name}（`) && candidate.includes("）：")) || (candidate.startsWith(`${name}(`) && candidate.includes("):")));
+    if (directSpeakerLabel || directedSpeakerLabel) return "";
+    if (/^#{1,6}\s*(?:S|SC)\d+|^【(?:无对白|商品动作|商品说明|制作说明|分镜说明)/i.test(candidate)) return "";
+    return candidate.replace(/[。！？!?]{2,}$/g, match => match.charAt(0));
+  };
+  const weights = turns.map(turn => Math.max(1, String(turn.text || "").replace(/[^\u3400-\u9fffA-Za-z0-9]/g, "").length));
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0) || 1;
+  const reactionTail = turns.length ? Math.min(0.8, Math.max(0.4, duration * 0.12)) : duration;
+  const speechSpan = Math.max(0, duration - reactionTail);
+  let cursor = 0;
+  const timeline = [];
+  turns.forEach((turn, index) => {
+    const start = cursor;
+    const end = index === turns.length - 1 ? speechSpan : start + speechSpan * (weights[index] / totalWeight);
+    cursor = end;
+    const speaker = turn.speaker || characters.get(turn.speakerId) || turn.speakerId || "未绑定角色";
+    const listener = (turn.listenerIds || []).map(id => characters.get(String(id)) || id).filter(Boolean).join("、") || "明确听者";
+    const meta = turn.metadata || {};
+    const tone = turn.sourceTone || meta.sourceTone || meta.delivery || "按当前处境自然起伏";
+    const rawEmotion = meta.emotionPeak || meta.emotion || turn.emotionPeak || shot.emotion || "";
+    const emotionPhases = [
+      "先压住本能反应，被事实刺中后眼神收紧",
+      "防御感被逼出，语气与呼吸开始失稳",
+      "情绪冲到本镜峰值，重音和身体动作同时落下",
+      "峰值回落但立场更硬，句尾留下清楚余震"
+    ];
+    const rawBody = meta.body || turn.body || "面部、手部和重心随台词发生可见变化";
+    const fallbackEmotion = emotionPhases[Math.min(emotionPhases.length - 1, Math.floor(index * emotionPhases.length / Math.max(1, turns.length)))];
+    const emotion = !rawEmotion || rawEmotion === tone || rawEmotion === shot.emotion
+      ? fallbackEmotion
+      : rawEmotion;
+    const body = rawBody === tone || rawBody === rawEmotion ? "眉眼、呼吸、手部和重心随重音发生可见变化" : rawBody;
+    const rawListenerBeat = meta.listenerBeat || turn.listenerBeat || "眼神、呼吸或手部给出同步反应";
+    const listenerBeat = rawListenerBeat.startsWith(listener)
+      ? rawListenerBeat
+      : /^听者/.test(rawListenerBeat)
+        ? rawListenerBeat.replace(/^听者/, listener)
+        : /^闭口/.test(rawListenerBeat)
+          ? `${listener}${rawListenerBeat}`
+          : `${listener}闭口并${rawListenerBeat}`;
+    timeline.push(`${start.toFixed(1)}-${end.toFixed(1)}秒：${speaker}面向${listener}，${tone}；${emotion}；说：“${turn.text}”——${body}；${listenerBeat}。`);
+  });
+  if (!turns.length) timeline.push(`0.0-${duration.toFixed(1)}秒：本镜无对白，人物闭口，只执行可见动作和同步环境声。`);
+  timeline.push(`${speechSpan.toFixed(1)}-${duration.toFixed(1)}秒：对白结束后保留呼吸、眨眼、衣料或道具微动，落到“${shot.stateAfter || shot.endFrame || "新的可见状态"}”。`);
+  const action = cleanNarrativeAction(shot.action) || cleanNarrativeAction(shot.visualBeat);
+  const subshots = Array.isArray(shot.subshots) ? shot.subshots : [];
+  const camera = subshots.length
+    ? subshots.map((item, index) => `${Number(item.start) || 0}-${Number(item.end) || duration}秒${index + 1}段：${item.framing || "中近景"}，${item.camera || "稳定机位"}，${cleanNarrativeAction(item.action) || action || "说话人完成台词动作，听者给出同步可见反应"}；切换：${item.transition || "按对白、视线或动作结果硬切"}`).join("\n")
+    : `0-${duration}秒：${shot.compositionPlan || "说话人近景与听者反应正反打"}；${shot.cameraMove || "稳定机位，按说话人变化硬切"}。`;
+  const product = shot.productMention ? `商品：只按用户上传的“${project.product?.name || "用户商品"}”原图和真实卖点，在本镜剧情动作需要时出现；不得新增功效、价格或口播。` : "商品：不出现。";
+  return [
+    `${shot.id || "SXX"}分镜视频提示词。竖屏9:16，写实真人短剧，严格${duration}秒。`,
+    "对白优先级：对白内容＞语气＞情绪＞场景＞运镜＞其他。以下对白必须逐字完整说完，每句只说一次，当前说话人开口时其他人物闭口；不得把时间码、场景标题、动作说明、商品说明或制作备注当成对白。",
+    `时间和完整台词：\n${timeline.join("\n")}`,
+    `核心表演：${shot.emotion || "情绪从压抑、受刺激、峰值到余震/决定递进"}；${shot.performance || "眉眼、下颌、呼吸、手部和重心必须随每句台词发生可见变化，禁止平声念稿。"}`,
+    `场景与动作：${scene?.name || shot.scene || "同一连续场景"}；${action || "只执行本镜唯一因果动作，并以听者的可见反应承接下一状态"}。`,
+    `分镜与运镜：\n${camera}`,
+    `声音：${shot.audioPlan || shot.soundDesign || "连续现场环境底噪，动作声与对白同步；禁止BGM、配乐、字幕、水印和旁白。"}`,
+    product,
+    "连续性：人物脸、年龄、发型、服装、站位、持物手、180度视线轴、场景门窗家具和主光保持不变；不新增人物，不串角，不换场，不冻结尾帧。"
+  ].join("\n");
 }
 
 function nestedReferenceManifests(referenceManifest = null) {
@@ -13825,22 +13960,25 @@ ${shotAnchor}
     }
     const strategy = resolveShotVideoStrategy(project, shot);
     const references = agentReferences || this.shotReferences(project, shot, mode);
-    let full;
+    let providerPrompt;
     try {
-      full = agentBundle?.promptManifest || this.buildShotPrompt(project, settings, shot, mode, references);
+      providerPrompt = agentBundle?.promptManifest || this.buildShotPrompt(project, settings, shot, mode, references);
     } catch (error) {
       if (error?.code !== "HAILUO_PROMPT_DIALOGUE_BUDGET_EXCEEDED") throw error;
       // Preview must expose the complete authored dialogue even when one
       // oversized shot cannot fit H3's paid provider budget. Never truncate;
       // paid submission remains blocked until the shot is split legitimately.
-      full = [
+      providerPrompt = [
         "Preview-only complete shot contract; do not submit without provider-budget validation.",
         String(shot.dialogue || "").trim(),
         String(shot.action || shot.visualBeat || "").trim(),
         "Continuous location ambience and synchronized visible-action SFX only."
       ].filter(Boolean).join("\n");
     }
-    if (projectVideoEngine(project) === "hailuo-h3" && shot.promptMode !== "manual" && String(shot.systemVideoPrompt || "") !== full) {
+    const full = shot.promptMode === "manual" && shot.manualVideoPrompt?.trim()
+      ? shot.manualVideoPrompt.trim()
+      : renderApprovedVideoPrompt(project, shot);
+    if (shot.promptMode !== "manual" && String(shot.systemVideoPrompt || "") !== full) {
       const latestProject = this.store.getProject(projectId);
       latestProject.shots = latestProject.shots.map(item => item.id === shotId
         ? { ...item, systemVideoPrompt: full }
@@ -13861,6 +13999,7 @@ ${shotAnchor}
       manualVideoPrompt: String(shot.manualVideoPrompt || ""),
       authored,
       full,
+      providerPrompt,
       references: {
         images: (references.imageRoles || []).map((role, index) => ({ index: index + 1, type: role.type, label: role.label, entityId: role.entityId || "" })),
         audios: (references.audios || []).map((item, index) => ({ index: index + 1, characterName: item.characterName, duration: item.duration })),
@@ -20204,3 +20343,4 @@ module.exports.nestedReferenceManifests = nestedReferenceManifests;
 module.exports.referenceManifestAudios = referenceManifestAudios;
 module.exports.candidateHasHailuoDialogueMode = candidateHasHailuoDialogueMode;
 module.exports.assertShotReferenceBundle = assertShotReferenceBundle;
+module.exports.renderApprovedVideoPrompt = renderApprovedVideoPrompt;
