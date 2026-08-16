@@ -286,7 +286,7 @@ test("five to ten minute script path matches relay slots and preserves failed se
   assert.match(workflow, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 2/);
   assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = NO_TOTAL_DEADLINE_MS/);
   assert.match(workflow, /const TEXT_STAGE_SLA_MS = 5 \* 60_000/);
-  assert.match(workflow, /const TEXT_STAGE_ATTEMPT_TIMEOUT_MS = 135_000/);
+  assert.match(workflow, /const TEXT_STAGE_ATTEMPT_TIMEOUT_MS = 240_000/);
   assert.match(workflow, /const TEXT_STAGE_MAX_ATTEMPTS = 2/);
   assert.match(workflow, /timeoutMs: options\.timeoutMs \?\? TEXT_STAGE_ATTEMPT_TIMEOUT_MS/);
   assert.match(workflow, /maxReconnectAttempts: options\.maxReconnectAttempts \?\? TEXT_STAGE_MAX_ATTEMPTS/);
