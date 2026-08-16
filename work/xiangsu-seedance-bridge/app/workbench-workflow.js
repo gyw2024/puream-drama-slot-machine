@@ -5785,6 +5785,143 @@ function requiredHailuoVoiceCharacterIds(project) {
   return ids;
 }
 
+function assertStrictCharacterMediaBindings(project, shot, references = {}) {
+  const characters = Array.isArray(project?.characters) ? project.characters : [];
+  const turns = uniqueDialogueTurns(project, shot);
+  const characterById = new Map(characters.map(item => [String(item?.id || "").trim(), item]).filter(([id]) => id));
+  const charactersByName = new Map();
+  for (const character of characters) {
+    const name = String(character?.name || "").trim();
+    if (!name) continue;
+    if (!charactersByName.has(name)) charactersByName.set(name, []);
+    charactersByName.get(name).push(character);
+  }
+  const speakerIds = [];
+  for (const turn of turns) {
+    const speakerToken = String(turn?.speakerId || turn?.speaker || "").trim();
+    const namedMatches = charactersByName.get(String(turn?.speaker || "").trim()) || [];
+    const character = characterById.get(speakerToken) || (namedMatches.length === 1 ? namedMatches[0] : null);
+    if (!character) {
+      throw Object.assign(new Error(`${shot.id}对白“${turn?.text || ""}”没有唯一说话人资产，禁止提交视频`), {
+        code: "SHOT_SPEAKER_IDENTITY_AMBIGUOUS",
+        shotId: shot.id,
+        speaker: turn?.speaker || speakerToken
+      });
+    }
+    if (namedMatches.length > 1) {
+      throw Object.assign(new Error(`${shot.id}说话人姓名“${turn.speaker}”对应${namedMatches.length}个角色ID，无法保证音色和台词一一对应`), {
+        code: "SHOT_SPEAKER_NAME_DUPLICATED",
+        shotId: shot.id,
+        speaker: turn.speaker,
+        characterIds: namedMatches.map(item => item.id)
+      });
+    }
+    if (!speakerIds.includes(character.id)) speakerIds.push(character.id);
+    const invalidListeners = normalizeStringArray(turn?.listenerIds).filter(id => id === character.id || !characterById.has(id));
+    if (invalidListeners.length) {
+      throw Object.assign(new Error(`${shot.id}对白“${turn.text}”的听者绑定无效：${invalidListeners.join("、")}`), {
+        code: "SHOT_DIALOGUE_LISTENER_BINDING_INVALID",
+        shotId: shot.id,
+        speakerId: character.id,
+        listenerIds: invalidListeners
+      });
+    }
+    const subshotNumber = Math.max(1, Number(turn?.subshotNumber) || 1);
+    const subshot = (Array.isArray(shot?.subshots) ? shot.subshots : [])[subshotNumber - 1];
+    const mouthOwnerId = String(subshot?.mouthOwnerId || "").trim();
+    if (turn?.onScreen !== false && mouthOwnerId && mouthOwnerId !== character.id) {
+      throw Object.assign(new Error(`${shot.id}第${subshotNumber}段嘴型属于${mouthOwnerId}，但台词属于${character.id}`), {
+        code: "SHOT_DIALOGUE_MOUTH_OWNER_MISMATCH",
+        shotId: shot.id,
+        subshotNumber,
+        speakerId: character.id,
+        mouthOwnerId
+      });
+    }
+  }
+
+  const audios = Array.isArray(references?.audios) ? references.audios : [];
+  const audioByCharacterId = new Map();
+  const audioPathOwner = new Map();
+  for (const audio of audios) {
+    const characterId = String(audio?.characterId || "").trim();
+    const character = characterById.get(characterId);
+    if (!character || String(audio?.characterName || "").trim() !== String(character.name || "").trim()) {
+      throw Object.assign(new Error(`${shot.id}音色文件的角色ID与姓名不一致，禁止提交`), {
+        code: "SHOT_VOICE_CHARACTER_METADATA_MISMATCH",
+        shotId: shot.id,
+        characterId,
+        characterName: audio?.characterName || ""
+      });
+    }
+    if (audioByCharacterId.has(characterId)) {
+      throw Object.assign(new Error(`${shot.id}角色“${character.name}”重复绑定多条音色`), {
+        code: "SHOT_VOICE_DUPLICATED",
+        shotId: shot.id,
+        characterId
+      });
+    }
+    const resolvedPath = path.resolve(String(audio?.path || ""));
+    const priorOwner = audioPathOwner.get(resolvedPath);
+    if (priorOwner && priorOwner !== characterId) {
+      throw Object.assign(new Error(`${shot.id}角色${priorOwner}与${characterId}共用了同一个音色文件，禁止提交`), {
+        code: "SHOT_VOICE_FILE_SHARED_BETWEEN_CHARACTERS",
+        shotId: shot.id,
+        characterIds: [priorOwner, characterId],
+        filePath: resolvedPath
+      });
+    }
+    audioByCharacterId.set(characterId, audio);
+    audioPathOwner.set(resolvedPath, characterId);
+  }
+  const missingAudio = speakerIds.filter(id => !audioByCharacterId.has(id));
+  const extraAudio = [...audioByCharacterId.keys()].filter(id => !speakerIds.includes(id));
+  if (missingAudio.length || extraAudio.length) {
+    throw Object.assign(new Error(`${shot.id}台词与音色不是一一对应：缺少[${missingAudio.join("、") || "无"}]，多余[${extraAudio.join("、") || "无"}]`), {
+      code: "SHOT_DIALOGUE_VOICE_BIJECTION_FAILED",
+      shotId: shot.id,
+      missingAudio,
+      extraAudio
+    });
+  }
+
+  const visibleIds = visibleShotCharacterCast(project, shot);
+  const identityRoles = (Array.isArray(references?.imageRoles) ? references.imageRoles : []).filter(item => item?.type === "character");
+  const identityByCharacterId = new Map();
+  const identityPathOwner = new Map();
+  for (const role of identityRoles) {
+    const characterId = String(role?.entityId || "").trim();
+    if (!visibleIds.includes(characterId) || identityByCharacterId.has(characterId)) {
+      throw Object.assign(new Error(`${shot.id}人物身份图绑定重复或不属于本镜可见人物：${characterId}`), {
+        code: "SHOT_CHARACTER_IDENTITY_BINDING_INVALID",
+        shotId: shot.id,
+        characterId
+      });
+    }
+    const resolvedPath = path.resolve(String(role?.path || ""));
+    const priorOwner = identityPathOwner.get(resolvedPath);
+    if (priorOwner && priorOwner !== characterId) {
+      throw Object.assign(new Error(`${shot.id}角色${priorOwner}与${characterId}共用了同一个人物身份图，禁止提交`), {
+        code: "SHOT_CHARACTER_IDENTITY_FILE_SHARED",
+        shotId: shot.id,
+        characterIds: [priorOwner, characterId],
+        filePath: resolvedPath
+      });
+    }
+    identityByCharacterId.set(characterId, role);
+    identityPathOwner.set(resolvedPath, characterId);
+  }
+  const missingIdentity = visibleIds.filter(id => !identityByCharacterId.has(id));
+  if (missingIdentity.length) {
+    throw Object.assign(new Error(`${shot.id}可见人物缺少唯一身份图：${missingIdentity.join("、")}`), {
+      code: "SHOT_CHARACTER_IDENTITY_BIJECTION_FAILED",
+      shotId: shot.id,
+      characterIds: missingIdentity
+    });
+  }
+  return true;
+}
+
 function assertHailuoDialogueVoiceReferences(project, shot, references = {}, options = {}) {
   const turns = uniqueDialogueTurns(project, shot);
   if (!turns.length) return { speakerIds: [], audioByCharacterId: new Map() };
@@ -16968,7 +17105,9 @@ ${shotAnchor}
       });
       audioDuration += duration;
     }
-    return { images, imageRoles, audios };
+    const references = { images, imageRoles, audios };
+    assertStrictCharacterMediaBindings(project, shot, references);
+    return references;
   }
 
   async ensureAgentCameraTakePlan(projectId, shotId, mode, settings = this.store.getSettings()) {
@@ -20344,3 +20483,4 @@ module.exports.referenceManifestAudios = referenceManifestAudios;
 module.exports.candidateHasHailuoDialogueMode = candidateHasHailuoDialogueMode;
 module.exports.assertShotReferenceBundle = assertShotReferenceBundle;
 module.exports.renderApprovedVideoPrompt = renderApprovedVideoPrompt;
+module.exports.assertStrictCharacterMediaBindings = assertStrictCharacterMediaBindings;
