@@ -13825,7 +13825,21 @@ ${shotAnchor}
     }
     const strategy = resolveShotVideoStrategy(project, shot);
     const references = agentReferences || this.shotReferences(project, shot, mode);
-    const full = agentBundle?.promptManifest || this.buildShotPrompt(project, settings, shot, mode, references);
+    let full;
+    try {
+      full = agentBundle?.promptManifest || this.buildShotPrompt(project, settings, shot, mode, references);
+    } catch (error) {
+      if (error?.code !== "HAILUO_PROMPT_DIALOGUE_BUDGET_EXCEEDED") throw error;
+      // Preview must expose the complete authored dialogue even when one
+      // oversized shot cannot fit H3's paid provider budget. Never truncate;
+      // paid submission remains blocked until the shot is split legitimately.
+      full = [
+        "Preview-only complete shot contract; do not submit without provider-budget validation.",
+        String(shot.dialogue || "").trim(),
+        String(shot.action || shot.visualBeat || "").trim(),
+        "Continuous location ambience and synchronized visible-action SFX only."
+      ].filter(Boolean).join("\n");
+    }
     if (projectVideoEngine(project) === "hailuo-h3" && shot.promptMode !== "manual" && String(shot.systemVideoPrompt || "") !== full) {
       const latestProject = this.store.getProject(projectId);
       latestProject.shots = latestProject.shots.map(item => item.id === shotId
