@@ -8,6 +8,9 @@ const { _electron: electron } = require("playwright-core");
 async function main() {
   const root = path.resolve(__dirname, "..");
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  const expectedCurrentVersion = process.env.DRAMA_SLOT_EXPECT_CURRENT_VERSION || packageJson.version;
+  const expectedLatestVersion = process.env.DRAMA_SLOT_EXPECT_LATEST_VERSION || packageJson.version;
+  const expectedStatus = process.env.DRAMA_SLOT_EXPECT_UPDATE_STATUS || "latest";
   const executablePath = process.env.DRAMA_SLOT_INSTALLED_EXE;
   if (!executablePath || !fs.existsSync(executablePath)) {
     throw new Error(`installed executable missing: ${executablePath || "DRAMA_SLOT_INSTALLED_EXE"}`);
@@ -45,9 +48,9 @@ async function main() {
     await page.waitForLoadState("domcontentloaded");
     await page.waitForFunction(() => typeof window.dramaSlot?.checkUpdate === "function", null, { timeout: 20_000 });
     const update = await page.evaluate(() => window.dramaSlot.checkUpdate());
-    assert.equal(update.status, "latest", "installed 0.16.0 must recognize the published 0.16.0 manifest as current");
-    assert.equal(update.currentVersion, packageJson.version);
-    assert.equal(update.latestVersion, packageJson.version);
+    assert.equal(update.status, expectedStatus, `installed ${expectedCurrentVersion} must report ${expectedStatus}`);
+    assert.equal(update.currentVersion, expectedCurrentVersion);
+    assert.equal(update.latestVersion, expectedLatestVersion);
     assert.equal(update.manifest?.sha256, "F70E28446CDF799FE81ECF0D1489341F2E6A2C9462C238C20AC589C23FF43C5A");
     assert.equal(update.manifest?.size, 126649520);
     assert.equal(update.manifest?.downloadUrl, "https://puream.cn/api/drama-slot/download");
