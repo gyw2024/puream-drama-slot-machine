@@ -13815,6 +13815,9 @@ ${shotAnchor}
         settings.videoProvider?.hailuoApiMode,
         agentReferences.audios.length > 0
       );
+      await this.ensureHailuoPromptSpec(projectId, shotId, mode, settings);
+      project = annotateProjectShotStrategies(this.store.getProject(projectId));
+      shot = project.shots.find(item => item.id === shotId);
       // Preview compiles the complete provider prompt contract without
       // requiring generated character/scene/storyboard files. Asset presence
       // is enforced later at paid submission, where take-sheet preparation is
