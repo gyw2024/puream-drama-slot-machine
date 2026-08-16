@@ -13803,7 +13803,12 @@ ${shotAnchor}
       }
       project = annotateProjectShotStrategies(this.store.getProject(projectId));
       shot = project.shots.find(item => item.id === shotId);
-      agentReferences = this.shotReferences(project, shot, mode);
+      const previewProductPath = shot.productMention && project.product?.imagePath ? project.product.imagePath : "";
+      agentReferences = {
+        images: previewProductPath ? [previewProductPath] : [],
+        imageRoles: previewProductPath ? [{ type: "product", label: `商品${project.product?.name ? `“${project.product.name}”` : ""}外观参考图`, entityType: "product", entityId: "product" }] : [],
+        audios: []
+      };
       const agentStrategy = resolveShotVideoStrategy(project, shot).strategy;
       agentReferences.hailuoApiMode = resolveHailuoApiModeForStrategy(
         agentStrategy,
