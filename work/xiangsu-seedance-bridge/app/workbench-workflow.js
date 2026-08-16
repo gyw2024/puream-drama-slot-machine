@@ -190,8 +190,8 @@ const TEXT_STAGE_SLA_MS = 5 * 60_000;
 // The production task itself has no wall-clock deadline, but one relay
 // execution must settle quickly enough for the stage to fall back within the
 // five-minute prompt SLA. Two attempts plus backoff stay below that budget.
-const TEXT_STAGE_ATTEMPT_TIMEOUT_MS = 135_000;
-const TEXT_STAGE_MAX_ATTEMPTS = 2;
+const TEXT_STAGE_ATTEMPT_TIMEOUT_MS = 240_000;
+const TEXT_STAGE_MAX_ATTEMPTS = 1;
 // Script fan-out has two relay slots. These per-request budgets keep the
 // spine plus three waves of five-shot segments inside five minutes, and six
 // waves for a complex 60-shot script inside ten minutes. The task itself still
@@ -8835,6 +8835,12 @@ function conformImportedAnalysisToDurationContract(data, project, options = {}) 
     return next;
   });
   normalized = applyUploadedProductBindings({ ...normalized, shots }, project);
+  // Agent output can expose the same dialogue ID in both shot-level and
+  // subshot-level structural views. Canonicalize those bindings before the
+  // strict parity assertion so each authored line has exactly one home.
+  if (Array.isArray(normalized.sourceDialogueLedger) && normalized.sourceDialogueLedger.length) {
+    normalized = bindSourceDialogueLedgerToAnalysis(normalized, normalized.sourceDialogueLedger);
+  }
   assertSourceDialogueParity(normalized, normalized.sourceDialogueLedger);
   const plannedSeconds = normalized.shots.reduce((sum, shot) => sum + shot.duration, 0);
   if (plannedSeconds !== targetSeconds) {

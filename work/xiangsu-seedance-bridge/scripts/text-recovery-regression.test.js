@@ -3,15 +3,36 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { generateText } = require("../app/ai-provider");
-const { WorkbenchWorkflow } = require("../app/workbench-workflow");
+const { WorkbenchWorkflow, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity } = require("../app/workbench-workflow");
+
+test("dialogue binding collapses duplicated shot/subshot views to one authored line", () => {
+  const ledger = [
+    { id: "D001", speaker: "甲", text: "第一句", tone: "克制" },
+    { id: "D002", speaker: "乙", text: "第二句", tone: "坚定" }
+  ];
+  const normalized = bindSourceDialogueLedgerToAnalysis({
+    characters: [{ id: "C01", name: "甲" }, { id: "C02", name: "乙" }],
+    shots: [
+      {
+        subshots: [
+          { sourceDialogueIds: ["D001"], dialogueTurns: [{ sourceDialogueId: "D001", text: "第一句" }] },
+          { sourceDialogueIds: ["D001"], dialogueTurns: [{ sourceDialogueId: "D001", text: "第一句" }] }
+        ]
+      },
+      { sourceDialogueBindings: [{ sourceDialogueId: "D002" }] }
+    ]
+  }, ledger);
+  assertSourceDialogueParity(normalized, ledger);
+  assert.deepEqual(normalized.shots.flatMap(shot => shot.sourceDialogueIds), ["D001", "D002"]);
+});
 
 test("production text attempts are bounded inside the five-minute stage SLA", () => {
   const options = WorkbenchWorkflow.prototype.productionTextOptions.call({
     operationControls: new Map(),
     setAutomation() {}
   }, "project-test", "asset_prompt");
-  assert.equal(options.timeoutMs, 135_000);
-  assert.equal(options.maxReconnectAttempts, 2);
+  assert.equal(options.timeoutMs, 240_000);
+  assert.equal(options.maxReconnectAttempts, 1);
 });
 
 test("PUREAM text reconnects rejected pre-response requests using one logical id", async () => {
