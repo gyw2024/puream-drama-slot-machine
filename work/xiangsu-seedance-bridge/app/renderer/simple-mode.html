@@ -75,12 +75,12 @@
       <section class="panel" data-content="script">
         <header class="panel-head">
           <div><span>STEP 02 · SCRIPT</span><h1>剧本与分集</h1><p>无论原稿怎样排版，先交给 AI 识别与整理，再保留剧情、人物和原对白完成拆镜。</p></div>
-          <div class="head-actions"><button id="generateTopics" class="outline-button" type="button">AI 想选题</button><button id="aiAnalyze" class="primary-button" type="button">保存并 AI 拆镜</button></div>
+          <div class="head-actions"><button id="aiAnalyze" class="primary-button" type="button">保存并 AI 拆镜</button></div>
         </header>
         <div class="script-grid">
           <article class="card script-card">
             <div class="card-head"><span><small>SOURCE SCRIPT</small><b>完整剧本</b></span><span id="scriptCount" class="muted">0 字</span></div>
-            <div class="inline-actions"><button id="uploadScript" class="outline-button" type="button">上传剧本文件</button><button id="saveScript" class="outline-button" type="button">保存剧本</button><button id="rewriteScript" class="outline-button" type="button">AI 规范原稿</button><button id="generateScript" class="outline-button" type="button">AI 写完整剧本</button></div>
+            <div class="inline-actions"><button id="uploadScript" class="outline-button" type="button">上传剧本文件</button><button id="saveScript" class="outline-button" type="button">保存剧本</button></div>
             <textarea id="scriptText" class="script-editor" maxlength="500000" aria-label="短剧剧本" placeholder="粘贴任意格式剧本，或上传 TXT / Markdown / JSON / CSV。AI 会保留故事、人物、对白和细节，再转成系统可稳定生产的格式。"></textarea>
             <div id="scriptAnalysis" class="analysis-bar">尚未拆解</div>
           </article>
@@ -91,7 +91,6 @@
               <label>商品名称<input id="productName" placeholder="不带货可留空"></label>
               <label>商品卖点<textarea id="productSellingPoints" rows="4" placeholder="商品如何自然参与剧情"></textarea></label>
             </article>
-            <article class="card topic-card"><div class="card-head"><span><small>IDEAS</small><b>AI 选题</b></span></div><div id="topicList" class="topic-list"><p class="muted">点击“AI 想选题”后在这里选择。</p></div></article>
           </aside>
         </div>
       </section>
@@ -147,6 +146,7 @@
       <section class="panel" data-content="settings">
         <header class="panel-head"><div><span>SIMPLE SETTINGS</span><h1>简易模式设置</h1><p>这些设置只属于简易模式；Agent 模式设置不会被覆盖。</p></div><div class="head-actions"><button id="resetSettings" class="outline-button" type="button">恢复默认</button><button id="saveSettings" class="primary-button" type="button">保存设置</button></div></header>
         <div class="settings-grid">
+          <article class="card provider-card"><div class="card-head"><span><small>TEXT MODEL</small><b>AI 拆镜文本模型</b></span><button id="testTextProvider" class="text-button" type="button">测试连接</button></div><label>供应商<select id="textProviderKind"><option value="puream-relay">纯梦官网（默认）</option><option value="openai-native">OpenAI 官方</option><option value="openai-compatible">自定义 OpenAI 兼容厂商</option><option value="gemini-native">Google Gemini 原生</option><option value="anthropic-native">Anthropic Claude 原生</option></select></label><label id="textBaseUrlField">Base URL<input id="textBaseUrl" autocomplete="url"></label><label id="textApiKeyField">API Key<input id="textApiKey" type="password" autocomplete="off"></label><label id="textModelField">模型名称<input id="textModel"></label><label id="textMaxTokensField">最大输出 Token<input id="textMaxTokens" type="number" min="256" max="131072" step="256"></label><p id="textProviderHelp">纯梦官网由系统自动调度；选择自定义供应商后可填写完整连接参数。</p><div id="textProviderStatus" class="test-status">尚未检测</div></article>
           <article class="card provider-card"><div class="card-head"><span><small>VIDEO ENGINE</small><b>海螺 H3</b></span><i class="locked-pill">固定接入</i></div><p>简易模式所有人物视频与分镜视频统一通过纯梦云端海螺 H3 生成，不能误切到其他引擎。</p><button id="testH3" class="outline-button" type="button">检测 H3 连接</button><div id="h3Status" class="test-status">尚未检测</div></article>
           <article class="card"><div class="card-head"><span><small>CONCURRENCY</small><b>生成并发</b></span></div><label>图片并发（后台额度）<input id="imageConcurrency" type="number" min="1" step="1" readonly aria-readonly="true"></label><label>视频并发（后台额度）<input id="videoConcurrency" type="number" min="1" step="1" readonly aria-readonly="true"></label><label>默认画幅<select id="aspectRatio"><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option><option value="1:1">1:1 方形</option></select></label><p>并发严格读取管理后台授权，不再由客户端写死或少开。</p></article>
           <article class="card"><div class="card-head"><span><small>STORAGE</small><b>数据边界</b></span></div><dl class="storage-list"><dt>简易模式项目</dt><dd id="simpleRoot">读取中</dd><dt>共享资产库</dt><dd id="sharedRoot">读取中</dd></dl><p class="boundary-note">项目、任务、费用、设置与成片不互通；只有资产库互通。</p></article>
@@ -163,7 +163,7 @@
     <form id="newProjectForm" method="dialog">
       <header><span><small>NEW SIMPLE PROJECT</small><b>新建简易模式项目</b></span><button type="button" data-close-dialog="newProjectDialog" aria-label="关闭">×</button></header>
       <label>项目名称<input id="newProjectName" required maxlength="80" placeholder="例如：婆婆留下的旧钥匙"></label>
-      <div class="form-columns"><label>起步方式<select id="newInputMode"><option value="manual">上传 / 粘贴剧本</option><option value="ai">AI 从选题写剧本</option></select></label><label>制作方式<select id="newExecutionMode"><option value="full">一键全流程</option><option value="step">一步步制作</option></select></label></div>
+      <div class="form-columns"><label>起步方式<select id="newInputMode" disabled aria-disabled="true"><option value="manual">上传 / 粘贴已有剧本</option></select></label><label>制作方式<select id="newExecutionMode"><option value="full">一键全流程</option><option value="step">一步步制作</option></select></label></div>
       <label>分镜模式<select id="newGenerationMode"><option value="storyboard_sheet">多帧合图</option><option value="smart">智能首尾帧 + 延续</option><option value="continuation">视频延续</option><option value="keyframe">首尾帧</option></select></label>
       <div class="form-columns"><label>目标时长（秒）<input id="newDuration" type="number" min="1" step="1" value="60"></label><label>带货方式<select id="newCommerceMode"><option value="none">不带货</option><option value="natural">自然植入</option><option value="explicit">明确带货</option></select></label></div>
       <p>目标时长没有上限；实际分镜会按剧情完整性与 H3 单段能力自动拆分。</p>

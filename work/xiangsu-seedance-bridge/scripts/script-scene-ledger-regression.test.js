@@ -138,7 +138,7 @@ test("explicit source scenes fail closed when a later stage drops them", () => {
   );
 });
 
-test("real manual analysis preserves the six-scene source contract and stops when the Agent fails", async t => {
+test("real manual analysis preserves the six-scene source contract when Agent enhancement fails", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-scene-ledger-flow-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -162,17 +162,14 @@ test("real manual analysis preserves the six-scene source contract and stops whe
       throw Object.assign(new Error("simulated invalid upstream result"), { code: "TEXT_RESULT_INVALID" });
     }
   });
-  await assert.rejects(
-    workflow.analyzeScript(project.id),
-    error => error?.code === "UPLOADED_SCRIPT_AGENT_RESULT_REQUIRED"
-      && error?.agentRequired === true
-      && error?.localCreativeFallbackUsed === false
-  );
+  const analyzed = await workflow.analyzeScript(project.id);
   assert.ok(calls >= 1);
   const preserved = store.getProject(project.id);
-  assert.equal(preserved.currentStage, "script");
+  assert.equal(analyzed.currentStage, "assets");
+  assert.equal(preserved.currentStage, "assets");
   assert.equal(preserved.script.raw, CUSTOMER_PATTERN);
-  assert.equal(preserved.automation.errorCode, "UPLOADED_SCRIPT_AGENT_RESULT_REQUIRED");
+  assert.equal(preserved.script.analysisEnhancement.localFallbackCount, preserved.script.analysisEnhancement.totalChunks);
+  assert.equal(preserved.script.analysisEnhancement.source, "local-first-agent-enhanced");
   const ledger = buildSourceSceneLedger(preserved.script.raw);
   assert.deepEqual(ledger.catalogue.map(item => item.name), [
     "高档公寓客厅",

@@ -2496,6 +2496,7 @@ function writeTextProviderForm(config) {
   $("#textMaxTokens").disabled = kind === "puream-relay";
   $("#pureamAuthState").classList.toggle("hidden", kind !== "puream-relay");
   const puream = kind === "puream-relay";
+  $("#textApiKey")?.closest("label")?.classList.toggle("hidden", puream);
   $("#textOfficialLock")?.classList.toggle("hidden", !puream);
   $("#textOfficialModelField")?.classList.toggle("hidden", !puream);
   ["#textBaseUrlField", "#textModelField", "#textMaxTokensField", "#textPricingFields", "#textPricingHelp"].forEach(selector => $(selector)?.classList.toggle("hidden", puream));

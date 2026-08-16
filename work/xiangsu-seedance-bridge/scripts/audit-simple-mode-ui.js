@@ -290,6 +290,27 @@ async function auditSimple(root, runDir, workbenchDir) {
       await page.waitForTimeout(panel === "library" ? 400 : 100);
       screenshots.push(await capture(page, path.join(runDir, `simple-${panel}-1440x900.png`)));
     }
+    await page.locator('.nav-button[data-panel="settings"]').click();
+    await page.locator("#textProviderKind").selectOption("openai-compatible");
+    await page.waitForTimeout(100);
+    const providerContract = await page.evaluate(() => {
+      const visible = selector => {
+        const node = document.querySelector(selector);
+        if (!node) return false;
+        const style = getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      return {
+        kind: document.querySelector("#textProviderKind")?.value || "",
+        baseUrlVisible: visible("#textBaseUrlField"),
+        apiKeyVisible: visible("#textApiKeyField"),
+        modelVisible: visible("#textModelField"),
+        maxTokensVisible: visible("#textMaxTokensField"),
+        forbiddenControls: ["#generateTopics", "#generateScript", "#rewriteScript", "#topicList"].filter(selector => document.querySelector(selector))
+      };
+    });
+    screenshots.push(await capture(page, path.join(runDir, "simple-settings-custom-provider-1440x900.png")));
     await page.locator('.nav-button[data-panel="assets"]').click();
     await page.waitForTimeout(150);
     const imageAudit = await page.evaluate(async () => {
@@ -320,6 +341,7 @@ async function auditSimple(root, runDir, workbenchDir) {
       layouts,
       imageAudit,
       stageContract,
+      providerContract,
       axe,
       screenshots
     }, null, 2), "utf8");
@@ -335,6 +357,12 @@ async function auditSimple(root, runDir, workbenchDir) {
     assert.match(stageContract.h3Locked, /固定接入/);
     assert.match(stageContract.simpleRoot, /simple-mode/i);
     assert.doesNotMatch(stageContract.sharedRoot, /simple-mode/i);
+    assert.equal(providerContract.kind, "openai-compatible");
+    assert.equal(providerContract.baseUrlVisible, true);
+    assert.equal(providerContract.apiKeyVisible, true);
+    assert.equal(providerContract.modelVisible, true);
+    assert.equal(providerContract.maxTokensVisible, true);
+    assert.deepEqual(providerContract.forbiddenControls, []);
     assert.ok(Object.values(axe).every(items => items.length === 0), "Simple mode has critical or serious accessibility violations");
     return { runtime, layouts, imageAudit, stageContract, axe, screenshots };
   } finally {

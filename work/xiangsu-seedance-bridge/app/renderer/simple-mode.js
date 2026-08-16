@@ -4,6 +4,14 @@ const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const api = (...args) => window.dramaSlot.simple.call(...args);
 
+const textProviderPresets = Object.freeze({
+  "puream-relay": { baseUrl: "https://puream.cn", model: "claude-opus-5", maxTokens: 16384, help: "纯梦官网由系统自动调度，无需填写 API Key。" },
+  "openai-native": { baseUrl: "https://api.openai.com/v1", model: "", maxTokens: 16384, help: "填写 OpenAI API Key 和账号可用的模型名称。" },
+  "openai-compatible": { baseUrl: "", model: "", maxTokens: 16384, help: "填写兼容 /chat/completions 的 Base URL、API Key 和实际模型 ID。" },
+  "gemini-native": { baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "", maxTokens: 16384, help: "填写 Gemini API Key 和账号可用的模型名称。" },
+  "anthropic-native": { baseUrl: "https://api.anthropic.com/v1", model: "", maxTokens: 16384, help: "填写 Anthropic API Key 和账号可用的 Claude 模型名称。" }
+});
+
 const state = {
   projects: [],
   project: null,
@@ -270,8 +278,6 @@ function renderScript() {
   $("#productState").textContent = hasProduct ? "已设置" : "不带货";
   const preview = $("#productPreview");
   preview.innerHTML = project.product?.imagePath ? `<img src="${escapeHtml(fileUrl(project.product.imagePath))}" alt="商品参考图">` : '<img src="../assets/icons/image.png" alt=""><span>上传商品原图</span>';
-  const topics = project.ideation?.topics || [];
-  $("#topicList").innerHTML = topics.length ? topics.map((topic, index) => `<button class="topic-button${project.ideation?.selectedTopicId === topic.id ? " selected" : ""}" type="button" data-topic-id="${escapeHtml(topic.id || "")}"><b>${String(index + 1).padStart(2, "0")} · ${escapeHtml(topic.title || topic.name || "未命名选题")}</b><small>${escapeHtml(topic.hook || topic.summary || topic.conflict || "点击选择此题材")}</small></button>`).join("") : '<p class="muted">点击“AI 想选题”后在这里选择。</p>';
 }
 
 function entityRunning(project, entityId) {
@@ -432,6 +438,40 @@ function renderSettings() {
   $("#imageConcurrency").value = state.license?.imageConcurrency || settings.generation?.keyframeConcurrency || 2;
   $("#videoConcurrency").value = state.license?.videoConcurrency || settings.generation?.maxVideoConcurrency || 4;
   $("#aspectRatio").value = settings.generation?.aspectRatio || "9:16";
+  writeTextProviderForm(settings.textProvider || {});
+}
+
+function currentTextProviderProfile(kind) {
+  const preset = textProviderPresets[kind] || textProviderPresets["openai-compatible"];
+  return { ...preset, ...(state.settings?.textProviderProfiles?.[kind] || {}), kind };
+}
+
+function readTextProviderForm(kind = $("#textProviderKind").value) {
+  const preset = textProviderPresets[kind] || textProviderPresets["openai-compatible"];
+  const puream = kind === "puream-relay";
+  return {
+    ...currentTextProviderProfile(kind),
+    kind,
+    authSource: puream ? "official-desktop" : "user",
+    baseUrl: puream ? preset.baseUrl : $("#textBaseUrl").value.trim(),
+    apiKey: puream ? "" : $("#textApiKey").value.trim(),
+    model: puream ? preset.model : $("#textModel").value.trim(),
+    maxTokens: puream ? preset.maxTokens : Math.max(256, Math.min(131072, Number($("#textMaxTokens").value) || preset.maxTokens))
+  };
+}
+
+function writeTextProviderForm(config) {
+  const kind = textProviderPresets[config?.kind] ? config.kind : "puream-relay";
+  const profile = { ...currentTextProviderProfile(kind), ...config, kind };
+  const puream = kind === "puream-relay";
+  $("#textProviderKind").value = kind;
+  $("#textProviderKind").dataset.currentKind = kind;
+  $("#textBaseUrl").value = profile.baseUrl || "";
+  $("#textApiKey").value = profile.apiKey || "";
+  $("#textModel").value = profile.model || "";
+  $("#textMaxTokens").value = String(profile.maxTokens || 16384);
+  ["#textBaseUrlField", "#textApiKeyField", "#textModelField", "#textMaxTokensField"].forEach(selector => $(selector).classList.toggle("hidden", puream));
+  $("#textProviderHelp").textContent = textProviderPresets[kind].help;
 }
 
 function renderAll() {
@@ -521,10 +561,10 @@ async function saveShotFields() {
 async function runAll() {
   if (!state.project) return;
   await saveScriptFields({ toast: false });
+  if (!String(state.project.script?.raw || "").trim()) return showToast("请先上传或粘贴完整剧本，再开始制作", "error");
   const accepted = await confirmAction("一键制作完整短剧", "将调用 AI 图片与海螺 H3 视频服务并产生实际费用。任务没有总时限，可暂停和断点续跑。", "开始制作");
   if (!accepted) return;
-  const method = String(state.project.script?.raw || "").trim() ? "runFullPipeline" : "runIdeaPipeline";
-  runLong("一键全流程已启动", "AI 将依次完成剧本、资产、分镜、H3 视频与成片", () => api(method, state.project.id), { background: true });
+  runLong("一键全流程已启动", "AI 将依次完成剧本分析、资产、分镜、H3 视频与成片", () => api("runFullPipeline", state.project.id), { background: true });
 }
 
 async function deleteProject() {
@@ -711,26 +751,6 @@ $("#aiAnalyze").addEventListener("click", async () => {
   await saveScriptFields({ toast: false });
   runLong("AI 正在识别并拆镜", "保留原剧情、人物和对白，整理成稳定生产结构", () => api("analyzeScript", state.project.id));
 });
-$("#rewriteScript").addEventListener("click", async () => {
-  if (!state.project || !$("#scriptText").value.trim()) return showToast("请先上传或粘贴剧本", "error");
-  await saveScriptFields({ toast: false });
-  runLong("AI 正在规范原稿", "保留剧情、人物关系、对白和关键细节", () => api("rewriteDialogueScript", state.project.id, $("#scriptText").value));
-});
-$("#generateTopics").addEventListener("click", () => state.project && runLong("AI 正在生成 10 个选题", "每次都会生成新的差异化题材", () => api("generateTopics", state.project.id)));
-$("#generateScript").addEventListener("click", () => {
-  if (!state.project) return;
-  if (!(state.project.ideation?.selectedTopicId)) return showToast("请先让 AI 生成选题并选择一个", "error");
-  runLong("AI 正在写完整剧本", "写作按断点持续保存，没有总时限", () => api("generateCompleteScript", state.project.id), { background: true });
-});
-$("#topicList").addEventListener("click", async event => {
-  const button = event.target.closest("[data-topic-id]");
-  if (!button || !state.project) return;
-  try {
-    const result = resultOrThrow(await api("patchProject", state.project.id, { ideation: { ...state.project.ideation, selectedTopicId: button.dataset.topicId }, activitySummary: "已选择 AI 选题" }));
-    state.project = result.project;
-    renderScript();
-  } catch (error) { showToast(error.message, "error"); }
-});
 $("#generateAssets").addEventListener("click", async () => {
   if (!state.project) return;
   const accepted = await confirmAction("生成全部缺少资产", "将调用图片与人物视频服务并产生实际费用；已就绪资产会自动跳过。", "开始生成");
@@ -764,8 +784,11 @@ $("#importLibrary").addEventListener("click", async () => {
 });
 $("#saveSettings").addEventListener("click", async () => {
   try {
+    const textProvider = readTextProviderForm();
     const next = {
       ...state.settings,
+      textProvider,
+      textProviderProfiles: { ...(state.settings.textProviderProfiles || {}), [textProvider.kind]: textProvider },
       generation: {
         ...state.settings.generation,
         aspectRatio: $("#aspectRatio").value
@@ -775,6 +798,28 @@ $("#saveSettings").addEventListener("click", async () => {
     renderSettings();
     showToast("简易模式设置已保存，Agent 模式未改变");
   } catch (error) { showToast(error.message, "error"); }
+});
+$("#textProviderKind").addEventListener("change", event => {
+  const previousKind = event.currentTarget.dataset.currentKind || state.settings?.textProvider?.kind || "puream-relay";
+  const previousProfile = readTextProviderForm(previousKind);
+  state.settings = {
+    ...state.settings,
+    textProviderProfiles: { ...(state.settings?.textProviderProfiles || {}), [previousKind]: previousProfile }
+  };
+  writeTextProviderForm(currentTextProviderProfile(event.currentTarget.value));
+});
+$("#testTextProvider").addEventListener("click", async () => {
+  const status = $("#textProviderStatus");
+  status.className = "test-status";
+  status.textContent = "正在检测文本模型连接…";
+  try {
+    resultOrThrow(await api("testProvider", "text", readTextProviderForm()));
+    status.className = "test-status ok";
+    status.textContent = "文本模型连接正常";
+  } catch (error) {
+    status.className = "test-status error";
+    status.textContent = error.message;
+  }
 });
 $("#resetSettings").addEventListener("click", async () => {
   const accepted = await confirmAction("恢复简易模式默认设置", "只重置简易模式设置，不影响 Agent 模式和共享资产。", "恢复默认");
@@ -807,7 +852,7 @@ window.dramaSlot.onUpdateStatus(update => {
 $("#newProjectForm").addEventListener("submit", async event => {
   event.preventDefault();
   const options = {
-    inputMode: $("#newInputMode").value,
+    inputMode: "manual",
     executionMode: $("#newExecutionMode").value,
     mode: $("#newGenerationMode").value,
     targetDurationSeconds: Math.max(1, Math.round(Number($("#newDuration").value) || 60)),
@@ -819,7 +864,7 @@ $("#newProjectForm").addEventListener("submit", async event => {
     const result = resultOrThrow(await api("createProject", $("#newProjectName").value.trim(), options));
     $("#newProjectDialog").close();
     await refreshProjects(result.project.id);
-    setPanel(options.inputMode === "ai" ? "script" : "script");
+    setPanel("script");
     showToast("简易模式项目已创建");
   } catch (error) { showToast(error.message, "error"); }
 });

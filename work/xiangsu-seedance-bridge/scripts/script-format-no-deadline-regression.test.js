@@ -168,8 +168,9 @@ test("all production generation has no total deadline and keeps cancellation con
   assert.match(provider, /const timeoutMs = Math\.max\(0, Number\(options\.timeoutMs\) \|\| 0\)/);
   assert.match(provider, /resolveAttemptLimit\(options\.maxReconnectAttempts, 3\)/);
   assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = NO_TOTAL_DEADLINE_MS/);
-  assert.match(workflow, /timeoutMs: NO_TOTAL_DEADLINE_MS/);
-  assert.match(workflow, /maxReconnectAttempts: UNLIMITED_ATTEMPTS/);
+  assert.match(workflow, /const TEXT_STAGE_SLA_MS = 5 \* 60_000/);
+  assert.match(workflow, /timeoutMs: options\.timeoutMs \?\? TEXT_STAGE_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflow, /maxReconnectAttempts: options\.maxReconnectAttempts \?\? TEXT_STAGE_MAX_ATTEMPTS/);
   assert.doesNotMatch(workflow, /\battempts:\s*[1-9]\d*/);
   assert.doesNotMatch(provider, /Date\.now\(\) - startedAt < 600_000/);
   assert.doesNotMatch(provider, /纯梦 GPT Image 2 生成超时/);

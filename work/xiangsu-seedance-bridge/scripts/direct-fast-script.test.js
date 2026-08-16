@@ -341,7 +341,7 @@ test("the direct compiler adapts product actions by category instead of forcing 
   assert.doesNotMatch(productText, /膝部|绑带|跪地量裁|戴好/);
 });
 
-test("failed direct segment stops without local creative substitution and resumes only that segment", async t => {
+test("failed direct segment falls back locally without restarting successful Agent segments", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-direct-resume-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -394,24 +394,15 @@ test("failed direct segment stops without local creative substitution and resume
     }
   });
 
-  await assert.rejects(
-    workflow.generateCompleteScript(created.id),
-    error => error?.code === "SCRIPT_AGENT_SEGMENT_REQUIRED"
-      && error?.retryRequiresExplicitResume === true
-      && error?.localCreativeFallbackUsed === false
-  );
-  assert.equal(calls.get(11), 1, "invalid upstream output must not trigger a second billable request");
-  const paused = store.getProject(created.id);
-  assert.equal(paused.script.generationCheckpoint.directFastSegments.length, 5);
-  assert.equal(paused.currentStage, "script");
-
   const completed = await workflow.generateCompleteScript(created.id);
-  assert.equal(calls.get(11), 2, "explicit resume must retry only the failed Agent segment");
+  assert.equal(calls.get(11), 1, "invalid upstream output must not trigger a second billable request");
   for (const start of [1, 6, 16, 21, 26]) assert.equal(calls.get(start), 1, `completed segment S${start} must be reused`);
   assert.equal(completed.script.generationCheckpoint, null);
   assert.equal(completed.shots.length, 30);
   assert.equal(completed.currentStage, "assets");
-  assert.equal(completed.script.generationPerformance.localFallbackCount, 0);
+  assert.equal(completed.script.generationPerformance.localFallbackCount, 1);
+  assert.deepEqual(completed.script.generationPerformance.localFallbackRanges, [[11, 15]]);
+  assert.deepEqual(completed.script.generationPerformance.generationSources, ["agent", "deterministic-local-preservation"]);
 });
 
 test("one-call compact script is locally expanded into a 300-second production-ready drama", () => {

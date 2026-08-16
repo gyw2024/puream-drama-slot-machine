@@ -277,7 +277,7 @@ test("replacing a product image retires product-dependent storyboard and video a
   assert.match(replaced.finalVideoStaleReason, /商品参考图已替换/);
 });
 
-test("five to ten minute script path matches the relay slots and forbids local creative fallbacks", () => {
+test("five to ten minute script path matches relay slots and preserves failed segments locally", () => {
   const workflow = source("app/workbench-workflow.js");
   assert.match(workflow, /const SCRIPT_FAST_TARGET_SECONDS = 600/);
   assert.match(workflow, /const SCRIPT_FAST_CONCURRENCY = 8/);
@@ -285,14 +285,18 @@ test("five to ten minute script path matches the relay slots and forbids local c
   assert.match(workflow, /const SCRIPT_DIRECT_SEGMENT_UNITS = 5/);
   assert.match(workflow, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 2/);
   assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = NO_TOTAL_DEADLINE_MS/);
-  assert.match(workflow, /timeoutMs: NO_TOTAL_DEADLINE_MS/);
-  assert.match(workflow, /maxReconnectAttempts: UNLIMITED_ATTEMPTS/);
+  assert.match(workflow, /const TEXT_STAGE_SLA_MS = 5 \* 60_000/);
+  assert.match(workflow, /const TEXT_STAGE_ATTEMPT_TIMEOUT_MS = 135_000/);
+  assert.match(workflow, /const TEXT_STAGE_MAX_ATTEMPTS = 2/);
+  assert.match(workflow, /timeoutMs: options\.timeoutMs \?\? TEXT_STAGE_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflow, /maxReconnectAttempts: options\.maxReconnectAttempts \?\? TEXT_STAGE_MAX_ATTEMPTS/);
   assert.match(workflow, /model: SCRIPT_FAST_PUREAM_MODEL/);
   assert.match(workflow, /directFastSegmentRanges\(unitCount, SCRIPT_DIRECT_SEGMENT_UNITS\)/);
   assert.match(workflow, /mapWithConcurrency\(pending, SCRIPT_DIRECT_MAX_CONCURRENCY/);
   assert.match(workflow, /directFastSegments:/);
   assert.match(workflow, /agentCreativeOutputRequired/);
-  assert.doesNotMatch(workflow, /buildDirectFastFallbackSegment/);
+  assert.match(workflow, /buildDirectFastFallbackSegment/);
+  assert.match(workflow, /buildDirectFastFallbackSpine/);
   assert.match(workflow, /mapWithConcurrency\(planTasks, SCRIPT_FAST_CONCURRENCY/);
   assert.match(workflow, /mapWithConcurrency\(unitTasks, SCRIPT_FAST_CONCURRENCY/);
   assert.match(workflow, /useFastScriptPath\s*\?\s*\{/);

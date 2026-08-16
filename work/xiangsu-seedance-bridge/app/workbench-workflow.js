@@ -23,6 +23,8 @@ const { allocateH3ShotSpeakers, h3AllowedSpeakersByShot } = require("./h3-speake
 const {
   assertDirectFastSegment,
   assertDirectFastStorySpine,
+  buildDirectFastFallbackSegment,
+  buildDirectFastFallbackSpine,
   directFastProductStartIndex,
   directFastSegmentRanges,
   directFastSpineFromLegacyPayload,
@@ -116,6 +118,7 @@ const {
 } = require("./production-liveness");
 const {
   buildFullReferencePrompt,
+  buildFallbackHailuoPromptSpec,
   compactFullReferencePrompt,
   compilerMessages,
   containsCjkOutsideDialogue,
@@ -183,6 +186,20 @@ const SCRIPT_DIRECT_SEGMENT_UNITS = 5;
 // one makes 5-10 minute scripts miss the writing SLA.
 const SCRIPT_DIRECT_MAX_CONCURRENCY = 2;
 const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = NO_TOTAL_DEADLINE_MS;
+const TEXT_STAGE_SLA_MS = 5 * 60_000;
+// The production task itself has no wall-clock deadline, but one relay
+// execution must settle quickly enough for the stage to fall back within the
+// five-minute prompt SLA. Two attempts plus backoff stay below that budget.
+const TEXT_STAGE_ATTEMPT_TIMEOUT_MS = 135_000;
+const TEXT_STAGE_MAX_ATTEMPTS = 2;
+// Script fan-out has two relay slots. These per-request budgets keep the
+// spine plus three waves of five-shot segments inside five minutes, and six
+// waves for a complex 60-shot script inside ten minutes. The task itself still
+// has no total deadline; a failed request becomes a local checkpoint.
+const SCRIPT_DIRECT_SPINE_TIMEOUT_MS = 40_000;
+const SCRIPT_DIRECT_SEGMENT_TIMEOUT_MS = 80_000;
+const UPLOADED_ANALYSIS_TIMEOUT_MS = 60_000;
+const PROMPT_COMPILER_TIMEOUT_MS = 90_000;
 const IMAGE_BATCH_MAX_CONCURRENCY = 6;
 const VIDEO_BATCH_MAX_CONCURRENCY = 4;
 const AUTHORITY_BATCH_MAX_CONCURRENCY = 64;
@@ -9482,7 +9499,7 @@ class WorkbenchWorkflow {
     );
     if (!this.adaptiveAgent.hasSkill("script.analyze_chunk")) {
       this.adaptiveAgent.registerSkill("script.analyze_chunk", {
-        maxAttempts: 3,
+        maxAttempts: 1,
         run: (payload, context) => context.agent.execute(
           "text",
           payload.config?.kind || "default",
@@ -9518,7 +9535,7 @@ class WorkbenchWorkflow {
         // deadline. Provider/network recovery keeps the same request identity
         // elsewhere; only a returned but invalid director draft starts a new
         // Agent turn here.
-        maxAttempts: 5,
+        maxAttempts: 2,
         run: async (payload, context) => {
           const raw = await context.agent.execute(
             "text",
@@ -9907,8 +9924,8 @@ class WorkbenchWorkflow {
     const callerOnAttemptFailure = options.onAttemptFailure;
     return {
       ...options,
-      timeoutMs: NO_TOTAL_DEADLINE_MS,
-      maxReconnectAttempts: UNLIMITED_ATTEMPTS,
+      timeoutMs: options.timeoutMs ?? TEXT_STAGE_ATTEMPT_TIMEOUT_MS,
+      maxReconnectAttempts: options.maxReconnectAttempts ?? TEXT_STAGE_MAX_ATTEMPTS,
       signal: options.signal || control?.controller.signal,
       onAttemptFailure: info => {
         if (info?.retrying && projectId) {
@@ -11260,23 +11277,31 @@ class WorkbenchWorkflow {
             unwrapKeys: ["data", "result", "payload", "content", "response", "output"],
             recursiveUnwrap: true,
             maxTokens: 3_072,
+            timeoutMs: SCRIPT_DIRECT_SPINE_TIMEOUT_MS,
+            maxReconnectAttempts: 1,
             sessionId: `${checkpoint.sessionId}-direct-fast-v7-spine`,
             onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) spineReceipt = { ...(usage || {}) }; }
           }));
           assertDirectFastStorySpine(directFastSpine, segments);
         } catch (error) {
           if (isScriptControlError(error)) throw error;
-          throw agentCreativeOutputRequired(
-            error,
-            "SCRIPT_AGENT_SPINE_REQUIRED",
-            "编剧 Agent 的全剧因果骨架未通过合同，已保留断点并停止，未使用本地模板编剧情"
-          );
+          directFastSpine = buildDirectFastFallbackSpine({ topic, ranges: segments });
+          assertDirectFastStorySpine(directFastSpine, segments);
+          checkpoint.directFastFallbacks = [
+            ...(Array.isArray(checkpoint.directFastFallbacks) ? checkpoint.directFastFallbacks : []),
+            {
+              kind: "spine",
+              source: "deterministic-local-preservation",
+              causeCode: error?.code || "TEXT_PROVIDER_FAILED",
+              completedAt: new Date().toISOString()
+            }
+          ];
         }
         assertDirectFastStorySpine(directFastSpine, segments);
         checkpoint = this.saveScriptCheckpoint(projectId, {
           ...checkpoint,
           directFastSpine,
-          directFastFallbacks: [],
+          directFastFallbacks: Array.isArray(checkpoint.directFastFallbacks) ? checkpoint.directFastFallbacks : [],
           directFastFailure: null
         }, topic, "script_direct_spine", "全剧人物、场景和因果骨架已保存，开始并发写各段对白正文");
         if (spineReceipt) receipts.push(spineReceipt);
@@ -11324,6 +11349,8 @@ class WorkbenchWorkflow {
             unwrapKeys: ["data", "result", "payload", "content", "response", "output"],
             recursiveUnwrap: true,
             maxTokens: 4_608,
+            timeoutMs: SCRIPT_DIRECT_SEGMENT_TIMEOUT_MS,
+            maxReconnectAttempts: 1,
             sessionId: `${checkpoint.sessionId}-direct-fast-v7-${segment.key}`,
             onDelta: text => { rawParts.set(segment.key, String(text || "")); },
             onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) receipt = { ...(usage || {}) }; }
@@ -11355,19 +11382,82 @@ class WorkbenchWorkflow {
           return { status: "fulfilled", segment };
         } catch (error) {
           if (isScriptControlError(error)) throw error;
-          return {
-            status: "rejected",
-            segment,
-            error: agentCreativeOutputRequired(
-              error,
-              "SCRIPT_AGENT_SEGMENT_REQUIRED",
-              `编剧 Agent 的 S${String(segment.start).padStart(2, "0")}–S${String(segment.end).padStart(2, "0")} 未通过合同，未用本地模板补写`,
-              { failedSegmentRange: [segment.start, segment.end] }
-            )
-          };
+          try {
+            const payload = buildDirectFastFallbackSegment({
+              spine: directFastSpine,
+              topic,
+              segmentStart: segment.start,
+              segmentEnd: segment.end,
+              unitDurations: filmSchedule.suggestedDurations,
+              productStartNumber
+            });
+            assertDirectFastSegment(payload, segment.start, segment.end, {
+              characters: directFastSpine.c,
+              scenes: directFastSpine.sc,
+              durations: filmSchedule.suggestedDurations,
+              productStartNumber,
+              strict: true
+            });
+            const saved = {
+              key: segment.key,
+              start: segment.start,
+              end: segment.end,
+              payload,
+              receipt: null,
+              source: "deterministic-local-preservation",
+              localFallback: true,
+              causeCode: error?.code || "TEXT_PROVIDER_FAILED",
+              completedAt: new Date().toISOString()
+            };
+            completedByKey.set(segment.key, saved);
+            checkpoint = this.saveScriptCheckpoint(projectId, {
+              ...checkpoint,
+              directFastSegments: segments
+                .map(([start, end]) => completedByKey.get(segmentKey(start, end)))
+                .filter(Boolean),
+              directFastFallbacks: [
+                ...(Array.isArray(checkpoint.directFastFallbacks) ? checkpoint.directFastFallbacks : []),
+                {
+                  kind: "segment",
+                  range: [segment.start, segment.end],
+                  source: saved.source,
+                  causeCode: saved.causeCode,
+                  completedAt: saved.completedAt
+                }
+              ],
+              directFastFailure: null
+            }, topic, "script_direct", `Agent 段 S${String(segment.start).padStart(2, "0")}-S${String(segment.end).padStart(2, "0")} 未及时返回，已保留本地可制作版本并继续`);
+            return { status: "fulfilled", segment, localFallback: true };
+          } catch (fallbackError) {
+            return {
+              status: "rejected",
+              segment,
+              error: agentCreativeOutputRequired(
+                fallbackError,
+                "SCRIPT_LOCAL_SEGMENT_FALLBACK_FAILED",
+                `S${String(segment.start).padStart(2, "0")}-S${String(segment.end).padStart(2, "0")} 的 Agent 与本地保底均未通过生产合同`,
+                { failedSegmentRange: [segment.start, segment.end] }
+              )
+            };
+          }
         }
       });
       rawText = [...rawParts.values()].join("\n");
+      checkpoint.directFastSegments = segments
+        .map(([start, end]) => completedByKey.get(segmentKey(start, end)))
+        .filter(Boolean);
+      checkpoint.directFastFallbacks = [
+        ...(checkpoint.directFastFallbacks || []).filter(item => item.kind === "spine").slice(0, 1),
+        ...checkpoint.directFastSegments
+          .filter(item => item.localFallback === true)
+          .map(item => ({
+            kind: "segment",
+            range: [item.start, item.end],
+            source: item.source || "deterministic-local-preservation",
+            causeCode: item.causeCode || "TEXT_PROVIDER_FAILED",
+            completedAt: item.completedAt
+          }))
+      ];
       const failedSegments = segmentResults.filter(item => item.status === "rejected");
       if (failedSegments.length) {
         const ranges = failedSegments.map(item => `S${String(item.segment.start).padStart(2, "0")}–S${String(item.segment.end).padStart(2, "0")}`).join("、");
@@ -11536,7 +11626,13 @@ class WorkbenchWorkflow {
           writingContractVersion: DRAMA_WRITING_CONTRACT_VERSION,
           finishedAt: finishedAt.toISOString(),
           upstreamModel: scriptTextProvider.model,
-          localFallbackCount: 0,
+          localFallbackCount: (checkpoint.directFastFallbacks || []).length,
+          localFallbackRanges: (checkpoint.directFastFallbacks || [])
+            .filter(item => item.kind === "segment" && Array.isArray(item.range))
+            .map(item => [...item.range]),
+          generationSources: (checkpoint.directFastFallbacks || []).length
+            ? ["agent", "deterministic-local-preservation"]
+            : ["agent"],
           upstreamReceipts: receipts.filter(Boolean).map(item => ({ requestId: item.requestId || "", billingStatus: item.billingStatus || item.billing_status || "" }))
         },
         generationCheckpoint: null,
@@ -12915,6 +13011,7 @@ class WorkbenchWorkflow {
     const productionSourceText = uploadedSections.dramaticBody;
     const productionSceneLedger = buildSourceSceneLedger(productionSourceText);
     const locallyParsedDialogueLedger = productionDialogueLedgerFromScript(project.script.raw, uploadedSections, sourceSceneLedger);
+    let uploadedAnalysisFallbackSummary = null;
     const commitAnalysis = (normalized, analysisMethod, analysisChunks) => {
       const sceneContract = normalized?.sourceSceneLedger?.explicit ? normalized.sourceSceneLedger : sourceSceneLedger;
       const normalizedDialogueLedger = Array.isArray(normalized?.sourceDialogueLedger) ? normalized.sourceDialogueLedger : [];
@@ -12960,6 +13057,9 @@ class WorkbenchWorkflow {
       project.script.detectedFormat = String(normalized.detectedFormat || "").trim();
       project.script.analysisChunks = analysisChunks;
       project.script.analysisMethod = analysisMethod;
+      if (uploadedAnalysisFallbackSummary) {
+        project.script.analysisEnhancement = uploadedAnalysisFallbackSummary;
+      }
       project.script.sourceDialogueLedger = Array.isArray(normalized.sourceDialogueLedger)
         ? normalized.sourceDialogueLedger.map(item => ({ ...item }))
         : [];
@@ -13272,8 +13372,19 @@ class WorkbenchWorkflow {
       this.store.saveProject(latest);
     };
     const pendingChunks = chunkSchedules.filter(chunk => !reusableIndices.has(chunk.index));
+    const localFallbackIndices = new Set(
+      [...reusableIndices].filter(index => priorByIndex.get(index)?.data?.localFallback === true)
+    );
     await mapWithConcurrency(pendingChunks, analysisConcurrency, async chunk => {
       this.assertOperationActive(projectId);
+      const localBound = localUploadedAnalysisChunk(chunk, project);
+      partials[chunk.index] = localBound;
+      saveCompletedAnalysisChunk(chunk, {
+        ...localBound,
+        authoredBy: "local-uploaded-script-compiler",
+        localFallback: true,
+        enhancementStatus: "pending"
+      }, 0);
       const ledgerPrompt = sourceDialoguePromptBlock(chunk.sourceDialogueLedger);
       const scenePrompt = sourceScenePromptBlock(chunk.sourceSceneLedger);
       const messages = [
@@ -13297,6 +13408,8 @@ class WorkbenchWorkflow {
           recursiveUnwrap: true,
           sessionId: `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-agent-v4`,
           maxTokens: Math.min(16384, 4096 + chunk.unitCount * 2400),
+          timeoutMs: UPLOADED_ANALYSIS_TIMEOUT_MS,
+          maxReconnectAttempts: 1,
           costOperation: `script_analysis_chunk_${chunk.index + 1}`
         });
         const partial = await this.runAgentSkill("script.analyze_chunk", {
@@ -13319,34 +13432,37 @@ class WorkbenchWorkflow {
         bound = enforceSourceSceneLedger(bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger), chunk.sourceSceneLedger, chunk.sourceDialogueLedger);
       } catch (error) {
         if (isScriptControlError(error)) throw error;
-        const failure = agentCreativeOutputRequired(
-          error,
-          "UPLOADED_SCRIPT_AGENT_RESULT_REQUIRED",
-          `剧本理解 Agent 的第 ${chunk.index + 1}/${chunks.length} 段未通过剧情、人物、场景和对白保真合同，已保留原稿与已完成断点，未使用本地模板拆镜`,
-          { chunkIndex: chunk.index + 1, chunkCount: chunks.length }
-        );
-        const latest = this.store.getProject(projectId);
-        latest.automation = {
-          ...(latest.automation || {}),
-          stage: "script_analysis",
-          message: failure.message,
-          errorCode: failure.code,
-          recoverableFailure: true,
-          updatedAt: new Date().toISOString()
-        };
-        this.store.saveProject(latest);
-        throw failure;
+        bound = localBound;
+        localFallbackIndices.add(chunk.index);
+        saveCompletedAnalysisChunk(chunk, {
+          ...localBound,
+          authoredBy: "local-uploaded-script-compiler",
+          localFallback: true,
+          enhancementStatus: "unavailable",
+          enhancementCauseCode: error?.code || "TEXT_PROVIDER_FAILED"
+        }, requestChars);
       }
       partials[chunk.index] = bound;
-      saveCompletedAnalysisChunk(chunk, { ...bound, authoredBy: "script-understanding-agent", localFallback: false }, requestChars);
+      if (!localFallbackIndices.has(chunk.index)) {
+        saveCompletedAnalysisChunk(chunk, { ...bound, authoredBy: "script-understanding-agent", localFallback: false, enhancementStatus: "completed" }, requestChars);
+      }
       return bound;
     });
+    uploadedAnalysisFallbackSummary = {
+      source: "local-first-agent-enhanced",
+      totalChunks: chunkSchedules.length,
+      localFallbackCount: localFallbackIndices.size,
+      localFallbackChunks: [...localFallbackIndices].sort((left, right) => left - right).map(index => index + 1),
+      promptSlaMs: TEXT_STAGE_SLA_MS,
+      noTotalDeadline: true,
+      completedAt: new Date().toISOString()
+    };
     const data = enforceSourceSceneLedger(mergeAnalysisChunks(partials), productionSceneLedger, sourceDialogueLedger);
     return commitAnalysis(conformImportedAnalysisToDurationContract(
       data,
       project,
       { adaptiveTargetSeconds: filmSchedule.totalSeconds, durationEstimate }
-    ), projectInputMode(project) === "manual" ? "uploaded-script-adaptive-dialogue-ledger-v3" : "ai-duration-contract-dialogue-ledger-v2", chunks.length);
+    ), projectInputMode(project) === "manual" ? "uploaded-script-local-first-agent-enhanced-v4" : "ai-duration-contract-dialogue-ledger-v2", chunks.length);
   }
 
   importAsset(projectId, category, sourcePath, name = "") {
@@ -16702,15 +16818,17 @@ ${shotAnchor}
         basePlan,
         textProvider: settings.textProvider,
         messages: cameraTakeCompilerMessages(project, shot, basePlan),
-        textOptions: {
+        textOptions: this.productionTextOptions(projectId, `director_continuity_${shotId}`, {
           json: true,
           sessionId: `agent-continuity-${projectId}-${shotId}-${fingerprint.slice(0, 12)}`,
           signal: this.operationControls.get(projectId)?.controller?.signal,
+          timeoutMs: PROMPT_COMPILER_TIMEOUT_MS,
+          maxReconnectAttempts: 1,
           costProjectId: projectId,
           costOperation: "agent_camera_take_direction",
           entityType: "shot",
           entityId: shotId
-        }
+        })
       }, { projectId, shotId, stage: "director_continuity_plan" });
     } catch (error) {
       if (isOperationControlError(error)) throw error;
@@ -17445,7 +17563,7 @@ ${shotAnchor}
     // enabled it may receive bounded automatic repair; with audits disabled it
     // compiles exactly once and proceeds without a hidden quality gate.
     const control = this.operationControls.get(projectId);
-    const maxCompileAttempts = promptQualityEnabled ? 4 : 1;
+    const maxCompileAttempts = promptQualityEnabled ? 2 : 1;
     let lastError = null;
     let repairNote = "";
     for (let attempt = 1; attempt <= maxCompileAttempts; attempt += 1) {
@@ -17465,15 +17583,17 @@ ${shotAnchor}
         const raw = await this.generateText(
           settings.textProvider,
           messages,
-          {
+          this.productionTextOptions(projectId, `hailuo_prompt_${shotId}`, {
             json: true,
             sessionId: `hailuo-h3-prompt-${projectId}-${shotId}-${fingerprint.slice(0, 12)}-a${attempt}`,
             signal: control?.controller.signal,
+            timeoutMs: PROMPT_COMPILER_TIMEOUT_MS,
+            maxReconnectAttempts: 1,
             costProjectId: projectId,
             costOperation: "hailuo_prompt_compiler",
             entityType: "shot",
             entityId: shotId
-          }
+          })
         );
         const spec = normalizePromptSpec(raw, shot, fingerprint);
         spec.fingerprint = fingerprint;
@@ -17517,22 +17637,27 @@ ${shotAnchor}
         break;
       }
     }
-    if (!promptQualityEnabled) {
-      const latestProject = this.store.getProject(projectId);
-      const latestShot = latestProject.shots.find(item => item.id === shotId);
-      if (!latestShot) throw Object.assign(new Error("分镜不存在"), { code: "SHOT_NOT_FOUND" });
-      const latestFingerprint = promptFingerprint(latestProject, latestShot, effectiveMode);
-      const fallbackSpec = localUngatedHailuoPromptSpec(latestShot, latestFingerprint, effectiveMode);
-      latestProject.shots = latestProject.shots.map(item => item.id === shotId
-        ? { ...item, hailuoPromptSpec: fallbackSpec }
-        : item);
-      this.store.saveProject(latestProject);
-      this.setAutomation(projectId, {
-        message: `S${String(latestShot.number).padStart(2, "0")} 云端提示词编译不可用，审核已关闭，已改用本地可执行稿继续`
-      });
-      return fallbackSpec;
+    const latestProject = this.store.getProject(projectId);
+    const latestShot = latestProject.shots.find(item => item.id === shotId);
+    if (!latestShot) throw Object.assign(new Error("分镜不存在"), { code: "SHOT_NOT_FOUND" });
+    const latestFingerprint = promptFingerprint(latestProject, latestShot, effectiveMode);
+    let fallbackSpec;
+    try {
+      fallbackSpec = normalizePromptSpec(buildFallbackHailuoPromptSpec(latestShot, { mode: effectiveMode }), latestShot, latestFingerprint);
+    } catch {
+      fallbackSpec = localUngatedHailuoPromptSpec(latestShot, latestFingerprint, effectiveMode, latestShot.hailuoPromptSpec);
     }
-    throw lastError || Object.assign(new Error("海螺英文提示词编译失败"), { code: "HAILUO_H3_PROMPT_SPEC_INVALID" });
+    fallbackSpec.fingerprint = latestFingerprint;
+    fallbackSpec.compileSource = "deterministic-local-preservation";
+    fallbackSpec.compileCauseCode = lastError?.code || "PROMPT_COMPILER_TIMEOUT";
+    latestProject.shots = latestProject.shots.map(item => item.id === shotId
+      ? { ...item, hailuoPromptSpec: fallbackSpec }
+      : item);
+    this.store.saveProject(latestProject);
+    this.setAutomation(projectId, {
+      message: `S${String(latestShot.number).padStart(2, "0")} 云端提示词编译未在预算内完成，已保留完整对白、镜头与参考绑定并改用本地可执行稿继续`
+    });
+    return fallbackSpec;
   }
 
   buildShotPrompt(project, settings, shot, mode, references = this.shotReferences(project, shot, mode), qualityRepair = "", qualityRepairKey = "") {

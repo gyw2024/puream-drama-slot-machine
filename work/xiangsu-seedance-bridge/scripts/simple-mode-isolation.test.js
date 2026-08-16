@@ -78,6 +78,7 @@ test("first-run mode choice, later switching, H3 lock and Simple allowlist are a
   const selector = fs.readFileSync(path.join(root, "app", "renderer", "mode-selector.html"), "utf8");
   const simple = fs.readFileSync(path.join(root, "app", "renderer", "simple-mode.html"), "utf8");
   const simpleJs = fs.readFileSync(path.join(root, "app", "renderer", "simple-mode.js"), "utf8");
+  const simpleCss = fs.readFileSync(path.join(root, "app", "renderer", "simple-mode.css"), "utf8");
   const agent = fs.readFileSync(path.join(root, "app", "renderer", "workbench.html"), "utf8");
 
   assert.match(main, /modeState\.selected[\s\S]*workspaceModePage\(modeState\.mode\)[\s\S]*mode-selector\.html/);
@@ -93,8 +94,50 @@ test("first-run mode choice, later switching, H3 lock and Simple allowlist are a
   assert.match(simple, /共享资产库/);
   assert.match(simple, /settingsSwitchSimpleMode|switchAgent/);
   assert.doesNotMatch(simple, /local-xiangsu|puream-seedance/);
+  assert.match(simple, /id="textProviderKind"/);
+  assert.match(simple, /id="textApiKey"/);
+  assert.match(simple, /id="textBaseUrl"/);
+  assert.match(simple, /id="textModel"/);
+  assert.match(simple, /id="textMaxTokens"/);
+  assert.doesNotMatch(simple, /id="generateTopics"|id="generateScript"|id="rewriteScript"|id="topicList"|value="ai"/);
   assert.match(simpleJs, /stageState\(project\)/);
   assert.match(simpleJs, /任务没有总时限/);
+  assert.match(simpleJs, /inputMode:\s*"manual"/);
+  assert.match(simpleJs, /api\("runFullPipeline", state\.project\.id\)/);
+  assert.match(simpleJs, /请先上传或粘贴完整剧本，再开始制作/);
+  assert.doesNotMatch(simpleJs, /runIdeaPipeline|generateTopics|generateCompleteScript|rewriteDialogueScript/);
+  assert.match(simpleJs, /textProviderProfiles:[\s\S]*\[textProvider\.kind\]: textProvider/);
+  assert.match(simpleJs, /api\("testProvider", "text", readTextProviderForm\(\)\)/);
+  assert.match(simpleCss, /\.hidden\s*\{\s*display:\s*none\s*!important/);
   assert.match(agent, /id="switchSimpleMode"/);
   assert.match(agent, /id="settingsSwitchSimpleMode"/);
+});
+
+test("custom text-provider profiles persist API key, endpoint, model and token budget", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "puream-simple-provider-"));
+  try {
+    const store = new WorkbenchStore(tempRoot, secretCodec());
+    const settings = store.getSettings();
+    const custom = {
+      kind: "openai-compatible",
+      baseUrl: "https://provider.example/v1",
+      apiKey: "test-only-key",
+      model: "provider-model",
+      maxTokens: 32768,
+      authSource: "user"
+    };
+    store.saveSettings({
+      ...settings,
+      textProvider: custom,
+      textProviderProfiles: { ...settings.textProviderProfiles, "openai-compatible": custom }
+    });
+    const saved = store.getSettings();
+    assert.deepEqual(saved.textProvider, { ...saved.textProvider, ...custom });
+    assert.equal(saved.textProviderProfiles["openai-compatible"].apiKey, "test-only-key");
+    assert.equal(saved.textProviderProfiles["openai-compatible"].baseUrl, custom.baseUrl);
+    assert.equal(saved.textProviderProfiles["openai-compatible"].model, custom.model);
+    assert.equal(saved.textProviderProfiles["openai-compatible"].maxTokens, custom.maxTokens);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
