@@ -13810,9 +13810,10 @@ ${shotAnchor}
         settings.videoProvider?.hailuoApiMode,
         agentReferences.audios.length > 0
       );
-      agentBundle = await this.prepareHailuoAgentShotTakes(projectId, project, shot, settings, mode, agentReferences);
-      project = annotateProjectShotStrategies(this.store.getProject(projectId));
-      shot = project.shots.find(item => item.id === shotId);
+      // Preview compiles the complete provider prompt contract without
+      // requiring generated character/scene/storyboard files. Asset presence
+      // is enforced later at paid submission, where take-sheet preparation is
+      // actually needed.
     }
     const strategy = resolveShotVideoStrategy(project, shot);
     const references = agentReferences || this.shotReferences(project, shot, mode);
