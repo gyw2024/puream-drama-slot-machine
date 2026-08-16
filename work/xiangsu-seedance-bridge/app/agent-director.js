@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 const { parseCompiledDialogueSegments } = require("./dialogue-parser");
 
-const AGENT_DIRECTOR_VERSION = "2026.08.15-continuity-block-v4";
+const AGENT_DIRECTOR_VERSION = "2026.08.16-narrative-frame-lock-v6";
 const HAILUO_TAKE_PROMPT_LIMIT = 1900;
 const HAILUO_BLOCK_PROMPT_LIMIT = HAILUO_TAKE_PROMPT_LIMIT;
 const HAILUO_MAX_BLOCK_SECONDS = 15;
@@ -17,11 +17,24 @@ const REQUIRED_HAILUO_SECTIONS = Object.freeze([
   "overall_soundscape:",
   "non_diegetic_music:"
 ]);
-const FINAL_OUTPUT_LOCK = "FINAL OUTPUT LOCK: dialogue+room tone+visible SFX only; NO music/BGM, subtitles/text/UI/watermarks/logos, narration, intros/bios, asset/multi-view boards.";
+const FINAL_OUTPUT_LOCK = "FINAL OUTPUT LOCK: live story at frame 1; refs stay offscreen. Dialogue+room tone+SFX only. NO BGM, subtitles/text/UI/logos, narration, intros, portraits or asset boards.";
 const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
 
 function clean(value) {
   return String(value || "").replace(/\r/g, "").trim();
+}
+
+function withGenerationBlockTechnicalRepair(prompt, repairDirective = "", retryKey = "") {
+  const source = clean(prompt);
+  if (!clean(repairDirective)) return source;
+  const repairId = crypto.createHash("sha256")
+    .update(`${clean(repairDirective)}\u0000${clean(retryKey)}`)
+    .digest("hex")
+    .slice(0, 12);
+  const directive = `TECHNICAL REPAIR ${repairId}: render live story action in a full-frame 9:16 set at every instant; use direct hard cuts only; never expose white/black canvas edges, wipes, blank frames, neutral portraits, identity pictures, split boards or reference panels.`;
+  return source.includes(FINAL_OUTPUT_LOCK)
+    ? source.replace(FINAL_OUTPUT_LOCK, `${directive}\n\n${FINAL_OUTPUT_LOCK}`)
+    : `${source}\n\n${directive}`.trim();
 }
 
 function list(value) {
@@ -61,12 +74,29 @@ function characterName(project, value) {
   return clean(record?.name || value);
 }
 
+function speakerToken(value) {
+  const raw = clean(value);
+  const offscreen = /(?:画外(?:音)?|\bO\.?\s*S\.?\b|off[- ]?screen)/i.test(raw);
+  const canonical = raw
+    .replace(/[（(【\[]?\s*(?:画外(?:音)?|O\.?\s*S\.?|off[- ]?screen)\s*[）)】\]]?/gi, "")
+    .replace(/[·•\s]+$/g, "")
+    .trim();
+  return { raw, canonical: canonical || raw, offscreen };
+}
+
+function dialogueText(value) {
+  return clean(value)
+    .replace(/^[\s'"“”‘’「」『』]+/, "")
+    .replace(/[\s'"“”‘’「」『』]+$/, "")
+    .trim();
+}
+
 function normalizeTurn(project, turn, subshotNumber, sourceIndex) {
   const source = turn && typeof turn === "object" ? turn : {};
-  const speakerToken = source.speakerId || source.characterId || source.speaker;
-  const speakerId = characterId(project, speakerToken);
-  const speakerName = characterName(project, speakerToken);
-  const text = clean(source.spokenText || source.text || source.dialogue);
+  const token = speakerToken(source.speakerId || source.characterId || source.speaker);
+  const speakerId = characterId(project, token.canonical);
+  const speakerName = characterName(project, token.canonical);
+  const text = dialogueText(source.spokenText || source.text || source.dialogue);
   if (!speakerId || !text) return null;
   const listenerIds = unique(source.listenerIds || source.listeners).map(item => characterId(project, item));
   const metadata = source.metadata && typeof source.metadata === "object" ? { ...source.metadata } : {};
@@ -80,10 +110,85 @@ function normalizeTurn(project, turn, subshotNumber, sourceIndex) {
     speakerName,
     listenerIds,
     text,
-    onScreen: source.onScreen !== false,
+    onScreen: source.onScreen !== false && !token.offscreen,
     subshotNumber: Math.max(1, Math.round(Number(source.subshotNumber) || Number(subshotNumber) || 1)),
     metadata
   };
+}
+
+function quotedDialogue(value = "") {
+  const source = clean(value);
+  const quoted = [...source.matchAll(/[\u201c\u2018\u300c\u300e'"]([^\u201d\u2019\u300d\u300f'"]+)[\u201d\u2019\u300d\u300f'"]/g)]
+    .map(match => clean(match[1]))
+    .filter(Boolean);
+  if (quoted.length) return quoted.join("");
+  return "";
+}
+
+function subshotSpeakerTokens(project, subshot = {}, names = []) {
+  const tokens = unique([
+    ...list(subshot?.speakerIds),
+    ...list(subshot?.offscreenSpeakerIds),
+    ...list(subshot?.dialogueTurns).flatMap(turn => [turn?.speakerId, turn?.characterId, turn?.speaker])
+  ]).map(value => characterId(project, speakerToken(value).canonical)).filter(Boolean);
+  if (tokens.length) return tokens;
+  return unique(parseCompiledDialogueSegments(subshot?.dialogue, names)
+    .map(turn => characterId(project, speakerToken(turn?.speakerId || turn?.speaker).canonical)))
+    .filter(Boolean);
+}
+
+function subshotDialogueAnchor(project, subshot = {}, speakerId = "", names = []) {
+  const authored = list(subshot?.dialogueTurns)
+    .map(turn => normalizeTurn(project, turn, 1, 0))
+    .find(turn => turn?.speakerId === speakerId && turn?.text);
+  if (authored?.text) return authored.text;
+  const parsed = parseCompiledDialogueSegments(subshot?.dialogue, names)
+    .map(turn => normalizeTurn(project, turn, 1, 0))
+    .find(turn => turn?.speakerId === speakerId && turn?.text);
+  const quoted = quotedDialogue(subshot?.dialogue);
+  return quoted || parsed?.text || "";
+}
+
+/**
+ * A source utterance may continue across several camera cuts. Models often
+ * repeat the tail in every subshot (for example a stressed phrase), which must
+ * never become repeated speech. Derive non-overlapping fragments from the
+ * immutable shot-level line; concatenating the fragments is byte-for-byte the
+ * original utterance. Performance notes remain metadata, never spoken text.
+ */
+function exactCameraDialogueSegments(project, shot, turn, names = []) {
+  const base = normalizeTurn(project, turn, turn?.subshotNumber || 1, 0);
+  if (!base?.text) return [];
+  const subshots = list(shot?.subshots);
+  if (subshots.length < 2) return [{ ...turn, text: base.text, spokenText: base.text, subshotNumber: base.subshotNumber }];
+  const startIndex = Math.max(0, Math.min(subshots.length - 1, base.subshotNumber - 1));
+  const anchors = [];
+  for (let index = startIndex; index < subshots.length; index += 1) {
+    const subshot = subshots[index];
+    const speakers = subshotSpeakerTokens(project, subshot, names);
+    if (index > startIndex && speakers.length && !speakers.includes(base.speakerId)) break;
+    if (index > startIndex && !speakers.includes(base.speakerId)) break;
+    const fragment = subshotDialogueAnchor(project, subshot, base.speakerId, names);
+    if (!fragment) continue;
+    const offset = base.text.indexOf(fragment);
+    if (offset < 0) continue;
+    anchors.push({ subshotNumber: index + 1, offset });
+  }
+  const ordered = anchors
+    .filter((item, index) => index === 0 || item.offset > anchors[index - 1].offset)
+    .filter((item, index, listValue) => index === 0 || item.subshotNumber > listValue[index - 1].subshotNumber);
+  if (ordered.length < 2 || ordered[0].offset !== 0) {
+    return [{ ...turn, text: base.text, spokenText: base.text, subshotNumber: base.subshotNumber }];
+  }
+  const segments = ordered.map((item, index) => ({
+    ...turn,
+    text: base.text.slice(item.offset, ordered[index + 1]?.offset ?? base.text.length),
+    spokenText: base.text.slice(item.offset, ordered[index + 1]?.offset ?? base.text.length),
+    subshotNumber: item.subshotNumber,
+    sourceSegmentIndex: index + 1,
+    sourceSegmentCount: ordered.length
+  })).filter(item => item.text);
+  return segments.map((item, index) => ({ ...item, sourceSegmentCount: segments.length, sourceSegmentIndex: index + 1 }));
 }
 
 /** Canonical dialogue order used by the Agent camera-take planner. */
@@ -98,6 +203,15 @@ function cameraDialogueTurns(project = {}, shot = {}) {
     parseCompiledDialogueSegments(shot.videoPromptDialogueOverride, names).forEach(turn => push(turn, 1));
     return result;
   }
+  // The shot-level list is the canonical utterance ledger. Subshot dialogue is
+  // camera/performance annotation and may contain overlapping fragments.
+  if (list(shot.dialogueTurns).length) {
+    list(shot.dialogueTurns).forEach(turn => {
+      exactCameraDialogueSegments(project, shot, turn, names)
+        .forEach(segment => push(segment, segment?.subshotNumber || turn?.subshotNumber || 1));
+    });
+    return result;
+  }
   const subshots = list(shot.subshots);
   const subshotOwnsDialogue = subshots.some(item => list(item?.dialogueTurns).length || clean(item?.dialogue));
   if (subshotOwnsDialogue) {
@@ -105,10 +219,6 @@ function cameraDialogueTurns(project = {}, shot = {}) {
       if (list(subshot?.dialogueTurns).length) list(subshot.dialogueTurns).forEach(turn => push(turn, index + 1));
       else parseCompiledDialogueSegments(subshot?.dialogue, names).forEach(turn => push(turn, index + 1));
     });
-    return result;
-  }
-  if (list(shot.dialogueTurns).length) {
-    list(shot.dialogueTurns).forEach(turn => push(turn, turn?.subshotNumber || 1));
     return result;
   }
   parseCompiledDialogueSegments(shot.dialogue, names).forEach(turn => push(turn, 1));
@@ -174,8 +284,11 @@ function groupConsecutiveTurns(turns) {
 function defaultCameraOwner(project, shot, subshot, turn = null) {
   if (turn?.onScreen !== false && turn?.speakerId) return turn.speakerId;
   return turn?.listenerIds?.[0]
-    || characterId(project, shot.focusCharacterId)
+    // A subshot's explicit visible cast owns its camera. Shot-level focus is
+    // only a fallback; otherwise a silent reaction can point the camera at a
+    // person who is explicitly absent from that subshot.
     || characterId(project, subshot?.visibleCharacterIds?.[0])
+    || characterId(project, shot.focusCharacterId)
     || characterId(project, shot.visibleCharacterIds?.[0])
     || characterId(project, shot.characterIds?.[0]);
 }
@@ -542,6 +655,32 @@ function performanceDirectionFailures(value, takeId = "take") {
   return requirements.filter(([pattern]) => !pattern.test(source)).map(([, label]) => `${takeId}.performanceEn missing ${label}`);
 }
 
+function invalidDirectorDraftSnapshot(payload = {}) {
+  const clipped = (value, maxLength = 600) => clean(value).slice(0, maxLength);
+  return {
+    takes: list(payload.takes).slice(0, 40).map(item => ({
+      id: clipped(item?.id, 80),
+      cameraOwnerId: clipped(item?.cameraOwnerId, 80),
+      mouthOwnerId: clipped(item?.mouthOwnerId, 80),
+      onScreenSpeaker: item?.onScreenSpeaker,
+      styleEn: clipped(item?.styleEn),
+      visualEn: clipped(item?.visualEn),
+      cameraEn: clipped(item?.cameraEn),
+      performanceEn: clipped(item?.performanceEn),
+      listenerReactionEn: clipped(item?.listenerReactionEn),
+      soundEn: clipped(item?.soundEn)
+    })),
+    generationBlocks: list(payload.generationBlocks).slice(0, 20).map(item => ({
+      id: clipped(item?.id, 80),
+      takeIds: list(item?.takeIds).slice(0, 40).map(value => clipped(value, 80)),
+      strategy: clipped(item?.strategy, 80),
+      continuityEn: clipped(item?.continuityEn),
+      transitionEn: clipped(item?.transitionEn),
+      reasonEn: clipped(item?.reasonEn)
+    }))
+  };
+}
+
 function mergeAgentTakeDraft(basePlan, raw, project = {}, shot = {}, options = {}) {
   const payload = raw && typeof raw === "object" ? raw : {};
   const drafted = list(payload.takes);
@@ -637,7 +776,11 @@ function mergeAgentTakeDraft(basePlan, raw, project = {}, shot = {}, options = {
   if (failures.length) {
     throw Object.assign(new Error(`Agent continuity direction is invalid: ${failures.join("; ")}`), {
       code: "AGENT_CONTINUITY_DIRECTION_INVALID",
-      failures
+      failures,
+      // The Agent must repair its own creative draft. Preserve only the
+      // director schema (bounded and stripped of unrelated provider data) so
+      // the next turn can make a surgical correction instead of guessing.
+      invalidDraft: invalidDirectorDraftSnapshot(payload)
     });
   }
   return merged;
@@ -804,10 +947,12 @@ function filterReferencesForGenerationBlock(references = {}, block = {}, options
       images.push(options.blockSheetPath);
       imageRoles.push({
         ...role,
-        type: "storyboard_generation_block_sheet",
+        type: options.blockSheetSinglePanel === true ? "storyboard_panel_anchor" : "storyboard_generation_block_sheet",
         path: options.blockSheetPath,
         remoteUrl: "",
-        label: `${block.id} ordered story timeline; panels map to timed shots and are never shown as a grid`,
+        label: options.blockSheetSinglePanel === true
+          ? `${block.id} clean live-story opening anchor; never show as an asset or introduction`
+          : `${block.id} ordered story timeline; panels map to timed shots and are never shown as a grid`,
         parentFilePath: filePath,
         panelIndices: [...list(block.panelIndices)]
       });
@@ -867,6 +1012,9 @@ function blockReferenceBindings(block, references) {
     } else if (["storyboard_generation_block_sheet", "storyboard_take_sheet", "storyboard_sheet"].includes(type)) {
       definitions.push(`${picture}: ordered shots; never render grid.`);
       retentions.push(`${picture}: preserve shot order and framing.`);
+    } else if (type === "storyboard_panel_anchor") {
+      definitions.push(`${picture}: clean live-story frame anchor; never render as a still, board, introduction, or UI.`);
+      retentions.push(`${picture}: preserve scene continuity only.`);
     } else if (type === "storyboard_start") {
       definitions.push(`${picture}: exact opening frame.`);
       retentions.push(`${picture}: fully_preserved opening.`);
@@ -1230,6 +1378,7 @@ function takeShotForValidation(shot = {}, take = {}) {
 module.exports = {
   AGENT_DIRECTOR_VERSION,
   FINAL_OUTPUT_LOCK,
+  withGenerationBlockTechnicalRepair,
   HAILUO_BLOCK_PROMPT_LIMIT,
   HAILUO_MAX_BLOCK_AUDIO_REFERENCES,
   HAILUO_MAX_BLOCK_SECONDS,

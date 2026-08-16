@@ -628,7 +628,30 @@ class DramaLicenseClient {
     this.heartbeatTimer = null;
   }
 
-  async acquireLease(kind, taskId, meta = {}) {
+  async waitForLeaseRetry(milliseconds, signal = null) {
+    if (!signal) return this.leaseRetrySleep(milliseconds);
+    if (signal.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : Object.assign(new Error("生产任务已取消"), { code: "LEASE_ACQUIRE_ABORTED" });
+    }
+    let abortListener;
+    try {
+      await Promise.race([
+        Promise.resolve(this.leaseRetrySleep(milliseconds)),
+        new Promise((_, reject) => {
+          abortListener = () => reject(signal.reason instanceof Error
+            ? signal.reason
+            : Object.assign(new Error("生产任务已取消"), { code: "LEASE_ACQUIRE_ABORTED" }));
+          signal.addEventListener("abort", abortListener, { once: true });
+        })
+      ]);
+    } finally {
+      if (abortListener) signal.removeEventListener("abort", abortListener);
+    }
+  }
+
+  async acquireLease(kind, taskId, meta = {}, options = {}) {
     const normalizedKind = String(kind || "").trim().toLowerCase();
     if (!["image", "video"].includes(normalizedKind)) {
       throw Object.assign(new Error("kind 必须是 image 或 video"), { code: "BAD_KIND" });
@@ -640,9 +663,18 @@ class DramaLicenseClient {
         { code: "CONCURRENCY_AUTHORITY_OFFLINE" }
       );
     }
-    const started = Date.now();
     let transportFailures = 0;
-    while (Date.now() - started < 30 * 60_000) {
+    const signal = options?.signal || null;
+    // The administrator owns concurrency, but a queue position is not a
+    // failure.  Production work has no wall-clock deadline: keep the same
+    // task/idempotency key queued until a slot opens or the user explicitly
+    // pauses/stops the operation.
+    for (;;) {
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : Object.assign(new Error("生产任务已取消"), { code: "LEASE_ACQUIRE_ABORTED" });
+      }
       try {
         const data = await this.request("/api/lease/acquire", {
           method: "POST",
@@ -658,14 +690,8 @@ class DramaLicenseClient {
       } catch (error) {
         if (error.code === "LICENSE_OFFLINE") {
           transportFailures += 1;
-          if (transportFailures <= 3) {
-            await this.leaseRetrySleep(transportFailures * 1000);
-            continue;
-          }
-          throw Object.assign(
-            new Error("管理后台并发控制服务暂时不可用，已停止新的生成任务，请稍后重试"),
-            { code: "CONCURRENCY_AUTHORITY_OFFLINE", cause: error }
-          );
+          await this.waitForLeaseRetry(Math.min(30_000, transportFailures * 1000), signal);
+          continue;
         }
         if (["SESSION_EXPIRED", "UNAUTHORIZED"].includes(String(error.code || ""))) {
           await this.autoRelogin(error);
@@ -673,10 +699,9 @@ class DramaLicenseClient {
           continue;
         }
         if (error.code !== "QUEUE" && error.status !== 429) throw error;
-        await this.leaseRetrySleep(2500);
+        await this.waitForLeaseRetry(2500, signal);
       }
     }
-    throw Object.assign(new Error("排队等待超时，请稍后重试"), { code: "QUEUE_TIMEOUT" });
   }
 
   async acquireOfflineLease(kind, taskId, meta = {}) {

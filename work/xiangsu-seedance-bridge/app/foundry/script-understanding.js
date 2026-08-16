@@ -4,6 +4,8 @@ const { detectUploadedScriptFormat, parseSourceDialogueLedger } = require("../di
 const { bindDialogueLedgerToScenes, buildSourceSceneLedger } = require("../script-scene-ledger");
 const { fingerprint } = require("./canonical");
 
+const SCRIPT_UNDERSTANDING_VERSION = "foundry.script-understanding.v2";
+
 const STORY_KEYWORDS = Object.freeze({
   hook: /(?:突然|当众|摔|抢|砸|推|赶|拦|跪|不许|威胁|质问|失踪|出事|倒下|第一镜|开场|前\s*\d+秒)/i,
   escalation: /(?:又|更|再次|逼|拒绝|封锁|争执|冲突|误会|不承认|证据不足|限时|最后通牒)/i,
@@ -124,7 +126,7 @@ function buildScriptUnderstanding(sourceValue = "", project = {}, options = {}) 
   if (!dialogueLedger.length && !["prose", "json"].includes(format)) unknowns.push({ id: "dialogue", severity: "medium", message: "当前格式似乎包含对白，但本地未提取到对白账本", resolution: "model_extract_then_parity_check" });
   const foundBeatCount = Object.values(beats).filter(item => item.found).length;
   return {
-    version: "foundry.script-understanding.v1",
+    version: SCRIPT_UNDERSTANDING_VERSION,
     sourceFingerprint,
     analyzedAt: String(options.now || new Date().toISOString()),
     format: { detected: format, confidence: format === "prose" ? "medium" : format === "empty" ? "none" : "high" },
@@ -166,4 +168,4 @@ function buildScriptUnderstanding(sourceValue = "", project = {}, options = {}) 
   };
 }
 
-module.exports = { buildScriptUnderstanding, normalizeSource, storyBeatEvidence };
+module.exports = { SCRIPT_UNDERSTANDING_VERSION, buildScriptUnderstanding, normalizeSource, storyBeatEvidence };

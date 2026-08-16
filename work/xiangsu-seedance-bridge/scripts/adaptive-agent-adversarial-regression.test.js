@@ -93,6 +93,31 @@ test("agent skills validate, repair and retry creative structure without duplica
   assert.equal(calls, 2);
 });
 
+test("agent skill boundary preserves provider recovery metadata", async () => {
+  const agent = new AdaptiveProductionAgent()
+    .registerAdapter("video_submit", "default", async payload => {
+      throw Object.assign(new Error("操作频繁，请稍后重试"), {
+        code: "SEEDANCE_SUBMISSION_BUSY",
+        retryable: true,
+        clientRequestId: payload.clientRequestId,
+        status: "rejected_before_task"
+      });
+    })
+    .registerSkill("provider.video_submit", {
+      capability: "video_submit",
+      platform: "default",
+      maxAttempts: 1
+    });
+
+  await assert.rejects(
+    () => agent.runSkill("provider.video_submit", { clientRequestId: "stable-1" }),
+    error => error.code === "SEEDANCE_SUBMISSION_BUSY"
+      && error.retryable === true
+      && error.clientRequestId === "stable-1"
+      && error.status === "rejected_before_task"
+  );
+});
+
 test("workflow owns one adaptive agent and can route an arbitrary API adapter", async () => {
   const project = { id: "P01", script: { raw: "" }, shots: [], productionPlan: { commerceShotCount: 6 }, product: { name: "sample" } };
   const workflow = new WorkbenchWorkflow({

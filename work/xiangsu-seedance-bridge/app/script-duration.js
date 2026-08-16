@@ -50,6 +50,93 @@ function estimateFallbackNarrationSeconds(script = "") {
   return spoken + punctuationPauseSeconds(source) + lineBeats;
 }
 
+/**
+ * Extract user-authored shot ranges without inventing narrative structure.
+ * These ranges are source facts (like exact dialogue), not AI rhythm hints.
+ * A plan is complete only when shot numbers are consecutive from 1, so a
+ * partial example embedded in a longer document cannot lock unrelated units.
+ */
+function explicitShotTimelinePlan(script = "", providerKind = "", options = {}) {
+  const source = String(script || "").replace(/\r\n?/g, "\n");
+  if (!source.trim()) return null;
+  const matches = [...source.matchAll(/(?:^|\n)\s*(?:S(?:HOT)?\s*0*(\d+)|分镜\s*0*(\d+)|镜头\s*0*(\d+))[^\n]{0,160}?(\d+(?:\.\d+)?)\s*[-–—~～至到]\s*(\d+(?:\.\d+)?)\s*秒/giu)];
+  const ranges = matches.map(match => {
+    const shotNumber = Number(match[1] || match[2] || match[3]);
+    const start = Number(match[4]);
+    const end = Number(match[5]);
+    return {
+      shotNumber,
+      start,
+      end,
+      duration: Number((end - start).toFixed(3)),
+      sourceIndex: Number(match.index) || 0
+    };
+  }).filter(item => Number.isFinite(item.shotNumber)
+    && item.shotNumber > 0
+    && Number.isFinite(item.start)
+    && Number.isFinite(item.end)
+    && item.end > item.start);
+  if (!ranges.length) return null;
+  const unique = [];
+  const seen = new Set();
+  for (const range of ranges) {
+    if (seen.has(range.shotNumber)) continue;
+    seen.add(range.shotNumber);
+    unique.push(range);
+  }
+  unique.sort((left, right) => left.shotNumber - right.shotNumber || left.sourceIndex - right.sourceIndex);
+  const complete = unique.every((item, index) => item.shotNumber === index + 1);
+  const requestedDurations = unique.map(item => item.duration);
+  const contract = durationContract(providerKind, options);
+  const normalizedDurations = requestedDurations.map(value => normalizeTargetDurationSeconds(value, contract));
+  const providerCompatible = normalizedDurations.every((value, index) => Math.abs(value - requestedDurations[index]) < 0.001);
+  const localTimelines = unique.length > 1 && unique.every(item => Math.abs(item.start) < 0.001);
+  const rangeSeconds = localTimelines
+    ? requestedDurations.reduce((sum, value) => sum + value, 0)
+    : Math.max(...unique.map(item => item.end));
+  return {
+    ranges: unique,
+    rangeCount: unique.length,
+    complete,
+    localTimelines,
+    requestedDurations,
+    normalizedDurations,
+    providerCompatible,
+    rangeSeconds: Number(rangeSeconds.toFixed(3))
+  };
+}
+
+function explicitTimelineDurationTarget(script = "", providerKind = "", options = {}) {
+  const source = String(script || "").replace(/\r\n?/g, "\n");
+  if (!source.trim()) return null;
+
+  const declared = source.match(/(?:全片|剧总时长|总时长|成片时长)\s*(?:约|大约|为|[:：=])*\s*(\d+(?:\.\d+)?)\s*(分钟|分|秒)/i);
+  const declaredSeconds = declared
+    ? Number(declared[1]) * (/分钟|分/.test(declared[2]) ? 60 : 1)
+    : 0;
+  const shotTimeline = explicitShotTimelinePlan(source, providerKind, options);
+  const rangeSeconds = Number(shotTimeline?.rangeSeconds) || 0;
+  // A complete per-shot ledger is more specific than a rounded/approximate total.
+  // Partial ledgers keep using the declared whole-film duration.
+  const requestedSeconds = shotTimeline?.complete && shotTimeline.rangeCount > 1
+    ? rangeSeconds
+    : (declaredSeconds > 0 ? declaredSeconds : rangeSeconds);
+  if (!Number.isFinite(requestedSeconds) || requestedSeconds <= 0) return null;
+  return {
+    mode: "uploaded-script-explicit-timeline",
+    targetSeconds: representableTargetSeconds(requestedSeconds, providerKind, options),
+    requestedSeconds: Number(requestedSeconds.toFixed(3)),
+    declaredSeconds: declaredSeconds > 0 ? Number(declaredSeconds.toFixed(3)) : 0,
+    rangeSeconds: rangeSeconds > 0 ? Number(rangeSeconds.toFixed(3)) : 0,
+    rangeCount: shotTimeline?.rangeCount || 0,
+    authoredShotRanges: shotTimeline?.ranges || [],
+    requestedDurations: shotTimeline?.requestedDurations || [],
+    normalizedDurations: shotTimeline?.normalizedDurations || [],
+    authoredShotDurationsLocked: Boolean(shotTimeline?.complete && shotTimeline?.providerCompatible),
+    declaredRangeMismatch: Boolean(declaredSeconds > 0 && rangeSeconds > 0 && Math.abs(declaredSeconds - rangeSeconds) >= 0.001)
+  };
+}
+
 function representableTargetSeconds(rawSeconds, providerKind = "", options = {}) {
   const contract = durationContract(providerKind, options);
   const min = Number(contract.min) || 5;
@@ -100,6 +187,17 @@ function estimateUploadedScriptDuration(script, dialogueLedger = [], providerKin
     : 0;
   const fallbackSeconds = ledger.length ? 0 : estimateFallbackNarrationSeconds(script);
   const estimatedSeconds = Math.max(0, spokenSeconds + transitionSeconds + fallbackSeconds);
+  const explicitTimeline = explicitTimelineDurationTarget(script, providerKind, options);
+  if (explicitTimeline) {
+    return {
+      ...explicitTimeline,
+      estimatedSeconds: explicitTimeline.requestedSeconds,
+      dialogueTurns: ledger.length,
+      spokenSeconds: Number(spokenSeconds.toFixed(3)),
+      transitionSeconds: Number(transitionSeconds.toFixed(3)),
+      turnSeconds
+    };
+  }
   const targetSeconds = representableTargetSeconds(estimatedSeconds, providerKind, options);
   return {
     mode: "uploaded-script-adaptive",
@@ -113,6 +211,8 @@ function estimateUploadedScriptDuration(script, dialogueLedger = [], providerKin
 }
 
 module.exports = {
+  explicitShotTimelinePlan,
+  explicitTimelineDurationTarget,
   estimateSpokenTurnSeconds,
   estimateUploadedScriptDuration,
   explicitShotDurationTarget,

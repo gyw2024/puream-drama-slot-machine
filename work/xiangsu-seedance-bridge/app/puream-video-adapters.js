@@ -276,7 +276,7 @@ function safeOssObjectSegment(value) {
   return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 32);
 }
 
-async function uploadReferenceToOss(config, filePath, requestId, mediaType, index, fetchImpl, fsImpl) {
+async function uploadReferenceToOss(config, filePath, requestId, mediaType, index, fetchImpl, fsImpl, signal = null) {
   const extension = path.extname(filePath).toLowerCase();
   const contentType = MIME_BY_EXTENSION[extension] || "application/octet-stream";
   const objectKey = `puream-drama-references/${new Date().toISOString().slice(0, 10)}/${safeOssObjectSegment(requestId)}/${safeOssObjectSegment(mediaType).slice(0, 12)}-${String(index + 1).padStart(2, "0")}${extension || ".bin"}`;
@@ -292,13 +292,13 @@ async function uploadReferenceToOss(config, filePath, requestId, mediaType, inde
     },
     body: await openUploadBody(fsImpl, filePath, contentType),
     redirect: "error",
-    signal: AbortSignal.timeout(600_000)
+    ...(signal ? { signal } : {})
   });
   if (!response.ok) throw Object.assign(new Error(`参考素材上传 OSS 失败：HTTP ${response.status}`), { code: "OSS_REFERENCE_UPLOAD_FAILED", status: response.status });
   return createOssReadUrl(config, objectKey, config.referenceUrlTtlSeconds);
 }
 
-async function uploadReferenceToManaged(config, filePath, requestId, mediaType, fetchImpl, fsImpl) {
+async function uploadReferenceToManaged(config, filePath, requestId, mediaType, fetchImpl, fsImpl, signal = null) {
   const endpoint = `${String(config.managedStorageBaseUrl || "https://puream.cn").replace(/\/$/, "")}/api/desktop/media/upload`;
   const apiKey = String(config.apiKey || "").trim().replace(/^puream-desktop:/i, "").trim();
   const response = await fetchImpl(endpoint, {
@@ -312,7 +312,7 @@ async function uploadReferenceToManaged(config, filePath, requestId, mediaType, 
     },
     body: await openUploadBody(fsImpl, filePath, MIME_BY_EXTENSION[path.extname(filePath).toLowerCase()] || "application/octet-stream"),
     redirect: "error",
-    signal: AbortSignal.timeout(600_000)
+    ...(signal ? { signal } : {})
   });
   const data = await response.json().catch(() => ({}));
   const url = data.url || data.publicUrl || data.data?.url || data.data?.publicUrl || "";
@@ -330,7 +330,7 @@ async function uploadReferenceToManaged(config, filePath, requestId, mediaType, 
   return assertPublicReferenceUrl(url);
 }
 
-async function resolveReferenceUrl(config, item, fetchImpl, requestId, mediaType, index, fsImpl) {
+async function resolveReferenceUrl(config, item, fetchImpl, requestId, mediaType, index, fsImpl, signal = null) {
   if (item?.url) return assertPublicReferenceUrl(item.url);
   const filePath = String(item?.path || "");
   if (!filePath || !path.isAbsolute(filePath) || !fsImpl.existsSync(filePath)) {
@@ -339,18 +339,18 @@ async function resolveReferenceUrl(config, item, fetchImpl, requestId, mediaType
   validateProviderConfig(config, { hasLocalMedia: true });
   if (config.storageMode === "managed") {
     try {
-      return await uploadReferenceToManaged(config, filePath, requestId, mediaType, fetchImpl, fsImpl);
+      return await uploadReferenceToManaged(config, filePath, requestId, mediaType, fetchImpl, fsImpl, signal);
     } catch (error) {
       if (hasDirectOssCredentials(config)) {
-        return uploadReferenceToOss(config, filePath, requestId, mediaType, index, fetchImpl, fsImpl);
+        return uploadReferenceToOss(config, filePath, requestId, mediaType, index, fetchImpl, fsImpl, signal);
       }
       throw error;
     }
   }
-  return uploadReferenceToOss(config, filePath, requestId, mediaType, index, fetchImpl, fsImpl);
+  return uploadReferenceToOss(config, filePath, requestId, mediaType, index, fetchImpl, fsImpl, signal);
 }
 
-async function buildCloudSubmit(config, payload, fetchImpl, fsImpl) {
+async function buildCloudSubmit(config, payload, fetchImpl, fsImpl, options = {}) {
   const effectivePayload = config.kind === "puream-hailuo-h3"
     ? { ...payload, hailuoApiMode: payload.hailuoApiMode || payload.mode || config.hailuoApiMode }
     : payload;
@@ -359,7 +359,7 @@ async function buildCloudSubmit(config, payload, fetchImpl, fsImpl) {
   const requestId = String(payload.clientRequestId || crypto.randomUUID());
   const limitUpload = createConcurrencyLimiter(3);
   const resolveMany = (items, type) => Promise.all(items.map((item, index) => item
-    ? limitUpload(() => resolveReferenceUrl(config, item, fetchImpl, requestId, type, index, fsImpl))
+    ? limitUpload(() => resolveReferenceUrl(config, item, fetchImpl, requestId, type, index, fsImpl, options.signal))
     : Promise.resolve(null)));
   const [images, videos, audios, videoAudios] = await Promise.all([
     resolveMany(media.images, "image"), resolveMany(media.videos, "video"), resolveMany(media.audios, "audio"), resolveMany(media.videoAudios, "video-audio")

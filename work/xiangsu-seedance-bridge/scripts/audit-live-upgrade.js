@@ -63,7 +63,37 @@ async function main() {
   const runDir = path.join(evidenceRoot, new Date().toISOString().replace(/[:.]/g, "-"));
   fs.mkdirSync(runDir, { recursive: true });
 
-  const electronApp = await electron.launch({ executablePath, env: { ...process.env } });
+  // Audit the authoritative installed workbench without mutating the user's
+  // selected Simple/Agent entry preference.  The activation envelope and
+  // Electron encryption key are cloned into an isolated browser profile while
+  // DRAMA_SLOT_DATA_ROOT still points at the real production data root.
+  const sourceUserDataDir = process.env.DRAMA_SLOT_LIVE_SOURCE_USER_DATA
+    ? path.resolve(process.env.DRAMA_SLOT_LIVE_SOURCE_USER_DATA)
+    : path.join(process.env.APPDATA || "", packageJson.name);
+  const userDataDir = path.join(runDir, "isolated-user-data");
+  fs.mkdirSync(userDataDir, { recursive: true });
+  const activationPath = path.join(sourceUserDataDir, "drama-license.json");
+  const localStatePath = path.join(sourceUserDataDir, "Local State");
+  if (!fs.existsSync(activationPath) || !fs.existsSync(localStatePath)) {
+    throw new Error("live upgrade audit requires the installed activation snapshot and Electron Local State");
+  }
+  fs.copyFileSync(activationPath, path.join(userDataDir, "drama-license.json"));
+  fs.copyFileSync(localStatePath, path.join(userDataDir, "Local State"));
+  fs.writeFileSync(path.join(userDataDir, "workspace-mode.json"), JSON.stringify({ version: 1, mode: "agent", updatedAt: new Date().toISOString() }, null, 2), "utf8");
+  let workbenchDir = path.join(sourceUserDataDir, "workbench");
+  const storageConfigPath = path.join(sourceUserDataDir, "storage-location.json");
+  if (fs.existsSync(storageConfigPath)) {
+    try {
+      const configured = String(JSON.parse(fs.readFileSync(storageConfigPath, "utf8"))?.workbenchDataRoot || "").trim();
+      if (configured && path.isAbsolute(configured)) workbenchDir = path.resolve(configured);
+    } catch {}
+  }
+
+  const electronApp = await electron.launch({
+    executablePath,
+    args: [`--user-data-dir=${userDataDir}`],
+    env: { ...process.env, DRAMA_SLOT_DATA_ROOT: workbenchDir }
+  });
   try {
     const page = await electronApp.firstWindow({ timeout: 20_000 });
     await page.waitForLoadState("domcontentloaded");

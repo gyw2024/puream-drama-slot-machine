@@ -27,7 +27,7 @@ test("every production stage exposes an explicit manual entry", () => {
   for (const label of ["人物图", "场景图", "通用图片", "资产视频", "资产音频"]) assert.match(html, new RegExp(label));
 
   const renderer = source("app/renderer/workbench.js");
-  for (const label of ["上传人物合板", "上传人物三视图", "上传人物介绍图", "上传人物视频", "上传音色", "上传服装图", "上传道具图", "上传场景四视图", "上传本镜视频"]) {
+  for (const label of ["上传人物合板", "上传人物三视图", "上传人物身份参考图", "上传人物视频", "上传音色", "上传服装图", "上传道具图", "上传场景四视图", "上传本镜视频"]) {
     assert.match(renderer, new RegExp(label));
   }
 });
@@ -284,7 +284,9 @@ test("five to ten minute script path matches the relay slots and forbids local c
   assert.match(workflow, /const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol"/);
   assert.match(workflow, /const SCRIPT_DIRECT_SEGMENT_UNITS = 5/);
   assert.match(workflow, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 2/);
-  assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = 60_000/);
+  assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = NO_TOTAL_DEADLINE_MS/);
+  assert.match(workflow, /timeoutMs: NO_TOTAL_DEADLINE_MS/);
+  assert.match(workflow, /maxReconnectAttempts: UNLIMITED_ATTEMPTS/);
   assert.match(workflow, /model: SCRIPT_FAST_PUREAM_MODEL/);
   assert.match(workflow, /directFastSegmentRanges\(unitCount, SCRIPT_DIRECT_SEGMENT_UNITS\)/);
   assert.match(workflow, /mapWithConcurrency\(pending, SCRIPT_DIRECT_MAX_CONCURRENCY/);

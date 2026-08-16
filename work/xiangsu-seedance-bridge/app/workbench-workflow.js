@@ -7,10 +7,10 @@ const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const { compactProviderVideoPrompt, generateImage, generateText, generateVideo, parseStructuredJson } = require("./ai-provider");
-const { resolvePureamMediaUploadConfig, resolveReferenceUrl } = require("./puream-video-adapters");
+const { hailuoMediaCategories, resolvePureamMediaUploadConfig, resolveReferenceUrl } = require("./puream-video-adapters");
 const { processFaceGrid } = require("./face-grid-processor");
 const { stageSubmissionMedia } = require("./media-staging");
-const { detectUploadedScriptFormat, parseCompiledDialogueSegments, parseSourceDialogueLedger } = require("./dialogue-parser");
+const { detectUploadedScriptFormat, normalizeSpeakerCue, parseCompiledDialogueSegments, parseSourceDialogueLedger } = require("./dialogue-parser");
 const {
   assertSourceSceneParity,
   bindDialogueLedgerToScenes,
@@ -48,7 +48,8 @@ const {
   generationBlockTakes,
   mergeAgentTakeDraft,
   takeShotForValidation,
-  validateCameraTakePlan
+  validateCameraTakePlan,
+  withGenerationBlockTechnicalRepair
 } = require("./agent-director");
 const { promptIntakeText } = require("./prompt-intake");
 const { normalizeCloudVideoResolution, normalizeHailuoApiMode, providerEngine } = require("./video-provider-policy");
@@ -107,6 +108,13 @@ const { assetPromptPolicy } = require("./foundry/asset-passport");
 const { compileProductionContract, contractPromptBlock } = require("./foundry/production-contract");
 const { priorTopicTitles, rememberTopicBatch } = require("./foundry/topic-diversity");
 const {
+  NO_TOTAL_DEADLINE_MS,
+  UNLIMITED_ATTEMPTS,
+  abortableDelay,
+  attemptLimitLabel,
+  resolveAttemptLimit
+} = require("./production-liveness");
+const {
   buildFullReferencePrompt,
   compactFullReferencePrompt,
   compilerMessages,
@@ -122,6 +130,7 @@ const {
   validatePromptSpec
 } = require("./hailuo-h3-prompt");
 const {
+  TECHNICAL_VISUAL_AUDIT_VERSION,
   QUALITY_LIMITS,
   parseAudioAnalysis,
   analyzeAudioFile,
@@ -133,10 +142,13 @@ const {
   analyzeImageFile,
   analyzeSceneFourViewLayout,
   analyzeImageDimensions,
+  analyzeStoryboardSheetGrid,
   analyzeImageSkinOccupancy,
   analyzeVideoEndpointFrames,
   assessAudioQuality,
   assessVisualQuality,
+  assessTechnicalVisualIntegrity,
+  assessReferenceAssetLeak,
   assessReferenceAnchors,
   assessStoryboardImage,
   assessEmptySceneImage,
@@ -170,10 +182,17 @@ const SCRIPT_DIRECT_SEGMENT_UNITS = 5;
 // Match the website relay's two text slots. More than two causes queue churn;
 // one makes 5-10 minute scripts miss the writing SLA.
 const SCRIPT_DIRECT_MAX_CONCURRENCY = 2;
-const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = 60_000;
+const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = NO_TOTAL_DEADLINE_MS;
 const IMAGE_BATCH_MAX_CONCURRENCY = 6;
 const VIDEO_BATCH_MAX_CONCURRENCY = 4;
 const AUTHORITY_BATCH_MAX_CONCURRENCY = 64;
+// Xiangsu/Hailuo H3 currently accepts an audio upload that is shorter than
+// three seconds, but then rejects the paid generation with the misleading
+// terminal message "AI is busy". Keep provider-reference constraints local to
+// each generated clip; they are not a total-project duration limit.
+const HAILUO_VOICE_REFERENCE_MIN_SECONDS = 3.05;
+const HAILUO_VOICE_REFERENCE_TARGET_SECONDS = 3.2;
+const HAILUO_VOICE_REFERENCE_MAX_SECONDS = 5;
 
 function fillTemplate(template, values) {
   return String(template || "").replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, key) => values[key] ?? "");
@@ -526,7 +545,7 @@ function blueprintSchema() {
     },
     characters: [{ id: "C01", name: "姓名", age: "年龄段", role: "身份与关系", description: "外貌体型发型服装配饰姿态", identitySignature: "至少三项不靠换衣区分的资产指纹", desire: "欲望", fear: "恐惧", arc: "人物弧光", voiceDescription: "声线指纹", signatureLine: "5秒测试台词", continuityLocks: ["不可漂移项"] }],
     scenes: [{ id: "SC01", name: "场景名", interiorExterior: "内/外景", time: "时段", description: "空间结构门窗家具活动区", lighting: "主光色温天气", atmosphere: "环境声", scenePurpose: "本场景独占剧情任务", entryAction: "人物为何来到这里", exitAction: "完成什么动作后离开", cameraAnchors: ["复用机位"], transitionReason: "场景切换动作或声音理由" }],
-    props: [{ name: "道具", appearance: "外观", holder: "当前持有人与手别", units: ["S01"], purpose: "叙事用途", continuity: "不可漂移项" }],
+    props: [{ id: "P01", name: "只填写参与核心因果的道具；家具、杯子、手机等环境装饰不得填写", appearance: "材质颜色磨损等可复用外观", coreStory: true, causalRole: "它如何触发、证明或解决核心剧情，缺少这项就不得进入资产库", holder: "当前持有人与手别", units: ["S01"], purpose: "核心叙事用途", continuity: "状态、归属与位置的不可漂移项" }],
     shotPlan: [{ id: "S01", title: "生成单元标题", duration: 10, characters: ["场内角色名"], scenePresenceCharacterIds: ["C01", "C02", "C03"], visibleCharacterIds: ["C01"], focusCharacterId: "C01", counterpartCharacterId: "", shotFunction: "speaker_closeup/listener_reaction/two_shot/action_insert/evidence_insert/product_packshot/product_detail/product_use/product_result", scene: "场景名", sceneObjective: "本镜在当前场景推进的具体任务", transitionReason: "台词接力/视线接力/动作匹配/物件揭示/入场/声音桥", mainlineStage: "hook/pressure/cost_kindness/evidence/main_reversal/payoff/ending", mainlineBeat: "不可逆主线推进", kindnessCost: "无或具体成本", reversalSetup: "无或证据伏笔", action: "本单元动作结果", stateBefore: "开始前人物/关系/证据状态", stateAfter: "结束后不可逆新状态", causalLink: "因为上一单元X所以本单元Y导致Z", visualBeat: "本单元独占可见动作/物证/结果", compositionPlan: "单人近景或双人正反打，禁止多人关系全景", audioPlan: "覆盖0-10秒的对白、环境底噪、动作特效声（不要背景音乐）", dialogueGoal: "按duration缩放的单人递进或固定双人交锋", dialogueArc: { entryCause: "刚发生的事实为何逼出首句", speakerGoalA: "A此刻要逼对方做什么", speakerGoalB: "B此刻要守住或反击什么", newInformation: "本镜对白新增的信息", exitConsequence: "末句造成的可见动作或状态变化" }, emotion: "起始到结束", emotionArc: { start: "起始情绪", trigger: "触发动作", peak: "可见峰值", aftershock: "余震状态" }, performanceBeats: { faceAction: "眉眼下颌泪线变化", bodyAction: "手部重心姿态变化", voiceDelivery: "音高质感语速哭腔怒音", listenerReaction: "听者可见反应" }, startFrame: "首帧", endFrame: "尾帧含持续微动作", tragedy: null, faceSlap: null, silenceBeat: null, motifRecall: "无或回收的声音/物件母题", storyCoreRefs: ["valueStatement"], reversalRole: "本单元在反转链中的职责", imageReferenceCharacterIds: ["C01"], videoReferenceCharacterIds: ["C01"], offscreenSpeakerIds: [], wardrobeBindings: [{ characterId: "C01", wardrobeId: "wardrobe_C01", continuity: "不换装" }], propBindings: [{ propId: "prop_evidence", holderCharacterId: "C01", hand: "左手", stateBefore: "未展开", stateAfter: "展开", visibleInSubshots: [2, 3] }], productMention: false, productShotType: "none", productCausalBridge: { situationNeed: "", whyNow: "", action: "", observableOutcome: "", relationOrDecisionShift: "" }, subshotTarget: 3 }]
   };
 }
@@ -2641,7 +2660,10 @@ function sanitizeBatchProgress(progress, automationStatus = "") {
     };
   });
   if (!changed) return progress;
-  return summarizeAssetBatch(items, progress.waveLabel || "", progress.kind || "asset_batch");
+  return summarizeAssetBatch(items, progress.waveLabel || "", progress.kind || "asset_batch", {
+    batchId: progress.batchId || "",
+    batchStartedAt: progress.batchStartedAt || ""
+  });
 }
 
 function projectVideoEngine(project) {
@@ -3061,6 +3083,28 @@ function selectHailuoReferencesForMode(references = {}, modeValue = "auto") {
   return base;
 }
 
+/**
+ * Provider mode must describe the references that will actually be submitted,
+ * not the parent shot's earlier intention. Director-Agent block filtering can
+ * legitimately turn a multimodal parent into a video-only, image-only or
+ * audio-only child. Deriving here prevents impossible provider contracts.
+ */
+function resolveHailuoApiModeForReferences(references = {}, preferredMode = "auto") {
+  const media = {
+    images: Array.isArray(references.images) ? references.images.filter(Boolean) : [],
+    videos: Array.isArray(references.videos) ? references.videos.filter(Boolean) : references.video ? [references.video] : [],
+    audios: Array.isArray(references.audios) ? references.audios.filter(Boolean) : [],
+    videoAudios: Array.isArray(references.videoAudios) ? references.videoAudios : []
+  };
+  const categories = hailuoMediaCategories(media);
+  if (categories.length >= 2) return "multimodal_to_video";
+  if (categories[0] === "image") return "image_to_video";
+  if (categories[0] === "video") return "video_to_video";
+  if (categories[0] === "audio") return "audio_to_video";
+  normalizeHailuoApiMode(preferredMode);
+  return "text_to_video";
+}
+
 function seedanceFaceMeshInstruction() {
   return "【Seedance全脸网格资产硬要求】保持人物真实身份、年龄、五官比例、发型、服装与背景不变；在每一张可见人脸上叠加细而清晰、密集均匀的拓扑网格线，必须从发际线覆盖到双耳、双颊、鼻翼、眼周、唇周和下颌线，完整覆盖全脸，不得只画额头或局部，不得变成面具、伤痕、妆容或科幻头盔。网格用于后续身份定位。";
 }
@@ -3474,19 +3518,27 @@ function isTransientProviderError(error) {
   // resubmission opportunity.
   if (error?.remoteSubmissionUnknown === true
     || String(error?.code || "") === "VIDEO_SUBMISSION_RESPONSE_UNKNOWN") return false;
+  // An HTTP gateway status describes how the local bridge relayed the
+  // rejection, not whether the provider decision is temporary. Authoritative
+  // quota/auth/policy errors must win over a surrounding 5xx or the outer
+  // unlimited recovery loop will hammer the provider forever.
+  const terminalProviderCode = String(error?.code || "");
+  if (/^(?:SEEDANCE_DAILY_QUOTA_EXHAUSTED|ACCOUNT_SWITCH_IN_PROGRESS|LICENSE_REQUIRED|LICENSE_EXPIRED|AUTH(?:ENTICATION)?_FAILED|INSUFFICIENT_(?:BALANCE|CREDIT)|CONTENT_POLICY|MODERATION_BLOCKED)$/i.test(terminalProviderCode)) return false;
+  if (String(error?.code || "") === "MEDIA_UPLOAD_STALLED") return true;
   const text = `${error?.code || ""} ${error?.status || ""} ${error?.message || ""}`;
   return /502|503|504|429|408|500|SERVER_ERROR|PROVIDER_HTTP|PROVIDER_TIMEOUT|TIMEOUT|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|network|VIDEO_REMOTE_PENDING|VIDEO_DOWNLOAD_PENDING|REMOTE_TASK_PENDING|BRIDGE_HTTP_ERROR|网关|超时|限流|繁忙|远端待恢复|稍后再试|Bad Gateway|Service Unavailable|Too Many Requests|Internal Server Error/i.test(text);
 }
 
 /** Retry transient upstream image failures with backoff; never swallow non-transient errors. */
 async function withTransientProviderRetries(run, {
-  attempts = 5,
+  attempts = UNLIMITED_ATTEMPTS,
   baseDelayMs = 2500,
   onRetry = null,
-  label = "上游任务"
+  label = "上游任务",
+  signal = null
 } = {}) {
   let lastError = null;
-  const maxAttempts = Math.max(1, Number(attempts) || 1);
+  const maxAttempts = resolveAttemptLimit(attempts, UNLIMITED_ATTEMPTS);
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       return await run(attempt);
@@ -3494,9 +3546,9 @@ async function withTransientProviderRetries(run, {
       lastError = error;
       if (!isTransientProviderError(error) || attempt === maxAttempts) throw error;
       if (typeof onRetry === "function") {
-        await onRetry(error, attempt, maxAttempts);
+        await onRetry(error, attempt, attemptLimitLabel(maxAttempts));
       }
-      await new Promise(resolve => setTimeout(resolve, baseDelayMs * attempt));
+      await abortableDelay(Math.min(30_000, baseDelayMs * attempt), signal);
     }
   }
   throw lastError || Object.assign(new Error(`${label}重试耗尽`), { code: "PROVIDER_RETRY_EXHAUSTED" });
@@ -3610,7 +3662,8 @@ function shouldUseAtomicGenerationFallback(error) {
     "PROMPT_TOO_LONG",
     "HAILUO_AGENT_GENERATION_BLOCK_PROMPT_INVALID",
     "HAILUO_PROMPT_DIALOGUE_PERFORMANCE_MISSING",
-    "HAILUO_PROMPT_DIALOGUE_AUDIO_BINDING_MISSING"
+    "HAILUO_PROMPT_DIALOGUE_AUDIO_BINDING_MISSING",
+    "AGENT_GENERATION_BLOCK_TECHNICAL_INTEGRITY_FAILED"
   ].includes(code) || /PROMPT_TOO_LONG|prompt length .* exceeds|dialogue performance missing/i.test(text);
 }
 
@@ -3971,7 +4024,7 @@ function assertShotReferenceBundle(project, shot, mode, references, previousVide
     || ((mode === "continuation" || mode === "smart" || shotStrategy.strategy === "continuation") && frameStages.includes("storyboard_end") && images.length > 0);
   if (requiresImageAnchors) {
     if (frameStages.includes("storyboard_sheet")) {
-      if (roles[0]?.type !== "storyboard_sheet") {
+      if (!["storyboard_sheet", "storyboard_take_sheet", "storyboard_panel_anchor"].includes(String(roles[0]?.type || ""))) {
         fail("逐秒合图模式：图1必须是本镜由多个完整9:16竖屏画格拼成的逐秒分镜合图", "SHOT_FRAME_ANCHORS_REQUIRED");
       }
       if (roles[0]?.entityId && roles[0].entityId !== shot.id) fail("图1逐秒合图必须属于本镜，不能串用其他镜头帧");
@@ -3999,7 +4052,12 @@ function assertShotReferenceBundle(project, shot, mode, references, previousVide
     if (!role.candidateId) return;
     const candidate = project.candidates.find(item => item.id === role.candidateId);
     if (!candidate) fail(`图${index + 1}引用的候选资产不存在`);
-    if (candidate.filePath !== role.path
+    const isSanitizedStoryboardDerivative = ["storyboard_take_sheet", "storyboard_panel_anchor"].includes(String(role.type || ""));
+    const candidatePathMatches = candidate.filePath === role.path
+      || (isSanitizedStoryboardDerivative
+        && Boolean(role.parentFilePath)
+        && candidate.filePath === role.parentFilePath);
+    if (!candidatePathMatches
       || candidate.stage !== role.sourceStage
       || candidate.entityType !== role.entityType
       || candidate.entityId !== role.entityId) {
@@ -4605,6 +4663,16 @@ function storyAssetDirective(project = {}, stage = "", entity = {}) {
     const productUsed = related.some(shot => shot.productMention);
     return `【故事判断后的场景四视图合同】该空间承载：${beats.join("；") || entity.scenePurpose || "按场景圣经"}。一张16:9画布严格分成2×2四格：主入口正向、反向轴、左侧45度、右侧45度；四格锁定同一出入口、门窗家具拓扑、光向、拍摄轴和可行动区域。${productUsed ? "后续有用户上传商品剧情，预留符合剧本动作的干净操作面，但空场景资产不得提前画入商品。" : "本场无商品剧情，不得画入商品或广告陈列。"}四个角度都必须无人。`;
   }
+  if (stage === "prop_asset") {
+    const related = (project?.shots || []).filter(shot => (
+      (entity.units || []).includes(shot.id || `S${shot.number}`)
+      || normalizePropBindings(shot.propBindings).some(binding => [entity.id, entity.name].includes(binding.propId))
+      || (shot.propNames || []).includes(entity.name)
+    ));
+    const causalRole = entity.causalRole || entity.purpose || "按 AI 核心道具合同推进剧情";
+    const continuity = entity.continuity || related.map(shot => shot.mainlineBeat || shot.action).filter(Boolean).slice(0, 3).join("；");
+    return `【AI 核心道具资产合同】“${entity.name || entity.id}”只有因参与核心因果才进入资产库：${causalRole}。跨镜状态、归属和位置严格保持：${continuity || "按核心剧情连续"}。只生成单个道具的写实资产图，固定纯色背景、均匀棚拍光、完整轮廓与清晰材质；不得出现人物、手、场景、桌椅杂物、商品替代品、文字、字幕、标签、水印或拼贴。`;
+  }
   return "";
 }
 
@@ -4793,9 +4861,12 @@ function uniqueDialogueTurns(project, shot) {
   const names = characters.map(item => item.name);
   const canonicalSpeaker = new Map(characters.flatMap(item => [[String(item.name || "").trim(), String(item.name || "").trim()], [String(item.id || "").trim(), String(item.name || "").trim()]]));
   const items = [];
-  const push = (turn, subshotNumber) => {
+  const push = (turn, subshotNumber, context = {}) => {
     const rawSpeaker = String(turn.speaker || turn.speakerId || turn.characterId || "").trim();
-    const speaker = canonicalSpeaker.get(rawSpeaker) || rawSpeaker;
+    const normalizedSpeaker = normalizeSpeakerCue(rawSpeaker).speaker;
+    const speaker = canonicalSpeaker.get(normalizedSpeaker) || canonicalSpeaker.get(rawSpeaker) || normalizedSpeaker || rawSpeaker;
+    const character = characters.find(item => item.name === speaker || item.id === rawSpeaker || item.id === speaker);
+    const speakerId = String(turn.speakerId || turn.characterId || character?.id || "").trim();
     const text = String(turn.spokenText || turn.text || "").trim();
     if (!speaker || !text) return;
     const metadata = turn.metadata && typeof turn.metadata === "object" ? { ...turn.metadata } : {};
@@ -4806,13 +4877,16 @@ function uniqueDialogueTurns(project, shot) {
       sourceDialogueId: String(turn.sourceDialogueId || "").trim(),
       sourceTone: String(turn.sourceTone || metadata.sourceTone || "").trim(),
       speaker,
-      speakerId: String(turn.speakerId || turn.characterId || "").trim(),
+      speakerId,
       listenerIds: [...new Set((Array.isArray(turn.listenerIds) ? turn.listenerIds : Array.isArray(turn.listeners) ? turn.listeners : [])
         .map(value => String(value || "").trim()).filter(Boolean))],
       text,
       spokenText: text,
       metadata,
-      onScreen: turn.onScreen !== false,
+      onScreen: turn.onScreen !== false
+        && !context.offscreenSpeakers?.has(speaker)
+        && !context.offscreenSpeakers?.has(speakerId)
+        && !context.offscreenSpeakers?.has(rawSpeaker),
       subshotNumber
     });
   };
@@ -4823,26 +4897,122 @@ function uniqueDialogueTurns(project, shot) {
   const subshots = Array.isArray(shot?.subshots) && shot.subshots.length
     ? shot.subshots
     : [];
-  const subshotDialoguePresent = subshots.some(item => String(item?.dialogue || "").trim() || (Array.isArray(item?.dialogueTurns) && item.dialogueTurns.length));
-  if (subshotDialoguePresent) {
-    for (const [index, subshot] of subshots.entries()) {
-      if (Array.isArray(subshot?.dialogueTurns) && subshot.dialogueTurns.length) {
-        for (const turn of subshot.dialogueTurns) push(turn, index + 1);
-      } else {
-        for (const turn of parseCompiledDialogueSegments(subshot.dialogue, names)) push(turn, index + 1);
+  // Shot-level dialogueTurns are the canonical source ledger. Subshot dialogue
+  // is allowed to describe where a line starts, continues off-screen, or lands
+  // on a stressed word, but it must never create a second spoken copy.
+  if (Array.isArray(shot?.dialogueTurns) && shot.dialogueTurns.length) {
+    for (const turn of shot.dialogueTurns) {
+      const requested = Math.max(1, Number(turn?.subshotNumber) || 1);
+      const sourceId = String(turn?.sourceDialogueId || "").trim();
+      const matchedIndex = sourceId
+        ? subshots.findIndex(item => (Array.isArray(item?.sourceDialogueIds) ? item.sourceDialogueIds : []).map(String).includes(sourceId))
+        : -1;
+      const index = matchedIndex >= 0 ? matchedIndex : Math.min(subshots.length - 1, requested - 1);
+      const subshot = index >= 0 ? subshots[index] : null;
+      const offscreenSpeakers = new Set();
+      for (const value of Array.isArray(subshot?.offscreenSpeakerIds) ? subshot.offscreenSpeakerIds : []) {
+        const token = String(value || "").trim();
+        if (!token) continue;
+        offscreenSpeakers.add(token);
+        const character = characters.find(item => item.id === token || item.name === token);
+        if (character?.id) offscreenSpeakers.add(String(character.id));
+        if (character?.name) offscreenSpeakers.add(String(character.name));
       }
+      push(turn, index >= 0 ? index + 1 : requested, { offscreenSpeakers });
     }
     return items;
   }
-  if (Array.isArray(shot?.dialogueTurns) && shot.dialogueTurns.length) {
-    for (const turn of shot.dialogueTurns) push(turn, Number(turn?.subshotNumber) || 1);
+  const subshotDialoguePresent = subshots.some(item => String(item?.dialogue || "").trim() || (Array.isArray(item?.dialogueTurns) && item.dialogueTurns.length));
+  if (subshotDialoguePresent) {
+    for (const [index, subshot] of subshots.entries()) {
+      const offscreenSpeakers = new Set();
+      for (const value of Array.isArray(subshot?.offscreenSpeakerIds) ? subshot.offscreenSpeakerIds : []) {
+        const token = String(value || "").trim();
+        if (!token) continue;
+        offscreenSpeakers.add(token);
+        const character = characters.find(item => item.id === token || item.name === token);
+        if (character?.id) offscreenSpeakers.add(String(character.id));
+        if (character?.name) offscreenSpeakers.add(String(character.name));
+      }
+      if (Array.isArray(subshot?.dialogueTurns) && subshot.dialogueTurns.length) {
+        for (const turn of subshot.dialogueTurns) push(turn, index + 1, { offscreenSpeakers });
+      } else {
+        for (const turn of parseCompiledDialogueSegments(subshot.dialogue, names)) push(turn, index + 1, { offscreenSpeakers });
+      }
+    }
     return items;
   }
   for (const turn of parseCompiledDialogueSegments(shot?.dialogue || "", names)) push(turn, 1);
   return items;
 }
 
-const GENERATED_VIDEO_PROMPT_LIMIT = 1900;
+function nestedReferenceManifests(referenceManifest = null) {
+  if (!referenceManifest || typeof referenceManifest !== "object") return [];
+  const manifests = [referenceManifest];
+  for (const block of Array.isArray(referenceManifest.generationBlocks) ? referenceManifest.generationBlocks : []) {
+    manifests.push(...nestedReferenceManifests(block?.referenceManifest));
+  }
+  return manifests;
+}
+
+function referenceManifestAudios(referenceManifest = null) {
+  const seen = new Set();
+  const audios = [];
+  for (const manifest of nestedReferenceManifests(referenceManifest)) {
+    for (const item of Array.isArray(manifest?.audios) ? manifest.audios : []) {
+      const key = [item?.characterId, item?.sha256, item?.filePath].map(value => String(value || "")).join("|");
+      if (!key.replace(/\|/g, "") || seen.has(key)) continue;
+      seen.add(key);
+      audios.push(item);
+    }
+  }
+  return audios;
+}
+
+function referenceManifestVisualControls(referenceManifest = null) {
+  const seen = new Set();
+  const controls = [];
+  const unsafeTypes = new Set([
+    "character", "scene", "product", "prop", "wardrobe",
+    "storyboard_sheet", "storyboard_take_sheet", "storyboard_generation_block_sheet"
+  ]);
+  for (const manifest of nestedReferenceManifests(referenceManifest)) {
+    for (const item of Array.isArray(manifest?.images) ? manifest.images : []) {
+      const type = String(item?.type || "").trim();
+      const sourceStage = String(item?.sourceStage || "").trim();
+      const filePath = String(item?.filePath || item?.path || "").trim();
+      if (!filePath || !fs.existsSync(filePath)) continue;
+      // A generated shot is expected to resemble its exact opening/ending
+      // story frame. These are live-scene anchors, not forbidden asset boards.
+      // Keep storyboard sheets and every identity/set/prop board in the leak
+      // audit, but never punish faithful animation of a sanctioned story frame.
+      if (["storyboard_start", "storyboard_end", "storyboard_panel_anchor"].includes(type)) continue;
+      if (!unsafeTypes.has(type)
+        && !/(?:character_(?:intro|sheet|three_view)|scene_asset|prop_asset|wardrobe_asset|product_asset|storyboard_sheet)/i.test(sourceStage)) continue;
+      const key = path.resolve(filePath).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      controls.push({ ...item, type, sourceStage, filePath });
+    }
+  }
+  return controls;
+}
+
+function candidateHasHailuoDialogueMode(candidate = {}) {
+  const resolvedMode = normalizeHailuoApiMode(candidate.hailuoResolvedMode || candidate.hailuoRequestedMode || "auto");
+  if (resolvedMode === "multimodal_to_video") return true;
+  const blocks = Array.isArray(candidate.referenceManifest?.generationBlocks)
+    ? candidate.referenceManifest.generationBlocks.map(item => item?.referenceManifest).filter(Boolean)
+    : [];
+  if (!blocks.length) return false;
+  const speakingBlocks = blocks.filter(manifest => Array.isArray(manifest?.audios) && manifest.audios.length);
+  return speakingBlocks.length > 0 && speakingBlocks.every(manifest => {
+    const categories = hailuoMediaCategories(manifest);
+    return categories.includes("audio") && (categories.includes("image") || categories.includes("video"));
+  });
+}
+
+const GENERATED_VIDEO_PROMPT_LIMIT = 1200;
 
 function compactPromptValue(value, limit) {
   const normalized = String(value || "").replace(/\s+/g, " ").trim();
@@ -4885,43 +5055,82 @@ function isPromptTooLongError(error) {
 }
 
 /**
- * The cloud Seedance-compatible relay accepts no more than 2,000 characters.
- * Rebuild an overlong system prompt from canonical shot data instead of
- * truncating the tail, because dialogue, speaker, listener and acting tone are
- * the highest-priority production contract. Manual prompts are never sent here.
+ * Rebuild every generated Seedance prompt from canonical shot data and keep it
+ * inside the conservative 1,200-character compatibility budget. This removes
+ * internal Agent labels such as listenerBeat/subshot/matrix/product enums that
+ * the video model may reject as unknown keywords. Manual prompts never enter
+ * this compiler.
  */
-function compactGeneratedSeedanceVideoPrompt(project, shot, references = {}, mode = "", prompt = "", maxLength = GENERATED_VIDEO_PROMPT_LIMIT) {
-  const original = String(prompt || "").trim();
-  const limit = Math.max(800, Math.min(1990, Number(maxLength) || GENERATED_VIDEO_PROMPT_LIMIT));
-  if (original.length <= limit) return original;
+function compactGeneratedSeedanceVideoPrompt(project, shot, references = {}, mode = "", prompt = "", maxLength = GENERATED_VIDEO_PROMPT_LIMIT, qualityRepair = "", qualityRepairKey = "") {
+  void prompt;
+  const limit = Math.max(800, Math.min(GENERATED_VIDEO_PROMPT_LIMIT, Number(maxLength) || GENERATED_VIDEO_PROMPT_LIMIT));
 
   const turns = uniqueDialogueTurns(project, shot);
+  const stripInternalAgentLabels = value => String(value || "")
+    .replace(/\bsubshot\s*(\d+)\b/gi, "第$1机位")
+    .replace(/\blistenerBeat\s*=/gi, "听者反应=")
+    .replace(/\bproduct_packshot\b/gi, "商品自然整体特写")
+    .replace(/\bproduct_detail\b/gi, "商品关键细节特写")
+    .replace(/\bproduct_use\b/gi, "商品真实使用动作")
+    .replace(/\bproduct_result\b/gi, "商品使用后的客观结果")
+    .replace(/\bproduct_reaction\b/gi, "受益者自然反应")
+    .replace(/\bspeaker_closeup\b/gi, "说话人单人近景")
+    .replace(/\blistener_reaction\b/gi, "听者反应近景")
+    .replace(/\btwo_shot\b/gi, "双人关系镜头")
+    .replace(/\baction_insert\b/gi, "关键动作特写")
+    .replace(/\bevidence_insert\b/gi, "证据细节特写")
+    .replace(/\b(?:confess|attack|deflect|counter|reveal|decision|delivery|intent)\b/gi, "")
+    .replace(/\b(?:xiangsu|cloud):(?:keyframe|continuation|smart|storyboard_sheet)\b/gi, "")
+    .replace(/承接\s*S\d+/gi, "承接上一镜")
+    .replace(/\s+/g, " ")
+    .trim();
+  const stripDialogueEchoes = value => {
+    let text = stripInternalAgentLabels(value);
+    for (const turn of turns) {
+      const exact = String(turn.text || "").trim();
+      const bare = exact.replace(/[。！？!?]+$/g, "");
+      for (const variant of [...new Set([exact, bare].filter(Boolean))]) {
+        text = text.split(variant).join("");
+      }
+    }
+    return text
+      .replace(/['“”]{2,}/g, "")
+      .replace(/[；，、]\s*[；，、]/g, "；")
+      .replace(/\s+/g, " ")
+      .trim();
+  };
   const dialogueLines = turns.map(turn => {
     const listeners = (turn.listenerIds || []).map(id => (
       (project.characters || []).find(character => character.id === id || character.name === id)?.name || id
     )).filter(Boolean);
     const meta = turn.metadata || {};
     const tone = turn.sourceTone || meta.sourceTone || meta.delivery || meta.emotion || shot.emotion || "符合剧情的生活化情绪语气";
-    const acting = [meta.body, meta.beat, meta.breath].filter(Boolean).join("；") || shot.performance || "脸、身体与声线同步表演";
+    const semanticBeat = /[\u3400-\u9fff]/.test(String(meta.beat || "")) ? meta.beat : "";
+    const acting = [meta.body, semanticBeat, meta.emotionPeak, meta.breath].filter(Boolean).join("；") || shot.performance || "脸、身体与声线同步表演";
     const reaction = meta.listenerBeat || (listeners.length ? "听者闭嘴并给出同步可见反应" : "");
-    return `角色“${turn.speaker}”${listeners.length ? `面对${listeners.join("、")}` : ""}；原稿语气=${tone}；表演=${acting}${reaction ? `；listenerBeat=${reaction}` : ""}；只说一遍：${turn.text}`;
+    return `角色“${turn.speaker}”${listeners.length ? `面对${listeners.join("、")}` : ""}；语气=${tone}；表演=${stripDialogueEchoes(acting)}${reaction ? `；听者反应=${stripDialogueEchoes(reaction)}` : ""}；只说一遍：${turn.text}`;
   });
   const dialogueContract = dialogueLines.length
-    ? `【对白最高优先级·逐字完整】${dialogueLines.join("；")}。说话人、听者和音色不得互换，每句只说一遍。`
+    ? `【对白最高优先级·逐字完整】${dialogueLines.join("；")}；说话人、听者和音色不得互换，每句只说一遍。`
     : "【对白】本镜无对白，禁止新增台词或画外音。";
-  const hardContract = "【成片硬约束】写实竖屏短剧；人物身份、服装、商品、场景与参考素材一致；镜头必须推进剧情并从首态变化到尾态；环境底噪和同步动作声覆盖全段，禁止BGM、字幕、水印、参考板、网格和无关人物。";
+  const hardContract = "【成片硬约束】写实竖屏短剧；身份、服装、商品、场景与参考素材一致；镜头推进剧情并从首态变化到尾态；只保留对白、环境声与同步动作声；禁止背景音乐、配乐、字幕、水印、人物介绍、身份锚图、人物四视图、资产板、参考板、网格和无关人物进入成片。";
+  const qualityRepairId = qualityRepair
+    ? crypto.createHash("sha256").update(`${qualityRepair}\u0000${qualityRepairKey || "repair"}`).digest("hex").slice(0, 12)
+    : "";
+  const repairContract = qualityRepair
+    ? `【技术修复批次${qualityRepairId}】本次必须生成全新候选，不得复用上次结果；${compactPromptValue(qualityRepair, 180)}`
+    : "";
 
-  if (dialogueContract.length + hardContract.length + 2 > limit) {
+  if (dialogueContract.length + hardContract.length + repairContract.length + 3 > limit) {
     // A single short video unit should never contain this much dialogue. Keep
     // every authored word and only drop optional prose; do not silently damage
     // the user's script to satisfy a provider limit.
-    return `${dialogueContract}\n${hardContract}`;
+    return [dialogueContract, repairContract, hardContract].filter(Boolean).join("\n");
   }
 
   const imageManifest = (references.imageRoles || []).map((item, index) => `图${index + 1}=${item.label || item.type || "参考资产"}`).join("；");
   const videoManifest = (references.videoRoles || []).map((item, index) => `视频${index + 1}=${item.label || item.type || "上一镜"}`).join("；");
   const audioManifest = (references.audios || []).map((item, index) => `音频${index + 1}=${item.characterName || "角色"}音色`).join("；");
-  const matrixMarkers = [...new Set(original.match(/[a-z][a-z0-9_-]*:(?:keyframe|continuation|storyboard_sheet|smart)/gi) || [])].join("；");
   const scene = (project.scenes || []).find(item => item.id === shot.sceneId);
   const performanceBeats = Array.isArray(shot.performanceBeats)
     ? shot.performanceBeats
@@ -4930,32 +5139,38 @@ function compactGeneratedSeedanceVideoPrompt(project, shot, references = {}, mod
       : shot.performanceBeats
         ? [shot.performanceBeats]
         : [];
+  const sheetPanelAnchor = mode === "storyboard_sheet"
+    && String(references.imageRoles?.[0]?.type || "") === "storyboard_panel_anchor";
   const modeLabel = mode === "storyboard_sheet"
-    ? "按逐秒合图从左到右、从上到下演绎，禁止把格线和序号生成进成片"
+    ? (sheetPanelAnchor
+      ? "图1是从逐秒合图安全裁出的无字剧情起点，只锁定场景、人物和动作起态；第一帧直接进入剧情，禁止静态展示、人物介绍或资产展示"
+      : "按逐秒合图从左到右、从上到下演绎，禁止把格线和序号生成进成片")
     : mode === "continuation"
       ? "从上一视频末态无缝继续，禁止重演、重置或切换空间"
       : "首帧到尾帧形成连续因果动作，禁止中途换空间";
+  const productDirectives = [shot.productRole, shot.productAction, shot.productShotType]
+    .filter(value => String(value || "").trim() && !/^(?:none|无|不植入)$/i.test(String(value).trim()));
+  const productSection = project.product?.name
+    ? `用户上传商品硬绑定：${[project.product.name, ...productDirectives].join("；")}`
+    : productDirectives.join("；");
   const optionalSections = [
     ["剧情动作", shot.action || shot.visualBeat || shot.shotFunction, 300],
     ["表演推进", [shot.emotion, shot.performance, ...performanceBeats].filter(Boolean).join("；"), 320],
     ["镜头调度", [shot.shotSize, shot.cameraMove, shot.compositionPlan, shot.transitionReason].filter(Boolean).join("；"), 230],
     ["模式", modeLabel, 150],
-    ["矩阵", matrixMarkers, 100],
     ["参考素材", [imageManifest, videoManifest, audioManifest].filter(Boolean).join("；"), 250],
     ["场景", [scene?.name, scene?.description, shot.stateBefore, shot.stateAfter].filter(Boolean).join("；"), 220],
-    ["商品", project.product?.name
-      ? `用户上传商品硬绑定：${[project.product.name, shot.productRole, shot.productAction, shot.productShotType].filter(Boolean).join("；")}`
-      : [shot.productRole, shot.productAction, shot.productShotType].filter(Boolean).join("；"), 220],
+    ["商品", productSection, 220],
     ["声音", shot.audioPlan || shot.soundDesign || "对白清晰，环境底噪连续，只保留同步动作声", 160]
   ];
 
-  const parts = [dialogueContract];
-  let used = dialogueContract.length + hardContract.length + 2;
+  const parts = [dialogueContract, repairContract].filter(Boolean);
+  let used = dialogueContract.length + repairContract.length + hardContract.length + 3;
   for (const [label, value, preferred] of optionalSections) {
     if (!String(value || "").trim()) continue;
     const remaining = limit - used - label.length - 4;
     if (remaining < 24) continue;
-    const body = compactPromptValue(value, Math.min(preferred, remaining));
+    const body = compactPromptValue(stripDialogueEchoes(value), Math.min(preferred, remaining));
     const section = `【${label}】${body}`;
     parts.push(section);
     used += section.length + 1;
@@ -5567,7 +5782,7 @@ function assertHailuoPromptVoiceBindings(project, shot, references = {}, prompt 
   return true;
 }
 
-function summarizeAssetBatch(items = [], waveLabel = "", kind = "asset_batch") {
+function summarizeAssetBatch(items = [], waveLabel = "", kind = "asset_batch", metadata = {}) {
   const total = items.length;
   const completed = items.filter(item => item.status === "completed" || item.status === "skipped").length;
   const failed = items.filter(item => item.status === "failed").length;
@@ -5582,7 +5797,10 @@ function summarizeAssetBatch(items = [], waveLabel = "", kind = "asset_batch") {
     running,
     percent: total ? Math.round((completed / total) * 100) : 100,
     waveLabel: waveLabel || "",
-    items
+    items,
+    ...(metadata.batchId ? { batchId: String(metadata.batchId) } : {}),
+    ...(metadata.batchStartedAt ? { batchStartedAt: String(metadata.batchStartedAt) } : {}),
+    updatedAt: new Date().toISOString()
   };
 }
 
@@ -5714,6 +5932,13 @@ function scriptPipelineEntryRoute(project = {}) {
   if (duration.hasShots && sourceFingerprint
     && crypto.createHash("sha256").update(raw).digest("hex") !== sourceFingerprint) return "reanalyze_source";
   if (duration.hasShots && !duration.ok) return "reanalyze_duration";
+  if (duration.hasShots && projectInputMode(project) === "manual") {
+    const expectedDialogueLedger = productionDialogueLedgerFromScript(raw);
+    if (expectedDialogueLedger.length
+      && !sourceDialogueLedgerMatches(project?.script?.sourceDialogueLedger, expectedDialogueLedger)) {
+      return "reanalyze_dialogue";
+    }
+  }
   if (duration.hasShots) return "ready";
   if (project?.script?.generationCheckpoint) return "resume_generation";
   if (String(project?.script?.raw || "").trim()) return "analyze_imported";
@@ -7088,6 +7313,27 @@ function uploadedAnalysisConcurrency(chunkSchedules = []) {
   return Math.max(1, Math.min(UPLOADED_ANALYSIS_MAX_CONCURRENCY, list.length));
 }
 
+function validateScriptAnalysisChunkResult(result = {}, payload = {}) {
+  const failures = [];
+  if (!result?.story || typeof result.story !== "object" || Array.isArray(result.story)) failures.push("story 必须是完整故事对象");
+  const shots = Array.isArray(result?.shots) ? result.shots : [];
+  const characters = Array.isArray(result?.characters) ? result.characters : [];
+  const scenes = Array.isArray(result?.scenes) ? result.scenes : [];
+  const props = Array.isArray(result?.props) ? result.props : [];
+  const expectedUnits = Math.max(1, Number(payload?.unitCount) || 1);
+  if (shots.length !== expectedUnits) failures.push(`shots 必须恰好 ${expectedUnits} 个，实际 ${shots.length} 个`);
+  if (!characters.length) failures.push("characters 不能为空");
+  if (!scenes.length) failures.push("scenes 不能为空");
+  if (!Array.isArray(result?.props)) failures.push("props 必须是数组；没有核心道具时返回空数组");
+  if (payload?.requireCoreProp === true && !props.length) failures.push("原稿明确存在核心道具/证物，props 不能留空");
+  for (const prop of props) {
+    if (prop?.coreStory !== true) failures.push(`道具“${prop?.name || "未命名"}”没有证明其参与核心因果，不得进入资产库`);
+    if (!String(prop?.purpose || prop?.causalRole || "").trim()) failures.push(`核心道具“${prop?.name || "未命名"}”缺少剧情用途`);
+    if (!Array.isArray(prop?.units) || !prop.units.length) failures.push(`核心道具“${prop?.name || "未命名"}”缺少参与镜号`);
+  }
+  return failures.length ? failures : true;
+}
+
 function analysisChunkSchedules(chunks, filmSchedule) {
   const list = Array.isArray(chunks) ? chunks : [];
   if (!list.length) return [];
@@ -7934,6 +8180,199 @@ function splitUploadedScriptSections(text = "") {
   return dramaticBody ? { metadata, dramaticBody } : { metadata: "", dramaticBody: source };
 }
 
+function sourceDialogueLedgerMatches(actual = [], expected = []) {
+  const left = Array.isArray(actual) ? actual : [];
+  const right = Array.isArray(expected) ? expected : [];
+  if (left.length !== right.length) return false;
+  return right.every((item, index) => {
+    const candidate = left[index] || {};
+    return String(candidate.id || "") === String(item.id || "")
+      && String(candidate.speaker || "").trim() === String(item.speaker || "").trim()
+      && String(candidate.text || "").trim() === String(item.text || "").trim()
+      && String(candidate.tone || "").trim() === String(item.tone || "").trim();
+  });
+}
+
+/**
+ * Build the immutable dialogue ledger from the complete upload while keeping
+ * only utterances that physically belong to the dramatic body. Character
+ * names often live in a preface/character bible; parsing only the stripped
+ * body therefore loses narrative quotes such as “林娜质问：‘……’”. Full-text
+ * parsing supplies those names and richer delivery notes, while the rebased
+ * offsets keep chunk assignment relative to the production body.
+ */
+function productionDialogueLedgerFromScript(text = "", providedSections = null, providedSceneLedger = null) {
+  const source = String(text || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").trim();
+  if (!source) return [];
+  if (source.startsWith("{") || source.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(source);
+      const candidate = Array.isArray(parsed) ? parsed[0] : parsed;
+      if (candidate && typeof candidate === "object") {
+        const characters = Array.isArray(candidate.characters) ? candidate.characters : [];
+        const characterName = new Map(characters.flatMap(item => [
+          [String(item?.id || "").trim(), String(item?.name || "").trim()],
+          [String(item?.name || "").trim(), String(item?.name || "").trim()]
+        ]).filter(([key, name]) => key && name));
+        const explicit = Array.isArray(candidate.sourceDialogueLedger) ? candidate.sourceDialogueLedger : [];
+        const turns = explicit.length ? explicit : (Array.isArray(candidate.shots) ? candidate.shots.flatMap(shot => [
+          ...(Array.isArray(shot?.dialogueTurns) ? shot.dialogueTurns : []),
+          ...(Array.isArray(shot?.subshots) ? shot.subshots.flatMap(subshot => Array.isArray(subshot?.dialogueTurns) ? subshot.dialogueTurns : []) : [])
+        ]) : []);
+        const seen = new Set();
+        return turns.map((turn, index) => {
+          const speakerToken = String(turn?.speaker || turn?.speakerId || "").trim();
+          return {
+            ...turn,
+            speaker: characterName.get(speakerToken) || speakerToken,
+            speakerRaw: characterName.get(speakerToken) || speakerToken,
+            tone: String(turn?.tone || turn?.sourceTone || turn?.delivery || "").trim(),
+            text: String(turn?.text || turn?.spokenText || turn?.dialogue || "").trim(),
+            spokenText: String(turn?.text || turn?.spokenText || turn?.dialogue || "").trim(),
+            sourceStart: Number(turn?.sourceStart) || index,
+            sourceEnd: Number(turn?.sourceEnd) || index + 1
+          };
+        }).filter(item => {
+          const key = `${item.speaker}\u0000${item.text}\u0000${item.sourceDialogueId || item.id || ""}`;
+          if (!item.speaker || !item.text || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }).map((item, index) => ({ ...item, id: `D${String(index + 1).padStart(3, "0")}`, order: index + 1 }));
+      }
+    } catch {}
+  }
+  const sections = providedSections || splitUploadedScriptSections(source);
+  const body = String(sections?.dramaticBody || source).trim();
+  const bodyStart = body === source ? 0 : source.indexOf(body);
+  const sourceSceneLedger = providedSceneLedger || buildSourceSceneLedger(source);
+  const fullLedger = bindDialogueLedgerToScenes(parseSourceDialogueLedger(source), sourceSceneLedger);
+  const fullBodyLedger = bodyStart >= 0
+    ? fullLedger.filter(item => Number(item?.sourceStart) >= bodyStart && Number(item?.sourceEnd) <= bodyStart + body.length + 1)
+      .map(item => ({
+        ...item,
+        sourceStart: Math.max(0, Number(item.sourceStart) - bodyStart),
+        sourceEnd: Math.max(0, Number(item.sourceEnd) - bodyStart)
+      }))
+    : [];
+  const knownNames = [...new Set(fullLedger.map(item => String(item?.speaker || "").trim()).filter(Boolean))];
+  const parsedBodyLedger = parseSourceDialogueLedger(body, knownNames);
+  const reboundBodyLedger = bindDialogueLedgerToScenes(parsedBodyLedger.map(item => ({
+    ...item,
+    sourceStart: Number(item.sourceStart) + Math.max(0, bodyStart),
+    sourceEnd: Number(item.sourceEnd) + Math.max(0, bodyStart)
+  })), sourceSceneLedger).map(item => ({
+    ...item,
+    sourceStart: Math.max(0, Number(item.sourceStart) - Math.max(0, bodyStart)),
+    sourceEnd: Math.max(0, Number(item.sourceEnd) - Math.max(0, bodyStart))
+  }));
+  const merged = [];
+  const seen = new Set();
+  for (const item of [...fullBodyLedger, ...reboundBodyLedger].sort((left, right) => Number(left.sourceStart) - Number(right.sourceStart))) {
+    const key = `${String(item.speaker || "").trim()}\u0000${String(item.text || "").trim()}\u0000${Number(item.sourceStart) || 0}`;
+    if (!item?.speaker || !item?.text || seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ ...item });
+  }
+  return merged.map((item, index) => ({
+    ...item,
+    id: `D${String(index + 1).padStart(3, "0")}`,
+    order: index + 1
+  }));
+}
+
+function spokenTextKey(value = "") {
+  return String(value || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function dialogueTextAffinity(left = "", right = "") {
+  const a = spokenTextKey(left);
+  const b = spokenTextKey(right);
+  if (!a || !b) return 0;
+  if (a === b) return 10_000 + a.length;
+  if (a.includes(b) || b.includes(a)) return 2_000 + Math.min(a.length, b.length);
+  const bigrams = value => {
+    const result = new Set();
+    if (value.length === 1) result.add(value);
+    for (let index = 0; index < value.length - 1; index += 1) result.add(value.slice(index, index + 2));
+    return result;
+  };
+  const aBigrams = bigrams(a);
+  const bBigrams = bigrams(b);
+  const overlap = [...aBigrams].filter(item => bBigrams.has(item)).length;
+  return overlap * 20 / Math.max(1, Math.max(aBigrams.size, bBigrams.size));
+}
+
+/**
+ * Older analyzed projects can contain model-invented D001/D002 identifiers
+ * even though the immutable ledger was never persisted. Never trust those
+ * identifiers during repair. Re-seed bindings from the actual spoken text,
+ * speaker and shot order, then let bindSourceDialogueLedgerToAnalysis replace
+ * every spoken line with the exact user-authored ledger entry.
+ */
+function seedExistingAnalysisDialogueBindings(data = {}, ledger = []) {
+  const source = data && typeof data === "object" ? { ...data } : {};
+  const characters = Array.isArray(source.characters) ? source.characters : [];
+  const characterByName = new Map(characters.map(item => [String(item?.name || "").trim(), String(item?.id || "").trim()]));
+  const shots = (Array.isArray(source.shots) ? source.shots : []).map(shot => ({
+    ...shot,
+    sourceDialogueBindings: [],
+    sourceDialogueIds: [],
+    subshots: (Array.isArray(shot?.subshots) ? shot.subshots : []).map(subshot => ({
+      ...subshot,
+      sourceDialogueIds: []
+    }))
+  }));
+  const shotTurns = shots.map(shot => {
+    const turns = [
+      ...(Array.isArray(shot?.dialogueTurns) ? shot.dialogueTurns : []),
+      ...(Array.isArray(shot?.subshots) ? shot.subshots.flatMap(subshot => Array.isArray(subshot?.dialogueTurns) ? subshot.dialogueTurns : []) : [])
+    ];
+    const unique = [];
+    const seen = new Set();
+    for (const turn of turns) {
+      const key = `${String(turn?.speakerId || turn?.speaker || "")}\u0000${String(turn?.text || turn?.spokenText || "")}\u0000${Number(turn?.subshotNumber) || 1}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(turn);
+    }
+    return unique;
+  });
+  for (const [ledgerIndex, item] of (Array.isArray(ledger) ? ledger : []).entries()) {
+    const speakerId = characterByName.get(String(item?.speaker || "").trim()) || "";
+    const expectedShotIndex = Math.min(shots.length - 1, Math.floor(ledgerIndex * Math.max(1, shots.length) / Math.max(1, ledger.length)));
+    let best = { shotIndex: Math.max(0, expectedShotIndex), score: -Infinity, turn: null };
+    shots.forEach((shot, shotIndex) => {
+      const matchingSpeakerTurns = shotTurns[shotIndex].filter(turn => !speakerId || String(turn?.speakerId || turn?.speaker || "").trim() === speakerId || String(turn?.speaker || "").trim() === String(item?.speaker || "").trim());
+      const joined = matchingSpeakerTurns.map(turn => String(turn?.text || turn?.spokenText || "")).join("");
+      const closestTurn = matchingSpeakerTurns.map(turn => ({ turn, score: dialogueTextAffinity(item?.text, turn?.text || turn?.spokenText) }))
+        .sort((left, right) => right.score - left.score)[0] || null;
+      const speakerBonus = matchingSpeakerTurns.length ? 80 : 0;
+      const orderPenalty = Math.abs(shotIndex - expectedShotIndex) * 5;
+      const score = Math.max(dialogueTextAffinity(item?.text, joined), closestTurn?.score || 0) + speakerBonus - orderPenalty;
+      if (score > best.score) best = { shotIndex, score, turn: closestTurn?.turn || matchingSpeakerTurns[0] || null };
+    });
+    const target = shots[best.shotIndex];
+    if (!target) continue;
+    const turn = best.turn || {};
+    target.sourceDialogueBindings.push({
+      sourceDialogueId: item.id,
+      listenerIds: normalizeStringArray(turn.listenerIds || turn.listeners),
+      subshotNumber: Math.max(1, Number(turn.subshotNumber) || 1),
+      onScreen: turn.onScreen !== false,
+      intent: String(turn.intent || turn.beat || "").trim(),
+      emotion: String(turn.emotionPeak || turn.emotionStart || "").trim(),
+      delivery: String(turn.delivery || "").trim(),
+      volume: String(turn.volume || "").trim(),
+      pace: String(turn.pace || "").trim(),
+      stressWord: String(turn.stressWord || "").trim(),
+      breath: String(turn.breath || "").trim(),
+      body: String(turn.body || "").trim(),
+      listenerBeat: String(turn.listenerBeat || "").trim()
+    });
+  }
+  return { ...source, shots };
+}
+
 function inferredSceneProfile(name = "") {
   const label = String(name || "").trim();
   const outside = /街|巷|路|广场|天桥|楼下|门外|站点|路口|小区|公园|桥/.test(label);
@@ -8089,6 +8528,8 @@ function normalizeAnalysis(data, project) {
     holder: String(item.holder || "").trim(),
     units: Array.isArray(item.units) ? item.units.map(String) : [],
     purpose: String(item.purpose || "").trim(),
+    coreStory: item.coreStory === true,
+    causalRole: String(item.causalRole || "").trim(),
     continuity: String(item.continuity || "").trim(),
     stateTransitions: (Array.isArray(item.stateTransitions) ? item.stateTransitions : []).map(transition => (
       transition && typeof transition === "object" ? { ...transition } : transition
@@ -8347,12 +8788,21 @@ function conformImportedAnalysisToDurationContract(data, project, options = {}) 
   const targetSeconds = adaptive
     ? Math.max(1, Math.round(Number(options.adaptiveTargetSeconds) || configuredTarget))
     : configuredTarget;
-  const durations = reconcileUnitDurations(
-    normalized.shots.map(shot => Number(shot.duration) || Number(project?.generation?.shotDuration) || 10),
-    targetSeconds,
-    providerKind,
-    { engine: projectVideoEngine(project), unitCount: normalized.shots.length }
-  );
+  const estimatedDurations = Array.isArray(options?.durationEstimate?.normalizedDurations)
+    ? options.durationEstimate.normalizedDurations.map(Number)
+    : [];
+  const authoredShotDurationsLocked = options?.durationEstimate?.authoredShotDurationsLocked === true
+    && estimatedDurations.length === normalized.shots.length
+    && estimatedDurations.every(value => Number.isFinite(value) && value > 0)
+    && Math.abs(estimatedDurations.reduce((sum, value) => sum + value, 0) - targetSeconds) < 0.001;
+  const durations = authoredShotDurationsLocked
+    ? Object.freeze([...estimatedDurations])
+    : reconcileUnitDurations(
+        normalized.shots.map(shot => Number(shot.duration) || Number(project?.generation?.shotDuration) || 10),
+        targetSeconds,
+        providerKind,
+        { engine: projectVideoEngine(project), unitCount: normalized.shots.length }
+      );
   const idWidth = Math.max(2, String(normalized.shots.length).length);
   const shots = normalized.shots.map((shot, index) => {
     const duration = durations[index];
@@ -8387,6 +8837,8 @@ function conformImportedAnalysisToDurationContract(data, project, options = {}) 
       unitCount: shots.length,
       providerKind,
       source: adaptive ? "uploaded-script-adaptive" : "ai-configured-target",
+      authoredShotDurationsLocked,
+      authoredShotDurations: authoredShotDurationsLocked ? [...durations] : [],
       estimate: adaptive && options.durationEstimate ? { ...options.durationEstimate } : null,
       checkedAt: new Date().toISOString()
     }
@@ -8682,8 +9134,11 @@ function semanticReviewPayload(blueprint, shots = []) {
       transitionReason: item.transitionReason
     })),
     props: (blueprint.props || []).map(item => ({
+      id: item.id,
       name: item.name,
       appearance: item.appearance,
+      coreStory: item.coreStory === true,
+      causalRole: item.causalRole,
       holder: item.holder,
       units: item.units,
       purpose: item.purpose,
@@ -8813,6 +9268,8 @@ class WorkbenchWorkflow {
     this.bridge = bridge;
     this.locateFfmpeg = locateFfmpeg;
     this.voiceDecodeAuditCache = new Map();
+    this.technicalVideoAuditActive = 0;
+    this.technicalVideoAuditWaiters = [];
     this.stagingRoot = stagingRoot;
     this.license = licenseClient || null;
     this.integrityGuard = integrityGuard || null;
@@ -8979,9 +9436,9 @@ class WorkbenchWorkflow {
     this.operationControls = new Map();
     this.liveDraftWrites = new Map();
     this.videoSubmissionPromises = new Map();
-    // 官网已经持久化接单并统一调度 云端算力节点 实例。客户端不得再按 10 秒
-    // 人为串行提交；只对“提交响应未知”使用同一幂等键做有限恢复。
-    this.videoSubmissionRecoveryAttempts = 3;
+    // 官网已经持久化接单并统一调度云端算力节点。对“提交响应未知”始终
+    // 使用同一幂等键恢复同一任务，不因恢复次数或经过时长判失败。
+    this.videoSubmissionRecoveryAttempts = UNLIMITED_ATTEMPTS;
     this.videoSubmissionRecoverySleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     this.videoQueryPollSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     this._accountedGenerateText = this.generateText;
@@ -8996,10 +9453,10 @@ class WorkbenchWorkflow {
       this.adaptiveAgent.registerAdapter("video", "default", payload => generateVideo(payload.config, payload.prompt, payload.targetPath, payload.options || {}));
     }
     if (!this.adaptiveAgent.hasAdapter("video_submit", "default")) {
-      this.adaptiveAgent.registerAdapter("video_submit", "default", payload => payload.bridge.submit(payload.stagedPayload));
+      this.adaptiveAgent.registerAdapter("video_submit", "default", payload => payload.bridge.submit(payload.stagedPayload, { signal: payload.signal }));
     }
     if (!this.adaptiveAgent.hasAdapter("video_query", "default")) {
-      this.adaptiveAgent.registerAdapter("video_query", "default", payload => payload.bridge.query(payload.taskId));
+      this.adaptiveAgent.registerAdapter("video_query", "default", payload => payload.bridge.query(payload.taskId, { signal: payload.signal }));
     }
     for (const capability of ["text", "image", "video", "video_submit", "video_query"]) {
       const skillName = `provider.${capability}`;
@@ -9023,8 +9480,45 @@ class WorkbenchWorkflow {
       { config, messages, options },
       { projectId: options.costProjectId || "", operation: options.costOperation || "text" }
     );
-    const continuityDirectorSkill = {
+    if (!this.adaptiveAgent.hasSkill("script.analyze_chunk")) {
+      this.adaptiveAgent.registerSkill("script.analyze_chunk", {
         maxAttempts: 3,
+        run: (payload, context) => context.agent.execute(
+          "text",
+          payload.config?.kind || "default",
+          { config: payload.config, messages: payload.messages, options: payload.textOptions },
+          { ...context, projectId: payload.projectId, operation: payload.operation || "script_analysis_chunk" }
+        ),
+        validate: (result, payload) => validateScriptAnalysisChunkResult(result, payload),
+        repairPayload: (payload, error, context) => {
+          // Provider/network recovery already owns one persisted request identity
+          // and has no total deadline. Only creative contract failures may open a
+          // fresh Agent repair turn; retrying an unknown paid response here could
+          // duplicate billing.
+          if (error?.code !== "AGENT_SKILL_VALIDATION_FAILED") throw error;
+          return {
+            ...payload,
+            messages: [
+              ...payload.messages,
+              {
+                role: "user",
+                content: `上一次 JSON 未通过剧本理解合同。请重新输出完整 JSON，保留原稿事实、逐字对白、镜数和时长；props 只允许收录参与核心因果的道具，家具、餐具、手机、杯子、普通门窗及环境装饰不得进入。修复项：${Array.isArray(error?.details) ? error.details.join("；") : error?.message || error}`
+              }
+            ],
+            textOptions: {
+              ...payload.textOptions,
+              sessionId: `${payload.textOptions?.sessionId || `agent-script-analysis-${payload.projectId || "project"}`}-agent-repair-${context.attempt + 1}`
+            }
+          };
+        }
+      });
+    }
+    const continuityDirectorSkill = {
+        // This is a creative-contract correction budget, not an execution
+        // deadline. Provider/network recovery keeps the same request identity
+        // elsewhere; only a returned but invalid director draft starts a new
+        // Agent turn here.
+        maxAttempts: 5,
         run: async (payload, context) => {
           const raw = await context.agent.execute(
             "text",
@@ -9035,20 +9529,53 @@ class WorkbenchWorkflow {
           return mergeAgentTakeDraft(payload.basePlan, raw, payload.project, payload.shot, { requireAgentAuthored: true });
         },
         validate: (plan, payload) => validateCameraTakePlan(plan, payload.project, payload.shot),
-        repairPayload: (payload, error, context) => ({
-          ...payload,
-          messages: [
+        repairPayload: (payload, error, context) => {
+          const creativeValidationCodes = new Set([
+            "AGENT_CONTINUITY_DIRECTION_INVALID",
+            "AGENT_CONTINUITY_PLAN_CONTRACT_FAILED",
+            "AGENT_SKILL_VALIDATION_FAILED"
+          ]);
+          if (!creativeValidationCodes.has(String(error?.code || ""))) throw error;
+          let previousDraftJson = "";
+          if (error?.invalidDraft && typeof error.invalidDraft === "object") {
+            try {
+              const serialized = JSON.stringify(error.invalidDraft);
+              previousDraftJson = serialized.length <= 20_000
+                ? serialized
+                : JSON.stringify({
+                    truncated: true,
+                    rawExcerpt: serialized.slice(0, 16_000)
+                  });
+            } catch {}
+          }
+          const repairMessages = [
             ...payload.messages,
+            ...(previousDraftJson ? [{
+              role: "assistant",
+              content: previousDraftJson
+            }] : []),
             {
               role: "user",
-              content: `Attempt ${context.attempt} failed validation. Repair the full JSON. Never change locked dialogue ids/order/time/speaker/listener, generation-block ids/takeIds/strategy, or Chinese wording. Camera ownership may only use locked participants and must obey visible-speaker mouth ownership. Failures: ${Array.isArray(error?.failures) ? error.failures.join("; ") : error?.message || error}`
+              content: [
+                `Attempt ${context.attempt} returned a director JSON that failed creative validation. Return the FULL corrected JSON object only and repair the listed failures; do not omit already-valid fields.`,
+                "For EVERY take, performanceEn must literally and concretely cover Face/eyes, body/shoulders/hands, breath, voice volume, pace/pause, and stress/emphasis.",
+                "For EVERY take, cameraEn must name an executable camera instruction such as Static camera, close-up, medium close-up, push-in, or pan, chosen for that exact story beat.",
+                "Never change locked take ids/order/start/end, dialogue ids/order/time/speaker/listener or Chinese wording, generation-block ids/takeIds/strategy, character ownership, or source facts.",
+                "Visible speech must keep the camera and mouth on the locked speaker; an off-screen speaker owns no visible lips. Keep listener reactions silent.",
+                "Do not create character introductions, biographies, subtitles, captions, titles, readable text, background music, songs, or non-diegetic music.",
+                `Failures: ${Array.isArray(error?.failures) ? error.failures.join("; ") : Array.isArray(error?.details) ? error.details.join("; ") : error?.message || error}`
+              ].join("\n")
             }
-          ],
-          textOptions: {
-            ...payload.textOptions,
-            sessionId: `${payload.textOptions.sessionId || `agent-continuity-${payload.projectId}-${payload.shot?.id}`}-repair-${context.attempt + 1}`
-          }
-        })
+          ];
+          return {
+            ...payload,
+            messages: repairMessages,
+            textOptions: {
+              ...(payload.textOptions || {}),
+              sessionId: `${payload.textOptions?.sessionId || `agent-continuity-${payload.projectId || "project"}-${payload.shot?.id || "shot"}`}-repair-${context.attempt + 1}`
+            }
+          };
+        }
       };
     if (!this.adaptiveAgent.hasSkill("director.continuity_plan")) {
       this.adaptiveAgent.registerSkill("director.continuity_plan", continuityDirectorSkill);
@@ -9130,7 +9657,10 @@ class WorkbenchWorkflow {
       });
     }
     if (!this.licenseEnabled()) return fn(null);
-    const lease = await this.license.acquireLease(kind, taskId, meta);
+    const operationSignal = meta?.projectId
+      ? this.operationControls.get(meta.projectId)?.controller?.signal || null
+      : null;
+    const lease = await this.license.acquireLease(kind, taskId, meta, { signal: operationSignal });
     try {
       return await fn(lease);
     } finally {
@@ -9372,25 +9902,45 @@ class WorkbenchWorkflow {
     this.liveDraftWrites.set(projectId, { at: nowMs, length: content.length });
   }
 
-  scriptGenerationOptions(projectId, stage, options = {}) {
+  productionTextOptions(projectId, stage, options = {}) {
     const control = this.operationControls.get(projectId);
-    const callerOnDelta = options.onDelta;
+    const callerOnAttemptFailure = options.onAttemptFailure;
     return {
       ...options,
-      timeoutMs: Math.max(1_000, Number(options.timeoutMs) || SCRIPT_TEXT_REQUEST_TIMEOUT_MS),
-      // The website has no durable response replay for an ambiguous desktop
-      // reconnect. One logical request therefore gets one billable attempt;
-      // the script compiler falls back locally instead of charging twice.
-      maxReconnectAttempts: Math.max(1, Number(options.maxReconnectAttempts) || 1),
-      signal: control?.controller.signal,
+      timeoutMs: NO_TOTAL_DEADLINE_MS,
+      maxReconnectAttempts: UNLIMITED_ATTEMPTS,
+      signal: options.signal || control?.controller.signal,
+      onAttemptFailure: info => {
+        if (info?.retrying && projectId) {
+          try {
+            this.setAutomation(projectId, {
+              stage: stage || "text_generation",
+              status: "running",
+              message: `文本链路波动，正在续接同一请求（第 ${info.attempt} 次）；不会因耗时停止，也不会创建新的逻辑任务`
+            });
+          } catch {}
+        }
+        if (typeof callerOnAttemptFailure === "function") {
+          try { callerOnAttemptFailure(info); } catch {}
+        }
+      },
+      ...(projectId ? {
+        costProjectId: projectId,
+        costOperation: stage || options.costOperation || "text"
+      } : {})
+    };
+  }
+
+  scriptGenerationOptions(projectId, stage, options = {}) {
+    const callerOnDelta = options.onDelta;
+    return {
+      ...this.productionTextOptions(projectId, stage, options),
       onDelta: text => {
         this.writeLiveScriptOutput(projectId, stage, text);
         if (typeof callerOnDelta === "function") {
           try { callerOnDelta(text); } catch {}
         }
-      },
-      costProjectId: projectId,
-      costOperation: stage || options.costOperation || "script"
+      }
     };
   }
 
@@ -9663,7 +10213,12 @@ class WorkbenchWorkflow {
       : (Array.isArray(shots) ? shots : []);
     const reviewUnitCount = reviewUnits.length;
     const reviewDuration = reviewUnits.reduce((sum, item) => sum + Math.max(0, Number(item?.duration) || 0), 0);
-    const requestOptions = { json: true, sessionId, timeoutMs: TOPIC_REQUEST_TIMEOUT_MS, maxReconnectAttempts: 1 };
+    const requestOptions = {
+      json: true,
+      sessionId,
+      timeoutMs: NO_TOTAL_DEADLINE_MS,
+      maxReconnectAttempts: UNLIMITED_ATTEMPTS
+    };
     try {
       const data = await this.generateText(settings.textProvider, [
         { role: "system", content: `${appendDocxPromptFusion(
@@ -10234,20 +10789,25 @@ class WorkbenchWorkflow {
   }
 
   async auditRecoveredVideoCandidate(projectId, candidate) {
-    if (!candidate || candidate.qualityAudit || !this.locateFfmpeg()) return candidate;
+    if (!candidate || !this.locateFfmpeg()) return candidate;
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
-    if (candidate.stage === "shot_video" && !this.qualityGatesEnabled(settings, "videos")) return candidate;
     if (candidate.stage === "character_video" && !this.qualityGatesEnabled(settings, "assets")) return candidate;
     if ((candidate.productionRevision || "") !== (project.productionRevision || "")) return candidate;
     try {
-      if (candidate.stage === "shot_video") await this.auditShotCandidate(projectId, candidate.entityId, candidate.id);
+      if (candidate.stage === "shot_video") {
+        if (this.qualityGatesEnabled(settings, "videos") && !candidate.qualityAudit) {
+          await this.auditShotCandidate(projectId, candidate.entityId, candidate.id);
+        } else if (!this.technicalVideoAuditIsCurrent(candidate)) {
+          await this.auditTechnicalShotCandidate(projectId, candidate.entityId, candidate.id);
+        }
+      }
       else if (candidate.stage === "character_video") await this.auditCharacterVideoCandidate(projectId, candidate.entityId, candidate.id);
     } catch (error) {
       const failure = { code: error.code || "RECOVERED_VIDEO_AUDIT_FAILED", message: `断点恢复后质检失败：${error.message}` };
-      this.store.updateCandidate(projectId, candidate.id, {
-        qualityAudit: { ok: false, checkedAt: new Date().toISOString(), type: candidate.stage, failures: [failure], repairDirective: buildRepairDirective([failure]) }
-      });
+      this.store.updateCandidate(projectId, candidate.id, candidate.stage === "shot_video"
+        ? { technicalIntegrityAudit: { ok: false, version: TECHNICAL_VISUAL_AUDIT_VERSION, checkedAt: new Date().toISOString(), mandatory: true, failures: [failure], repairDirective: buildRepairDirective([failure]) } }
+        : { qualityAudit: { ok: false, checkedAt: new Date().toISOString(), type: candidate.stage, failures: [failure], repairDirective: buildRepairDirective([failure]) } });
     }
     return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
   }
@@ -10543,16 +11103,13 @@ class WorkbenchWorkflow {
         // {result:{topics:[...]}}. Require the logical shape and unwrap those
         // envelopes before validation so a charged, valid upstream response is
         // not discarded by the desktop client.
-        ], {
+        ], this.productionTextOptions(projectId, "topics", {
           json: true,
           ...topicJsonParseOptions(),
           sessionId: topicSessionId,
           maxTokens: 2_400,
-          timeoutMs: TOPIC_REQUEST_TIMEOUT_MS,
-          maxReconnectAttempts: 1,
-          costProjectId: projectId,
           costOperation: "topic_ideation"
-        });
+        }));
         const topics = normalizeTopicOptions(data);
         const repeatedTitles = topics.filter(item => previousTitles.has(String(item.title || "").trim()));
         if (options.fresh && repeatedTitles.length > 0) {
@@ -10623,6 +11180,7 @@ class WorkbenchWorkflow {
       requestTimeoutMs: SCRIPT_TEXT_REQUEST_TIMEOUT_MS,
       topicTimeoutMs: TOPIC_REQUEST_TIMEOUT_MS
     });
+    checkpoint.noTotalDeadline = true;
     const segmentKey = (start, end) => `${start}-${end}`;
     let directFastSpine = checkpoint.directFastSpine || null;
     try {
@@ -10652,7 +11210,7 @@ class WorkbenchWorkflow {
       status: "running",
       message: initiallyCompleted
         ? `正在从本地断点续写：已保留 ${initiallyCompleted}/${segments.length} 段，只由编剧 Agent 补未完成剧本段`
-        : `八分钟简短剧保障：正文最多九分钟、选题到资产最多十五分钟；每段最多 ${SCRIPT_DIRECT_SEGMENT_UNITS} 镜、${SCRIPT_DIRECT_MAX_CONCURRENCY} 路并发，所有创作内容只接受编剧 Agent 输出`
+        : `八分钟简短剧性能目标：正文约九分钟、选题到资产约十五分钟；超过目标仍继续运行，不判失败。每段最多 ${SCRIPT_DIRECT_SEGMENT_UNITS} 镜、${SCRIPT_DIRECT_MAX_CONCURRENCY} 路并发，所有创作内容只接受编剧 Agent 输出`
     });
     let rawText = "";
     const receipts = checkpoint.directFastSegments.map(item => item.receipt).filter(Boolean);
@@ -10965,7 +11523,7 @@ class WorkbenchWorkflow {
         sourceFingerprint: crypto.createHash("sha256").update(raw).digest("hex"),
         durationContract: normalized.durationContract,
         generationPerformance: {
-          path: "global-agent-spine-resumable-bounded-segments-v8",
+          path: "global-agent-spine-resumable-no-total-deadline-v9",
           targetSeconds: SCRIPT_FAST_TARGET_SECONDS,
           elapsedSeconds,
           metTarget: elapsedSeconds !== null ? elapsedSeconds <= SCRIPT_FAST_TARGET_SECONDS : null,
@@ -10973,7 +11531,8 @@ class WorkbenchWorkflow {
           topicToAssetsTargetSeconds: TOPIC_TO_ASSETS_SLA_MS / 1000,
           topicToAssetsElapsedSeconds,
           metTopicToAssetsTarget: topicToAssetsElapsedSeconds !== null ? topicToAssetsElapsedSeconds <= TOPIC_TO_ASSETS_SLA_MS / 1000 : null,
-          theoreticalUpperBoundSeconds: Math.round(checkpoint.theoreticalUpperBoundMs / 1000),
+          theoreticalUpperBoundSeconds: null,
+          noTotalDeadline: true,
           writingContractVersion: DRAMA_WRITING_CONTRACT_VERSION,
           finishedAt: finishedAt.toISOString(),
           upstreamModel: scriptTextProvider.model,
@@ -12282,17 +12841,13 @@ class WorkbenchWorkflow {
             role: "user",
             content: `人物名称映射：${JSON.stringify(nameMap)}\n这是第 ${chunkIndex + 1}/${chunks.length} 段。返回 {"lines":[{"sourceId":"D001","speakerName":"映射后姓名","tone":"贴合原意的语气表情","dialogue":"轻微改写后的完整原句","scene":"不新增事实的简短场景","action":"不新增事实的简短动作"}]}。每句改写应保留原句大部分用词，新增内容不超过原句约 50%，数字必须原样保留。\n邻近上下文（仅用于理解，不得另写对白）：\n${nearbyContext}\n\n本段逐句事实账本：\n${JSON.stringify(sourceLines)}`
           }
-        ], {
+        ], this.productionTextOptions(projectId, `dialogue_rewrite_chunk_${chunkIndex + 1}`, {
           json: true,
           requiredKeys: ["lines"],
-          signal: control?.controller.signal,
-          timeoutMs: SCRIPT_TEXT_REQUEST_TIMEOUT_MS,
-          maxReconnectAttempts: 1,
           sessionId: `dialogue-rewrite-${sourceFingerprint.slice(0, 20)}-${chunkIndex + 1}-v1`,
           maxTokens: Math.min(8192, Math.max(1024, 640 + chunk.length * 150)),
-          costProjectId: projectId,
           costOperation: `dialogue_rewrite_chunk_${chunkIndex + 1}`
-        });
+        }));
         return { lines: validateDialogueRewriteLines(chunk, data?.lines, nameMap), fallback: false, fallbackReason: "" };
       } catch (error) {
         if (isScriptControlError(error)) throw error;
@@ -12356,9 +12911,26 @@ class WorkbenchWorkflow {
     if (!project.script?.raw?.trim()) throw Object.assign(new Error("请先粘贴完整短剧剧本"), { code: "SCRIPT_REQUIRED" });
     const sourceFormat = detectUploadedScriptFormat(project.script.raw);
     const sourceSceneLedger = buildSourceSceneLedger(project.script.raw);
+    const uploadedSections = splitUploadedScriptSections(project.script.raw);
+    const productionSourceText = uploadedSections.dramaticBody;
+    const productionSceneLedger = buildSourceSceneLedger(productionSourceText);
+    const locallyParsedDialogueLedger = productionDialogueLedgerFromScript(project.script.raw, uploadedSections, sourceSceneLedger);
     const commitAnalysis = (normalized, analysisMethod, analysisChunks) => {
       const sceneContract = normalized?.sourceSceneLedger?.explicit ? normalized.sourceSceneLedger : sourceSceneLedger;
-      normalized = enforceSourceSceneLedger({ ...normalized, detectedFormat: String(normalized?.detectedFormat || sourceFormat).trim() }, sceneContract, normalized?.sourceDialogueLedger);
+      const normalizedDialogueLedger = Array.isArray(normalized?.sourceDialogueLedger) ? normalized.sourceDialogueLedger : [];
+      // Dedicated local parsers (for example the timed-storyboard format) own
+      // a stronger ledger than the generic narrative parser. Agent analysis is
+      // already bound to the locally parsed source ledger before this point.
+      const authoritativeDialogueLedger = normalizedDialogueLedger.length ? normalizedDialogueLedger : locallyParsedDialogueLedger;
+      normalized = authoritativeDialogueLedger.length
+        ? bindSourceDialogueLedgerToAnalysis(normalized, authoritativeDialogueLedger)
+        : normalized;
+      normalized = enforceSourceSceneLedger({
+        ...normalized,
+        detectedFormat: String(normalized?.detectedFormat || sourceFormat).trim(),
+        sourceDialogueLedger: authoritativeDialogueLedger.map(item => ({ ...item }))
+      }, sceneContract, authoritativeDialogueLedger);
+      assertSourceDialogueParity(normalized, authoritativeDialogueLedger);
       assertSourceSceneParity(normalized, sceneContract);
       const auditedQuality = auditDramaSpec(normalized, {
         ...scriptQualityGateOptions(settings),
@@ -12445,6 +13017,36 @@ class WorkbenchWorkflow {
       this.syncReferenceLibraries(projectId, { props: normalized.props || [] });
       return this.store.getProject(projectId);
     };
+    const sourceFingerprint = crypto.createHash("sha256").update(String(project.script.raw || "")).digest("hex");
+    if (projectInputMode(project) === "manual"
+      && project.shots.length
+      && project.script?.sourceFingerprint === sourceFingerprint
+      && locallyParsedDialogueLedger.length
+      && !sourceDialogueLedgerMatches(project.script?.sourceDialogueLedger, locallyParsedDialogueLedger)) {
+      const repairInput = seedExistingAnalysisDialogueBindings({
+        story: project.script?.analysis || {},
+        characters: project.characters,
+        scenes: project.scenes,
+        shots: project.shots,
+        sourceDialogueLedger: []
+      }, locallyParsedDialogueLedger);
+      let repaired = bindSourceDialogueLedgerToAnalysis(repairInput, locallyParsedDialogueLedger);
+      repaired = enforceSourceSceneLedger(repaired, sourceSceneLedger, locallyParsedDialogueLedger);
+      assertSourceDialogueParity(repaired, locallyParsedDialogueLedger);
+      assertSourceSceneParity(repaired, sourceSceneLedger);
+      return this.store.patchProject(projectId, {
+        script: {
+          sourceDialogueLedger: locallyParsedDialogueLedger.map(item => ({ ...item })),
+          sourceSceneLedger,
+          sceneRecognitionReport: sourceSceneLedger.report || null,
+          analysisMethod: `${String(project.script?.analysisMethod || "uploaded-script").replace(/\+source-dialogue-local-repair-v1$/g, "")}+source-dialogue-local-repair-v1`
+        },
+        characters: repaired.characters,
+        scenes: repaired.scenes,
+        shots: repaired.shots,
+        activitySummary: `已从用户原稿本地恢复并锁定 ${locallyParsedDialogueLedger.length} 句逐字对白；旧分镜视频若不一致已退出当前成片`
+      });
+    }
     const timedStoryboard = parseTimedStoryboardScript(project.script.raw);
     if (timedStoryboard) {
       const providerKind = projectVideoProviderKind(project, settings);
@@ -12469,8 +13071,13 @@ class WorkbenchWorkflow {
       try {
         const knownNames = (structured.characters || []).map(item => item?.name).filter(Boolean);
         const parsedLedger = parseSourceDialogueLedger(project.script.raw, knownNames);
-        const sourceDialogueLedger = Array.isArray(structured.sourceDialogueLedger) ? structured.sourceDialogueLedger : [];
-        const durationLedger = sourceDialogueLedger.length ? sourceDialogueLedger : parsedLedger;
+        const rawStructuredJson = /^[\s\uFEFF]*[\[{]/.test(String(project.script.raw || ""));
+        const safeParsedLedger = rawStructuredJson ? [] : parsedLedger;
+        const structuredDialogueLedger = Array.isArray(structured.sourceDialogueLedger) ? structured.sourceDialogueLedger : [];
+        const sourceDialogueLedger = locallyParsedDialogueLedger.length
+          ? locallyParsedDialogueLedger
+          : (structuredDialogueLedger.length ? structuredDialogueLedger : safeParsedLedger);
+        const durationLedger = sourceDialogueLedger.length ? sourceDialogueLedger : safeParsedLedger;
         const providerKind = projectVideoProviderKind(project, settings);
         const explicit = explicitShotDurationTarget(structured.shots, providerKind, { engine: projectVideoEngine(project) });
         const durationEstimate = explicit
@@ -12493,20 +13100,32 @@ class WorkbenchWorkflow {
       story: { storyMechanism: "rescue_repaid/kindness_misjudged/sacrifice_repaid/evidence_reversal", premise: "故事前提", hook: "开场钩子", conflict: "核心冲突", turns: ["转折"], climax: "高潮", ending: "结尾", emotionCurve: ["情绪节点"] },
       characters: [{ id: "C01", name: "角色名", description: "含年龄体型五官发型服装配饰姿态的稳定角色圣经", identitySignature: "至少三项不能只靠换衣服区分的脸部/年龄/体型/姿态指纹", voiceDescription: "年龄性别语速音高质感情绪习惯", signatureLine: "5秒内可说完的角色压力测试台词", importance: "lead/supporting" }],
       scenes: [{ name: "场景名", description: "空间结构门窗家具机位光线与连续性锚点", time: "时间", atmosphere: "氛围与环境声" }],
+      props: [{ id: "P01", name: "核心道具名", description: "稳定外观", coreStory: true, causalRole: "它如何触发、证明或解决核心剧情", holder: "持有人", units: ["S01", "S02"], purpose: "核心叙事用途", continuity: "状态、归属与位置连续性" }],
       shots: [authoredShotSchema]
     };
     const providerKind = projectVideoProviderKind(project, settings);
-    const uploadedSections = splitUploadedScriptSections(project.script.raw);
-    const productionSourceText = uploadedSections.dramaticBody;
-    const productionSceneLedger = buildSourceSceneLedger(productionSourceText);
-    const sourceDialogueLedger = bindDialogueLedgerToScenes(parseSourceDialogueLedger(productionSourceText), productionSceneLedger);
+    const sourceDialogueLedger = locallyParsedDialogueLedger.length
+      ? locallyParsedDialogueLedger
+      : bindDialogueLedgerToScenes(parseSourceDialogueLedger(productionSourceText), productionSceneLedger);
     const durationEstimate = projectInputMode(project) === "manual"
       ? estimateUploadedScriptDuration(productionSourceText, sourceDialogueLedger, providerKind, { engine: projectVideoEngine(project) })
       : null;
     const targetSeconds = durationEstimate?.targetSeconds
       || Math.max(30, Math.round(Number(project.generation?.targetDurationSeconds) || 300));
+    const plannedFilmSchedule = planFilmSchedule(targetSeconds, providerKind, { engine: projectVideoEngine(project) });
+    const authoredUnitDurations = durationEstimate?.authoredShotDurationsLocked === true
+      && Array.isArray(durationEstimate?.normalizedDurations)
+      && durationEstimate.normalizedDurations.length === plannedFilmSchedule.unitCount
+      && Math.abs(durationEstimate.normalizedDurations.reduce((sum, value) => sum + Number(value || 0), 0) - targetSeconds) < 0.001
+      ? Object.freeze(durationEstimate.normalizedDurations.map(Number))
+      : null;
     const filmSchedule = {
-      ...planFilmSchedule(targetSeconds, providerKind, { engine: projectVideoEngine(project) }),
+      ...plannedFilmSchedule,
+      ...(authoredUnitDurations ? {
+        unitDurations: authoredUnitDurations,
+        suggestedDurations: authoredUnitDurations,
+        authoredShotDurationsLocked: true
+      } : {}),
       commerceShotCount: normalizeCommerceShotCount(project.productionPlan?.commerceShotCount, 3)
     };
     const chunks = analysisChunksForSchedule(productionSourceText, filmSchedule.unitCount);
@@ -12536,7 +13155,6 @@ class WorkbenchWorkflow {
     );
     const modeDirective = generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project));
     const schemaJson = JSON.stringify(schema);
-    const sourceFingerprint = crypto.createHash("sha256").update(String(project.script.raw || "")).digest("hex");
     const chunkFingerprint = chunk => crypto.createHash("sha256").update(JSON.stringify({
       text: chunk.text,
       start: chunk.start,
@@ -12547,7 +13165,7 @@ class WorkbenchWorkflow {
       scenes: (chunk.sourceSceneLedger?.catalogue || []).map(item => [item.id, item.name, item.aliases])
     })).digest("hex");
     const analysisSignature = crypto.createHash("sha256").update(JSON.stringify({
-      version: 3,
+      version: 4,
       sourceFingerprint,
       targetSeconds: filmSchedule.totalSeconds,
       unitDurations: filmSchedule.unitDurations,
@@ -12570,7 +13188,7 @@ class WorkbenchWorkflow {
     })).digest("hex");
     const analysisConcurrency = uploadedAnalysisConcurrency(chunkSchedules);
     const checkpointSeed = {
-      version: 3,
+      version: 4,
       kind: "uploaded-script-analysis",
       signature: analysisSignature,
       sourceFingerprint,
@@ -12659,28 +13277,37 @@ class WorkbenchWorkflow {
       const ledgerPrompt = sourceDialoguePromptBlock(chunk.sourceDialogueLedger);
       const scenePrompt = sourceScenePromptBlock(chunk.sourceSceneLedger);
       const messages = [
-        { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n${scenePrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}` },
-        { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先判断本段故事因果、人物关系、每句话的说话人/听者/语气/表情和商品出现时机，再写人物场景资产信息、分镜结构与sourceDialogueBindings。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。\n${uploadedSections.metadata ? `\n人物小传/故事简介（只用于建立人物与背景事实，绝对不能生成“人物介绍”“角色展示”“故事简介”镜头）：\n${uploadedSections.metadata}\n` : ""}\n正式剧情片段（只有这里可以转成成片镜头）：\n${chunk.text}` }
+        { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n${scenePrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。props 必须由你依据故事因果判断：只收录会触发事件、证明真相、改变关系或完成结局的核心道具，并写 coreStory=true、causalRole、purpose 与实际参与镜号；家具、门窗、杯盘、普通手机、随手杂物和环境装饰一律不收录；没有核心道具时必须返回空数组。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}` },
+        { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先判断本段故事因果、人物关系、每句话的说话人/听者/语气/表情、核心道具与商品出现时机，再写人物、场景、核心道具资产信息、分镜结构与sourceDialogueBindings。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。商品资产由用户图锁定，不得重复作为 prop 生成。\n${uploadedSections.metadata ? `\n人物小传/故事简介（只用于建立人物与背景事实，绝对不能生成“人物介绍”“角色展示”“故事简介”镜头）：\n${uploadedSections.metadata}\n` : ""}\n正式剧情片段（只有这里可以转成成片镜头）：\n${chunk.text}` }
       ];
       const requestChars = JSON.stringify(messages).length;
       const control = this.operationControls.get(projectId);
       let bound;
       try {
-        const partial = await this.generateText(settings.textProvider, messages, {
+        const textOptions = this.productionTextOptions(projectId, `script_analysis_chunk_${chunk.index + 1}`, {
           json: true,
+          // The transport parser only proves that a JSON shot payload is
+          // recoverable. Story/character/scene/prop completeness belongs to the
+          // Agent validator so it can repair creative omissions instead of a
+          // local parser prematurely turning them into a terminal error.
           requiredKeys: ["shots"],
           rootArrayKey: "shots",
           rootArrayAliases: ["units", "scriptUnits", "productionShots", "storyboards"],
           unwrapKeys: ["data", "result", "payload", "content", "response", "output", "analysis"],
           recursiveUnwrap: true,
-          signal: control?.controller.signal,
-          timeoutMs: SCRIPT_TEXT_REQUEST_TIMEOUT_MS,
-          maxReconnectAttempts: 1,
-          sessionId: `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-once-v3`,
+          sessionId: `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-agent-v4`,
           maxTokens: Math.min(16384, 4096 + chunk.unitCount * 2400),
-          costProjectId: projectId,
           costOperation: `script_analysis_chunk_${chunk.index + 1}`
         });
+        const partial = await this.runAgentSkill("script.analyze_chunk", {
+          projectId,
+          operation: `script_analysis_chunk_${chunk.index + 1}`,
+          config: settings.textProvider,
+          messages,
+          textOptions,
+          unitCount: chunk.unitCount,
+          requireCoreProp: /核心道具|关键道具|核心证物|关键证物|唯一证物/.test(String(chunk.text || ""))
+        }, { projectId, operation: `script_analysis_chunk_${chunk.index + 1}`, signal: control?.controller?.signal });
         const actualCount = Array.isArray(partial?.shots) ? partial.shots.length : 0;
         if (actualCount !== chunk.unitCount
           || !Array.isArray(partial?.characters) || !partial.characters.length
@@ -13451,7 +14078,7 @@ ${shotAnchor}
           const portrait = characterVideoIdentityCandidate(project, characterId, settings);
           const character = project.characters.find(item => item.id === characterId);
           if (!portrait?.filePath) {
-            throw Object.assign(new Error(`镜头 ${entity.id || entity.number} 的角色“${character?.name || characterId}”缺少独立正脸介绍图`), {
+            throw Object.assign(new Error(`镜头 ${entity.id || entity.number} 的角色“${character?.name || characterId}”缺少 H3 人物身份参考图（仅供锁脸，不进入成片）`), {
               code: "STORYBOARD_CHARACTER_REFERENCE_REQUIRED",
               shotId: entity.id,
               characterId
@@ -13472,7 +14099,7 @@ ${shotAnchor}
           const portrait = characterVideoIdentityCandidate(project, characterId, settings);
           const character = project.characters.find(item => item.id === characterId);
           if (!portrait?.filePath) {
-            throw Object.assign(new Error(`镜头 ${entity.id || entity.number} 的角色“${character?.name || characterId}”缺少独立正脸介绍图`), {
+            throw Object.assign(new Error(`镜头 ${entity.id || entity.number} 的角色“${character?.name || characterId}”缺少 H3 人物身份参考图（仅供锁脸，不进入成片）`), {
               code: "STORYBOARD_CHARACTER_REFERENCE_REQUIRED",
               shotId: entity.id,
               characterId
@@ -13864,7 +14491,7 @@ ${shotAnchor}
     }
     const source = project.candidates.find(item => item.id === candidateId);
     if (!source || source.entityType !== "character" || !["character_sheet", "character_three_view", "character_intro"].includes(source.stage)) {
-      throw Object.assign(new Error("只能对人物合板、三视图或介绍图执行全脸网格化"), { code: "FACE_MESH_SOURCE_INVALID" });
+      throw Object.assign(new Error("只能对人物合板、三视图或人物身份参考图执行全脸网格化"), { code: "FACE_MESH_SOURCE_INVALID" });
     }
     const character = project.characters.find(item => item.id === source.entityId);
     if (!character || !source.filePath || !fs.existsSync(source.filePath)) {
@@ -13885,7 +14512,7 @@ ${shotAnchor}
     }
     const source = project.candidates.find(item => item.id === candidateId);
     if (!source || source.entityType !== "character" || !["character_sheet", "character_three_view", "character_intro"].includes(source.stage)) {
-      throw Object.assign(new Error("只能对人物合板、三视图或介绍图添加人脸网格"), { code: "FACE_GRID_SOURCE_INVALID" });
+      throw Object.assign(new Error("只能对人物合板、三视图或人物身份参考图添加人脸网格"), { code: "FACE_GRID_SOURCE_INVALID" });
     }
     if (source.faceMesh?.applied === true) {
       throw Object.assign(new Error("这张人物资产已经添加网格，请从原图重新处理"), { code: "FACE_GRID_ALREADY_APPLIED" });
@@ -14028,7 +14655,7 @@ ${shotAnchor}
       const candidate = await withTransientProviderRetries(
         () => this.generateImageCandidate(projectId, "scene_asset", sceneId, `${basePrompt}${repair}`),
         {
-          attempts: 4,
+          attempts: UNLIMITED_ATTEMPTS,
           baseDelayMs: 2500,
           label: `${scene?.name || sceneId} 空场景`,
           onRetry: async (error, retryAttempt, maxRetryAttempts) => {
@@ -14054,10 +14681,10 @@ ${shotAnchor}
     const character = project.characters.find(item => item.id === characterId);
     const candidate = project.candidates.find(item => item.id === candidateId);
     if (!character || !candidate || candidate.entityType !== "character" || candidate.entityId !== characterId || candidate.stage !== "character_intro") {
-      throw Object.assign(new Error("人物介绍图候选归属不一致"), { code: "CHARACTER_INTRO_LINEAGE_INVALID" });
+      throw Object.assign(new Error("人物身份参考图候选归属不一致"), { code: "CHARACTER_INTRO_LINEAGE_INVALID" });
     }
     if (!candidate.filePath || !fs.existsSync(candidate.filePath)) {
-      throw Object.assign(new Error("待质检人物介绍图文件不存在"), { code: "CHARACTER_INTRO_MISSING" });
+      throw Object.assign(new Error("待质检人物身份参考图文件不存在"), { code: "CHARACTER_INTRO_MISSING" });
     }
     if (!this.qualityGatesEnabled(null, "assets")) {
       const audit = skippedQualityAudit("character_intro");
@@ -14085,11 +14712,11 @@ ${shotAnchor}
       ...item,
       code: item.code === "STORYBOARD_IS_CHARACTER_SHEET" ? "CHARACTER_INTRO_IS_SHEET" : item.code,
       message: item.code === "STORYBOARD_IS_CHARACTER_SHEET"
-        ? `人物“${character.name}”介绍图与三视图相似度过高，不能作为人物视频首帧`
+        ? `人物“${character.name}”身份参考图与三视图相似度过高，不能作为人物视频首帧`
         : item.message
     }));
     if (sameFile && !failures.some(item => item.code === "CHARACTER_INTRO_IS_SHEET")) {
-      failures.push({ code: "CHARACTER_INTRO_IS_SHEET", message: `人物“${character.name}”介绍图直接复用了三视图文件`, relatedCandidateId: sheet.id, relatedCharacterId: characterId });
+      failures.push({ code: "CHARACTER_INTRO_IS_SHEET", message: `人物“${character.name}”身份参考图直接复用了三视图文件`, relatedCandidateId: sheet.id, relatedCharacterId: characterId });
     }
     const audit = {
       ok: failures.length === 0,
@@ -14258,7 +14885,7 @@ ${shotAnchor}
       const candidate = await withTransientProviderRetries(
         () => this.generateImageCandidate(projectId, stage, shotId, `${basePrompt}${repair}`),
         {
-          attempts: 5,
+          attempts: UNLIMITED_ATTEMPTS,
           baseDelayMs: 3000,
           label: `S${String(shot?.number || shotId).padStart(2, "0")} ${storyboardStageLabel(stage)}`,
           onRetry: async (error, retryAttempt, maxRetryAttempts) => {
@@ -14293,7 +14920,8 @@ ${shotAnchor}
       try {
         result = await this.executeAdaptiveCapability("video_query", initialJob?.providerKind || "default", {
           bridge: taskBridge,
-          taskId
+          taskId,
+          signal: this.operationControls.get(projectId)?.controller.signal
         }, { projectId, jobId, stage: "video_poll", attempt });
       } catch (error) {
         if (!error.taskId) error.taskId = taskId;
@@ -14322,7 +14950,10 @@ ${shotAnchor}
       });
       if (result.status === "finished" && result.localPath) return result;
       if (["failed", "discarded"].includes(result.status) || result.ok === false) {
-        if (result.retryable !== false) {
+        // A provider's terminal failure is terminal unless it explicitly marks
+        // the same task as retryable. Missing retryable metadata must never turn
+        // a rejected paid task into an endless poll loop.
+        if (result.retryable === true) {
           this.store.updateJob(projectId, jobId, {
             status: "remote_pending",
             progressDeterminate: false,
@@ -14350,6 +14981,21 @@ ${shotAnchor}
     // configure(); always sync from durable settings before any paid submit.
     // Project engine wins: hailuo-h3 must never fall through to local Xiangsu.
     const expectedEngine = assertVideoProviderAligned(project, settings);
+    // Every provider reaches this single paid-submission boundary. Local
+    // Xiangsu accepts the same audio-reference shape as cloud H3 and exhibits
+    // the same misleading terminal rejection for sub-three-second clips, so it
+    // must not bypass the shared voice envelope merely because its engine label
+    // is "seedance".
+    if (entityType === "shot" && stage === "shot_video" && Array.isArray(references?.audios) && references.audios.length) {
+      const parentShot = (project.shots || []).find(item => item.id === entityId);
+      const activeShot = references?.agentGenerationBlockShot || references?.agentTakeShot || parentShot;
+      if (!activeShot) throw Object.assign(new Error("分镜不存在，禁止提交带音色的视频任务"), { code: "SHOT_NOT_FOUND" });
+      references = {
+        ...references,
+        audios: references.audios.map(item => ({ ...item }))
+      };
+      await this.verifyHailuoVoiceReferences(project, activeShot, references);
+    }
     // Compiler-owned shot prompts are immutable here. Manual, character, and
     // other prompts still receive the generic bounded output-policy compiler.
     const executionPrompt = finalizeVideoPromptForSubmission(project, entityType, entityId, stage, prompt, expectedEngine, references);
@@ -14610,34 +15256,81 @@ ${shotAnchor}
     const costEntry = this.ensureVideoCostEntry(projectId, job);
     try {
       let submitted = null;
-      const maxSubmitAttempts = expectedEngine === "hailuo-h3"
-        ? Math.max(1, Number(this.videoSubmissionRecoveryAttempts) || 3)
-        : 1;
+      const maxSubmitAttempts = resolveAttemptLimit(this.videoSubmissionRecoveryAttempts, UNLIMITED_ATTEMPTS);
       for (let submitAttempt = 1; submitAttempt <= maxSubmitAttempts; submitAttempt += 1) {
         try {
           submitted = await this.executeAdaptiveCapability("video_submit", providerKind || "default", {
             bridge: submissionBridge,
-            stagedPayload: staged.payload
+            stagedPayload: staged.payload,
+            signal: this.operationControls.get(projectId)?.controller.signal
           }, { projectId, stage, entityType, entityId, submitAttempt });
           break;
         } catch (error) {
           const responseUnknown = error?.remoteSubmissionUnknown === true
             || String(error?.code || "") === "VIDEO_SUBMISSION_RESPONSE_UNKNOWN";
-          if (!responseUnknown || submitAttempt >= maxSubmitAttempts) throw error;
+          const retryableBeforeTaskCreation = error?.retryable === true
+            && !error?.taskId
+            && !responseUnknown;
+          if (retryableBeforeTaskCreation && submitAttempt < maxSubmitAttempts) {
+            this.store.updateJob(projectId, job.id, {
+              status: "queued",
+              progress: null,
+              progressDeterminate: false,
+              submissionFingerprint: fingerprint,
+              clientRequestId,
+              message: `${error.message || `${providerLabel}当前繁忙`}；使用同一制作请求自动等待重试（第 ${submitAttempt} 次）`,
+              errorCode: error.code || "VIDEO_SUBMISSION_BUSY"
+            });
+            this.assertOperationActive(projectId);
+            await this.videoSubmissionRecoverySleep(Math.min(30_000, 2500 * submitAttempt));
+            continue;
+          }
+          // Cloud submissions are protected by the official idempotency key and
+          // can recover an unknown response. A local post-connect unknown is
+          // never replayed because an upstream paid task might already exist.
+          const canRecoverUnknown = expectedEngine === "hailuo-h3" && responseUnknown;
+          if (!canRecoverUnknown || submitAttempt >= maxSubmitAttempts) throw error;
           this.store.updateJob(projectId, job.id, {
             status: "remote_pending",
             progress: null,
             progressDeterminate: false,
             submissionFingerprint: fingerprint,
             clientRequestId,
-            message: `提交响应未知；第 ${submitAttempt}/${maxSubmitAttempts} 次使用原幂等键取回同一官网任务`,
+            message: `提交响应未知；第 ${submitAttempt}/${attemptLimitLabel(maxSubmitAttempts)} 次使用原幂等键取回同一官网任务，不因耗时停止`,
             errorCode: "VIDEO_SUBMISSION_RESPONSE_UNKNOWN"
           });
           this.assertOperationActive(projectId);
           await this.videoSubmissionRecoverySleep(Math.min(3000, submitAttempt * 1000));
+          continue;
         }
+        if (!submitted?.ok || !submitted?.taskId) {
+          const retryableBeforeTaskCreation = submitted?.retryable === true && !submitted?.taskId;
+          if (!retryableBeforeTaskCreation || submitAttempt >= maxSubmitAttempts) {
+            throw Object.assign(new Error(submitted?.message || `${providerLabel}没有返回任务 ID`), {
+              code: submitted?.code || "VIDEO_SUBMISSION_REJECTED",
+              upstream: submitted?.result || submitted || null
+            });
+          }
+          this.store.updateJob(projectId, job.id, {
+            status: "queued",
+            progress: null,
+            progressDeterminate: false,
+            submissionFingerprint: fingerprint,
+            clientRequestId,
+            message: `${submitted.message || `${providerLabel}当前繁忙`}；使用同一制作请求自动等待重试（第 ${submitAttempt} 次）`,
+            errorCode: submitted.code || "VIDEO_SUBMISSION_BUSY"
+          });
+          this.assertOperationActive(projectId);
+          await this.videoSubmissionRecoverySleep(Math.min(30_000, 2500 * submitAttempt));
+          continue;
+        }
+        break;
       }
-      if (!submitted.ok || !submitted.taskId) throw new Error(submitted.message || `${providerLabel}没有返回任务 ID`);
+      if (!submitted?.ok || !submitted?.taskId) {
+        throw Object.assign(new Error(submitted?.message || `${providerLabel}没有返回任务 ID`), {
+          code: submitted?.code || "VIDEO_SUBMISSION_REJECTED"
+        });
+      }
       this.store.updateJob(projectId, job.id, {
         taskId: submitted.taskId,
         costEntryId: costEntry.id,
@@ -14837,12 +15530,12 @@ ${shotAnchor}
     if (!character) throw Object.assign(new Error("角色不存在"), { code: "CHARACTER_NOT_FOUND" });
     let portrait = characterVideoIdentityCandidate(project, characterId, settings);
     if (!portrait?.filePath) {
-      this.setAutomation(projectId, { message: `角色“${character.name}”尚无独立人物介绍图，正在自动补齐后继续生成人物视频` });
+      this.setAutomation(projectId, { message: `角色“${character.name}”尚无 H3 人物身份参考图，正在自动补齐锁脸资产后继续生成人物视频；该图不会进入成片` });
       await this.ensureCharacterIntroCandidate(projectId, characterId);
       project = this.store.getProject(projectId);
       portrait = characterVideoIdentityCandidate(project, characterId, settings);
     }
-    if (!portrait?.filePath) throw Object.assign(new Error(projectRequiresFaceMesh(project, settings) ? "角色人物介绍图尚未就绪；系统已保留任务，补齐云端 Seedance 全脸网格后可直接续跑" : "角色人物介绍图尚未就绪；系统已保留任务，补齐后可直接续跑"), { code: "ASSET_VIDEO_DEPENDENCIES_PENDING" });
+    if (!portrait?.filePath) throw Object.assign(new Error(projectRequiresFaceMesh(project, settings) ? "角色人物身份参考图尚未就绪；系统已保留任务，补齐云端 Seedance 全脸网格后可直接续跑" : "角色人物身份参考图尚未就绪；系统已保留任务，补齐后可直接续跑"), { code: "ASSET_VIDEO_DEPENDENCIES_PENDING" });
     const engine = projectVideoEngine(project);
     const stageProvider = characterVideoStageProvider(settings);
     const characterVideoDuration = characterVideoShortestDuration(stageProvider, settings, engine);
@@ -14866,7 +15559,7 @@ ${shotAnchor}
       return this.withLicenseLease("video", leaseTaskId, { projectId, stage: "character_video", entityId: characterId, provider: stageProvider }, async () => {
       const referenceUrl = portrait.remoteUrl || "";
       if (!/^https?:\/\//i.test(referenceUrl)) {
-        throw Object.assign(new Error("纯梦清波人物视频需要人物介绍图的纯梦公网结果 URL；请重新抽取人物介绍图或改为跟随项目视频引擎"), { code: "DIGITAL_HUMAN_REFERENCE_URL_REQUIRED" });
+        throw Object.assign(new Error("纯梦清波人物视频需要人物身份参考图的纯梦公网结果 URL；请重新生成身份参考图或改为跟随项目视频引擎"), { code: "DIGITAL_HUMAN_REFERENCE_URL_REQUIRED" });
       }
       const providerConfig = {
         ...(settings.digitalHumanProvider || {}),
@@ -15045,7 +15738,7 @@ ${shotAnchor}
     const referenceManifest = candidate.referenceManifest || task?.referenceManifest || null;
     const failures = [...audioDecision.failures, ...anchors.failures];
     if (candidate.taskId && Array.isArray(referenceManifest?.images) && referenceManifest.images.some(item => ["character_three_view", "character_sheet"].includes(item.sourceStage))) {
-      failures.push({ code: "VIDEO_USED_CHARACTER_SHEET_REFERENCE", message: "人物视频生成任务直接使用了人物设定板，必须改用通过质检的单人介绍图" });
+      failures.push({ code: "VIDEO_USED_CHARACTER_SHEET_REFERENCE", message: "人物视频生成任务直接使用了人物设定板，必须改用通过质检的单人身份参考图" });
     } else if (candidate.taskId && (!Array.isArray(referenceManifest?.images) || !referenceManifest.images.length)) {
       failures.push({ code: "VIDEO_REFERENCE_LINEAGE_UNVERIFIED", message: "人物视频缺少参考资产清单，无法证明首帧没有误用三视图" });
     }
@@ -15106,12 +15799,18 @@ ${shotAnchor}
     const videoDuration = Math.max(1, Number(video.duration) || 6);
     const sourceAudit = await analyzeAudioFile(ffmpeg, video.filePath, videoDuration);
     const audible = audibleIntervalsFromSilence(sourceAudit.silenceIntervals || [], videoDuration);
-    let plan = selectVoiceExtractPlan(audible, { minSeconds: 1.2, maxSeconds: 5 });
+    let plan = selectVoiceExtractPlan(audible, {
+      minSeconds: HAILUO_VOICE_REFERENCE_TARGET_SECONDS,
+      maxSeconds: HAILUO_VOICE_REFERENCE_MAX_SECONDS
+    });
     let usedFallback = false;
     if (!plan) {
       // Best-effort: take a mid segment so voice assets still exist for Seedance audio refs.
       const start = Math.max(0.4, Math.min(videoDuration * 0.2, Math.max(0, videoDuration - 5.5)));
-      const duration = Math.max(1.5, Math.min(5, videoDuration - start - 0.2));
+      const duration = Math.max(
+        HAILUO_VOICE_REFERENCE_TARGET_SECONDS,
+        Math.min(HAILUO_VOICE_REFERENCE_MAX_SECONDS, videoDuration - start - 0.2)
+      );
       plan = { mode: "single", start: Number(start.toFixed(3)), duration: Number(duration.toFixed(3)), segments: [{ start: Number(start.toFixed(3)), end: Number((start + duration).toFixed(3)) }], fallback: true };
       usedFallback = true;
     }
@@ -15186,7 +15885,7 @@ ${shotAnchor}
     for (const candidate of project.candidates || []) {
       if (candidate.entityType !== "shot" || candidate.stage !== "shot_video" || !affectedShotIds.has(candidate.entityId)) continue;
       if ((candidate.productionRevision || "") !== activeRevision || candidate.stale === true) continue;
-      const audioItems = Array.isArray(candidate.referenceManifest?.audios) ? candidate.referenceManifest.audios : [];
+      const audioItems = referenceManifestAudios(candidate.referenceManifest);
       const bound = audioItems.find(item => item.characterId === characterId);
       const sameVoice = Boolean(bound && currentSha && bound.sha256 === currentSha);
       if (sameVoice) continue;
@@ -15229,9 +15928,8 @@ ${shotAnchor}
       for (const candidate of project.candidates || []) {
         if (candidate.entityType !== "shot" || candidate.entityId !== shot.id || candidate.stage !== "shot_video") continue;
         if ((candidate.productionRevision || "") !== activeRevision || candidate.stale === true) continue;
-        const audios = Array.isArray(candidate.referenceManifest?.audios) ? candidate.referenceManifest.audios : [];
-        const resolvedMode = normalizeHailuoApiMode(candidate.hailuoResolvedMode || candidate.hailuoRequestedMode || "auto");
-        const badMode = resolvedMode !== "multimodal_to_video";
+        const audios = referenceManifestAudios(candidate.referenceManifest);
+        const badMode = !candidateHasHailuoDialogueMode(candidate);
         const missingOrChanged = speakerIds.some(characterId => {
           const item = audios.find(audio => audio.characterId === characterId);
           const expectedSha = currentVoiceSha.get(characterId);
@@ -15257,7 +15955,7 @@ ${shotAnchor}
   }
 
   reconcileProductionContracts(projectId, options = {}) {
-    const project = this.store.getProject(projectId);
+    let project = this.store.getProject(projectId);
     const enforcementEnabled = productionStructureGateEnabled(this.store.getSettings(), project);
     const failures = enforcementEnabled && (project.shots || []).length
       ? productionHardContractFailures(project, {
@@ -15507,6 +16205,154 @@ ${shotAnchor}
     return this.extractCharacterVoice(projectId, characterId, { track: false });
   }
 
+  async prepareHailuoVoiceReference(project, shot, audio, ffmpeg, speakerCount = 1) {
+    const decode = async candidate => {
+      const expectedDuration = Number(candidate?.duration) || 0;
+      let audit = await auditVoiceReferenceFile(ffmpeg, candidate?.path || candidate?.filePath, expectedDuration);
+      // Old project rows occasionally kept a rounded or stale duration. The
+      // decoded PCM duration is authoritative and can be re-audited safely.
+      if (audit?.code === "AUDIO_DURATION_MISMATCH" && Number(audit.actualDuration) > 0) {
+        candidate.duration = Number(audit.actualDuration);
+        audit = await auditVoiceReferenceFile(ffmpeg, candidate?.path || candidate?.filePath, candidate.duration);
+      }
+      return audit;
+    };
+    const asReference = (candidate, fallback = audio) => ({
+      ...fallback,
+      path: candidate.filePath || candidate.path,
+      remoteUrl: candidate.remoteUrl || "",
+      duration: Number(candidate.duration) || Number(fallback.duration) || 0,
+      candidateId: candidate.id || fallback.candidateId || "",
+      sourceStage: candidate.stage || fallback.sourceStage || "character_voice",
+      mediaProbeVerified: candidate.mediaProbeVerified === true
+    });
+
+    let prepared = { ...audio };
+    let audit = await decode(prepared);
+    if (!audit?.ok) return { audio: prepared, audit };
+    prepared.duration = Number(audit.actualDuration) || Number(audit.duration) || Number(prepared.duration) || 0;
+
+    const count = Math.max(1, Math.min(3, Number(speakerCount) || 1));
+    const perSpeakerMax = Math.min(HAILUO_VOICE_REFERENCE_MAX_SECONDS, (15 - 0.15) / count);
+    const inEnvelope = () => prepared.duration >= HAILUO_VOICE_REFERENCE_MIN_SECONDS
+      && prepared.duration <= perSpeakerMax + 0.001;
+    if (inEnvelope()) return { audio: prepared, audit };
+
+    const characterId = String(prepared.characterId || "");
+    const character = (project.characters || []).find(item => item.id === characterId);
+    const originalHash = fileSha256(prepared.path);
+
+    // Prefer the exact bound/same-role reusable voice when it already has a
+    // provider-safe duration. This preserves more real speech than padding a
+    // legacy short extraction and was the successful path in the H3 live probe.
+    if (prepared.duration < HAILUO_VOICE_REFERENCE_MIN_SECONDS && character) {
+      const reusable = this.findReusableVoice(character)?.entry;
+      if (reusable?.filePath && fs.existsSync(reusable.filePath) && fileSha256(reusable.filePath) !== originalHash) {
+        const reusableDraft = {
+          path: reusable.filePath,
+          duration: Number(reusable.duration) || 0,
+          mediaProbeVerified: reusable.mediaProbeVerified === true
+        };
+        const reusableAudit = await decode(reusableDraft);
+        const reusableDuration = Number(reusableAudit?.actualDuration) || Number(reusableDraft.duration) || 0;
+        if (reusableAudit?.ok
+          && reusableDuration >= HAILUO_VOICE_REFERENCE_MIN_SECONDS
+          && reusableDuration <= perSpeakerMax + 0.001) {
+          const materialized = this.materializeVoiceFromLibrary(project.id, characterId, reusable.id);
+          prepared = asReference({ ...materialized, duration: reusableDuration });
+          audit = await decode(prepared);
+          if (audit?.ok) return { audio: prepared, audit };
+        }
+      }
+    }
+
+    const targetDuration = prepared.duration < HAILUO_VOICE_REFERENCE_MIN_SECONDS
+      ? Math.min(perSpeakerMax, HAILUO_VOICE_REFERENCE_TARGET_SECONDS)
+      : perSpeakerMax;
+    const sourceHash = fileSha256(prepared.path);
+    const latestProject = this.store.getProject(project.id);
+    let normalized = (latestProject.candidates || []).find(candidate => (
+      candidate.entityType === "character"
+      && candidate.entityId === characterId
+      && candidate.stage === "character_voice"
+      && candidate.h3VoiceNormalization?.sourceSha256 === sourceHash
+      && Math.abs(Number(candidate.h3VoiceNormalization?.targetDuration) - targetDuration) <= 0.01
+      && candidate.filePath
+      && fs.existsSync(candidate.filePath)
+    ));
+
+    if (!normalized) {
+      const targetPath = path.join(
+        this.store.assetDir(project.id, "audio"),
+        `voice-h3-${slug(characterId || "speaker")}-${sourceHash.slice(0, 12)}-${String(targetDuration).replace(".", "_")}.wav`
+      );
+      try {
+        await spawnCapture(ffmpeg, [
+          "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", prepared.path,
+          "-map", "0:a:0", "-vn",
+          "-af", `aresample=44100,aformat=sample_fmts=s16:channel_layouts=mono,highpass=f=70,lowpass=f=12000,apad=pad_dur=${targetDuration},atrim=duration=${targetDuration},asetpts=N/SR/TB`,
+          "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le", targetPath
+        ], 180_000);
+      } catch (error) {
+        try { fs.rmSync(targetPath, { force: true }); } catch {}
+        throw Object.assign(new Error(`镜头 ${shot?.id || shot?.number || ""} 的角色音色无法整理为 H3 可接收时长：${error.message || error}`), {
+          code: "HAILUO_VOICE_REFERENCE_NORMALIZE_FAILED",
+          shotId: shot?.id || "",
+          characterId,
+          cause: error
+        });
+      }
+      const normalizedAudit = await auditVoiceReferenceFile(ffmpeg, targetPath, targetDuration);
+      if (!normalizedAudit?.ok || Number(normalizedAudit.actualDuration) < HAILUO_VOICE_REFERENCE_MIN_SECONDS) {
+        try { fs.rmSync(targetPath, { force: true }); } catch {}
+        throw Object.assign(new Error(`镜头 ${shot?.id || shot?.number || ""} 的角色音色整理后仍不可用：${normalizedAudit?.message || "时长不足"}`), {
+          code: normalizedAudit?.code || "HAILUO_VOICE_REFERENCE_NORMALIZE_FAILED",
+          shotId: shot?.id || "",
+          characterId,
+          audit: normalizedAudit
+        });
+      }
+      normalized = this.store.addCandidate(project.id, {
+        entityType: "character",
+        entityId: characterId,
+        stage: "character_voice",
+        prompt: prepared.duration < HAILUO_VOICE_REFERENCE_MIN_SECONDS
+          ? `H3 提交前自动把过短音色补足至 ${targetDuration.toFixed(2)} 秒；只作音色参考，不进入成片音轨`
+          : `H3 提交前自动把过长音色裁至 ${targetDuration.toFixed(2)} 秒；只作音色参考，不进入成片音轨`,
+        filePath: targetPath,
+        fileUrl: pathToFileURL(targetPath).href,
+        duration: Number(normalizedAudit.actualDuration),
+        audioSpec: { container: "wav", codec: "pcm_s16le", channels: 1, sampleRate: 44100 },
+        audioAudit: { ...normalizedAudit, source: "hailuo-h3-reference-envelope" },
+        mediaProbeVerified: true,
+        h3VoiceNormalization: {
+          sourceCandidateId: prepared.candidateId || "",
+          sourceSha256: sourceHash,
+          sourceDuration: prepared.duration,
+          targetDuration
+        },
+        selected: true
+      });
+    }
+
+    const projectAfter = this.store.getProject(project.id);
+    for (const candidate of projectAfter.candidates || []) {
+      if (candidate.entityType === "character" && candidate.entityId === characterId && candidate.stage === "character_voice") {
+        candidate.selected = candidate.id === normalized.id;
+      }
+    }
+    this.store.saveProject(projectAfter);
+    const selected = this.store.getProject(project.id).candidates.find(candidate => candidate.id === normalized.id) || normalized;
+    try {
+      this.depositCharacterVoiceToLibrary(project.id, characterId, selected);
+    } catch (error) {
+      this.store.addActivity(project.id, "asset_library_warning", `人物 ${characterId} 的 H3 合格音色已保存到项目；同步独立音色库失败：${String(error?.message || "未知错误")}`);
+    }
+    prepared = asReference(selected);
+    audit = await decode(prepared);
+    return { audio: prepared, audit };
+  }
+
   async verifyHailuoVoiceReferences(project, shot, references) {
     const audios = Array.isArray(references?.audios) ? references.audios : [];
     if (!audios.length) return references;
@@ -15519,14 +16365,16 @@ ${shotAnchor}
     }
     let totalDuration = 0;
     for (const audio of audios) {
+      const prepared = await this.prepareHailuoVoiceReference(project, shot, audio, ffmpeg, audios.length);
+      Object.assign(audio, prepared.audio);
       const identity = fileIdentity(audio.path);
       const contentHash = fileSha256(audio.path);
       const cacheKey = `${contentHash}:${identity.size || 0}:${Number(audio.duration) || 0}`;
-      let audit = this.voiceDecodeAuditCache.get(cacheKey);
+      let audit = prepared.audit?.ok ? prepared.audit : this.voiceDecodeAuditCache.get(cacheKey);
       if (!audit) {
         audit = await auditVoiceReferenceFile(ffmpeg, audio.path, Number(audio.duration) || 0);
-        this.voiceDecodeAuditCache.set(cacheKey, audit);
       }
+      this.voiceDecodeAuditCache.set(cacheKey, audit);
       if (!audit?.ok) {
         throw Object.assign(new Error(`镜头 ${shot?.id || shot?.number || ""} 的角色音色未通过真实解码：${audit?.message || "音频不可用"}`), {
           code: audit?.code || "HAILUO_VOICE_DECODE_FAILED",
@@ -15643,8 +16491,9 @@ ${shotAnchor}
       const candidate = characterVideoIdentityCandidate(project, characterId, settings);
       const character = project.characters.find(item => item.id === characterId);
       if (!candidate?.filePath) {
-        throw Object.assign(new Error(`镜头 ${shot.id || shot.number} 中角色“${character?.name || characterId}”缺少独立正脸介绍图；人物合板/三视图禁止直接送入视频`), {
-          code: "SHOT_CHARACTER_INTRO_REQUIRED",
+        throw Object.assign(new Error(`镜头 ${shot.id || shot.number} 中角色“${character?.name || characterId}”缺少 H3 人物身份参考图；该图只用于锁脸且不会进入成片，人物合板/三视图不能直接送入视频`), {
+          code: "SHOT_CHARACTER_IDENTITY_REFERENCE_REQUIRED",
+          legacyCode: "SHOT_CHARACTER_INTRO_REQUIRED",
           shotId: shot.id,
           characterId
         });
@@ -15883,7 +16732,7 @@ ${shotAnchor}
     return persisted;
   }
 
-  async cropStoryboardTakeSheet(projectId, shot, take, references = {}) {
+  async cropStoryboardTakeSheet(projectId, shot, take, references = {}, options = {}) {
     const sheetIndex = (references.imageRoles || []).findIndex(role => ["storyboard_sheet", "storyboard_take_sheet"].includes(String(role?.type || "")));
     if (sheetIndex < 0) return "";
     const sourcePath = references.images?.[sheetIndex];
@@ -15893,14 +16742,22 @@ ${shotAnchor}
     const ffmpeg = typeof this.locateFfmpeg === "function" ? this.locateFfmpeg() : "";
     if (!ffmpeg) throw Object.assign(new Error("未找到 FFmpeg，无法把父分镜合图裁成说话人专属时间轴"), { code: "FFMPEG_NOT_FOUND" });
     const parentGrid = storyboardSheetGrid(shot.duration || 10);
-    const panelIndices = [...new Set((take.panelIndices || []).map(Number).filter(index => Number.isInteger(index) && index >= 0 && index < parentGrid.panelCount))];
+    const detectedGrid = await analyzeStoryboardSheetGrid(ffmpeg, sourcePath, parentGrid.panelCount);
+    if (!detectedGrid.ok || detectedGrid.cells.length < parentGrid.panelCount) {
+      throw Object.assign(new Error(`${take.id} 的父分镜合图无法可靠识别真实画格：${detectedGrid.error || "画格数量不足"}`), {
+        code: "AGENT_TAKE_SHEET_GRID_UNSAFE",
+        takeId: take.id,
+        storyboardGrid: detectedGrid
+      });
+    }
+    let panelIndices = [...new Set((take.panelIndices || []).map(Number).filter(index => Number.isInteger(index) && index >= 0 && index < detectedGrid.cells.length))];
     if (!panelIndices.length) throw Object.assign(new Error(`${take.id} 没有可用的分镜画格`), { code: "AGENT_TAKE_PANEL_REQUIRED", takeId: take.id });
+    if (options.singlePanel === true) panelIndices = [panelIndices[0]];
     const takeColumns = panelIndices.length <= 2 ? panelIndices.length : panelIndices.length <= 4 ? 2 : 3;
-    const takeRows = Math.ceil(panelIndices.length / takeColumns);
     const sourceHash = fileSha256(sourcePath).slice(0, 12);
     const targetPath = path.join(
       this.store.assetDir(projectId, "storyboards"),
-      `agent-take-sheet-${slug(shot.id)}-${slug(take.id)}-${panelIndices.join("-")}-${sourceHash}.png`
+      `${options.singlePanel === true ? "agent-take-frame" : "agent-take-sheet"}-${slug(shot.id)}-${slug(take.id)}-${panelIndices.join("-")}-${sourceHash}-gridv3.png`
     );
     if (fs.existsSync(targetPath)) return targetPath;
     const sourceLabels = panelIndices.map((_panel, index) => `src${index}`);
@@ -15908,10 +16765,13 @@ ${shotAnchor}
     const filters = [];
     if (panelIndices.length > 1) filters.push(`[0:v]split=${panelIndices.length}${sourceLabels.map(label => `[${label}]`).join("")}`);
     panelIndices.forEach((panelIndex, index) => {
-      const column = panelIndex % parentGrid.columns;
-      const row = Math.floor(panelIndex / parentGrid.columns);
+      const cell = detectedGrid.cells[panelIndex];
+      const cropX = cell.x + cell.width * 0.035;
+      const cropY = cell.y + cell.height * 0.09;
+      const cropWidth = cell.width * 0.93;
+      const cropHeight = cell.height * 0.875;
       const input = panelIndices.length > 1 ? `[${sourceLabels[index]}]` : "[0:v]";
-      filters.push(`${input}crop=iw/${parentGrid.columns}:ih/${parentGrid.rows}:${column}*iw/${parentGrid.columns}:${row}*ih/${parentGrid.rows},scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:(ow-iw)/2:(oh-ih)/2:black[${panelLabels[index]}]`);
+      filters.push(`${input}crop=iw*${cropWidth.toFixed(8)}:ih*${cropHeight.toFixed(8)}:iw*${cropX.toFixed(8)}:ih*${cropY.toFixed(8)},scale=360:640:force_original_aspect_ratio=increase,crop=360:640:(iw-360)/2:(ih-640)/2,setsar=1[${panelLabels[index]}]`);
     });
     let outputLabel = panelLabels[0];
     if (panelIndices.length > 1) {
@@ -15936,6 +16796,43 @@ ${shotAnchor}
     return targetPath;
   }
 
+  async sanitizeStoryboardSheetReferences(projectId, shot, references = {}, options = {}) {
+    const sheetTypes = new Set(["storyboard_sheet", "storyboard_take_sheet", "storyboard_generation_block_sheet"]);
+    const sourceRoles = Array.isArray(references.imageRoles) ? references.imageRoles : [];
+    if (!sourceRoles.some(role => sheetTypes.has(String(role?.type || "")))) return references;
+    const panelCount = storyboardSheetGrid(shot.duration || 10).panelCount;
+    const sanitizedPath = await this.cropStoryboardTakeSheet(projectId, shot, {
+      id: `${shot.id}-provider-sheet`,
+      panelIndices: Array.from({ length: panelCount }, (_item, index) => index)
+    }, references, { singlePanel: options.singlePanel === true });
+    if (!sanitizedPath) return references;
+    const images = [];
+    const imageRoles = [];
+    let inserted = false;
+    (references.images || []).forEach((filePath, index) => {
+      const role = sourceRoles[index] || {};
+      if (!sheetTypes.has(String(role?.type || ""))) {
+        images.push(filePath);
+        imageRoles.push(role);
+        return;
+      }
+      if (inserted) return;
+      inserted = true;
+      images.push(sanitizedPath);
+      imageRoles.push({
+        ...role,
+        type: options.singlePanel === true ? "storyboard_panel_anchor" : "storyboard_take_sheet",
+        path: sanitizedPath,
+        remoteUrl: "",
+        parentFilePath: filePath,
+        label: options.singlePanel === true
+          ? "无字剧情首帧锚点，只约束场景连续性，禁止作为静态画面展示"
+          : "已裁掉时间码和边框的有序剧情画格，仅约束镜头顺序，禁止显示合图版式"
+      });
+    });
+    return { ...references, images, imageRoles };
+  }
+
   async prepareHailuoAgentShotTakes(projectId, project, shot, settings, mode, references, options = {}) {
     const plan = shot.agentCameraTakePlan;
     validateCameraTakePlan(plan, project, shot);
@@ -15944,8 +16841,13 @@ ${shotAnchor}
     const prepared = [];
     const prepareBlock = async (block, prepareOptions = {}) => {
       this.assertOperationActive(projectId);
-      const needsCrop = prepareOptions.forceCrop === true || multiBlock || block.takes.length > 1;
-      const blockSheetPath = needsCrop ? await this.cropStoryboardTakeSheet(projectId, shot, block, references) : "";
+      const hasStoryboardSheet = (references.imageRoles || []).some(role => ["storyboard_sheet", "storyboard_take_sheet"].includes(String(role?.type || "")));
+      const repairNeedsSinglePanel = /完全无字|时间码|分镜序号|资产板|参考图|展示画面/.test(String(options.qualityRepair || ""));
+      const singlePanel = prepareOptions.atomicFallback === true || repairNeedsSinglePanel;
+      const needsCrop = hasStoryboardSheet || prepareOptions.forceCrop === true || multiBlock || block.takes.length > 1;
+      const blockSheetPath = needsCrop ? await this.cropStoryboardTakeSheet(projectId, shot, block, references, {
+        singlePanel
+      }) : "";
       const internalGenerationBlock = sourceBlocks.length > 1
         || block.takes.length > 1
         || Math.abs(Number(block.providerDuration) - Number(block.authoredDuration)) > 0.002
@@ -15955,19 +16857,36 @@ ${shotAnchor}
         internalGenerationBlock,
         blockCount: sourceBlocks.length,
         blockSheetPath,
+        blockSheetSinglePanel: singlePanel,
         includeParentStart: prepareOptions.includeParentStart,
         includeParentEnd: prepareOptions.includeParentEnd,
         includeVideos: prepareOptions.includeVideos
       });
       const dialogueCount = block.takes.reduce((sum, take) => sum + (take.dialogueTurns || []).length, 0);
-      blockReferences.hailuoApiMode = dialogueCount
-        ? "multimodal_to_video"
-        : normalizeHailuoApiMode(blockReferences.hailuoApiMode || settings.videoProvider?.hailuoApiMode);
+      blockReferences.hailuoApiMode = resolveHailuoApiModeForReferences(
+        blockReferences,
+        blockReferences.hailuoApiMode || settings.videoProvider?.hailuoApiMode
+      );
       const blockShot = generationBlockShotForValidation(shot, block);
       blockReferences.agentGenerationBlockShot = blockShot;
       await this.verifyHailuoVoiceReferences(project, blockShot, blockReferences);
-      assertHailuoDialogueVoiceReferences(project, blockShot, blockReferences, { requireMultimodal: dialogueCount > 0 });
-      const prompt = buildHailuoGenerationBlockPrompt(project, blockShot, block, blockReferences);
+      const referenceCategories = hailuoMediaCategories(blockReferences);
+      const visualCategoryPresent = referenceCategories.some(category => category === "image" || category === "video");
+      if (dialogueCount > 0 && !visualCategoryPresent) {
+        throw Object.assign(new Error(`${block.id} 含对白但分块后没有人物/场景图或连续视频，已在付费提交前停止`), {
+          code: "HAILUO_DIALOGUE_VISUAL_REFERENCE_REQUIRED",
+          shotId: shot.id,
+          blockId: block.id
+        });
+      }
+      assertHailuoDialogueVoiceReferences(project, blockShot, blockReferences, {
+        requireMultimodal: dialogueCount > 0 && referenceCategories.length >= 2
+      });
+      const prompt = withGenerationBlockTechnicalRepair(
+        buildHailuoGenerationBlockPrompt(project, blockShot, block, blockReferences),
+        options.qualityRepair || "",
+        options.qualityRepairKey || ""
+      );
       assertAgentGenerationBlockPrompt(project, blockShot, block, blockReferences, prompt);
       return { block, blockShot, references: blockReferences, prompt, internalGenerationBlock };
     };
@@ -15989,7 +16908,11 @@ ${shotAnchor}
           fallbackPrepared.push(await prepareBlock(fallbackBlock, {
             forceCrop: true,
             atomicFallback: true,
-            includeParentStart: sourceBlock.index === 1 && index === 0,
+            // Every independently generated fallback clip needs a real story
+            // frame as its primary visual anchor.  Without one, H3 only sees
+            // scene/identity control assets and can replay those boards into
+            // the paid video instead of starting inside the scene.
+            includeParentStart: true,
             includeParentEnd: sourceBlock.index === sourceBlocks.length && index === fallbackBlocks.length - 1,
             includeVideos: sourceBlock.index === 1 && index === 0
           }));
@@ -16044,6 +16967,155 @@ ${shotAnchor}
     };
   }
 
+  async auditAgentGenerationBlockResult(projectId, item, result) {
+    const ffmpeg = typeof this.locateFfmpeg === "function" ? this.locateFfmpeg() : "";
+    if (!ffmpeg) throw Object.assign(new Error("未找到 FFmpeg，无法在原子视频进入拼接前执行强制逐帧质检"), { code: "FFMPEG_NOT_FOUND" });
+    const filePath = String(result?.filePath || "");
+    if (!filePath || !fs.existsSync(filePath)) {
+      throw Object.assign(new Error(`${item?.block?.id || "生成块"} 返回的视频文件不存在`), {
+        code: "AGENT_GENERATION_BLOCK_FILE_MISSING",
+        blockId: item?.block?.id || ""
+      });
+    }
+    const duration = Math.max(0.5, Number(item?.block?.authoredDuration) || Number(item?.block?.providerDuration) || 5);
+    const visual = await this.withTechnicalVideoAuditSlot(() => analyzeVisualFile(
+      ffmpeg,
+      filePath,
+      duration,
+      QUALITY_LIMITS.technicalVisual.sampleFps
+    ));
+    const technical = assessTechnicalVisualIntegrity(visual);
+    const assetRoleTypes = new Set([
+      "character", "scene", "product", "prop", "wardrobe",
+      "storyboard_sheet", "storyboard_take_sheet", "storyboard_generation_block_sheet"
+    ]);
+    const images = Array.isArray(item?.references?.images) ? item.references.images : [];
+    const roles = Array.isArray(item?.references?.imageRoles) ? item.references.imageRoles : [];
+    const referenceEntries = roles.map((role, index) => ({
+      ...role,
+      filePath: images[index] || role?.filePath || role?.path || ""
+    })).filter(entry => {
+      const roleType = String(entry?.type || "").trim();
+      const sourceStage = String(entry?.sourceStage || "").trim();
+      if (["storyboard_start", "storyboard_end", "storyboard_panel_anchor"].includes(roleType)) return false;
+      return (assetRoleTypes.has(roleType) || /(?:character_(?:intro|sheet|three_view)|scene_asset|prop_asset|wardrobe_asset|product_asset|storyboard_sheet)/i.test(sourceStage))
+        && entry.filePath
+        && fs.existsSync(entry.filePath);
+    });
+    const analyzedReferences = await Promise.all(referenceEntries.map(async entry => ({
+      ...entry,
+      ...(await analyzeImageFile(ffmpeg, entry.filePath))
+    })));
+    const referenceLeak = assessReferenceAssetLeak(visual, analyzedReferences);
+    const failures = [...technical.failures, ...referenceLeak.failures];
+    const stat = fs.statSync(filePath);
+    const audit = {
+      ok: failures.length === 0,
+      version: TECHNICAL_VISUAL_AUDIT_VERSION,
+      mandatory: true,
+      checkedAt: new Date().toISOString(),
+      blockId: item?.block?.id || "",
+      authoredDuration: duration,
+      fileSize: stat.size,
+      fileMtimeMs: stat.mtimeMs,
+      visual,
+      technical,
+      referenceLeak,
+      failures,
+      repairDirective: buildRepairDirective(failures)
+    };
+    if (result?.jobId) {
+      try {
+        this.store.updateJob(projectId, result.jobId, {
+          generationBlockTechnicalAudit: audit,
+          localQualityRejected: !audit.ok,
+          message: audit.ok
+            ? "原子视频逐帧质检通过，允许进入本地拼接"
+            : `原子视频含坏帧或参考资产回放，已拦截并仅重做 ${item?.block?.id || "当前生成块"}`
+        });
+      } catch {}
+    }
+    const currentProject = this.store.getProject(projectId);
+    if (result?.id && (currentProject.candidates || []).some(candidate => candidate.id === result.id)) {
+      this.store.updateCandidate(projectId, result.id, {
+        technicalIntegrityAudit: audit,
+        ...(audit.ok ? {} : {
+          selected: false,
+          stale: true,
+          staleAt: new Date().toISOString(),
+          staleReason: "原始视频在拼接前检测到坏帧或内部参考资产回放"
+        })
+      });
+    }
+    return audit;
+  }
+
+  async extractAgentFallbackContinuityAnchor(projectId, shot, parentBlock, fallbackBlock, sourceResult) {
+    const ffmpeg = typeof this.locateFfmpeg === "function" ? this.locateFfmpeg() : "";
+    const sourcePath = String(sourceResult?.filePath || "");
+    if (!ffmpeg || !sourcePath || !fs.existsSync(sourcePath)) return "";
+    const sourceStat = fs.statSync(sourcePath);
+    const relativeStart = Math.max(0, Number(fallbackBlock?.start) - Number(parentBlock?.start));
+    const providerDuration = Math.max(0.2, Number(parentBlock?.providerDuration) || Number(sourceResult?.duration) || 5);
+    const seekSeconds = Math.max(0, Math.min(providerDuration - 0.08, relativeStart + 0.04));
+    const fingerprint = crypto.createHash("sha256")
+      .update(`${sourcePath}|${sourceStat.size}|${sourceStat.mtimeMs}|${seekSeconds.toFixed(3)}|${fallbackBlock?.id || ""}`)
+      .digest("hex")
+      .slice(0, 16);
+    const targetPath = path.join(
+      this.store.assetDir(projectId, "storyboards"),
+      `agent-live-anchor-${slug(shot.id)}-${slug(fallbackBlock?.id || "take")}-${fingerprint}.png`
+    );
+    if (fs.existsSync(targetPath)) return targetPath;
+    try {
+      await spawnCapture(ffmpeg, [
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", seekSeconds.toFixed(3), "-i", sourcePath,
+        "-frames:v", "1",
+        "-vf", "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280",
+        targetPath
+      ], 180_000);
+      return fs.existsSync(targetPath) ? targetPath : "";
+    } catch {
+      try { fs.rmSync(targetPath, { force: true }); } catch {}
+      return "";
+    }
+  }
+
+  async anchorAtomicFallbackPrepared(projectId, project, shot, parentBlock, fallback, sourceResult, options = {}) {
+    const anchorPath = await this.extractAgentFallbackContinuityAnchor(projectId, shot, parentBlock, fallback.block, sourceResult);
+    if (!anchorPath) return fallback;
+    const sourceImages = Array.isArray(fallback?.references?.images) ? fallback.references.images : [];
+    const sourceRoles = Array.isArray(fallback?.references?.imageRoles) ? fallback.references.imageRoles : [];
+    const retained = sourceRoles.map((role, index) => ({ role, filePath: sourceImages[index] }))
+      .filter(item => String(item.role?.type || "") !== "storyboard_start");
+    const references = {
+      ...fallback.references,
+      images: [anchorPath, ...retained.map(item => item.filePath)],
+      imageRoles: [{
+        type: "storyboard_start",
+        sourceStage: "generated_continuity_anchor",
+        entityType: "shot",
+        entityId: shot.id,
+        candidateId: "",
+        path: anchorPath,
+        filePath: anchorPath,
+        remoteUrl: "",
+        label: `${fallback.block.id} exact live-story opening frame`
+      }, ...retained.map(item => item.role)]
+    };
+    references.hailuoApiMode = resolveHailuoApiModeForReferences(
+      references,
+      references.hailuoApiMode || this.store.getSettings().videoProvider?.hailuoApiMode
+    );
+    references.agentGenerationBlockShot = fallback.blockShot;
+    await this.verifyHailuoVoiceReferences(project, fallback.blockShot, references);
+    let prompt = buildHailuoGenerationBlockPrompt(project, fallback.blockShot, fallback.block, references);
+    prompt = withGenerationBlockTechnicalRepair(prompt, options.qualityRepair || "", options.qualityRepairKey || "");
+    assertAgentGenerationBlockPrompt(project, fallback.blockShot, fallback.block, references, prompt);
+    return { ...fallback, references, prompt, narrativeAnchorPath: anchorPath };
+  }
+
   async stitchAgentCameraTakes(projectId, shot, plan, prepared, executionUnits, options = {}) {
     const ffmpeg = typeof this.locateFfmpeg === "function" ? this.locateFfmpeg() : "";
     if (!ffmpeg) throw Object.assign(new Error("未找到 FFmpeg，无法把连续生成块精确合成为完整分镜"), { code: "FFMPEG_NOT_FOUND" });
@@ -16088,6 +17160,9 @@ ${shotAnchor}
     const promptManifest = executionUnits.map(item => `[${item.block.id} ${item.block.start}-${item.block.end}s strategy=${item.block.strategy}]\n${item.prompt}`).join("\n\n");
     const allBilledResults = [...executionUnits.map(item => item.result), ...(options.discardedResults || [])];
     const numericCharges = allBilledResults.map(item => Number(item.chargeYuan)).filter(Number.isFinite);
+    const stitchedAudios = referenceManifestAudios({
+      generationBlocks: executionUnits.map(item => ({ referenceManifest: item.result.referenceManifest || null }))
+    });
     const candidate = this.store.addCandidate(projectId, {
       entityType: "shot",
       entityId: shot.id,
@@ -16103,12 +17178,15 @@ ${shotAnchor}
       sourceJobIds: allBilledResults.map(item => item.jobId).filter(Boolean),
       sourceTaskIds: allBilledResults.map(item => item.taskId).filter(Boolean),
       providerKind: "puream-hailuo-h3",
+      hailuoRequestedMode: "multimodal_to_video",
+      hailuoResolvedMode: "multimodal_to_video",
       chargeYuan: numericCharges.length === allBilledResults.length ? Number(numericCharges.reduce((sum, value) => sum + value, 0).toFixed(4)) : null,
       settlementStatus: allBilledResults.every(item => item.settlementStatus === "charged") ? "charged" : "",
       agentDirectorVersion: AGENT_DIRECTOR_VERSION,
       agentCameraTakePlan: plan,
       referenceManifest: {
         agentDirectorVersion: AGENT_DIRECTOR_VERSION,
+        audios: stitchedAudios,
         generationBlocks: executionUnits.map(item => ({
           id: item.block.id,
           parentBlockId: item.block.parentBlockId || item.block.id,
@@ -16139,39 +17217,73 @@ ${shotAnchor}
       shot,
       settings,
       mode,
-      references
+      references,
+      options
     );
 
     const executionUnits = [];
     const discardedResults = [];
     const submitPrepared = async (item, label) => {
-      this.setAutomation(projectId, {
-        stage: "agent_continuity_block_video",
-        message: `S${String(shot.number).padStart(2, "0")} ${item.block.id}：连续生成块 ${item.block.takeIds.join("/")}（${label}）`
-      });
-      return withTransientProviderRetries(
-        () => this.submitVideo(projectId, "shot", shot.id, "shot_video", item.prompt, item.references, item.block.providerDuration),
-        {
-          attempts: 5,
-          baseDelayMs: 4000,
-          label: `${item.block.id} 连续生成块`,
-          onRetry: async (error, retryAttempt, maxRetryAttempts) => {
-            this.setAutomation(projectId, {
-              stage: "agent_continuity_block_retry",
-              message: `${item.block.id} 上游抖动（${error.status || error.code || "transient"}），${4 * retryAttempt}s 后第 ${retryAttempt + 1}/${maxRetryAttempts} 次恢复同一幂等任务`
-            });
+      const technicalAttempts = item.block.strategy === "atomic_fallback" || item.block.takes.length === 1 ? 2 : 1;
+      let attemptPrompt = item.prompt;
+      let lastAudit = null;
+      let lastResult = null;
+      for (let technicalAttempt = 1; technicalAttempt <= technicalAttempts; technicalAttempt += 1) {
+        this.setAutomation(projectId, {
+          stage: technicalAttempt > 1 ? "agent_continuity_block_quality_retry" : "agent_continuity_block_video",
+          message: technicalAttempt > 1
+            ? `${item.block.id} 原子视频逐帧质检未通过，正在仅重做该镜头（${technicalAttempt}/${technicalAttempts}）`
+            : `S${String(shot.number).padStart(2, "0")} ${item.block.id}：连续生成块 ${item.block.takeIds.join("/")}（${label}）`
+        });
+        const result = await withTransientProviderRetries(
+          () => this.submitVideo(projectId, "shot", shot.id, "shot_video", attemptPrompt, item.references, item.block.providerDuration),
+          {
+            attempts: UNLIMITED_ATTEMPTS,
+            baseDelayMs: 4000,
+            label: `${item.block.id} 连续生成块`,
+            onRetry: async (error, retryAttempt, maxRetryAttempts) => {
+              this.setAutomation(projectId, {
+                stage: "agent_continuity_block_retry",
+                message: `${item.block.id} 上游抖动（${error.status || error.code || "transient"}），${4 * retryAttempt}s 后第 ${retryAttempt + 1}/${maxRetryAttempts} 次恢复同一幂等任务`
+              });
+            }
           }
+        );
+        lastResult = result;
+        lastAudit = await this.auditAgentGenerationBlockResult(projectId, { ...item, prompt: attemptPrompt }, result);
+        if (lastAudit.ok) return { ...result, generationBlockTechnicalAudit: lastAudit };
+        discardedResults.push({
+          ...result,
+          fallbackReason: "generation_block_technical_integrity_failed",
+          generationBlockTechnicalAudit: lastAudit
+        });
+        if (technicalAttempt < technicalAttempts) {
+          attemptPrompt = withGenerationBlockTechnicalRepair(
+            item.prompt,
+            lastAudit.repairDirective || lastAudit.failures.map(failure => failure.message).join("; "),
+            `${result.taskId || result.jobId || item.block.id}:local-block-retry-${technicalAttempt + 1}`
+          );
+          assertAgentGenerationBlockPrompt(project, item.blockShot, item.block, item.references, attemptPrompt);
         }
-      );
+      }
+      throw Object.assign(new Error(`${item.block.id} 连续出现坏帧或内部参考资产回放，已禁止进入拼接`), {
+        code: "AGENT_GENERATION_BLOCK_TECHNICAL_INTEGRITY_FAILED",
+        blockId: item.block.id,
+        result: lastResult,
+        audit: lastAudit
+      });
     };
-    const useFallback = async (item, reason, cutAudit = null) => {
+    const useFallback = async (item, reason, cutAudit = null, continuitySource = null) => {
       if (!item.fallbackPrepared.length) throw Object.assign(new Error(`${item.block.id} 没有可用的原子回退方案`), { code: "AGENT_ATOMIC_FALLBACK_UNAVAILABLE", blockId: item.block.id });
       this.setAutomation(projectId, {
         stage: "agent_continuity_atomic_fallback",
         message: `${item.block.id} 连续切镜未通过（${reason}），仅回退该块为 ${item.fallbackPrepared.length} 个原子任务`
       });
       for (let index = 0; index < item.fallbackPrepared.length; index += 1) {
-        const fallback = item.fallbackPrepared[index];
+        const preparedFallback = item.fallbackPrepared[index];
+        const fallback = continuitySource
+          ? await this.anchorAtomicFallbackPrepared(projectId, project, shot, item.block, preparedFallback, continuitySource, options)
+          : preparedFallback;
         const result = await submitPrepared(fallback, `原子回退 ${index + 1}/${item.fallbackPrepared.length}`);
         executionUnits.push({ ...fallback, result, cutAudit, fallbackReason: reason });
       }
@@ -16205,7 +17317,7 @@ ${shotAnchor}
           const fallbackReason = cutAudit.ok ? "continuity_cut_missing" : "continuity_cut_audit_failed";
           const fallbackMessage = cutAudit.ok ? "缺少预期说话人切镜" : "连续镜头切换质检未通过";
           discardedResults.push({ ...result, fallbackReason, cutAudit });
-          await useFallback(item, fallbackMessage, cutAudit);
+          await useFallback(item, fallbackMessage, cutAudit, result);
           continue;
         }
       }
@@ -16423,12 +17535,16 @@ ${shotAnchor}
     throw lastError || Object.assign(new Error("海螺英文提示词编译失败"), { code: "HAILUO_H3_PROMPT_SPEC_INVALID" });
   }
 
-  buildShotPrompt(project, settings, shot, mode, references = this.shotReferences(project, shot, mode), qualityRepair = "") {
+  buildShotPrompt(project, settings, shot, mode, references = this.shotReferences(project, shot, mode), qualityRepair = "", qualityRepairKey = "") {
     const engine = projectVideoEngine(project);
     const projectMode = normalizeProjectMode(mode || project.generation?.mode);
     const shotStrategy = resolveShotVideoStrategy({ ...project, generation: { ...(project.generation || {}), mode: projectMode } }, shot);
     const effectiveMode = shotStrategy.strategy;
     const isSheet = projectMode === "storyboard_sheet";
+    const sheetRepairUsesSinglePanel = isSheet && String(references.imageRoles?.[0]?.type || "") === "storyboard_panel_anchor";
+    const qualityRepairId = qualityRepair
+      ? crypto.createHash("sha256").update(`${qualityRepair}\u0000${qualityRepairKey || "repair"}`).digest("hex").slice(0, 12)
+      : "";
     const matrixRuntimePrompt = matrixRuntimeVideoPromptForProject(project, settings, projectMode);
     if (engine === "hailuo-h3") {
       if (shotUsesManualVideoPrompt(shot)) {
@@ -16499,7 +17615,9 @@ ${shotAnchor}
     const endRoleIndex = references.imageRoles.findIndex(item => item.type === "storyboard_end");
     const endPicture = endRoleIndex >= 0 ? pictureToken(endRoleIndex + 1) : "本镜尾帧目标";
     const continuityInstruction = isSheet
-      ? `${pictureToken(1)}是本镜由多个完整9:16竖屏画格拼成的逐秒分镜合图（接触印）。按格子从左到右、从上到下的时间顺序逐格演绎整镜；每个画格都是必须命中的构图与动作锚点；禁止把合图边框、序号条或分格线画进成片；禁止只拍其中一格定格。`
+      ? (sheetRepairUsesSinglePanel
+        ? `${pictureToken(1)}是从本镜逐秒合图中安全裁出的无字剧情起点，只锁场景、人物和动作起态；直接从该剧情状态继续完整演绎本镜，禁止把它当静态图片、人物介绍或资产展示。`
+        : `${pictureToken(1)}是本镜由多个完整9:16竖屏画格拼成的逐秒分镜合图（接触印）。按格子从左到右、从上到下的时间顺序逐格演绎整镜；每个画格都是必须命中的构图与动作锚点；禁止把合图边框、序号条或分格线画进成片；禁止只拍其中一格定格。`)
       : effectiveMode === "continuation" && shotStrategy.usePreviousVideo
         ? `${videoToken(1)}是上一镜完整视频，也是唯一0.0秒时间锚点；必须从${videoToken(1)}最后一帧无缝继续，禁止重新开场，禁止瞬移到另一内景/外景。${endPicture}只是本镜结束状态目标构图，本镜不再单独提供首帧图。禁止角色排排站、禁止出现棚拍灰底或多视角设定板。`
         : `本镜按首尾帧控制：${pictureToken(1)}必须作为0.0秒剧情首帧，${pictureToken(2)}是本镜结束状态${shotStrategy.reason === "smart_scene_cut" ? "（场景切换，不沿用上一镜视频）" : "，不引用上一镜视频"}；首尾帧与中间动作必须锁在同一场景空间。`;
@@ -16529,7 +17647,7 @@ ${shotAnchor}
       `构图与调度：${shot.compositionPlan || `${shot.shotSize || "中景"}；${shot.cameraMove || "稳定机位"}`}`,
       sceneLock,
       nearbyVisuals ? `前两单元已经拍过：${nearbyVisuals}。不得复用它们的同一脸部特写、人物站位、桌面/手机/文件构图或动作` : "",
-      qualityRepair ? `上一次生成未过质检，本次强制修复：${qualityRepair}` : ""
+      qualityRepair ? `技术修复批次${qualityRepairId}：上一次生成未过质检，本次强制修复：${qualityRepair}` : ""
     ].filter(Boolean).join("；");
     const template = isSheet
       ? (settings.prompts.storyboardSheetVideo || settings.prompts.keyframeVideo)
@@ -16574,8 +17692,17 @@ ${shotAnchor}
     const rawCompiledPrompt = `${authoredPrompt}\n\n【Seedance本镜约束】${hardConstraints}`.trim();
     const compiledPrompt = shotUsesManualVideoPrompt(shot)
       ? rawCompiledPrompt
-      : compactGeneratedSeedanceVideoPrompt(project, shot, references, projectMode, rawCompiledPrompt);
-    if (isQualityGatesEnabled(settings, "script")) assertSystemPromptDialogueParity(project, shot, compiledPrompt, engine);
+      : compactGeneratedSeedanceVideoPrompt(
+        project,
+        shot,
+        references,
+        projectMode,
+        rawCompiledPrompt,
+        GENERATED_VIDEO_PROMPT_LIMIT,
+        qualityRepair,
+        qualityRepairKey
+      );
+    assertSystemPromptDialogueParity(project, shot, compiledPrompt, engine);
     return compiledPrompt;
   }
 
@@ -16646,6 +17773,11 @@ ${shotAnchor}
     if (engine === "hailuo-h3" && hailuoApiMode === "auto" && !shouldUseImageAnchors && activeStrategy.strategy !== "keyframe") {
       baseReferences = { ...baseReferences, images: [], imageRoles: [] };
     }
+    if (engine !== "hailuo-h3" && (baseReferences.imageRoles || []).some(role => ["storyboard_sheet", "storyboard_take_sheet"].includes(String(role?.type || "")))) {
+      baseReferences = await this.sanitizeStoryboardSheetReferences(projectId, activeShot, baseReferences, {
+        singlePanel: /完全无字|时间码|分镜序号|资产板|参考图|展示画面/.test(String(options.qualityRepair || ""))
+      });
+    }
     if (engine === "seedance" && !baseReferences.images.length) throw Object.assign(new Error("当前分镜至少需要一张已选参考图"), { code: "SHOT_IMAGE_REQUIRED" });
     let previousVideo = null;
     const wantsPreviousVideo = activeStrategy.usePreviousVideo;
@@ -16699,8 +17831,9 @@ ${shotAnchor}
         references,
         options
       );
-      if (options.audit !== false && this.qualityGatesEnabled(settings, "videos")) {
-        await this.auditShotCandidate(projectId, activeShot.id, candidate.id);
+      if (options.audit !== false) {
+        if (this.qualityGatesEnabled(settings, "videos")) await this.auditShotCandidate(projectId, activeShot.id, candidate.id);
+        else await this.auditTechnicalShotCandidate(projectId, activeShot.id, candidate.id);
         candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
       }
       return candidate;
@@ -16714,7 +17847,7 @@ ${shotAnchor}
         end: Number(((Number(item.end) || requestedDuration) * outputDuration / requestedDuration).toFixed(1))
       }))
     };
-    const prompt = this.buildShotPrompt(refreshedProject, settings, promptShot, mode, references, options.qualityRepair || "");
+    const prompt = this.buildShotPrompt(refreshedProject, settings, promptShot, mode, references, options.qualityRepair || "", options.qualityRepairKey || "");
     if (engine === "hailuo-h3" && !manualPromptActive) {
       assertHailuoPromptVoiceBindings(refreshedProject, activeShot, references, prompt);
       // The exact prompt shown to the user and the prompt sent to the paid API
@@ -16732,7 +17865,7 @@ ${shotAnchor}
     let candidate = await withTransientProviderRetries(
       () => this.submitVideo(projectId, "shot", activeShot.id, "shot_video", prompt, references, outputDuration),
       {
-        attempts: 5,
+        attempts: UNLIMITED_ATTEMPTS,
         baseDelayMs: 4000,
         label: `S${String(activeShot.number).padStart(2, "0")} 分镜视频`,
         onRetry: async (error, retryAttempt, maxRetryAttempts) => {
@@ -16743,8 +17876,9 @@ ${shotAnchor}
         }
       }
     );
-    if (options.audit !== false && this.qualityGatesEnabled(settings, "videos")) {
-      await this.auditShotCandidate(projectId, activeShot.id, candidate.id);
+    if (options.audit !== false) {
+      if (this.qualityGatesEnabled(settings, "videos")) await this.auditShotCandidate(projectId, activeShot.id, candidate.id);
+      else await this.auditTechnicalShotCandidate(projectId, activeShot.id, candidate.id);
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
     return candidate;
@@ -16851,6 +17985,77 @@ ${shotAnchor}
     };
   }
 
+  async withTechnicalVideoAuditSlot(task) {
+    this.technicalVideoAuditWaiters = Array.isArray(this.technicalVideoAuditWaiters) ? this.technicalVideoAuditWaiters : [];
+    this.technicalVideoAuditActive = Number(this.technicalVideoAuditActive) || 0;
+    if (this.technicalVideoAuditActive >= 4) {
+      await new Promise(resolve => this.technicalVideoAuditWaiters.push(resolve));
+    }
+    this.technicalVideoAuditActive += 1;
+    try {
+      return await task();
+    } finally {
+      this.technicalVideoAuditActive = Math.max(0, this.technicalVideoAuditActive - 1);
+      const next = this.technicalVideoAuditWaiters.shift();
+      if (next) next();
+    }
+  }
+
+  technicalVideoAuditIsCurrent(candidate) {
+    const audit = candidate?.technicalIntegrityAudit;
+    if (!candidate?.filePath || !audit || audit.version !== TECHNICAL_VISUAL_AUDIT_VERSION) return false;
+    try {
+      const stat = fs.statSync(candidate.filePath);
+      return stat.isFile()
+        && Number(audit.fileSize) === Number(stat.size)
+        && Math.abs(Number(audit.fileMtimeMs) - Number(stat.mtimeMs)) < 1;
+    } catch {
+      return false;
+    }
+  }
+
+  async auditTechnicalShotCandidate(projectId, shotId, candidateId) {
+    const project = this.store.getProject(projectId);
+    const shot = (project.shots || []).find(item => item.id === shotId);
+    const candidate = (project.candidates || []).find(item => item.id === candidateId);
+    if (!shot || !candidate?.filePath || !fs.existsSync(candidate.filePath)) {
+      throw Object.assign(new Error("待检测分镜视频不存在"), { code: "SHOT_VIDEO_TECHNICAL_TARGET_MISSING" });
+    }
+    if (this.technicalVideoAuditIsCurrent(candidate)) return candidate.technicalIntegrityAudit;
+    const ffmpeg = this.locateFfmpeg();
+    if (!ffmpeg) throw Object.assign(new Error("未找到本地媒体处理组件 FFmpeg，无法执行强制视频完整性检测"), { code: "FFMPEG_NOT_FOUND" });
+    const duration = Number(shot.duration) || Number(candidate.duration) || 10;
+    const visual = await this.withTechnicalVideoAuditSlot(() => analyzeVisualFile(
+      ffmpeg,
+      candidate.filePath,
+      duration,
+      QUALITY_LIMITS.technicalVisual.sampleFps
+    ));
+    const technicalDecision = assessTechnicalVisualIntegrity(visual);
+    const referenceControls = referenceManifestVisualControls(candidate.referenceManifest);
+    const analyzedReferences = await Promise.all(referenceControls.map(async entry => ({
+      ...entry,
+      ...(await analyzeImageFile(ffmpeg, entry.filePath))
+    })));
+    const referenceLeak = assessReferenceAssetLeak(visual, analyzedReferences);
+    const failures = [...technicalDecision.failures, ...referenceLeak.failures];
+    const stat = fs.statSync(candidate.filePath);
+    const audit = {
+      ...technicalDecision,
+      ok: failures.length === 0,
+      failures,
+      checkedAt: new Date().toISOString(),
+      mandatory: true,
+      fileSize: stat.size,
+      fileMtimeMs: stat.mtimeMs,
+      visual,
+      referenceLeak,
+      repairDirective: buildRepairDirective(failures)
+    };
+    this.store.updateCandidate(projectId, candidateId, { technicalIntegrityAudit: audit });
+    return audit;
+  }
+
   async auditShotCandidate(projectId, shotId, candidateId) {
     const project = this.store.getProject(projectId);
     const shot = project.shots.find(item => item.id === shotId);
@@ -16867,14 +18072,15 @@ ${shotAnchor}
     if (!ffmpeg) throw Object.assign(new Error("未找到像塑 FFmpeg"), { code: "FFMPEG_NOT_FOUND" });
     const duration = Number(shot.duration) || Number(candidate.duration) || 10;
     const hasDialogue = shotDialogueStats(shot).turns > 0;
-    const [audio, visual, anchors] = await Promise.all([
+    const [audio, technicalIntegrity, anchors] = await Promise.all([
       analyzeAudioFile(ffmpeg, candidate.filePath, duration),
-      analyzeVisualFile(ffmpeg, candidate.filePath, duration, 2),
+      this.auditTechnicalShotCandidate(projectId, shot.id, candidate.id),
       this.inspectShotReferenceAnchors(project, shot, candidate, ffmpeg)
     ]);
+    const visual = technicalIntegrity.visual;
     const audioDecision = assessAudioQuality(audio, { hasDialogue });
     const visualDecision = assessVisualQuality(visual);
-    const failures = [...audioDecision.failures, ...visualDecision.failures, ...anchors.failures];
+    const failures = [...technicalIntegrity.failures, ...audioDecision.failures, ...visualDecision.failures, ...anchors.failures];
     let nearestDuplicate = null;
     for (const previousShot of project.shots.filter(item => Number(item.number) < Number(shot.number) - 1)) {
       const previous = selectedOrLatest(project, "shot", previousShot.id, "shot_video");
@@ -16892,6 +18098,7 @@ ${shotAnchor}
       hasDialogue,
       audio,
       visual,
+      technicalIntegrity,
       anchors,
       nearestDuplicate,
       failures,
@@ -16903,21 +18110,68 @@ ${shotAnchor}
 
   async generateQualityShotVideo(projectId, shot, mode, { force = false } = {}) {
     const settings = this.store.getSettings();
+    const qualityEnabled = this.qualityGatesEnabled(settings, "videos");
     let project = this.store.getProject(projectId);
     let existing = force ? null : (candidateReady(project, "shot", shot.id, "shot_video", settings)
       || selectedOrLatest(project, "shot", shot.id, "shot_video"));
-    if (!force && existing?.qualityAudit?.ok === false && existing.filePath && fs.existsSync(existing.filePath)) {
-      return this.acceptQualityAdvisoryCandidate(projectId, existing, existing.qualityAudit);
+    const evaluate = async candidate => {
+      const technicalIntegrity = await this.auditTechnicalShotCandidate(projectId, shot.id, candidate.id);
+      if (!technicalIntegrity.ok) {
+        const failed = {
+          ok: false,
+          blockingTechnical: true,
+          checkedAt: technicalIntegrity.checkedAt,
+          technicalIntegrity,
+          failures: technicalIntegrity.failures,
+          repairDirective: technicalIntegrity.repairDirective
+        };
+        this.store.updateCandidate(projectId, candidate.id, {
+          selected: false,
+          stale: true,
+          staleAt: new Date().toISOString(),
+          staleReason: `强制视频完整性检测未通过：${technicalIntegrity.failures.map(item => item.message).join("；")}`
+        });
+        return failed;
+      }
+      if (!qualityEnabled) {
+        return {
+          ok: true,
+          skipped: true,
+          checkedAt: technicalIntegrity.checkedAt,
+          mandatoryTechnicalOnly: true,
+          technicalIntegrity,
+          failures: [],
+          repairDirective: ""
+        };
+      }
+      const current = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+      const quality = current.qualityAudit || await this.auditShotCandidate(projectId, shot.id, candidate.id);
+      return { ...quality, technicalIntegrity: quality.technicalIntegrity || technicalIntegrity };
+    };
+    if (!force && !existing) {
+      const revalidationCandidates = (project.candidates || [])
+        .filter(item => item.entityType === "shot" && item.entityId === shot.id && item.stage === "shot_video")
+        .filter(item => (item.productionRevision || "") === (project.productionRevision || ""))
+        .filter(item => item.stale === true && item.filePath && fs.existsSync(item.filePath))
+        .filter(item => item.technicalIntegrityAudit?.mandatory === true
+          && item.technicalIntegrityAudit?.version !== TECHNICAL_VISUAL_AUDIT_VERSION)
+        .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")));
+      for (const historical of revalidationCandidates) {
+        const revalidated = await evaluate(historical);
+        if (revalidated.ok) {
+          this.store.confirmCandidate(projectId, historical.id, false);
+          return this.store.getProject(projectId).candidates.find(item => item.id === historical.id) || historical;
+        }
+        if (!revalidated.blockingTechnical && historical.qualityAudit?.ok === false) {
+          return this.acceptQualityAdvisoryCandidate(projectId, historical, historical.qualityAudit);
+        }
+      }
     }
     let lastAudit = null;
     let lastCandidate = null;
-    if (existing && !this.qualityGatesEnabled(settings, "videos")) {
-      if (existing.selected !== true) this.store.confirmCandidate(projectId, existing.id, false);
-      return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
-    }
     if (existing) {
       lastCandidate = existing;
-      lastAudit = existing.qualityAudit || await this.auditShotCandidate(projectId, shot.id, existing.id);
+      lastAudit = await evaluate(existing);
       if (lastAudit.ok) {
         // A recovered paid task is added as an unselected candidate first. If its
         // local file and audit are already valid, promote it here exactly like a
@@ -16926,32 +18180,45 @@ ${shotAnchor}
         if (existing.selected !== true) this.store.confirmCandidate(projectId, existing.id, false);
         return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
       }
+      if (!lastAudit.blockingTechnical && existing.qualityAudit?.ok === false && existing.filePath && fs.existsSync(existing.filePath)) {
+        return this.acceptQualityAdvisoryCandidate(projectId, existing, existing.qualityAudit);
+      }
     }
-    const maxAttempts = 1;
+    // Objective provider defects require a genuinely new repair fingerprint.
+    // Local Xiangsu retries do not consume the cloud wallet, so allow enough
+    // stochastic rerolls to remove baked subtitles/boards while preserving
+    // every rejected file. Cloud H3 remains capped at two paid repair attempts.
+    const maxAttempts = projectVideoProviderKind(project, settings) === "local-xiangsu" ? 4 : 2;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       this.setAutomation(projectId, {
         stage: "shot_quality_retry",
-        message: this.qualityGatesEnabled(settings, "videos")
+        message: qualityEnabled
           ? `S${String(shot.number).padStart(2, "0")} 正在生成并执行声音、画面质检`
-          : `S${String(shot.number).padStart(2, "0")} 正在生成分镜视频（质检已关闭）`
+          : `S${String(shot.number).padStart(2, "0")} 正在生成并执行强制坏帧/画布泄漏检测${attempt > 1 ? "（自动局部重生）" : ""}`
       });
       const candidate = await this.generateShotVideo(projectId, shot.id, mode, {
         track: false,
         audit: false,
-        qualityRepair: lastAudit?.repairDirective || ""
+        qualityRepair: lastAudit?.repairDirective || "",
+        qualityRepairKey: `${lastCandidate?.id || existing?.id || shot.id}:attempt-${attempt}`
       });
       lastCandidate = candidate;
-      if (!this.qualityGatesEnabled(settings, "videos")) {
-        this.store.confirmCandidate(projectId, candidate.id, false);
-        return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
-      }
-      lastAudit = await this.auditShotCandidate(projectId, shot.id, candidate.id);
+      lastAudit = await evaluate(candidate);
       if (lastAudit.ok) {
         const audited = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id);
-        if (audited?.qualityAudit?.ok !== true) this.store.updateCandidate(projectId, candidate.id, { qualityAudit: lastAudit });
+        if (qualityEnabled && audited?.qualityAudit?.ok !== true) this.store.updateCandidate(projectId, candidate.id, { qualityAudit: lastAudit });
         this.store.confirmCandidate(projectId, candidate.id, false);
         return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id);
       }
+      if (!lastAudit.blockingTechnical) break;
+    }
+    if (lastAudit?.blockingTechnical) {
+      throw Object.assign(new Error(`S${String(shot.number).padStart(2, "0")} 连续两次出现空白帧、纯色边栏、错误转场或画布泄漏，已禁止进入成片并保留失败历史`), {
+        code: "SHOT_VIDEO_TECHNICAL_INTEGRITY_FAILED",
+        shotId: shot.id,
+        candidateId: lastCandidate?.id || "",
+        audit: lastAudit
+      });
     }
     return this.acceptQualityAdvisoryCandidate(projectId, lastCandidate, lastAudit);
   }
@@ -16990,15 +18257,16 @@ ${shotAnchor}
         }
         const duration = Number(shot.duration) || Number(candidate.duration) || 10;
         const hasDialogue = shotDialogueStats(shot).turns > 0;
-        const [audio, visual, anchors] = await Promise.all([
+        const [audio, technicalIntegrity, anchors] = await Promise.all([
           analyzeAudioFile(ffmpeg, candidate.filePath, duration),
-          analyzeVisualFile(ffmpeg, candidate.filePath, duration, 2),
+          this.auditTechnicalShotCandidate(projectId, shot.id, candidate.id),
           this.inspectShotReferenceAnchors(project, shot, candidate, ffmpeg)
         ]);
+        const visual = technicalIntegrity.visual;
         const audioDecision = assessAudioQuality(audio, { hasDialogue });
         const visualDecision = assessVisualQuality(visual);
-        const failures = [...audioDecision.failures, ...visualDecision.failures, ...anchors.failures];
-        records[index] = { shotId: shot.id, shotNumber: shot.number, candidateId: candidate.id, hasDialogue, audio, visual, anchors, ok: failures.length === 0, failures };
+        const failures = [...technicalIntegrity.failures, ...audioDecision.failures, ...visualDecision.failures, ...anchors.failures];
+        records[index] = { shotId: shot.id, shotNumber: shot.number, candidateId: candidate.id, hasDialogue, audio, visual, technicalIntegrity, anchors, ok: failures.length === 0, failures };
       }
     };
     await Promise.all(Array.from({ length: Math.min(5, Math.max(1, shots.length)) }, worker));
@@ -17091,21 +18359,36 @@ ${shotAnchor}
     assertProjectStoryboardsReady(project, settings);
     const mode = normalizeProjectMode(project.generation?.mode);
     const shots = project.shots.slice().sort((a, b) => a.number - b.number);
+    // Preflight every speaking voice before the first paid non-H3/desktop task.
+    // The H3 branch below additionally validates speaker-token bindings and
+    // compiles all Director-Agent blocks before submission.
+    if (projectVideoEngine(project) !== "hailuo-h3") {
+      for (const shot of shots) {
+        const currentProject = this.store.getProject(projectId);
+        const currentShot = (currentProject.shots || []).find(item => item.id === shot.id) || shot;
+        const references = this.shotReferences(currentProject, currentShot, mode);
+        if ((references.audios || []).length) {
+          await this.verifyHailuoVoiceReferences(currentProject, currentShot, references);
+        }
+      }
+    }
     // Validate the complete H3 speaker/audio contract before compiling prompts or
     // submitting the first paid video. A bad late shot must not be discovered only
     // after earlier shots have already consumed upstream credits.
     if (projectVideoEngine(project) === "hailuo-h3") {
       for (const shot of shots) {
-        const references = this.shotReferences(project, shot, mode);
-        await this.verifyHailuoVoiceReferences(project, shot, references);
-        const strategy = resolveShotVideoStrategy(project, shot).strategy;
+        const currentProject = this.store.getProject(projectId);
+        const currentShot = (currentProject.shots || []).find(item => item.id === shot.id) || shot;
+        const references = this.shotReferences(currentProject, currentShot, mode);
+        await this.verifyHailuoVoiceReferences(currentProject, currentShot, references);
+        const strategy = resolveShotVideoStrategy(currentProject, currentShot).strategy;
         references.hailuoApiMode = resolveHailuoApiModeForStrategy(
           strategy,
           settings.videoProvider?.hailuoApiMode,
           references.audios.length > 0
         );
-        assertHailuoDialogueVoiceReferences(project, shot, references, {
-          requireMultimodal: uniqueDialogueTurns(project, shot).length > 0
+        assertHailuoDialogueVoiceReferences(currentProject, currentShot, references, {
+          requireMultimodal: uniqueDialogueTurns(currentProject, currentShot).length > 0
         });
       }
       // Let the Director Agent author every camera segment and continuous
@@ -17196,7 +18479,9 @@ ${shotAnchor}
         const existing = candidateReady(current, "shot", shot.id, "shot_video", settings);
         let existingReady = false;
         if (existing && !chainDirty) {
-          if (!videoQualityEnabled) existingReady = true;
+          const technicalIntegrity = await this.auditTechnicalShotCandidate(projectId, shot.id, existing.id);
+          if (!technicalIntegrity.ok) chainDirty = true;
+          else if (!videoQualityEnabled) existingReady = true;
           else {
             const audit = existing.qualityAudit || await this.auditShotCandidate(projectId, shot.id, existing.id);
             existingReady = audit.ok;
@@ -17289,6 +18574,7 @@ ${shotAnchor}
     this.reconcileProjectCharacterReferences(projectId);
     this.ensureProjectShotScenes(projectId);
     this.syncReferenceLibraries(projectId);
+    this.restoreUnchangedScriptAssets(projectId);
     this.reconcileProductionContracts(projectId, { markScriptFailed: false });
     let contractProject = this.store.getProject(projectId);
     const settings = this.store.getSettings();
@@ -17296,9 +18582,13 @@ ${shotAnchor}
     // execution lock. This keeps uploaded and previously authored scripts usable.
     const plan = this.buildAssetBatchPlan(projectId);
     const concurrency = await this.authoritativeGenerationConcurrency(this.store.getProject(projectId));
+    const batchStartedAt = new Date().toISOString();
     this.setAutomation(projectId, {
       stage: "assets",
-      progress: summarizeAssetBatch(plan, `等待启动：图片并发 ${concurrency.image} / 视频并发 ${concurrency.video}`, "asset_batch"),
+      progress: summarizeAssetBatch(plan, `等待启动：图片并发 ${concurrency.image} / 视频并发 ${concurrency.video}`, "asset_batch", {
+        batchId: makeId("asset-batch"),
+        batchStartedAt
+      }),
       message: `资产批次已建立：${plan.filter(item => item.status === "completed" || item.status === "skipped").length}/${plan.length} 已就绪；严格采用后台图片 ${concurrency.image} / 视频 ${concurrency.video} 并发`,
       concurrency: { image: concurrency.image, video: concurrency.video, source: concurrency.source, authority: concurrency.authority || "" }
     });
@@ -17358,7 +18648,7 @@ ${shotAnchor}
           result = await this.ensureCharacterVoice(projectId, item.entityId, { track: false });
         }
         else if (item.kind === "scene_asset") result = await this.ensureSceneAssetCandidate(projectId, item.entityId);
-        else if (item.kind === "prop_asset" || item.kind === "wardrobe_asset") result = await this.generateLibraryAssetImage(projectId, item.libraryType, item.entityId, { track: false });
+        else if (item.kind === "prop_asset" || item.kind === "wardrobe_asset") result = await this.ensureLibraryAssetCandidate(projectId, item.libraryType, item.entityId);
         else result = null;
         if (result) results.push(result);
         this.updateAssetBatchProgress(projectId, item.key, { status: "completed", message: "已生成" });
@@ -17381,7 +18671,7 @@ ${shotAnchor}
     const inheritProjectVideo = stageProvider === "inherit-project";
     const waves = [
       { id: "identity_and_scene", resource: "image", label: "第1波 · 人物合板 / 场景四视图", items: plan.filter(item => ["character_sheet", "scene_asset", "product_reference"].includes(item.kind)) },
-      { id: "character_intro", resource: "image", label: "第2A波 · 独立正脸介绍图", items: plan.filter(item => ["character_intro", "character_three_view"].includes(item.kind)) },
+      { id: "character_intro", resource: "image", label: "第2A波 · H3人物身份参考图（不进成片）", items: plan.filter(item => ["character_intro", "character_three_view"].includes(item.kind)) },
       { id: "asset_library", resource: "image", label: "第2B波 · 道具 / 换装资产库", items: plan.filter(item => ["prop_asset", "wardrobe_asset"].includes(item.kind)) },
       {
         id: "character_video",
@@ -17559,52 +18849,61 @@ ${shotAnchor}
       shot.wardrobeId = (shot.characterIds || []).length === 1 ? (shot.wardrobeBindings[0]?.wardrobeId || "") : "";
     }
     const productName = String(project.product?.name || "").trim();
-    // Never AI-draw the sellable product as a prop card — uploaded product image is the only look.
-    const removedProductPropIds = new Set(
-      (project.assetLibraries.props || [])
-        .filter(item => isSameProductName(item?.name, productName))
-        .map(item => item.id)
-    );
-    project.assetLibraries.props = project.assetLibraries.props.filter(item => !removedProductPropIds.has(item.id));
-    if (removedProductPropIds.size && Array.isArray(project.candidates)) {
-      project.candidates = project.candidates.filter(item => !(
-        item.entityType === "library"
-        && item.stage === "prop_asset"
-        && removedProductPropIds.has(item.entityId)
-      ));
-    }
-    const propIds = new Set(project.assetLibraries.props.map(item => item.id));
+    // Prop cards are an AI-authoritative allow-list. A shot may mention furniture,
+    // cups or other continuity details, but those details are never promoted to
+    // reusable assets by local parsing. The sellable product also stays bound to
+    // the user's uploaded product image instead of being redrawn as a prop.
+    const previousProps = [...project.assetLibraries.props];
+    const hasFreshAgentProps = Object.prototype.hasOwnProperty.call(options, "props");
     const propSources = [
-      ...(Array.isArray(options.props) ? options.props : []),
+      ...(hasFreshAgentProps
+        ? (Array.isArray(options.props) ? options.props : [])
+        : previousProps.filter(item => item?.coreStory === true)),
       ...(Array.isArray(project.script?.generationCheckpoint?.blueprint?.props) ? project.script.generationCheckpoint.blueprint.props : []),
-      ...(Array.isArray(project.script?.generationCheckpoint?.storyBible?.props) ? project.script.generationCheckpoint.storyBible.props : []),
-      ...parsePropBibleFromScript(project.script?.raw || "")
+      ...(Array.isArray(project.script?.generationCheckpoint?.storyBible?.props) ? project.script.generationCheckpoint.storyBible.props : [])
     ];
+    const nextProps = [];
+    const byName = new Map();
     for (const prop of propSources) {
       const name = String(prop?.name || "").trim();
-      if (!name || isSameProductName(name, productName)) continue;
-      const propId = String(prop.id || `prop_${slug(name)}`);
-      if (propIds.has(propId)) {
-        const existing = project.assetLibraries.props.find(item => item.id === propId);
-        if (existing) {
-          if (!existing.description && prop.description) existing.description = String(prop.description || "").trim();
-          if (!existing.holder && prop.holder) existing.holder = String(prop.holder || "").trim();
-          if (!existing.purpose && prop.purpose) existing.purpose = String(prop.purpose || "").trim();
-          if (!existing.continuity && prop.continuity) existing.continuity = String(prop.continuity || "").trim();
-          existing.units = [...new Set([...(existing.units || []), ...((prop.units || []).map(String))])];
-        }
-        continue;
-      }
-      project.assetLibraries.props.push({
-        id: propId,
+      if (!name || prop?.coreStory !== true || isSameProductName(name, productName)) continue;
+      const nameKey = name.toLocaleLowerCase();
+      const existingByName = previousProps.find(item => String(item?.name || "").trim().toLocaleLowerCase() === nameKey);
+      const existingById = previousProps.find(item => item?.id && prop?.id && String(item.id) === String(prop.id));
+      const prior = byName.get(nameKey) || existingById || existingByName || {};
+      const normalized = {
+        ...prior,
+        id: String(prop.id || prior.id || `prop_${slug(name)}`),
         name,
-        description: String(prop.description || prop.appearance || "").trim(),
-        holder: String(prop.holder || "").trim(),
-        units: Array.isArray(prop.units) ? prop.units.map(String) : [],
-        purpose: String(prop.purpose || "").trim(),
-        continuity: String(prop.continuity || "").trim()
-      });
-      propIds.add(propId);
+        description: String(prop.description || prop.appearance || prior.description || "").trim(),
+        holder: String(prop.holder || prior.holder || "").trim(),
+        units: [...new Set([...(prior.units || []), ...((Array.isArray(prop.units) ? prop.units : []).map(String))])],
+        purpose: String(prop.purpose || prior.purpose || prop.causalRole || "").trim(),
+        coreStory: true,
+        causalRole: String(prop.causalRole || prior.causalRole || prop.purpose || "").trim(),
+        continuity: String(prop.continuity || prior.continuity || "").trim()
+      };
+      if (!byName.has(nameKey)) {
+        nextProps.push(normalized);
+        byName.set(nameKey, normalized);
+      } else {
+        const target = byName.get(nameKey);
+        Object.assign(target, normalized);
+        byName.set(nameKey, target);
+      }
+    }
+    project.assetLibraries.props = nextProps;
+    const propIds = new Set(nextProps.map(item => item.id));
+    const stalePropIds = new Set(previousProps.map(item => item.id).filter(id => id && !propIds.has(id)));
+    if (stalePropIds.size && Array.isArray(project.candidates)) {
+      const staleAt = new Date().toISOString();
+      for (const candidate of project.candidates) {
+        if (candidate.entityType !== "library" || candidate.stage !== "prop_asset" || !stalePropIds.has(candidate.entityId)) continue;
+        candidate.selected = false;
+        candidate.stale = true;
+        candidate.staleAt = candidate.staleAt || staleAt;
+        candidate.staleReason = "AI 核心道具合同已更新；保留历史文件但不再参与当前生产";
+      }
     }
     for (const shot of project.shots || []) {
       for (const binding of normalizePropBindings(shot.propBindings)) {
@@ -17617,38 +18916,15 @@ ${shotAnchor}
             const holder = (project.characters || []).find(item => item.id === binding.holderCharacterId);
             existing.holder = holder?.name || binding.holderCharacterId;
           }
-          continue;
         }
-        if (isSameProductName(lookup, productName)) continue;
-        const propId = lookup.startsWith("prop_") ? lookup : `prop_${slug(lookup)}`;
-        if (propIds.has(propId)) continue;
-        project.assetLibraries.props.push({
-          id: propId,
-          name: lookup.replace(/^prop_/, ""),
-          description: `${lookup}剧情道具外观参考`,
-          holder: binding.holderCharacterId || "",
-          units: [shot.id || `S${shot.number}`],
-          purpose: "剧情连续性",
-          continuity: [binding.stateBefore, binding.stateAfter].filter(Boolean).join("→")
-        });
-        propIds.add(propId);
       }
     }
     for (const shot of project.shots || []) {
       for (const propName of shot.propNames || []) {
         const name = String(propName || "").trim();
-        if (!name || isSameProductName(name, productName)) continue;
-        const propId = `prop_${slug(name)}`;
-        if (propIds.has(propId)) continue;
-        project.assetLibraries.props.push({
-          id: propId,
-          name,
-          description: `${name}剧情道具外观参考`,
-          holder: "",
-          units: [shot.id || `S${shot.number}`],
-          purpose: "剧情连续性"
-        });
-        propIds.add(propId);
+        if (!name) continue;
+        const existing = project.assetLibraries.props.find(item => item.name === name || item.id === name || item.id === `prop_${slug(name)}`);
+        if (existing) existing.units = [...new Set([...(existing.units || []), String(shot.id || `S${shot.number}`)])];
       }
     }
     if (referenceState(project) !== beforeState) this.store.saveProject(project);
@@ -17679,10 +18955,14 @@ ${shotAnchor}
     const repairedReferences = this.reconcileProjectCharacterReferences(projectId);
     let project = this.store.getProject(projectId);
     const actions = [];
-    if (targetStage !== "script" && (!Array.isArray(project.shots) || project.shots.length === 0) && String(project.script?.raw || "").trim()) {
+    const scriptRoute = scriptPipelineEntryRoute(project);
+    const analysisRequired = ["analyze_imported", "reanalyze_duration", "reanalyze_source", "reanalyze_dialogue"].includes(scriptRoute);
+    if (targetStage !== "script" && analysisRequired && String(project.script?.raw || "").trim()) {
       this.setAutomation(projectId, {
         stage: "script",
-        message: "后续阶段发现剧本尚未拆镜，正在自动回到剧本阶段补齐分镜结构"
+        message: scriptRoute === "reanalyze_dialogue"
+          ? "后续阶段发现旧项目缺少逐字对白账本，正在从原稿本地恢复并校验"
+          : "后续阶段发现剧本尚未满足生产合同，正在自动回到剧本阶段补齐分镜结构"
       });
       await this.analyzeScript(projectId, { track: false });
       actions.push("script_analysis");
@@ -17743,10 +19023,11 @@ ${shotAnchor}
         this.assertOperationActive(projectId);
         await this.generateCompleteScript(projectId, { track: false });
         project = this.store.getProject(projectId);
-      } else if (["analyze_imported", "reanalyze_duration", "reanalyze_source"].includes(route)) {
+      } else if (["analyze_imported", "reanalyze_duration", "reanalyze_source", "reanalyze_dialogue"].includes(route)) {
         this.setAutomation(projectId, { stage: "script", message: route === "reanalyze_duration"
           ? "检测到旧分镜时长与目标不一致，正在按当前时长重新拆镜"
-          : route === "reanalyze_source" ? "检测到剧本原稿已变化，正在隔离旧生产版本并重新拆镜" : "正在拆解已导入的完整剧本" });
+          : route === "reanalyze_source" ? "检测到剧本原稿已变化，正在隔离旧生产版本并重新拆镜"
+          : route === "reanalyze_dialogue" ? "检测到旧项目缺少逐字对白账本，正在从原稿本地恢复并校验，不会重复调用写作模型" : "正在拆解已导入的完整剧本" });
         this.assertOperationActive(projectId);
         await this.analyzeScript(projectId, { track: false });
         project = this.store.getProject(projectId);
@@ -17820,7 +19101,10 @@ ${shotAnchor}
       const character = (project.characters || []).find(item => item.id === entityId);
       if (kind === "scene_asset") ready = Boolean(candidateReady(project, "scene", entityId, kind, settings));
       else if (kind === "prop_asset" || kind === "wardrobe_asset") {
-        ready = (project.candidates || []).some(item => item.entityType === "library" && item.entityId === entityId && item.stage === kind && item.filePath);
+        const active = candidateReady(project, "library", entityId, kind, settings);
+        // An arbitrary historical file is not production state. Library images
+        // become ready only when the current revision explicitly selected them.
+        ready = Boolean(active?.selected === true);
       } else if (kind === "character_voice") {
         ready = Boolean(candidateReady(project, "character", entityId, kind, settings)?.filePath)
           || Boolean(this.findReusableVoice(character)?.entry?.filePath);
@@ -17879,6 +19163,85 @@ ${shotAnchor}
     return items;
   }
 
+  /**
+   * Re-analysis of the exact same source may change timing or AI annotations, but
+   * it must not redraw identity assets. Restore only non-timeline assets whose
+   * immutable source fingerprint and entity id both match; storyboards/videos
+   * remain revision-scoped because camera timing may have changed.
+   */
+  restoreUnchangedScriptAssets(projectId) {
+    let project = this.store.getProject(projectId);
+    const settings = this.store.getSettings();
+    const sourceFingerprint = String(project.script?.sourceFingerprint || "").trim();
+    const activeRevision = String(project.productionRevision || "");
+    if (!sourceFingerprint || !activeRevision) return [];
+    const reusableStages = new Set([
+      "character_sheet",
+      "character_three_view",
+      "character_intro",
+      "character_video",
+      "character_voice",
+      "scene_asset",
+      "prop_asset",
+      "wardrobe_asset"
+    ]);
+    const entityExists = candidate => {
+      if (candidate.entityType === "character") return (project.characters || []).some(item => item.id === candidate.entityId);
+      if (candidate.entityType === "scene") return (project.scenes || []).some(item => item.id === candidate.entityId);
+      if (candidate.entityType === "library") {
+        const libraries = project.assetLibraries || {};
+        return [...(libraries.props || []), ...(libraries.wardrobes || []), ...(libraries.voices || [])]
+          .some(item => item.id === candidate.entityId);
+      }
+      return false;
+    };
+    const historical = (project.candidates || [])
+      .filter(candidate => reusableStages.has(candidate.stage))
+      .filter(candidate => String(candidate.productionRevision || "") !== activeRevision)
+      .filter(candidate => String(candidate.sourceScriptFingerprint || "") === sourceFingerprint)
+      .filter(candidate => candidate.filePath && (!path.isAbsolute(candidate.filePath) || fs.existsSync(candidate.filePath)))
+      .filter(candidate => qualityAccepted(candidate, settings))
+      .filter(entityExists)
+      .sort((left, right) => {
+        const priority = stage => ({
+          character_sheet: 10,
+          character_three_view: 11,
+          scene_asset: 12,
+          prop_asset: 13,
+          wardrobe_asset: 14,
+          character_intro: 20,
+          character_video: 30,
+          character_voice: 40
+        })[String(stage)] || 99;
+        return priority(left.stage) - priority(right.stage)
+        || Number(right.selected === true) - Number(left.selected === true)
+        || String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || ""));
+      });
+    const restored = [];
+    const handled = new Set();
+    for (const candidate of historical) {
+      const key = `${candidate.entityType}:${candidate.entityId}:${candidate.stage}`;
+      if (handled.has(key)) continue;
+      handled.add(key);
+      if (candidateReady(project, candidate.entityType, candidate.entityId, candidate.stage, settings)) continue;
+      const current = this.store.confirmCandidate(projectId, candidate.id, false);
+      restored.push(current.id);
+      project = this.store.getProject(projectId);
+    }
+    if (restored.length) {
+      project.activity = Array.isArray(project.activity) ? project.activity : [];
+      project.activity.unshift({
+        id: makeId("activity"),
+        at: new Date().toISOString(),
+        type: "unchanged_script_assets_restored",
+        summary: `同一原稿重新分析后安全复用 ${restored.length} 项人物、场景、音色或核心道具资产；分镜图与视频仍按新时长重制`
+      });
+      project.activity = project.activity.slice(0, 300);
+      this.store.saveProject(project);
+    }
+    return restored;
+  }
+
   updateAssetBatchProgress(projectId, itemKey, patch = {}) {
     const project = this.store.getProject(projectId);
     const prior = project.automation?.progress;
@@ -17887,7 +19250,10 @@ ${shotAnchor}
     const item = items.find(entry => entry.key === itemKey);
     if (!item) return null;
     Object.assign(item, patch, { updatedAt: new Date().toISOString() });
-    const progress = summarizeAssetBatch(items, prior.waveLabel || "", prior.kind);
+    const progress = summarizeAssetBatch(items, prior.waveLabel || "", prior.kind, {
+      batchId: prior.batchId || "",
+      batchStartedAt: prior.batchStartedAt || ""
+    });
     const runningNames = progress.running.map(entry => entry.label).slice(0, 8);
     const topic = prior.kind === "storyboard_batch" ? "分镜帧" : "资产批次";
     this.setAutomation(projectId, {
@@ -18040,6 +19406,19 @@ ${shotAnchor}
       model: settings.imageProvider.model,
       libraryType: type
     });
+  }
+
+  async ensureLibraryAssetCandidate(projectId, type, assetId) {
+    const stage = type === "wardrobes" ? "wardrobe_asset" : "prop_asset";
+    const settings = this.store.getSettings();
+    const existing = candidateReady(this.store.getProject(projectId), "library", assetId, stage, settings);
+    if (existing) {
+      if (existing.selected !== true) this.store.confirmCandidate(projectId, existing.id, false);
+      return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
+    }
+    const generated = await this.generateLibraryAssetImage(projectId, type, assetId, { track: false });
+    this.store.confirmCandidate(projectId, generated.id, false);
+    return this.store.getProject(projectId).candidates.find(item => item.id === generated.id) || generated;
   }
 
   ensureVideoCostEntry(projectId, job = {}) {
@@ -18383,6 +19762,31 @@ ${shotAnchor}
     }
     const ffmpeg = this.locateFfmpeg();
     if (!ffmpeg) throw Object.assign(new Error("未找到本地媒体处理组件 FFmpeg，请检查像塑安装或重新安装纯梦短剧老虎机"), { code: "FFMPEG_NOT_FOUND" });
+    const orderedShotsForIntegrity = project.shots.slice().sort((a, b) => a.number - b.number);
+    const technicalShotAudits = await mapWithConcurrency(videos.map((candidate, index) => ({
+      candidate,
+      shot: orderedShotsForIntegrity[index]
+    })), 4, async item => ({
+      shotId: item.shot.id,
+      shotNumber: item.shot.number,
+      candidateId: item.candidate.id,
+      audit: await this.auditTechnicalShotCandidate(projectId, item.shot.id, item.candidate.id)
+    }));
+    const technicalShotFailures = technicalShotAudits.filter(item => item.audit.ok !== true);
+    if (technicalShotFailures.length) {
+      for (const item of technicalShotFailures) {
+        this.store.updateCandidate(projectId, item.candidateId, {
+          selected: false,
+          stale: true,
+          staleAt: new Date().toISOString(),
+          staleReason: `拼接前强制视频完整性检测未通过：${item.audit.failures.map(failure => failure.message).join("；")}`
+        });
+      }
+      throw Object.assign(new Error(`拼接前发现 ${technicalShotFailures.length} 个分镜含空白帧、纯色边栏、错误转场或画布泄漏；已阻止坏视频进入成片，请继续任务局部重生`), {
+        code: "SHOT_VIDEO_TECHNICAL_INTEGRITY_FAILED",
+        failures: technicalShotFailures
+      });
+    }
     const mediaAudit = this.qualityGatesEnabled(settings, "videos")
       ? await this.auditProjectMediaQuality(projectId)
       : { ok: true, skipped: true, failures: [] };
@@ -18497,18 +19901,57 @@ ${shotAnchor}
         });
       }
     }
+    const finalDuration = exactDurationRequired ? exactTargetSeconds : project.shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
+    const finalVisualAudit = await analyzeVisualFile(
+      ffmpeg,
+      outputPath,
+      finalDuration,
+      QUALITY_LIMITS.technicalVisual.sampleFps
+    );
+    const finalTechnicalDecision = assessTechnicalVisualIntegrity(finalVisualAudit);
+    if (!finalTechnicalDecision.ok) {
+      try { project = verifyInputsStillCurrent(); }
+      catch (error) { throw Object.assign(error, { outputPath }); }
+      project.finalVisualAudit = { ...finalVisualAudit, technicalDecision: finalTechnicalDecision, mandatory: true };
+      if (finalDurationAudit) project.finalDurationAudit = finalDurationAudit;
+      project.finalQualityAudit = {
+        checkedAt: new Date().toISOString(),
+        ok: false,
+        blocking: true,
+        outputPath,
+        failures: finalTechnicalDecision.failures
+      };
+      project.finalVideoHistory = Array.isArray(project.finalVideoHistory) ? project.finalVideoHistory : [];
+      project.finalVideoHistory.unshift({
+        id: makeId("final"),
+        filePath: outputPath,
+        source: "generated",
+        productionRevision: project.productionRevision || "",
+        replacedAt: new Date().toISOString(),
+        stale: true,
+        staleReason: `强制成片完整性检测未通过：${finalTechnicalDecision.failures.map(item => item.message).join("；")}`,
+        qualityAudit: project.finalQualityAudit
+      });
+      project.finalVideoHistory = project.finalVideoHistory.slice(0, 50);
+      this.store.saveProject(project);
+      throw Object.assign(new Error("成片检测到空白帧、纯色边栏、错误转场或画布泄漏；已保留失败文件但禁止作为当前成片"), {
+        code: "FINAL_VIDEO_TECHNICAL_INTEGRITY_FAILED",
+        audit: finalTechnicalDecision,
+        outputPath
+      });
+    }
     if (!this.qualityGatesEnabled(null, "delivery")) {
       try { project = verifyInputsStillCurrent(); }
       catch (error) { throw Object.assign(error, { outputPath }); }
       project.finalAudioAudit = { skipped: true, ok: true };
-      project.finalVisualAudit = { skipped: true, ok: true };
+      project.finalVisualAudit = { ...finalVisualAudit, ok: true, mandatory: true, technicalDecision: finalTechnicalDecision, subjectiveSkipped: true };
       if (finalDurationAudit) project.finalDurationAudit = finalDurationAudit;
       project.finalQualityAudit = {
         checkedAt: new Date().toISOString(),
         ok: true,
         skipped: true,
         failures: [],
-        note: "蓝图/质检限制已关闭，已跳过成片终审"
+        note: "已通过强制坏帧/画布泄漏检测；用户关闭的仅是主观音画评分"
       };
       archiveCurrentFinalVideo(project, "new-generated-final");
       project.finalVideoPath = outputPath;
@@ -18521,19 +19964,15 @@ ${shotAnchor}
       this.store.saveProject(project);
       return { path: outputPath, fileUrl: pathToFileURL(outputPath).href };
     }
-    const finalDuration = exactDurationRequired ? exactTargetSeconds : project.shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
-    const [finalAudioAudit, finalVisualAudit] = await Promise.all([
-      analyzeAudioFile(ffmpeg, outputPath, finalDuration),
-      analyzeVisualFile(ffmpeg, outputPath, finalDuration, 1)
-    ]);
+    const finalAudioAudit = await analyzeAudioFile(ffmpeg, outputPath, finalDuration);
     const finalAudioDecision = assessAudioQuality(finalAudioAudit, { final: true });
     const finalVisualDecision = assessVisualQuality(finalVisualAudit, { final: true });
     try { project = verifyInputsStillCurrent(); }
     catch (error) { throw Object.assign(error, { outputPath }); }
     project.finalAudioAudit = { ...finalAudioAudit, decision: finalAudioDecision };
-    project.finalVisualAudit = { ...finalVisualAudit, decision: finalVisualDecision };
+    project.finalVisualAudit = { ...finalVisualAudit, decision: finalVisualDecision, technicalDecision: finalTechnicalDecision, mandatory: true };
     if (finalDurationAudit) project.finalDurationAudit = finalDurationAudit;
-    project.finalQualityAudit = { checkedAt: new Date().toISOString(), ok: finalAudioDecision.ok && finalVisualDecision.ok, outputPath, audio: project.finalAudioAudit, visual: project.finalVisualAudit, failures: [...finalAudioDecision.failures, ...finalVisualDecision.failures] };
+    project.finalQualityAudit = { checkedAt: new Date().toISOString(), ok: finalAudioDecision.ok && finalVisualDecision.ok, outputPath, audio: project.finalAudioAudit, visual: project.finalVisualAudit, failures: [...finalTechnicalDecision.failures, ...finalAudioDecision.failures, ...finalVisualDecision.failures] };
     if (!project.finalQualityAudit.ok) {
       project.finalQualityAudit = { ...ignoredQualityAudit(project.finalQualityAudit, { note: "成片终审提醒已保留，当前成片继续交付" }), mode: "advisory_continue", outputPath };
     }
@@ -18552,6 +19991,7 @@ ${shotAnchor}
 
 module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, topicJsonParseOptions, recoverTopicOptionsFromDiagnostics, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, projectScriptFormat, assertAiScriptFormatConfirmed, scriptFormatDirective, viewerComprehensionPriorityDirective, renderProductionScript, renderDialogueScript, renderTimedStoryboardScript, renderScriptForProject, ideaSignature, parseTimedStoryboardScript, expandTimedStoryboardForProvider, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, localUploadedAnalysisChunk, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, compactGeneratedSeedanceVideoPrompt, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract, dialogueRewriteNameMap, validateDialogueRewriteLines, localDialogueRewriteLines, renderDialogueRewriteScript };
 module.exports.reconcileShotSceneCatalog = reconcileShotSceneCatalog;
+module.exports.resolveHailuoApiModeForReferences = resolveHailuoApiModeForReferences;
 module.exports.finalizeVideoPromptForSubmission = finalizeVideoPromptForSubmission;
 module.exports.activeBlueprintFailures = activeBlueprintFailures;
 module.exports.scriptQualityGateOptions = scriptQualityGateOptions;
@@ -18571,3 +20011,11 @@ module.exports.legacyAutomationIsAdvisory = legacyAutomationIsAdvisory;
 module.exports.imageGenerationOptions = imageGenerationOptions;
 module.exports.buildLocalTopicOptions = buildLocalTopicOptions;
 module.exports.splitUploadedScriptSections = splitUploadedScriptSections;
+module.exports.productionDialogueLedgerFromScript = productionDialogueLedgerFromScript;
+module.exports.sourceDialogueLedgerMatches = sourceDialogueLedgerMatches;
+module.exports.seedExistingAnalysisDialogueBindings = seedExistingAnalysisDialogueBindings;
+module.exports.validateScriptAnalysisChunkResult = validateScriptAnalysisChunkResult;
+module.exports.nestedReferenceManifests = nestedReferenceManifests;
+module.exports.referenceManifestAudios = referenceManifestAudios;
+module.exports.candidateHasHailuoDialogueMode = candidateHasHailuoDialogueMode;
+module.exports.assertShotReferenceBundle = assertShotReferenceBundle;

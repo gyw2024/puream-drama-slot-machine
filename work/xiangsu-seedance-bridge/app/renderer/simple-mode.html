@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'none'; img-src 'self' puream-asset: data:; media-src 'self' puream-asset: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>简易模式 · 纯梦短剧老虎机</title>
+  <link rel="stylesheet" href="simple-mode.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-icon"><img src="../assets/drama-slot-mark.svg" alt=""></span>
+        <span><b>纯梦短剧老虎机</b><small>简易模式 · H3 SHORT DRAMA STUDIO</small></span>
+        <em>简单、清楚、一步一步</em>
+      </div>
+      <div class="project-tools">
+        <label for="projectSelect">当前项目</label>
+        <select id="projectSelect" aria-label="当前简易模式项目"></select>
+        <button id="newProject" class="icon-button" type="button" title="新建项目" aria-label="新建项目">＋</button>
+        <button id="deleteProject" class="icon-button danger-icon" type="button" title="删除项目" aria-label="删除项目">删</button>
+        <button id="restoreProject" class="icon-button" type="button" title="恢复已删除项目" aria-label="恢复已删除项目">恢</button>
+      </div>
+      <div class="top-actions">
+        <button id="runAll" class="primary-button" type="button"><img src="../assets/icons/sparkle.png" alt="">一键做完整部剧</button>
+        <button id="pauseRun" class="outline-button" type="button">暂停</button>
+        <button id="walletButton" class="wallet-button" type="button"><span>余额</span><b id="walletBalance">读取中</b></button>
+        <button id="switchAgent" class="mode-switch" type="button">切换 Agent 模式</button>
+      </div>
+    </header>
+
+    <aside class="sidebar" aria-label="简易制作流程">
+      <div class="sidebar-title"><span>SIMPLE WORKSPACE</span><b>短剧制作台</b></div>
+      <nav>
+        <button class="nav-button active" type="button" data-panel="overview"><em>01</em><span><b>项目总览</b><small>进度与下一步</small></span></button>
+        <button class="nav-button" type="button" data-panel="script"><em>02</em><span><b>剧本与分集</b><small>上传、改写、拆镜</small></span></button>
+        <button class="nav-button" type="button" data-panel="assets"><em>03</em><span><b>角色场景道具</b><small>共享或生成资产</small></span></button>
+        <button class="nav-button" type="button" data-panel="storyboard"><em>04</em><span><b>分镜准备</b><small>画面与提示词</small></span></button>
+        <button class="nav-button" type="button" data-panel="generate"><em>05</em><span><b>H3 生成工作台</b><small>分镜视频生产</small></span></button>
+        <button class="nav-button" type="button" data-panel="final"><em>06</em><span><b>成片导出</b><small>拼接与交付</small></span></button>
+        <button class="nav-button" type="button" data-panel="tasks"><em>07</em><span><b>任务中心</b><small>状态、费用、失败</small></span></button>
+        <button class="nav-button shared-nav" type="button" data-panel="library"><em>08</em><span><b>共享资产库</b><small>与 Agent 模式互通</small></span></button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <button class="nav-button" type="button" data-panel="settings"><em>⚙</em><span><b>简易模式设置</b><small>H3 与并发控制</small></span></button>
+      <button id="versionButton" class="version-button" type="button"><span>VERSION</span><b id="versionText">读取中</b><small id="updateText">检查更新</small></button>
+    </aside>
+
+    <main class="workspace">
+      <section class="workspace-status">
+        <div><span>当前流程</span><b id="currentStatus">等待创建项目</b><small id="statusDetail">选择或新建一个项目开始制作</small></div>
+        <div class="status-progress"><i id="statusProgress"></i></div>
+        <div class="status-count"><b id="progressPercent">0%</b><span id="progressCount">0/6 阶段</span></div>
+      </section>
+
+      <section class="panel active" data-content="overview">
+        <header class="panel-head">
+          <div><span>PROJECT OVERVIEW</span><h1>今天要做的短剧</h1><p>按六步走完，也可以直接点击右上角一键制作。</p></div>
+          <button class="primary-button" type="button" data-action="next-step">带我做下一步</button>
+        </header>
+        <div id="emptyProject" class="empty-project" hidden>
+          <span class="empty-icon">＋</span><h2>新建第一部短剧</h2><p>简易模式只保留最清楚的制作步骤，底层仍由 AI 和海螺 H3 完成。</p><button class="primary-button" type="button" data-action="new-project">开始新项目</button>
+        </div>
+        <div id="overviewContent">
+          <div id="projectHero" class="project-hero"></div>
+          <div id="stepGrid" class="step-grid"></div>
+          <div class="overview-columns">
+            <article class="card"><div class="card-head"><span><small>NEXT ACTION</small><b>下一步建议</b></span></div><div id="nextAction" class="next-action"></div></article>
+            <article class="card"><div class="card-head"><span><small>RECENT ACTIVITY</small><b>最近动态</b></span><button class="text-button" type="button" data-panel-jump="tasks">查看全部</button></div><div id="recentActivity" class="activity-list"></div></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" data-content="script">
+        <header class="panel-head">
+          <div><span>STEP 02 · SCRIPT</span><h1>剧本与分集</h1><p>无论原稿怎样排版，先交给 AI 识别与整理，再保留剧情、人物和原对白完成拆镜。</p></div>
+          <div class="head-actions"><button id="generateTopics" class="outline-button" type="button">AI 想选题</button><button id="aiAnalyze" class="primary-button" type="button">保存并 AI 拆镜</button></div>
+        </header>
+        <div class="script-grid">
+          <article class="card script-card">
+            <div class="card-head"><span><small>SOURCE SCRIPT</small><b>完整剧本</b></span><span id="scriptCount" class="muted">0 字</span></div>
+            <div class="inline-actions"><button id="uploadScript" class="outline-button" type="button">上传剧本文件</button><button id="saveScript" class="outline-button" type="button">保存剧本</button><button id="rewriteScript" class="outline-button" type="button">AI 规范原稿</button><button id="generateScript" class="outline-button" type="button">AI 写完整剧本</button></div>
+            <textarea id="scriptText" class="script-editor" maxlength="500000" aria-label="短剧剧本" placeholder="粘贴任意格式剧本，或上传 TXT / Markdown / JSON / CSV。AI 会保留故事、人物、对白和细节，再转成系统可稳定生产的格式。"></textarea>
+            <div id="scriptAnalysis" class="analysis-bar">尚未拆解</div>
+          </article>
+          <aside class="script-side">
+            <article class="card">
+              <div class="card-head"><span><small>PRODUCT · OPTIONAL</small><b>带货商品（可选）</b></span><i id="productState" class="state-pill">不带货</i></div>
+              <button id="productPreview" class="product-preview" type="button"><img src="../assets/icons/image.png" alt=""><span>上传商品原图</span></button>
+              <label>商品名称<input id="productName" placeholder="不带货可留空"></label>
+              <label>商品卖点<textarea id="productSellingPoints" rows="4" placeholder="商品如何自然参与剧情"></textarea></label>
+            </article>
+            <article class="card topic-card"><div class="card-head"><span><small>IDEAS</small><b>AI 选题</b></span></div><div id="topicList" class="topic-list"><p class="muted">点击“AI 想选题”后在这里选择。</p></div></article>
+          </aside>
+        </div>
+      </section>
+
+      <section class="panel" data-content="assets">
+        <header class="panel-head">
+          <div><span>STEP 03 · ASSETS</span><h1>角色、场景与核心道具</h1><p>只生成参与核心剧情的道具。人物、场景和音色可直接复用两个模式共享的资产库。</p></div>
+          <div class="head-actions"><button class="outline-button" type="button" data-panel-jump="library">打开共享资产库</button><button id="generateAssets" class="primary-button" type="button">AI 生成缺少的资产</button></div>
+        </header>
+        <div id="assetSummary" class="summary-strip"></div>
+        <div class="asset-section"><div class="section-title"><span>CHARACTERS</span><h2>人物</h2><b id="characterCount">0</b></div><div id="characterGrid" class="asset-grid"></div></div>
+        <div class="asset-section"><div class="section-title"><span>SCENES</span><h2>场景</h2><b id="sceneCount">0</b></div><div id="sceneGrid" class="asset-grid"></div></div>
+        <div class="asset-section"><div class="section-title"><span>CORE PROPS</span><h2>核心道具与服装</h2><b id="propCount">0</b></div><div id="propGrid" class="asset-grid"></div></div>
+      </section>
+
+      <section class="panel" data-content="storyboard">
+        <header class="panel-head">
+          <div><span>STEP 04 · STORYBOARD</span><h1>分镜准备</h1><p>查看剧情拆分、人物关系和画面提示词；修改后保存，再生成多帧合图或首尾帧。</p></div>
+          <div class="head-actions"><button id="saveShots" class="outline-button" type="button">保存分镜修改</button><button id="generateStoryboards" class="primary-button" type="button">生成全部分镜图</button></div>
+        </header>
+        <div id="storyboardMode" class="summary-strip"></div>
+        <div id="shotEditorList" class="shot-editor-list"></div>
+      </section>
+
+      <section class="panel" data-content="generate">
+        <header class="panel-head">
+          <div><span>STEP 05 · HAILUO H3</span><h1>H3 生成工作台</h1><p>每个分镜都按说话人、听者、情绪、机位与切镜控制；任务无总时限，网络中断会保留断点续跑。</p></div>
+          <div class="head-actions"><button id="generateVideos" class="primary-button" type="button">生成全部分镜视频</button></div>
+        </header>
+        <div id="videoQueueSummary" class="summary-strip"></div>
+        <div id="videoGrid" class="video-grid"></div>
+      </section>
+
+      <section class="panel" data-content="final">
+        <header class="panel-head">
+          <div><span>STEP 06 · DELIVERY</span><h1>成片导出</h1><p>所有分镜视频完成后按剧情顺序拼接，不增加字幕、背景音乐或人物介绍。</p></div>
+          <div class="head-actions"><button id="stitchFinal" class="primary-button" type="button">拼接最新成片</button></div>
+        </header>
+        <div id="finalStage" class="final-stage"></div>
+      </section>
+
+      <section class="panel" data-content="tasks">
+        <header class="panel-head"><div><span>TASK CENTER</span><h1>任务与费用</h1><p>只显示简易模式自己的任务、错误、费用和恢复状态。</p></div><button id="refreshTasks" class="outline-button" type="button">刷新</button></header>
+        <div id="taskSummary" class="task-summary"></div>
+        <div class="overview-columns"><article class="card"><div class="card-head"><span><small>RUN DETAILS</small><b>任务状态</b></span></div><div id="jobList" class="job-list"></div></article><article class="card"><div class="card-head"><span><small>COST LEDGER</small><b>费用记录</b></span></div><div id="costList" class="cost-list"></div></article></div>
+      </section>
+
+      <section class="panel" data-content="library">
+        <header class="panel-head"><div><span>SHARED LIBRARY</span><h1>共享资产库</h1><p>这是两个模式唯一互通的数据：人物、场景、道具、服装、商品、音色和可复用视频。</p></div><div class="head-actions"><select id="libraryKind" aria-label="资产类型"><option value="">全部</option><option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="wardrobe">服装</option><option value="product">商品</option><option value="voice">音色</option><option value="video">视频</option></select><button id="importLibrary" class="primary-button" type="button">导入资产</button></div></header>
+        <div id="libraryGrid" class="library-grid"></div>
+      </section>
+
+      <section class="panel" data-content="settings">
+        <header class="panel-head"><div><span>SIMPLE SETTINGS</span><h1>简易模式设置</h1><p>这些设置只属于简易模式；Agent 模式设置不会被覆盖。</p></div><div class="head-actions"><button id="resetSettings" class="outline-button" type="button">恢复默认</button><button id="saveSettings" class="primary-button" type="button">保存设置</button></div></header>
+        <div class="settings-grid">
+          <article class="card provider-card"><div class="card-head"><span><small>VIDEO ENGINE</small><b>海螺 H3</b></span><i class="locked-pill">固定接入</i></div><p>简易模式所有人物视频与分镜视频统一通过纯梦云端海螺 H3 生成，不能误切到其他引擎。</p><button id="testH3" class="outline-button" type="button">检测 H3 连接</button><div id="h3Status" class="test-status">尚未检测</div></article>
+          <article class="card"><div class="card-head"><span><small>CONCURRENCY</small><b>生成并发</b></span></div><label>图片并发（后台额度）<input id="imageConcurrency" type="number" min="1" step="1" readonly aria-readonly="true"></label><label>视频并发（后台额度）<input id="videoConcurrency" type="number" min="1" step="1" readonly aria-readonly="true"></label><label>默认画幅<select id="aspectRatio"><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option><option value="1:1">1:1 方形</option></select></label><p>并发严格读取管理后台授权，不再由客户端写死或少开。</p></article>
+          <article class="card"><div class="card-head"><span><small>STORAGE</small><b>数据边界</b></span></div><dl class="storage-list"><dt>简易模式项目</dt><dd id="simpleRoot">读取中</dd><dt>共享资产库</dt><dd id="sharedRoot">读取中</dd></dl><p class="boundary-note">项目、任务、费用、设置与成片不互通；只有资产库互通。</p></article>
+          <article class="card switch-card"><div class="card-head"><span><small>WORKSPACE MODE</small><b>需要高级控制？</b></span></div><p>切换只改变默认入口，不搬迁、不合并、不删除任何项目。</p><button class="mode-switch large" type="button" data-action="switch-agent">切换到 Agent 模式</button></article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="busyOverlay" class="busy-overlay" hidden><div><i></i><b id="busyTitle">正在处理</b><span id="busyMessage">AI 正在执行，请保持软件开启</span><button id="hideBusy" class="text-button" type="button">转入后台</button></div></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog id="newProjectDialog" class="modal">
+    <form id="newProjectForm" method="dialog">
+      <header><span><small>NEW SIMPLE PROJECT</small><b>新建简易模式项目</b></span><button type="button" data-close-dialog="newProjectDialog" aria-label="关闭">×</button></header>
+      <label>项目名称<input id="newProjectName" required maxlength="80" placeholder="例如：婆婆留下的旧钥匙"></label>
+      <div class="form-columns"><label>起步方式<select id="newInputMode"><option value="manual">上传 / 粘贴剧本</option><option value="ai">AI 从选题写剧本</option></select></label><label>制作方式<select id="newExecutionMode"><option value="full">一键全流程</option><option value="step">一步步制作</option></select></label></div>
+      <label>分镜模式<select id="newGenerationMode"><option value="storyboard_sheet">多帧合图</option><option value="smart">智能首尾帧 + 延续</option><option value="continuation">视频延续</option><option value="keyframe">首尾帧</option></select></label>
+      <div class="form-columns"><label>目标时长（秒）<input id="newDuration" type="number" min="1" step="1" value="60"></label><label>带货方式<select id="newCommerceMode"><option value="none">不带货</option><option value="natural">自然植入</option><option value="explicit">明确带货</option></select></label></div>
+      <p>目标时长没有上限；实际分镜会按剧情完整性与 H3 单段能力自动拆分。</p>
+      <footer><button type="button" class="outline-button" data-close-dialog="newProjectDialog">取消</button><button type="submit" class="primary-button">创建项目</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="confirmDialog" class="modal confirm-modal">
+    <form method="dialog">
+      <header><span><small>CONFIRM ACTION</small><b id="confirmTitle">确认操作</b></span><button type="button" data-close-dialog="confirmDialog" aria-label="关闭">×</button></header>
+      <p id="confirmMessage">确认继续？</p>
+      <footer><button id="confirmCancel" type="button" class="outline-button">取消</button><button id="confirmAccept" type="button" class="primary-button">确认</button></footer>
+    </form>
+  </dialog>
+
+  <script src="simple-mode.js"></script>
+</body>
+</html>

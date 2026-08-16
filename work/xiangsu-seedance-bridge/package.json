@@ -1,6 +1,6 @@
 {
   "name": "xiangsu-seedance-bridge",
-  "version": "0.15.1",
+  "version": "0.16.0",
   "description": "纯梦短剧老虎机：纯梦云端算力默认、可切换本地像塑的一键短剧生产工具",
   "main": "app/bootstrap.js",
   "author": "PUREAM",
@@ -51,7 +51,7 @@
       }
     ],
     "directories": {
-      "output": "dist-fixed-0.15.1"
+      "output": "dist-fixed-0.16.0"
     },
     "win": {
       "icon": "app/assets/app.ico",

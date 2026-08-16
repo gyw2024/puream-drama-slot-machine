@@ -108,7 +108,7 @@ function settingsFixture() {
       storyboardSheet: "生成{{panelCount}}格逐秒分镜合图",
       characterSheet: "角色{{characterName}}：{{characterDescription}}；{{identitySignature}}",
       characterThreeView: "角色{{characterName}}三视图：{{identitySignature}}",
-      characterIntro: "角色{{characterName}}介绍图",
+      characterIntro: "角色{{characterName}}身份参考图（不进入成片）",
       sceneAsset: "场景{{sceneName}}：{{sceneDescription}}",
       keyframeVideo: "{{referenceManifest}}\n{{continuityInstruction}}\n{{shotDescription}}\n{{subshotTimeline}}\n{{dialogueInstruction}}\n{{performanceInstruction}}\n{{productInstruction}}\n{{soundInstruction}}",
       continuationVideo: "{{referenceManifest}}\n{{continuityInstruction}}\n{{shotDescription}}\n{{subshotTimeline}}\n{{dialogueInstruction}}\n{{performanceInstruction}}\n{{productInstruction}}\n{{soundInstruction}}",
@@ -244,10 +244,83 @@ test("asset, storyboard and Xiangsu video prompts share story, dialogue, product
   };
   const videoPrompt = WorkbenchWorkflow.prototype.buildShotPrompt.call({}, project, settings, shot, "keyframe", references);
   for (const item of ledger) assert.equal(videoPrompt.split(item.text).length - 1, 1);
-  assert.match(videoPrompt, /角色“林娜”[^\n]*原稿语气=突然推门，声嘶力竭/);
-  assert.match(videoPrompt, /角色“秦添”[^\n]*原稿语气=压低声音，眼神躲闪/);
+  assert.match(videoPrompt, /角色“林娜”[^\n]*语气=突然推门，声嘶力竭/);
+  assert.match(videoPrompt, /角色“秦添”[^\n]*语气=压低声音，眼神躲闪/);
   assert.match(videoPrompt, /用户上传商品硬绑定/);
-  assert.match(videoPrompt, /xiangsu:keyframe/);
+  assert.match(videoPrompt, /首帧到尾帧形成连续因果动作/);
+  assert.doesNotMatch(videoPrompt, /xiangsu:|product_(?:packshot|detail|use|result|reaction)/i);
+});
+
+test("local video quality repairs create fresh prompts and keep reference assets offscreen", () => {
+  const ledger = parseSourceDialogueLedger(uploadedScript);
+  const baseProject = projectFixture();
+  const bound = bindSourceDialogueLedgerToAnalysis(analysisFixture(ledger), ledger);
+  const normalized = applyUploadedProductBindings(normalizeAnalysis(bound, baseProject), baseProject);
+  const project = {
+    ...baseProject,
+    characters: normalized.characters,
+    scenes: normalized.scenes,
+    shots: normalized.shots,
+    script: { ...baseProject.script, sourceDialogueLedger: ledger }
+  };
+  const shot = project.shots[0];
+  const settings = settingsFixture();
+  const references = {
+    imageRoles: [
+      { type: "storyboard_start", label: "story opening frame" },
+      { type: "storyboard_end", label: "story ending frame" }
+    ],
+    audios: []
+  };
+  const repair = "Remove every baked subtitle, title card, UI panel, portrait introduction and reference board.";
+  const first = WorkbenchWorkflow.prototype.buildShotPrompt.call({}, project, settings, shot, "keyframe", references, repair, "candidate-a:attempt-1");
+  const second = WorkbenchWorkflow.prototype.buildShotPrompt.call({}, project, settings, shot, "keyframe", references, repair, "candidate-a:attempt-2");
+
+  assert.notEqual(first, second);
+  assert.match(first, /[0-9a-f]{12}/);
+  assert.match(second, /[0-9a-f]{12}/);
+  assert.match(first, /NO subtitles|禁止.*字幕|无字/i);
+  assert.match(first, /禁止.*人物介绍|禁止.*资产展示|asset board/i);
+});
+
+test("a sanitized storyboard panel is treated as a live-story anchor, never a contact sheet", () => {
+  const ledger = parseSourceDialogueLedger(uploadedScript);
+  const baseProject = {
+    ...projectFixture(),
+    generation: {
+      ...projectFixture().generation,
+      engine: "seedance",
+      videoProviderKind: "local-xiangsu",
+      mode: "storyboard_sheet"
+    }
+  };
+  const bound = bindSourceDialogueLedgerToAnalysis(analysisFixture(ledger), ledger);
+  const normalized = applyUploadedProductBindings(normalizeAnalysis(bound, baseProject), baseProject);
+  const project = {
+    ...baseProject,
+    characters: normalized.characters,
+    scenes: normalized.scenes,
+    shots: normalized.shots,
+    script: { ...baseProject.script, sourceDialogueLedger: ledger }
+  };
+  const references = {
+    imageRoles: [{ type: "storyboard_panel_anchor", label: "sanitized live-story opening anchor" }],
+    audios: []
+  };
+  const prompt = WorkbenchWorkflow.prototype.buildShotPrompt.call(
+    {},
+    project,
+    settingsFixture(),
+    project.shots[0],
+    "storyboard_sheet",
+    references,
+    "Remove the prior reference board.",
+    "sheet-candidate:attempt-1"
+  );
+
+  assert.match(prompt, /无字剧情起点/);
+  assert.match(prompt, /禁止.*人物介绍|禁止.*资产展示/);
+  assert.doesNotMatch(prompt, /接触印/);
 });
 
 test("storyboard sheets map every panel to an atomic camera and mouth owner without rewriting the authored action", () => {
@@ -516,6 +589,7 @@ test("natural uploaded script completes the real adaptive-duration analysis in b
           { id: "C02", name: "秦添", description: "四十岁男性，方脸，略驼背", identitySignature: "方脸、眼袋、微驼背", voiceDescription: "低沉男声，紧张时放慢", signatureLine: "我会把真相说完" }
         ],
         scenes: [{ id: "SC01", name: "书房", description: "固定木桌、书架、东侧窗和门口轴线", time: "夜" }],
+        props: [],
         shots: Array.from({ length: count }, (_, shotIndex) => {
           const local = ledger.filter((_, ledgerIndex) => ledgerIndex % count === shotIndex);
           const ids = local.map(item => item.id);

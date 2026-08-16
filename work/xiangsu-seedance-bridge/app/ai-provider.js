@@ -9,6 +9,7 @@ const {
   stripSystemVideoOutputLock,
   systemVideoOutputLockForPrompt
 } = require("./production-mode-matrix");
+const { abortableDelay, resolveAttemptLimit } = require("./production-liveness");
 const MAX_REMOTE_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_REMOTE_VIDEO_BYTES = 500 * 1024 * 1024;
 const PROVIDER_VIDEO_PROMPT_LIMIT = 1900;
@@ -830,31 +831,17 @@ async function generatePureamText(config, messages, options = {}) {
     const code = String(error?.code || error?.cause?.code || "").toUpperCase();
     const upstreamCode = String(error?.upstreamCode || "").toUpperCase();
     const text = `${error?.message || ""} ${error?.cause?.message || ""}`.toLowerCase();
-    return ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED", "EAI_AGAIN", "ENOTFOUND", "ERR_FAILED", "ERR_EMPTY_RESPONSE", "PUREAM_TRANSPORT_INTERRUPTED"].includes(code)
+    return ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED", "EAI_AGAIN", "ENOTFOUND", "ERR_FAILED", "ERR_EMPTY_RESPONSE", "PUREAM_TRANSPORT_INTERRUPTED", "PROVIDER_TIMEOUT"].includes(code)
       || ["UPSTREAM_NETWORK_ERROR", "UPSTREAM_CAPACITY_BUSY", "UPSTREAM_429", "UPSTREAM_502", "UPSTREAM_503", "UPSTREAM_504"].includes(upstreamCode)
       || (code === "PUREAM_TEXT_STREAM_ERROR" && /连接失败|网络|繁忙|稍后重试/.test(text))
       || (code === "PUREAM_TEXT_HTTP_ERROR" && [408, 425, 429, 500, 502, 503, 504].includes(Number(error?.status)))
       || /fetch failed|socket closed|socket hang up|connection reset|other side closed|net::err_failed|err_empty_response|empty response|upstream_network_error/.test(text);
   };
-  const waitForRetry = ms => new Promise((resolve, reject) => {
-    const signal = options.signal;
-    if (signal?.aborted) {
-      reject(signal.reason instanceof Error ? signal.reason : Object.assign(new Error("文本生成已取消"), { code: "PROVIDER_REQUEST_ABORTED" }));
-      return;
-    }
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", abort);
-      resolve();
-    }, ms);
-    const abort = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      reject(signal.reason instanceof Error ? signal.reason : Object.assign(new Error("文本生成已取消"), { code: "PROVIDER_REQUEST_ABORTED" }));
-    };
-    signal?.addEventListener("abort", abort, { once: true });
-  });
+  const waitForRetry = ms => abortableDelay(ms, options.signal);
   let attempt = 0;
-  const maxAttempts = Math.max(1, Math.min(3, Number(options.maxReconnectAttempts) || 3));
+  // Explicit zero means unlimited reconnects for a production request. The
+  // logical session/idempotency key remains stable across every attempt.
+  const maxAttempts = resolveAttemptLimit(options.maxReconnectAttempts, 3);
   while (true) {
     attempt += 1;
     try {
@@ -882,11 +869,13 @@ async function generatePureamText(config, messages, options = {}) {
         });
       }
       if (typeof options.onAttemptFailure === "function") {
+        const baseRetryDelayMs = Math.max(1, Number(options.retryBaseDelayMs) || 1_000);
+        const retryDelayMs = recoverable ? Math.min(15_000, baseRetryDelayMs * (2 ** Math.min(attempt - 1, 4))) : 0;
         try {
           options.onAttemptFailure({
             attempt,
             retrying: recoverable,
-            retryDelayMs: recoverable ? Math.min(15_000, 1_000 * (2 ** Math.min(attempt - 1, 4))) : 0,
+            retryDelayMs,
             sessionId: error.sessionId,
             model: config?.model || "",
             code: error?.code || "TEXT_PROVIDER_FAILED",
@@ -895,7 +884,8 @@ async function generatePureamText(config, messages, options = {}) {
         } catch {}
       }
       if (!recoverable) throw error;
-      await waitForRetry(Math.min(15_000, 1_000 * (2 ** Math.min(attempt - 1, 4))));
+      const baseRetryDelayMs = Math.max(1, Number(options.retryBaseDelayMs) || 1_000);
+      await waitForRetry(Math.min(15_000, baseRetryDelayMs * (2 ** Math.min(attempt - 1, 4))));
     }
   }
 }
@@ -1110,12 +1100,12 @@ async function generateText(config, messages, options = {}) {
   throw Object.assign(new Error(`不支持的文本供应商类型：${config.kind || "未设置"}`), { code: "TEXT_PROVIDER_INVALID" });
 }
 
-async function downloadImage(url, targetPath) {
+async function downloadImage(url, targetPath, signal = null) {
   let currentUrl = assertPublicReferenceUrl(url);
   let response = null;
   for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
     currentUrl = await assertResolvedPublicUrl(currentUrl, { privateCode: "IMAGE_DOWNLOAD_URL_BLOCKED", unresolvedCode: "IMAGE_DOWNLOAD_DNS_UNRESOLVED" });
-    response = await fetch(currentUrl, { redirect: "manual", signal: AbortSignal.timeout(120_000) });
+    response = await fetch(currentUrl, { redirect: "manual", ...(signal ? { signal } : {}) });
     if (![301, 302, 303, 307, 308].includes(response.status)) break;
     const location = response.headers.get("location");
     if (!location || redirectCount === 5) throw Object.assign(new Error("图片下载重定向无效或次数过多"), { code: "IMAGE_DOWNLOAD_REDIRECT_BLOCKED" });
@@ -1280,7 +1270,7 @@ async function generatePureamImage(config, prompt, targetPath, options = {}) {
     }
   }
   resultUrl = urls[0];
-  await downloadImage(resultUrl, targetPath);
+  await downloadImage(resultUrl, targetPath, options.signal);
   return {
     path: targetPath,
     remoteUrl: resultUrl,
@@ -1654,7 +1644,7 @@ async function generateImage(config, prompt, targetPath, options = {}) {
     }
     fs.writeFileSync(targetPath, decoded);
   } else if (typeof image?.url === "string" && image.url) {
-    await downloadImage(image.url, targetPath);
+    await downloadImage(image.url, targetPath, options.signal);
   } else {
     throw Object.assign(new Error("图片模型没有返回 URL 或 base64 图片"), { code: "IMAGE_RESULT_EMPTY" });
   }

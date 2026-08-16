@@ -15,6 +15,10 @@ const PORT = 28911;
 const MAX_BODY_BYTES = 1_000_000;
 const MAX_DIAGNOSTIC_DEPTH = 6;
 const UPLOAD_INFLIGHT = new Map();
+const REFERENCE_MEDIA_COMPLETED = new Map();
+const REFERENCE_MEDIA_CACHE_LIMIT = 256;
+const REFERENCE_MEDIA_UPLOAD_STALL_MS = 120_000;
+let referenceMediaUploadTail = Promise.resolve();
 const MODEL_ID = "7648913495051894811";
 const CLIENT_VERSION = "9.1.2";
 const MEDIA_AUDIT_WORKFLOW_ID = "7650417852005810186";
@@ -156,6 +160,43 @@ function readTaskRegistry() {
     } catch {
       throw Object.assign(new Error("像塑任务索引损坏，且没有可用备份"), { code: "XIANGSU_TASK_REGISTRY_CORRUPTED", cause: primaryError });
     }
+  }
+}
+
+function findTaskByClientRequestId(tasks, clientRequestId) {
+  const wanted = String(clientRequestId || "").trim();
+  if (!wanted) return null;
+  const entries = [...(tasks instanceof Map ? tasks.entries() : Object.entries(tasks || {}))].reverse();
+  for (const [taskId, task] of entries) {
+    if (String(task?.clientRequestId || "").trim() !== wanted) continue;
+    if (["failed", "discarded"].includes(String(task?.terminalStatus || "").toLowerCase())) continue;
+    return { taskId, task };
+  }
+  return null;
+}
+
+async function resolveReusableTask(runtime, tasks, clientRequestId) {
+  const existing = findTaskByClientRequestId(tasks, clientRequestId);
+  if (!existing || existing.task?.localPath) return existing;
+  if (!runtime.aiEffectApi || typeof runtime.aiEffectApi.queryAIGCResult !== "function") return existing;
+  try {
+    const result = await runtime.aiEffectApi.queryAIGCResult({ taskId: existing.taskId });
+    if (Number(result?.code) !== 0) return existing;
+    const statusCode = Number(result?.data?.status);
+    if (statusCode === FAILED_STATUS || statusCode === DISCARDED_STATUS) {
+      existing.task.terminalStatus = statusCode === DISCARDED_STATUS ? "discarded" : "failed";
+      existing.task.terminalStatusCode = statusCode;
+      existing.task.terminalErrorCode = result?.data?.errorCode || "GENERATION_FAILED";
+      existing.task.terminalMessage = result?.data?.message || "";
+      writeTaskRegistry(tasks);
+      return null;
+    }
+    return existing;
+  } catch {
+    // When the old task cannot be authoritatively classified, reuse it. This
+    // protects billing from duplicate paid tasks until a later query resolves
+    // the original terminal state.
+    return existing;
   }
 }
 
@@ -457,6 +498,14 @@ function buildSubmitParams(payload) {
   const images = Array.isArray(payload.uploadedImages) ? payload.uploadedImages : [];
   const videos = Array.isArray(payload.uploadedVideos) ? payload.uploadedVideos : [];
   const audios = Array.isArray(payload.uploadedAudios) ? payload.uploadedAudios : [];
+  for (const item of [...videos, ...audios]) {
+    if (!isReviewMediaVid(item?.vid)) {
+      throw Object.assign(
+        new Error("参考音频或参考视频尚未完成像塑空间上传与审核"),
+        { code: "REFERENCE_MEDIA_VID_INVALID" }
+      );
+    }
+  }
   const staticResource = {};
   if (videos.length) {
     staticResource.video = videos.map((item, index) => ({ vid: item.vid, index, extra: {} }));
@@ -536,7 +585,7 @@ async function uploadImage(runtime, item) {
       filePath: media.stagedPath,
       fileType: runtime.uploadApi.FileType.Picture
     }),
-    180_000,
+    0,
     "图片上传审核超时"
   );
   const tosKey = result?.data?.decryptedUri;
@@ -546,7 +595,44 @@ async function uploadImage(runtime, item) {
   return { ...media, tosKey };
 }
 
+async function uploadReferenceMediaDirect(runtime, kind, media) {
+  const fileType = kind === "audio"
+    ? runtime.uploadApi?.FileType?.Audio
+    : runtime.uploadApi?.FileType?.Video;
+  if (!runtime.uploadApi || typeof runtime.uploadApi.uploadToSpace !== "function" || !Number.isFinite(fileType)) {
+    throw Object.assign(new Error(`像塑${kind === "audio" ? "音频" : "视频"}底层上传模块尚未就绪`), {
+      code: "REFERENCE_UPLOAD_API_UNAVAILABLE"
+    });
+  }
+  const contentKey = referenceMediaContentKey(kind, media.stagedPath);
+  const result = await trackedUpload(
+    `reference-direct:${contentKey}`,
+    () => runtime.uploadApi.uploadToSpace({ filePath: media.stagedPath, fileType }),
+    0,
+    ""
+  );
+  const vid = String(
+    result?.data?.videoInfo?.vid
+      || result?.data?.audioInfo?.vid
+      || result?.data?.mediaInfo?.vid
+      || ""
+  ).trim();
+  if (Number(result?.code) !== 0 || !isReviewMediaVid(vid)) {
+    throw Object.assign(new Error(result?.message || `像塑${kind === "audio" ? "音频" : "视频"}底层上传失败`), {
+      code: "REFERENCE_MEDIA_VID_INVALID"
+    });
+  }
+  return { vid, uploadState: "UploadSuccess", transport: "uploadToSpace" };
+}
+
+function isReviewMediaVid(value) {
+  return /^v[0-9a-z]{20,64}$/i.test(String(value || "").trim());
+}
+
 function withTimeout(promise, timeoutMs, message) {
+  // Production uploads have no wall-clock deadline. A positive timeout is
+  // reserved for bounded diagnostics; callers pass 0 for the real pipeline.
+  if (!(Number(timeoutMs) > 0)) return Promise.resolve(promise);
   let timer;
   return Promise.race([
     promise,
@@ -568,15 +654,85 @@ function trackedUpload(key, factory, timeoutMs, message) {
   return withTimeout(operation, timeoutMs, message);
 }
 
+function referenceMediaContentKey(kind, filePath) {
+  const stat = fs.statSync(filePath);
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  return `${kind}:${stat.size}:${digest}`;
+}
+
+async function cachedReferenceMediaUpload(key, factory) {
+  const cached = REFERENCE_MEDIA_COMPLETED.get(key);
+  if (isReviewMediaVid(cached?.vid)) return { ...cached, cacheHit: true };
+  const info = await trackedUpload(`reference:${key}`, factory, 0, "参考素材上传审核超时");
+  const vid = String(info?.vid || "").trim();
+  if (!isReviewMediaVid(vid)) {
+    throw Object.assign(new Error("像塑参考素材上传未返回已审核的媒体 VID"), {
+      code: "REFERENCE_MEDIA_VID_INVALID"
+    });
+  }
+  if (vid) {
+    REFERENCE_MEDIA_COMPLETED.delete(key);
+    REFERENCE_MEDIA_COMPLETED.set(key, { vid, uploadState: "UploadSuccess" });
+    while (REFERENCE_MEDIA_COMPLETED.size > REFERENCE_MEDIA_CACHE_LIMIT) {
+      REFERENCE_MEDIA_COMPLETED.delete(REFERENCE_MEDIA_COMPLETED.keys().next().value);
+    }
+  }
+  return info;
+}
+
+function runReferenceMediaUploadExclusive(factory) {
+  const operation = referenceMediaUploadTail.catch(() => {}).then(factory);
+  referenceMediaUploadTail = operation.catch(() => {});
+  return operation;
+}
+
+function uploadedMediaInfo(instance, kind) {
+  return kind === "audio" ? instance?.audioInfo?._value : instance?.videoInfo?._value;
+}
+
+async function waitForReferenceMediaUpload(instance, kind, options = {}) {
+  const sleep = typeof options.sleep === "function"
+    ? options.sleep
+    : ms => new Promise(resolve => setTimeout(resolve, ms));
+  const pollMs = Math.max(10, Number(options.pollMs) || 250);
+  const stallMs = Math.max(1_000, Number(options.stallMs) || REFERENCE_MEDIA_UPLOAD_STALL_MS);
+  const now = typeof options.now === "function" ? options.now : Date.now;
+  let lastSignal = "";
+  let lastChangedAt = now();
+  for (;;) {
+    const info = uploadedMediaInfo(instance, kind);
+    const state = String(info?.uploadState || "").trim();
+    const vid = String(info?.vid || "").trim();
+    if (state === "UploadSuccess" && vid) return info;
+    if (/(?:fail|error|reject|invalid|block|cancel)/i.test(state)) {
+      const mediaLabel = kind === "audio" ? "音频" : "视频";
+      throw Object.assign(
+        new Error(String(info?.message || info?.errorMessage || `${mediaLabel}上传失败：${state}`)),
+        { code: "MEDIA_UPLOAD_FAILED", uploadState: state }
+      );
+    }
+    const signal = `${state}\u0000${vid}\u0000${String(info?.progress ?? info?.percent ?? "")}`;
+    const observedAt = now();
+    if (signal !== lastSignal) {
+      lastSignal = signal;
+      lastChangedAt = observedAt;
+    } else if (observedAt - lastChangedAt >= stallMs) {
+      throw Object.assign(
+        new Error(`${kind === "audio" ? "音频" : "视频"}参考素材上传长时间无进展；将释放本次上传槽并使用同一制作任务重试`),
+        { code: "MEDIA_UPLOAD_STALLED", uploadState: state, retryable: true }
+      );
+    }
+    // Xiangsu's uploadAudio/uploadVideo promise can resolve before its reactive
+    // audioInfo/videoInfo receives UploadSuccess and VID. Keep the same native
+    // instance alive and wait for that authoritative terminal state.
+    await sleep(pollMs);
+  }
+}
+
 async function uploadReferenceMedia(runtime, kind, item, uploadedAudioDurationMs) {
   const moduleName = kind === "audio"
     ? "@orion/Business/AIEffectWindow/controller/SubController/MultiMedia/MultiMediaAudioItem"
     : "@orion/Business/AIEffectWindow/controller/SubController/MultiMedia/MultiMediaVideoItem";
-  const moduleValue = runtime.registry[moduleName];
-  const Constructor = moduleValue?.default || moduleValue?.[kind === "audio" ? "MultiMediaAudioItem" : "MultiMediaVideoItem"];
-  if (typeof Constructor !== "function") {
-    throw Object.assign(new Error(`像塑${kind === "audio" ? "音频" : "视频"}上传模块尚未就绪`), { code: "MULTIMEDIA_CLASS_UNAVAILABLE" });
-  }
   const media = assertMediaFile(item, kind === "audio" ? "音频" : "视频");
   const parent = {
     maxAudioDurationLimit: 15_000,
@@ -586,20 +742,28 @@ async function uploadReferenceMedia(runtime, kind, item, uploadedAudioDurationMs
     getAudioTotalDurationMs: () => uploadedAudioDurationMs,
     triggerUpdateImageParams: () => {}
   };
-  const instance = new Constructor(parent);
-  const uploadedInstance = await trackedUpload(
-    `${kind}:${media.stagedPath}`,
+  const contentKey = referenceMediaContentKey(kind, media.stagedPath);
+  const info = await cachedReferenceMediaUpload(
+    contentKey,
     async () => {
-      await Promise.resolve(instance[kind === "audio" ? "uploadAudio" : "uploadVideo"](media.stagedPath));
-      return instance;
-    },
-    180_000,
-    `${kind === "audio" ? "音频" : "视频"}上传审核超时`
+      // review_audio_list/review_video_list accepts only the audited v02... VID
+      // returned by Xiangsu's space uploader. The raw ies.fe.effect/... storage
+      // key from uploadFileCommon is valid for images but invalid here.
+      try {
+        return await uploadReferenceMediaDirect(runtime, kind, media);
+      } catch (directError) {
+        const moduleValue = runtime.registry[moduleName];
+        const Constructor = moduleValue?.default || moduleValue?.[kind === "audio" ? "MultiMediaAudioItem" : "MultiMediaVideoItem"];
+        if (typeof Constructor !== "function") throw directError;
+        return runReferenceMediaUploadExclusive(async () => {
+          // Compatibility fallback for older runtimes without direct media upload.
+          const instance = new Constructor(parent);
+          await Promise.resolve(instance[kind === "audio" ? "uploadAudio" : "uploadVideo"](media.stagedPath));
+          return waitForReferenceMediaUpload(instance, kind);
+        });
+      }
+    }
   );
-  const info = kind === "audio" ? uploadedInstance.audioInfo?._value : uploadedInstance.videoInfo?._value;
-  if (!info || info.uploadState !== "UploadSuccess" || typeof info.vid !== "string" || !info.vid) {
-    throw Object.assign(new Error(`${kind === "audio" ? "音频" : "视频"}上传未取得有效 VID`), { code: "MEDIA_UPLOAD_FAILED" });
-  }
   return { ...media, vid: info.vid };
 }
 
@@ -662,6 +826,14 @@ function submitFailure(value) {
         code: "SEEDANCE_DAILY_QUOTA_EXHAUSTED",
         message: message || "Seedance 2.0 Mini 今日配额已耗尽",
         result: { upstreamCode, hasNoQuota, quotaMap: body?.data?.quotaMap || null }
+      };
+    }
+    if (/操作频繁|AI\s*正忙|请稍后(?:再试)?|too\s+frequent|busy|rate\s*limit/i.test(String(message))) {
+      return {
+        code: "SEEDANCE_SUBMISSION_BUSY",
+        message: message || "Seedance 当前繁忙，正在使用同一制作请求等待重试",
+        retryable: true,
+        result: { upstreamCode }
       };
     }
     return { code: "SUBMIT_NO_TASK_ID", message: message || "像塑未返回视频任务 ID", result: { upstreamCode } };
@@ -916,16 +1088,22 @@ async function probeUploadFile(request, response, runtime) {
   });
   const result = payload.space === true
     ? await runtime.uploadApi.uploadToSpace({
-        filePath: payload.richPath === true ? richPath : payload.urlObject === true ? pathToFileURL(filePath) : filePath
+        filePath: payload.richPath === true ? richPath : payload.urlObject === true ? pathToFileURL(filePath) : filePath,
+        fileType: typeMap[kind]
       })
     : await runtime.uploadApi.uploadFileCommon({ filePath, fileType: typeMap[kind] });
   let auditResult = null;
+  const auditMediaType = Number.isFinite(payload.auditMediaType)
+    ? payload.auditMediaType
+    : (typeof payload.auditMediaType === "string" && payload.auditMediaType.trim()
+        ? payload.auditMediaType.trim()
+        : kind);
   if (payload.audit === true && kind !== "image" && Number(result?.code) === 0) {
     if (!runtime.auditApi || typeof runtime.auditApi.auditMedia !== "function") {
       return json(response, 503, { ok: false, code: "AUDIT_API_UNAVAILABLE", message: "像塑媒体审核模块尚未就绪" });
     }
     auditResult = await runtime.auditApi.auditMedia({
-      mediaType: kind,
+      mediaType: auditMediaType,
       vid: result?.data?.decryptedUri,
       auditWorkflowId: MEDIA_AUDIT_WORKFLOW_ID
     });
@@ -941,6 +1119,7 @@ async function probeUploadFile(request, response, runtime) {
       looksLikeVid: /^v[0-9a-z]+$/i.test(result.data.decryptedUri)
     } : null,
     richPathAccesses: payload.richPath === true ? richPathAccesses : undefined,
+    auditMediaType,
     auditResult: safeResultShape(auditResult)
   });
 }
@@ -1045,9 +1224,45 @@ async function probeMultimediaUpload(request, response, runtime) {
     }
   });
   const instance = new Constructor(parent);
+  const argumentAccesses = [];
+  const argumentTarget = {
+    path: filePath,
+    filePath,
+    localPath: filePath,
+    pathname: filePath,
+    name: path.basename(filePath),
+    href: pathToFileURL(filePath).href,
+    url: pathToFileURL(filePath).href,
+    type: kind === "audio" ? "audio/wav" : "video/mp4",
+    toString: () => filePath,
+    valueOf: () => filePath,
+    [Symbol.toPrimitive]: () => filePath
+  };
+  const richArgument = new Proxy(argumentTarget, {
+    get(target, property) {
+      argumentAccesses.push(`get:${String(property)}`);
+      return Reflect.get(target, property);
+    },
+    has(target, property) {
+      argumentAccesses.push(`has:${String(property)}`);
+      return Reflect.has(target, property);
+    }
+  });
+  const uploadArgument = payload.argumentMode === "object"
+    ? richArgument
+    : payload.argumentMode === "url"
+      ? pathToFileURL(filePath)
+      : filePath;
   try {
-    const result = await instance[kind === "audio" ? "uploadAudio" : "uploadVideo"](filePath);
-    for (let attempt = 0; attempt < 60; attempt += 1) {
+    const uploadOperation = Promise.resolve()
+      .then(() => instance[kind === "audio" ? "uploadAudio" : "uploadVideo"](uploadArgument))
+      .then(result => ({ state: "resolved", result }))
+      .catch(error => ({ state: "rejected", error }));
+    const uploadOutcome = await Promise.race([
+      uploadOperation,
+      new Promise(resolve => setTimeout(() => resolve({ state: "pending" }), 5_000))
+    ]);
+    for (let attempt = 0; attempt < 40; attempt += 1) {
       const info = kind === "audio" ? instance.audioInfo?._value : instance.videoInfo?._value;
       if (info) break;
       await new Promise(resolve => setTimeout(resolve, 250));
@@ -1055,14 +1270,17 @@ async function probeMultimediaUpload(request, response, runtime) {
     return json(response, 200, {
       ok: true,
       kind,
-      result: safeResultShape(result),
+      uploadOutcome: uploadOutcome.state,
+      result: safeResultShape(uploadOutcome.result),
+      error: uploadOutcome.error ? { code: uploadOutcome.error?.code || "", message: String(uploadOutcome.error?.message || uploadOutcome.error).slice(0, 500) } : null,
       instance: safeResultShape({
         audioInfo: instance.audioInfo?._value,
         videoInfo: instance.videoInfo?._value,
         durationMs: instance.durationMs,
         id: instance.id
       }),
-      parentAccesses
+      parentAccesses,
+      argumentAccesses
     });
   } catch (error) {
     return json(response, 200, {
@@ -1076,9 +1294,42 @@ async function probeMultimediaUpload(request, response, runtime) {
         durationMs: instance.durationMs,
         id: instance.id
       }),
-      parentAccesses
+      parentAccesses,
+      argumentAccesses
     });
   }
+}
+
+function clientConnectionClosed(request = {}, response = {}) {
+  // IncomingMessage.destroyed may become true after the request body has been
+  // fully consumed even while its socket is alive and the response is still
+  // pending. It is therefore not a disconnect signal. Abort, response/socket
+  // destruction, or a prematurely closed response are authoritative.
+  return request.aborted === true
+    || response.destroyed === true
+    || request.socket?.destroyed === true
+    || (response.closed === true && response.writableEnded !== true);
+}
+
+function validateReferenceAudioDurations(audios = []) {
+  const items = Array.isArray(audios) ? audios : [];
+  const durations = items.map(item => Number(item?.duration));
+  if (durations.some(duration => !Number.isFinite(duration) || duration <= 0)) {
+    return { ok: false, code: "AUDIO_DURATION_INVALID", message: "参考音频必须包含可读取的真实时长" };
+  }
+  const tooShort = durations.find(duration => duration < 3.05);
+  if (tooShort !== undefined) {
+    return {
+      ok: false,
+      code: "REFERENCE_AUDIO_TOO_SHORT",
+      message: `参考音频 ${tooShort.toFixed(2)} 秒，低于 H3 稳定提交下限 3.05 秒；请由桌面端先自动补足再提交`
+    };
+  }
+  const total = durations.reduce((sum, duration) => sum + duration, 0);
+  if (total > 15.05) {
+    return { ok: false, code: "AUDIO_DURATION_INVALID", message: "参考音频总时长最长 15 秒" };
+  }
+  return { ok: true, total };
 }
 
 async function handleVideos(request, response, runtime, tasks) {
@@ -1111,12 +1362,26 @@ async function handleVideos(request, response, runtime, tasks) {
   if (videos.some(item => !Number.isFinite(Number(item?.duration)) || Number(item.duration) > 10.05)) {
     return json(response, 400, { ok: false, code: "VIDEO_DURATION_INVALID", message: "参考视频最长 10 秒" });
   }
-  const audioTotal = audios.reduce((sum, item) => sum + Number(item?.duration || 0), 0);
-  if (audios.some(item => !Number.isFinite(Number(item?.duration))) || audioTotal > 15.05) {
-    return json(response, 400, { ok: false, code: "AUDIO_DURATION_INVALID", message: "参考音频总时长最长 15 秒" });
+  const audioDurationAudit = validateReferenceAudioDurations(audios);
+  if (!audioDurationAudit.ok) {
+    return json(response, 400, audioDurationAudit);
   }
   if (typeof payload.outputDir !== "string" || !path.isAbsolute(payload.outputDir)) {
     return json(response, 400, { ok: false, code: "OUTPUT_DIR_REQUIRED", message: "请选择绝对视频保存目录" });
+  }
+  const clientRequestId = String(payload.clientRequestId || "").trim();
+  if (clientRequestId.length > 200 || (clientRequestId && !/^[0-9A-Za-z._:-]+$/.test(clientRequestId))) {
+    return json(response, 400, { ok: false, code: "CLIENT_REQUEST_ID_INVALID", message: "clientRequestId is invalid" });
+  }
+  const existing = await resolveReusableTask(runtime, tasks, clientRequestId);
+  if (existing) {
+    return json(response, 200, {
+      ok: true,
+      taskId: existing.taskId,
+      status: existing.task?.localPath ? "finished" : "running",
+      reused: true,
+      message: "The existing Xiangsu task was recovered from the stable client request id."
+    });
   }
   if (!runtime.platformUtils || typeof runtime.platformUtils.genSignData !== "function" || !runtime.aiEffectApi || typeof runtime.aiEffectApi.submitAIGCRequest !== "function") {
     return json(response, 503, {
@@ -1127,16 +1392,39 @@ async function handleVideos(request, response, runtime, tasks) {
   }
   fs.mkdirSync(payload.outputDir, { recursive: true });
   const uploadedImages = [];
-  for (const item of images) uploadedImages.push(await uploadImage(runtime, item));
+  const assertClientConnected = () => {
+    if (clientConnectionClosed(request, response)) {
+      throw Object.assign(new Error("桌面端已取消本次提交；未创建上游视频任务"), {
+        code: "CLIENT_DISCONNECTED_BEFORE_SUBMIT",
+        connectionState: {
+          requestAborted: request.aborted === true,
+          requestDestroyed: request.destroyed === true,
+          responseDestroyed: response.destroyed === true,
+          responseClosed: response.closed === true,
+          responseWritableEnded: response.writableEnded === true,
+          socketDestroyed: request.socket?.destroyed === true
+        }
+      });
+    }
+  };
+  for (const item of images) {
+    assertClientConnected();
+    uploadedImages.push(await uploadImage(runtime, item));
+  }
   const uploadedVideos = [];
-  for (const item of videos) uploadedVideos.push(await uploadReferenceMedia(runtime, "video", item, 0));
+  for (const item of videos) {
+    assertClientConnected();
+    uploadedVideos.push(await uploadReferenceMedia(runtime, "video", item, 0));
+  }
   const uploadedAudios = [];
   let uploadedAudioDurationMs = 0;
   for (const item of audios) {
+    assertClientConnected();
     const uploaded = await uploadReferenceMedia(runtime, "audio", item, uploadedAudioDurationMs);
     uploadedAudios.push(uploaded);
     uploadedAudioDurationMs += Math.round(Number(uploaded.duration || 0) * 1000);
   }
+  assertClientConnected();
   const submitParams = buildSubmitParams({ ...payload, uploadedImages, uploadedVideos, uploadedAudios });
   const result = await runtime.aiEffectApi.submitAIGCRequest(submitParams);
   const taskId = findTaskId(result);
@@ -1146,10 +1434,12 @@ async function handleVideos(request, response, runtime, tasks) {
       ok: false,
       code: failure.code,
       message: failure.message,
+      retryable: failure.retryable === true,
       result: failure.result
     });
   }
   tasks.set(taskId, {
+    clientRequestId,
     prompt: payload.prompt.trim(),
     outputDir: path.resolve(payload.outputDir),
     submittedAt: new Date().toISOString(),
@@ -1164,7 +1454,23 @@ async function handleVideos(request, response, runtime, tasks) {
   });
 }
 
-async function handleVideoQuery(response, runtime, tasks, taskId) {
+function recoverTaskOutputMapping(tasks, taskId, outputDir) {
+  if (tasks.has(taskId) || typeof outputDir !== "string" || !path.isAbsolute(outputDir)) return tasks.get(taskId) || null;
+  const task = {
+    prompt: "",
+    outputDir: path.resolve(outputDir),
+    submittedAt: "",
+    recoveredAt: new Date().toISOString(),
+    recoveredFromDesktopRegistry: true,
+    localPath: null
+  };
+  fs.mkdirSync(task.outputDir, { recursive: true });
+  tasks.set(taskId, task);
+  writeTaskRegistry(tasks);
+  return task;
+}
+
+async function handleVideoQuery(response, runtime, tasks, taskId, outputDir = "") {
   if (!runtime.aiEffectApi || typeof runtime.aiEffectApi.queryAIGCResult !== "function") {
     return json(response, 503, { ok: false, code: "AIGC_API_UNAVAILABLE", message: "像塑 AIGC 查询模块尚未就绪" });
   }
@@ -1178,12 +1484,20 @@ async function handleVideoQuery(response, runtime, tasks, taskId) {
     });
   }
 
+  const task = tasks.get(taskId) || recoverTaskOutputMapping(tasks, taskId, outputDir);
   const statusCode = Number(result?.data?.status);
   const upstreamProgress = extractUpstreamProgress(result);
   const progressFields = upstreamProgress
     ? { progress: upstreamProgress.value, progressSource: "xiangsu", progressField: upstreamProgress.field, progressDeterminate: true }
     : { progress: null, progressSource: "status-only", progressField: "", progressDeterminate: false };
   if (statusCode === FAILED_STATUS || statusCode === DISCARDED_STATUS) {
+    if (task) {
+      task.terminalStatus = statusCode === DISCARDED_STATUS ? "discarded" : "failed";
+      task.terminalStatusCode = statusCode;
+      task.terminalErrorCode = result?.data?.errorCode || "GENERATION_FAILED";
+      task.terminalMessage = result?.data?.message || "";
+      writeTaskRegistry(tasks);
+    }
     return json(response, 200, {
       ok: false,
       taskId,
@@ -1205,7 +1519,6 @@ async function handleVideoQuery(response, runtime, tasks, taskId) {
     });
   }
 
-  const task = tasks.get(taskId);
   if (!task) {
     return json(response, 200, {
       ok: true,
@@ -1217,7 +1530,7 @@ async function handleVideoQuery(response, runtime, tasks, taskId) {
       progressField: "",
       progressDeterminate: true,
       downloaded: false,
-      message: "视频已生成；桥接重启后需要在像塑历史记录中下载"
+      message: "视频已生成；等待桌面任务账本恢复保存目录"
     });
   }
   if (task.localPath && fs.existsSync(task.localPath)) {
@@ -1301,7 +1614,7 @@ class PluginInstance {
             sessionCode: session.code || "",
             taskRegistryReady: !this.taskRegistryError,
             product: "DYEH",
-            version: "0.2.1",
+            version: "0.2.13",
             message: sessionReady ? "像塑原生会话与登录状态已就绪" : (signerReady && apiReady ? session.message : "插件在线，正在等待像塑业务模块")
           });
         }
@@ -1328,6 +1641,21 @@ class PluginInstance {
             modules: findAccountModules()
           });
         }
+        if (request.method === "GET" && url.pathname === "/v1/diagnostics/upload-contract") {
+          return await probeUploadContract(response, runtime);
+        }
+        if (request.method === "GET" && url.pathname === "/v1/diagnostics/audit-contract") {
+          return await probeAuditContract(response, runtime);
+        }
+        if (request.method === "GET" && url.pathname === "/v1/diagnostics/multimedia-instances") {
+          return probeMultimediaInstances(response, runtime);
+        }
+        if (request.method === "POST" && url.pathname === "/v1/diagnostics/upload-file") {
+          return await probeUploadFile(request, response, runtime);
+        }
+        if (request.method === "POST" && url.pathname === "/v1/diagnostics/multimedia-upload") {
+          return await probeMultimediaUpload(request, response, runtime);
+        }
         if (request.method === "GET" && url.pathname.startsWith("/v1/probe/query/")) {
           const taskId = decodeURIComponent(url.pathname.slice("/v1/probe/query/".length));
           if (!/^wf\d{20,}$/.test(taskId)) {
@@ -1344,7 +1672,7 @@ class PluginInstance {
           if (!/^wf\d{20,}$/.test(taskId)) {
             return json(response, 400, { ok: false, code: "INVALID_TASK_ID", message: "任务 ID 格式无效" });
           }
-          return await handleVideoQuery(response, runtime, this.tasks, taskId);
+          return await handleVideoQuery(response, runtime, this.tasks, taskId, url.searchParams.get("outputDir") || "");
         }
         return json(response, 404, { ok: false, code: "NOT_FOUND", message: "接口不存在" });
       } catch (error) {
@@ -1369,4 +1697,18 @@ PluginInstance.invokeOfficialAccountAction = invokeOfficialAccountAction;
 PluginInstance.extractUpstreamProgress = extractUpstreamProgress;
 PluginInstance.isPrivateAddress = isPrivateAddress;
 PluginInstance.publicHttpsLookup = publicHttpsLookup;
+PluginInstance.isReviewMediaVid = isReviewMediaVid;
+PluginInstance.buildSubmitParams = buildSubmitParams;
+PluginInstance.uploadReferenceMediaDirect = uploadReferenceMediaDirect;
+PluginInstance.waitForReferenceMediaUpload = waitForReferenceMediaUpload;
+PluginInstance.runReferenceMediaUploadExclusive = runReferenceMediaUploadExclusive;
+PluginInstance.referenceMediaContentKey = referenceMediaContentKey;
+PluginInstance.cachedReferenceMediaUpload = cachedReferenceMediaUpload;
+PluginInstance.clearReferenceMediaUploadCache = () => REFERENCE_MEDIA_COMPLETED.clear();
+PluginInstance.recoverTaskOutputMapping = recoverTaskOutputMapping;
+PluginInstance.findTaskByClientRequestId = findTaskByClientRequestId;
+PluginInstance.resolveReusableTask = resolveReusableTask;
+PluginInstance.clientConnectionClosed = clientConnectionClosed;
+PluginInstance.validateReferenceAudioDurations = validateReferenceAudioDurations;
+PluginInstance.submitFailure = submitFailure;
 module.exports = PluginInstance;

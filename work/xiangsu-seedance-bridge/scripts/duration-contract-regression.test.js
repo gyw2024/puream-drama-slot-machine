@@ -7,7 +7,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { reconcileUnitDurations } = require("../app/duration-contract");
-const { estimateUploadedScriptDuration } = require("../app/script-duration");
+const { estimateUploadedScriptDuration, explicitShotTimelinePlan, explicitTimelineDurationTarget } = require("../app/script-duration");
 const { WorkbenchStore } = require("../app/workbench-store");
 const {
   WorkbenchWorkflow,
@@ -94,6 +94,59 @@ test("uploaded dialogue duration responds to exact speech, punctuation, pace and
   const faster = estimateUploadedScriptDuration("母亲（飞快）：这些年我一直没有告诉你", require("../app/dialogue-parser").parseSourceDialogueLedger("母亲（飞快）：这些年我一直没有告诉你"), "puream-hailuo-h3");
   const slower = estimateUploadedScriptDuration("母亲（缓慢，一字一顿，停顿）：这些年我一直没有告诉你……", require("../app/dialogue-parser").parseSourceDialogueLedger("母亲（缓慢，一字一顿，停顿）：这些年我一直没有告诉你……"), "puream-hailuo-h3");
   assert.ok(slower.estimatedSeconds > faster.estimatedSeconds);
+});
+
+test("compact authored shot timelines override prose-length estimation without a project duration cap", () => {
+  const script = [
+    "全片20秒，9:16竖屏现实短剧。",
+    "S01【0-10秒｜旧宅客厅】林娜带哭腔质问：‘我妈等了你整整三十年！’",
+    "S02【10-20秒｜同一客厅】秦添声音发颤承认：‘是我错怪了她。’"
+  ].join("\n");
+  const explicit = explicitTimelineDurationTarget(script, "puream-hailuo-h3", { engine: "hailuo-h3" });
+  assert.equal(explicit.targetSeconds, 20);
+  assert.equal(explicit.rangeCount, 2);
+  const estimate = estimateUploadedScriptDuration(script, [], "puream-hailuo-h3", { engine: "hailuo-h3" });
+  assert.equal(estimate.mode, "uploaded-script-explicit-timeline");
+  assert.equal(estimate.targetSeconds, 20);
+
+  const sevenMinutes = explicitTimelineDurationTarget("剧总时长约420秒。S01【0-10秒】开场。", "puream-hailuo-h3", { engine: "hailuo-h3" });
+  assert.equal(sevenMinutes.targetSeconds, 420);
+});
+
+test("explicit per-shot ranges remain authoritative when Agent rhythm returns 14 plus 6", () => {
+  const script = [
+    "全片20秒。",
+    "S01【0-10秒｜客厅】林娜带哭腔质问。",
+    "S02【10-20秒｜同一客厅】秦添发颤承认。"
+  ].join("\n");
+  const plan = explicitShotTimelinePlan(script, "puream-hailuo-h3", { engine: "hailuo-h3" });
+  assert.equal(plan.complete, true);
+  assert.equal(plan.providerCompatible, true);
+  assert.deepEqual(plan.normalizedDurations, [10, 10]);
+  const estimate = estimateUploadedScriptDuration(script, [], "puream-hailuo-h3", { engine: "hailuo-h3" });
+  const agentResult = importedAnalysis(2);
+  agentResult.shots[0].duration = 14;
+  agentResult.shots[1].duration = 6;
+  const normalized = conformImportedAnalysisToDurationContract(agentResult, {
+    generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", targetDurationSeconds: 20 },
+    productionPlan: { inputMode: "manual" }
+  }, { adaptiveTargetSeconds: 20, durationEstimate: estimate });
+  assert.deepEqual(normalized.shots.map(shot => shot.duration), [10, 10]);
+  assert.equal(normalized.durationContract.authoredShotDurationsLocked, true);
+  assert.deepEqual(normalized.durationContract.authoredShotDurations, [10, 10]);
+});
+
+test("scripts without complete shot ranges keep adaptive Agent rhythm", () => {
+  const estimate = estimateUploadedScriptDuration("全片20秒。林娜质问，秦添承认。", [], "puream-hailuo-h3", { engine: "hailuo-h3" });
+  const agentResult = importedAnalysis(2);
+  agentResult.shots[0].duration = 14;
+  agentResult.shots[1].duration = 6;
+  const normalized = conformImportedAnalysisToDurationContract(agentResult, {
+    generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", targetDurationSeconds: 20 },
+    productionPlan: { inputMode: "manual" }
+  }, { adaptiveTargetSeconds: 20, durationEstimate: estimate });
+  assert.deepEqual(normalized.shots.map(shot => shot.duration), [14, 6]);
+  assert.equal(normalized.durationContract.authoredShotDurationsLocked, false);
 });
 
 test("JSON script imports use the same local structured path as markdown imports", () => {

@@ -1,6 +1,6 @@
 {
   "name": "@local/seedance-bridge",
-  "version": "0.2.1",
+  "version": "0.2.13",
   "license": "UNLICENSED",
   "main": "lib/plugin/index.js",
   "ORPluginConfig": {

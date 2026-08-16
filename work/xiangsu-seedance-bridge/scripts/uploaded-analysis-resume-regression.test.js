@@ -22,6 +22,7 @@ function responseFor(messages) {
       { id: "C02", name: "陈立", description: "四十岁男性，方脸，微驼背", identitySignature: "方脸、眼袋、微驼背", voiceDescription: "低沉男声", signatureLine: "我现在明白了" }
     ],
     scenes: [{ id: "SC01", name: "客厅", description: "木桌、布沙发、东侧窗和固定门口轴线", time: "夜" }],
+    props: [],
     shots: Array.from({ length: count }, (_, shotIndex) => {
       const local = ledger.filter((_, index) => index % count === shotIndex);
       const duration = durations[shotIndex] || 10;

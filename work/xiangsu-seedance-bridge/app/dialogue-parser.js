@@ -9,12 +9,45 @@ const NON_SPEAKER_LABELS = new Set([
   "计划", "原因", "结果", "重点", "注意", "描述", "信息", "状态", "目标", "步骤", "问题", "答案"
 ]);
 
+/**
+ * A screenplay may append an off-screen direction to a real character name,
+ * for example `林娜画外音`, `林娜（画外）` or `LIN NA O.S.`. That direction is
+ * blocking/camera metadata, not part of the character identity. Normalize it
+ * at the parser boundary so every downstream consumer sees the same speaker.
+ * Generic narration labels such as `旁白` remain untouched.
+ */
+function normalizeSpeakerCue(value) {
+  const raw = clean(value);
+  if (!raw) return { raw, speaker: "", offscreen: false, direction: "" };
+  const parenthetical = raw.match(/^(.+?)\s*[（(]\s*(画外(?:音)?|O\.?\s*S\.?|off[\s-]*screen)\s*[）)]\s*$/i);
+  if (parenthetical) {
+    return {
+      raw,
+      speaker: clean(parenthetical[1]),
+      offscreen: true,
+      direction: clean(parenthetical[2])
+    };
+  }
+  const suffixed = raw.match(/^(.+?)\s*(画外(?:音)?|O\.?\s*S\.?|off[\s-]*screen)\s*$/i);
+  if (suffixed && clean(suffixed[1])) {
+    return {
+      raw,
+      speaker: clean(suffixed[1]),
+      offscreen: true,
+      direction: clean(suffixed[2])
+    };
+  }
+  return { raw, speaker: raw, offscreen: false, direction: "" };
+}
+
 function canonicalSpeaker(rawSpeaker, knownNames = []) {
   const raw = clean(rawSpeaker);
+  const cue = normalizeSpeakerCue(raw);
   const names = knownNames.map(clean).filter(Boolean).sort((a, b) => b.length - a.length);
-  return names.find(name => raw === name
+  return names.find(name => cue.speaker === name
+    || raw === name
     || new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[（(][^）)]{1,12}[）)]$`).test(raw))
-    || raw;
+    || cue.speaker;
 }
 
 function parseMetadata(value = "") {
@@ -48,10 +81,13 @@ function parseSpeakerLabel(value, knownNames = []) {
   const parenthetical = raw.match(/^(.{1,24}?)\s*[（(]([^）)]{1,120})[）)]\s*$/);
   const speakerRaw = clean(parenthetical?.[1] || raw);
   const tone = clean(parenthetical?.[2] || "");
+  if (/^(?:唯一)?(?:角色|人物|演员|场景|地点|时间|核心道具|道具|商品|产品)(?:固定|设定|列表|清单)?$/.test(speakerRaw)) return null;
   if (!speakerRaw || NON_SPEAKER_LABELS.has(speakerRaw) || /[，。！？；;：:]/.test(speakerRaw)) return null;
-  const speaker = canonicalSpeaker(speakerRaw, knownNames);
+  const cue = normalizeSpeakerCue(speakerRaw);
+  const speaker = canonicalSpeaker(cue.speaker, knownNames);
   if (!speaker) return null;
-  return { speaker, speakerRaw, tone };
+  const offscreen = cue.offscreen || /(?:画外(?:音)?|O\.?\s*S\.?|off[\s-]*screen)/i.test(tone);
+  return { speaker, speakerRaw, tone, offscreen };
 }
 
 function toneMetadata(tone = "") {
@@ -140,6 +176,13 @@ function parseSourceDialogueLedger(value, knownNames = [], options = {}) {
   const source = String(value || "").replace(/^\uFEFF/, "").replace(/\r/g, "");
   const prefix = clean(options.idPrefix || "D").replace(/[^A-Za-z0-9_-]/g, "") || "D";
   const inferredNames = new Set(knownNames.map(clean).filter(Boolean));
+  // Structured production scripts commonly declare cast as `C01林娜，...`
+  // and later place the exact spoken line inside Chinese quotes after action
+  // prose. Learn those explicit ids before parsing; this is fact extraction,
+  // not a creative rewrite.
+  for (const match of source.matchAll(/\bC\d{1,3}\s*[:\uFF1A-]?\s*([\u3400-\u9fff]{2,8})(?=[\uFF0C,\uFF1B;\s])/gi)) {
+    inferredNames.add(clean(match[1]));
+  }
   for (const line of source.split("\n")) {
     const first = String(line || "").match(/^\s*([^：:；;\n]{1,48})\s*[：:]/);
     if (!first) continue;
@@ -187,6 +230,46 @@ function parseSourceDialogueLedger(value, knownNames = [], options = {}) {
       pushEntry(marker, text, lineEntry.start + Math.max(0, prefixLength) + marker.markerStart, lineEntry.start + Math.max(0, prefixLength) + (markers[index + 1]?.markerStart ?? line.length));
     }
   }
+  // Narrative screenplay form: `林娜按住信封，带哭腔质问：‘原话’`.
+  // The quote is the immutable spoken text; nearby action/tone remains
+  // metadata. Only an explicitly declared/known name plus a speech verb may
+  // claim a quote, preventing titles and prop labels from becoming dialogue.
+  const speechVerb = /(?:说|说道|开口|道|问|质问|追问|反问|回答|回应|承认|解释|喊|怒吼|吼道|哭诉|低声|高声|怒声|颤声|嘀咕|喃喃)/;
+  const quoteMatcher = /[\u201c\u2018\u300c\u300e]([^\u201d\u2019\u300d\u300f\n]{1,500})[\u201d\u2019\u300d\u300f]/g;
+  let quoteMatch;
+  while ((quoteMatch = quoteMatcher.exec(source))) {
+    const text = clean(quoteMatch[1]);
+    const sourceStart = quoteMatch.index;
+    const sourceEnd = quoteMatcher.lastIndex;
+    if (!text || ledger.some(item => item.sourceStart <= sourceStart && item.sourceEnd >= sourceEnd)) continue;
+    const lineStart = Math.max(source.lastIndexOf("\n", sourceStart - 1) + 1, sourceStart - 240);
+    const prefixText = source.slice(lineStart, sourceStart);
+    let owner = null;
+    const structuredHeading = prefixText.match(/^\s*S\d{1,4}\s*[\u3010\[][^\u3011\]]*[\u3011\]]\s*/i);
+    if (structuredHeading) {
+      const body = prefixText.slice(structuredHeading[0].length);
+      const firstActor = [...inferredNames].map(name => ({ name, index: body.indexOf(name) }))
+        .filter(item => item.index >= 0)
+        .sort((left, right) => left.index - right.index)[0];
+      if (firstActor) owner = { name: firstActor.name, index: structuredHeading[0].length + firstActor.index };
+    }
+    if (!owner) {
+      const clauses = prefixText.split(/[，,。！？；;]/);
+      let consumed = 0;
+      for (const clause of clauses) {
+        const localCandidates = [...inferredNames].map(name => ({ name, index: clause.indexOf(name) }))
+          .filter(item => item.index >= 0)
+          .sort((left, right) => left.index - right.index);
+        if (localCandidates.length) owner = { name: localCandidates[0].name, index: consumed + localCandidates[0].index };
+        consumed += clause.length + 1;
+      }
+    }
+    if (!owner) continue;
+    const direction = clean(prefixText.slice(owner.index + owner.name.length)).slice(-160);
+    if (!speechVerb.test(direction)) continue;
+    const tone = clean(direction.replace(/^[\uFF0C,\uFF1B;:\uFF1A\s]+|[\uFF0C,\uFF1B;:\uFF1A\s]+$/g, "")).slice(-120);
+    pushEntry({ speaker: owner.name, speakerRaw: owner.name, tone }, text, lineStart + owner.index, sourceEnd);
+  }
   if (options.allowStandaloneCues === false) return ledger;
   for (let index = 0; index < lines.length; index += 1) {
     const current = lines[index];
@@ -229,8 +312,13 @@ function parseCompiledDialogueSegments(value, knownNames = []) {
   const starts = [];
   let match;
   while ((match = marker.exec(source))) {
+    const label = parseSpeakerLabel(match[1], knownNames);
+    if (!label) continue;
     starts.push({
-      speaker: canonicalSpeaker(match[1], knownNames),
+      speaker: label.speaker,
+      speakerRaw: label.speakerRaw,
+      sourceTone: label.tone,
+      onScreen: label.offscreen ? false : undefined,
       bodyStart: marker.lastIndex,
       markerStart: match.index
     });
@@ -242,9 +330,15 @@ function parseCompiledDialogueSegments(value, knownNames = []) {
     const metadataText = divider >= 0 ? body.slice(divider + 1) : "";
     return {
       speaker: item.speaker,
+      speakerRaw: item.speakerRaw,
       text: spokenText,
       spokenText,
-      metadata: parseMetadata(metadataText)
+      sourceTone: item.sourceTone,
+      ...(item.onScreen === false ? { onScreen: false } : {}),
+      metadata: {
+        ...toneMetadata(item.sourceTone),
+        ...parseMetadata(metadataText)
+      }
     };
   }).filter(item => item.speaker && item.spokenText);
 }
@@ -255,5 +349,6 @@ module.exports = {
   parseMetadata,
   parseSourceDialogueLedger,
   parseSpeakerLabel,
+  normalizeSpeakerCue,
   toneMetadata
 };

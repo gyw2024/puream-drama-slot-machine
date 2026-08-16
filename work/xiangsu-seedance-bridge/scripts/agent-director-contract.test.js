@@ -14,12 +14,14 @@ const {
   buildCameraTakePlan,
   buildHailuoGenerationBlockPrompt,
   buildHailuoTakePrompt,
+  cameraTakeCompilerMessages,
   filterReferencesForGenerationBlock,
   filterReferencesForTake,
   generationBlockTakes,
   mergeAgentTakeDraft,
   validateCameraTakePlan
 } = require("../app/agent-director");
+const { WorkbenchWorkflow } = require("../app/workbench-workflow");
 
 test("every H3 authoring entry uses the same continuous-block provider contract", () => {
   const files = [
@@ -197,6 +199,108 @@ test("director-agent performance and generation-block continuity must be fully a
   assert.equal(validateCameraTakePlan(valid, project, shot), true);
 });
 
+test("director Agent sees its invalid JSON and surgically repairs creative omissions", async () => {
+  const { project, shot } = fixture();
+  const basePlan = buildCameraTakePlan(project, shot);
+  const draft = ({ cameraEn, performanceEn }) => ({
+    takes: basePlan.takes.map(take => ({
+      id: take.id,
+      cameraOwnerId: take.cameraOwnerId,
+      mouthOwnerId: take.mouthOwnerId,
+      onScreenSpeaker: take.onScreenSpeaker,
+      styleEn: "Realistic Chinese vertical short drama with natural practical light.",
+      visualEn: "The locked speaker confronts the listener while the decisive evidence remains visible.",
+      cameraEn,
+      performanceEn,
+      listenerReactionEn: "The listener keeps closed lips and reacts silently with a small recoil.",
+      soundEn: "Continuous room tone with synchronized cloth and paper movement only."
+    })),
+    generationBlocks: basePlan.generationBlocks.map(block => ({
+      id: block.id,
+      takeIds: block.takeIds,
+      strategy: block.strategy,
+      continuityEn: "Keep identity, wardrobe, set, light, eyeline axis and room tone continuous.",
+      transitionEn: block.takeIds.length > 1
+        ? "Use timed hard cuts at the exact locked boundaries without morphing."
+        : "Hold one coherent camera setup without an unnecessary cut.",
+      reasonEn: "This is the minimum safe provider-block plan for conversational rhythm."
+    }))
+  });
+  const invalid = draft({
+    cameraEn: "Observe the locked focal subject.",
+    performanceEn: "Shoulders and hands tense; voice volume rises, pace slows, and stress lands on the keyword."
+  });
+  const valid = draft({
+    cameraEn: "Static medium close-up camera with a restrained push-in on the locked focal subject.",
+    performanceEn: "Eyes tighten and jaw trembles; shoulders and hands tense; breath catches; voice volume rises; pace slows at a pause; stress emphasizes the keyword."
+  });
+  const calls = [];
+  const workflow = new WorkbenchWorkflow({
+    store: {},
+    textGenerator: async (_config, messages, options) => {
+      calls.push({
+        messages: JSON.parse(JSON.stringify(messages)),
+        options: { ...(options || {}) }
+      });
+      return calls.length === 1 ? invalid : valid;
+    }
+  });
+  const result = await workflow.adaptiveAgent.runSkill("director.continuity_plan", {
+    projectId: "director-repair-project",
+    project,
+    shot,
+    basePlan,
+    textProvider: { kind: "default" },
+    messages: cameraTakeCompilerMessages(project, shot, basePlan),
+    textOptions: { sessionId: "director-repair-test" }
+  });
+
+  assert.equal(calls.length, 2);
+  const priorDraftMessage = calls[1].messages.find(message => message.role === "assistant");
+  assert.ok(priorDraftMessage, "repair turn must receive the previous invalid assistant JSON");
+  const priorDraft = JSON.parse(priorDraftMessage.content);
+  assert.equal(priorDraft.takes[0].id, basePlan.takes[0].id);
+  assert.equal(priorDraft.takes[0].performanceEn, invalid.takes[0].performanceEn);
+  const repairInstruction = calls[1].messages.at(-1).content;
+  assert.match(repairInstruction, /FULL corrected JSON/);
+  assert.match(repairInstruction, /Face\/eyes/);
+  assert.match(repairInstruction, /body\/shoulders\/hands/);
+  assert.match(repairInstruction, /breath/);
+  assert.match(repairInstruction, /voice volume/);
+  assert.match(repairInstruction, /pace\/pause/);
+  assert.match(repairInstruction, /stress\/emphasis/);
+  assert.match(repairInstruction, /Do not create character introductions/);
+  assert.match(calls[1].options.sessionId, /-repair-2$/);
+  assert.equal(validateCameraTakePlan(result, project, shot), true);
+});
+
+test("director Agent never converts provider or authorization failures into paid creative retries", async () => {
+  const { project, shot } = fixture();
+  const basePlan = buildCameraTakePlan(project, shot);
+  let calls = 0;
+  const authFailure = Object.assign(new Error("authorization rejected"), { code: "AUTH_FAILED" });
+  const workflow = new WorkbenchWorkflow({
+    store: {},
+    textGenerator: async () => {
+      calls += 1;
+      throw authFailure;
+    }
+  });
+  await assert.rejects(
+    workflow.adaptiveAgent.runSkill("director.continuity_plan", {
+      projectId: "director-auth-project",
+      project,
+      shot,
+      basePlan,
+      textProvider: { kind: "default" },
+      messages: cameraTakeCompilerMessages(project, shot, basePlan),
+      textOptions: { sessionId: "director-auth-test" }
+    }),
+    error => error === authFailure
+  );
+  assert.equal(calls, 1);
+});
+
 test("consecutive lines by one speaker stay in one take and off-screen speech owns no lips", () => {
   const { project, shot } = fixture();
   shot.duration = 8;
@@ -289,4 +393,57 @@ test("director may frame a silent listener reaction while the locked speaker sta
   assert.equal(plan.takes[0].onScreenSpeaker, false);
   assert.equal(plan.takes[0].mouthOwnerId, "");
   assert.equal(validateCameraTakePlan(plan, project, shot), true);
+});
+
+test("silent reaction subshots use their visible participant instead of stale shot focus", () => {
+  const { project, shot } = fixture();
+  shot.id = "S02";
+  shot.duration = 6;
+  shot.focusCharacterId = "C02";
+  shot.visibleCharacterIds = ["C02", "C01"];
+  shot.subshots = [
+    {
+      start: 0,
+      end: 2,
+      visibleCharacterIds: ["C02"],
+      dialogueTurns: [{ speakerId: "C02", listenerIds: ["C01"], text: "是我错怪了她。" }]
+    },
+    { start: 2, end: 4, visibleCharacterIds: ["C01"], action: "C01闭口接过信封" },
+    { start: 4, end: 6, visibleCharacterIds: ["C01"], action: "C01抱紧信封无声落泪" }
+  ];
+  const plan = buildCameraTakePlan(project, shot);
+  assert.equal(validateCameraTakePlan(plan, project, shot), true);
+  assert.equal(plan.takes.at(-1).cameraOwnerId, "C01");
+  assert.equal(plan.takes.at(-1).mouthOwnerId, "");
+  assert.equal(plan.takes.at(-1).onScreenSpeaker, false);
+});
+
+test("named off-screen dialogue resolves to the real speaker while the visible listener owns camera and no lips", () => {
+  const { project, shot } = fixture();
+  shot.id = "S02";
+  shot.duration = 6;
+  shot.focusCharacterId = "C02";
+  shot.subshots = [
+    {
+      start: 0,
+      end: 2,
+      visibleCharacterIds: ["C02"],
+      dialogue: "母亲：‘我今天才知道，’"
+    },
+    {
+      start: 2,
+      end: 4,
+      visibleCharacterIds: ["C01"],
+      dialogue: "母亲画外：‘是我错怪了她。’"
+    },
+    { start: 4, end: 6, visibleCharacterIds: ["C01"], action: "女主抱紧信封无声落泪" }
+  ];
+  const plan = buildCameraTakePlan(project, shot);
+  assert.equal(validateCameraTakePlan(plan, project, shot), true);
+  assert.deepEqual(plan.takes.map(item => item.speakerId), ["C02", "C02"]);
+  assert.equal(plan.takes[1].cameraOwnerId, "C01");
+  assert.equal(plan.takes[1].mouthOwnerId, "");
+  assert.equal(plan.takes[1].onScreenSpeaker, false);
+  assert.equal(plan.takes[1].end, 6, "同一听者机位的画外尾句与随后无声余震应连续保留");
+  assert.equal(plan.takes[1].dialogueTurns[0].text, "是我错怪了她。");
 });

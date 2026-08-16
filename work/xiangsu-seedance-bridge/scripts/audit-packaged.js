@@ -20,6 +20,7 @@ async function main() {
   fs.mkdirSync(evidenceDir, { recursive: true });
   fs.mkdirSync(runDir, { recursive: true });
   fs.mkdirSync(userDataDir, { recursive: true });
+  fs.writeFileSync(path.join(userDataDir, "workspace-mode.json"), JSON.stringify({ version: 1, mode: "agent", updatedAt: new Date().toISOString() }, null, 2), "utf8");
   const reusableAssetDir = path.join(workbenchDir, "reusable-asset-library");
   const reusableFilesDir = path.join(reusableAssetDir, "files");
   fs.mkdirSync(reusableFilesDir, { recursive: true });

@@ -137,10 +137,17 @@ test("20-second shortest path covers both engines, four modes and both workflow 
             references.videoRoles = [{ type: "previous_shot" }];
           }
           const videoPrompt = compileVideo.call(workflow, staged, settings, shot, mode, references);
-          assert.match(videoPrompt, new RegExp(`${provider.family}:${mode}`));
+          const modePromptPattern = mode === "storyboard_sheet"
+            ? /按逐秒合图从左到右、从上到下演绎/
+            : mode === "continuation"
+              ? /从上一视频末态无缝继续/
+              : /首帧到尾帧形成连续因果动作/;
+          assert.match(videoPrompt, modePromptPattern);
+          assert.doesNotMatch(videoPrompt, /(?:xiangsu|cloud):(?:keyframe|continuation|smart|storyboard_sheet)/i);
           assert.equal(videoPrompt.split(shot.dialogueTurns[0].text).length - 1, 1);
           assert.match(videoPrompt, new RegExp(shot.dialogueTurns[0].speakerId === "C01" ? "林娜" : "秦添"));
-          assert.match(videoPrompt, /听者必须有可见反应|listenerBeat/);
+          assert.match(videoPrompt, /听者反应=/);
+          assert.doesNotMatch(videoPrompt, /【商品】none/i);
           assert.equal(assertSystemPromptDialogueParity(staged, shot, videoPrompt, provider.engine), true);
         } else {
           const manual = { ...shot, promptMode: "manual", manualVideoPrompt: `CLOUD_MANUAL_${mode}_${shot.id}` };

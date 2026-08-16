@@ -221,6 +221,7 @@ async function main() {
     env: {
       ...process.env,
       DRAMA_LICENSE_BYPASS: "1",
+      DRAMA_SLOT_WORKSPACE_MODE: "agent",
       DRAMA_SLOT_DATA_ROOT: workbenchDir
     }
   });

@@ -15,6 +15,7 @@ async function main() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "drama-a11y-"));
   const userDataDir = path.join(tempRoot, "user-data");
   fs.mkdirSync(userDataDir, { recursive: true });
+  fs.writeFileSync(path.join(userDataDir, "workspace-mode.json"), JSON.stringify({ version: 1, mode: "agent", updatedAt: new Date().toISOString() }, null, 2), "utf8");
   fs.copyFileSync(licenseSource, path.join(userDataDir, "drama-license.json"));
   fs.copyFileSync(path.join(path.dirname(licenseSource), "Local State"), path.join(userDataDir, "Local State"));
   const electronApp = await electron.launch({

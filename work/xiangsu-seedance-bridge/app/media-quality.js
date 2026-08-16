@@ -6,6 +6,8 @@ const { spawn } = require("node:child_process");
 // Calibrated from the ten supplied realistic vertical-drama reference films.
 // The limits intentionally leave production headroom, but reject the latest
 // failed film (-23.3 dB, 13.97% silence and 31.79% repeated frames).
+const TECHNICAL_VISUAL_AUDIT_VERSION = "2026.08.16-live-anchor-v6";
+
 const QUALITY_LIMITS = Object.freeze({
   dialogueShot: Object.freeze({ minMeanVolumeDb: -28, maxSilenceRatio: 0.24, maxLongestSilenceSeconds: 1.6 }),
   ambienceShot: Object.freeze({ minMeanVolumeDb: -40, maxSilenceRatio: 0.55, maxLongestSilenceSeconds: 3 }),
@@ -15,6 +17,27 @@ const QUALITY_LIMITS = Object.freeze({
   finalAudio: Object.freeze({ minMeanVolumeDb: -20, maxSilenceRatio: 0.24, maxLongestSilenceSeconds: 3 }),
   shotVisual: Object.freeze({ minMeanMotion: 5, maxRepeatedFrameRatio: 0.35 }),
   finalVisual: Object.freeze({ minMeanMotion: 12, maxRepeatedFrameRatio: 0.28, minSceneChangesPerMinute: 24 }),
+  // Objective decode/integrity failures are never controlled by the optional
+  // creative-quality switch. Sampling at 4fps catches short provider wipes,
+  // blank flashes and reference-board edge bands without adding a project
+  // duration ceiling.
+  technicalVisual: Object.freeze({
+    sampleFps: 4,
+    // Sample often enough to catch a one-second caption, but require a full
+    // temporal run so eyeglasses, buttons and table highlights in one or two
+    // frames cannot masquerade as baked text.
+    overlaySampleFps: 3,
+    nearSolidStdDev: 5,
+    nearSolidExtremePixelRatio: 0.88,
+    edgeExtremePixelRatio: 0.9,
+    minSolidEdgeFraction: 0.21875,
+    referenceAssetLeakSimilarity: 0.74,
+    minOverlayTextFrames: 3,
+    minOverlayTextComponents: 4,
+    minOverlayTextPixels: 18,
+    minOverlayTextSpanFraction: 0.14,
+    minOverlayTextScore: 24
+  }),
   crossShot: Object.freeze({ duplicateSimilarity: 0.78, minBestFrameSimilarity: 0.82, maxDuplicatePairs: 1 }),
   referenceAnchor: Object.freeze({
     wrongAssetSimilarity: 0.7,
@@ -442,6 +465,248 @@ async function analyzeImageDimensions(ffmpeg, filePath) {
   }
 }
 
+async function analyzeStoryboardSheetGrid(ffmpeg, filePath, panelCount = 10) {
+  const dimensions = await analyzeImageDimensions(ffmpeg, filePath);
+  if (!dimensions.ok) return { ok: false, dimensions, columns: 0, rows: 0, cells: [], error: dimensions.error || "无法读取合图尺寸" };
+  const maxSide = 512;
+  const scale = maxSide / Math.max(dimensions.width, dimensions.height);
+  const width = Math.max(32, Math.round(dimensions.width * scale));
+  const height = Math.max(32, Math.round(dimensions.height * scale));
+  try {
+    const output = await spawnBuffer(ffmpeg, [
+      "-hide_banner", "-loglevel", "error", "-i", filePath,
+      "-frames:v", "1", "-vf", `scale=${width}:${height}:flags=area,format=gray`,
+      "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"
+    ], 120_000, width * height * 2);
+    const frame = output.subarray(0, width * height);
+    if (frame.length !== width * height) throw new Error("合图像素解码不完整");
+    const lineRecords = axis => {
+      const positions = axis === "vertical" ? width : height;
+      const samples = axis === "vertical" ? height : width;
+      const records = [];
+      for (let position = 1; position < positions - 1; position += 1) {
+        if (position < positions * 0.025 || position > positions * 0.975) continue;
+        let bright = 0;
+        let dark = 0;
+        let sharp = 0;
+        for (let offset = 0; offset < samples; offset += 1) {
+          const index = axis === "vertical" ? offset * width + position : position * width + offset;
+          const previous = axis === "vertical" ? index - 1 : index - width;
+          const value = frame[index];
+          if (value >= 238) bright += 1;
+          if (value <= 17) dark += 1;
+          if (Math.abs(value - frame[previous]) >= 72) sharp += 1;
+        }
+        const brightRatio = bright / Math.max(1, samples);
+        const darkRatio = dark / Math.max(1, samples);
+        const sharpRatio = sharp / Math.max(1, samples);
+        const strength = Math.max(brightRatio, darkRatio * 0.92, sharpRatio * 0.9);
+        if (brightRatio >= 0.68 || darkRatio >= 0.82 || sharpRatio >= 0.72) {
+          records.push({ position, strength: round(strength, 4), brightRatio: round(brightRatio, 4), darkRatio: round(darkRatio, 4), sharpRatio: round(sharpRatio, 4) });
+        }
+      }
+      // AI-authored sheets rarely draw one mathematically perfect separator.
+      // A separator may be two or three bright rows with a few dark pixels in
+      // between, so merge nearby responses before trying to infer the grid.
+      const mergeGap = Math.max(2, Math.round(positions * 0.018));
+      const groups = [];
+      for (const record of records) {
+        const current = groups.at(-1);
+        if (!current || record.position > current.at(-1).position + mergeGap) groups.push([record]);
+        else current.push(record);
+      }
+      return groups.map(group => {
+        const strongest = group.slice().sort((left, right) => right.strength - left.strength)[0];
+        return {
+          position: strongest.position,
+          start: group[0].position,
+          end: group.at(-1).position,
+          strength: strongest.strength
+        };
+      }).filter(group => group.end - group.start <= positions * 0.14);
+    };
+    const verticalCandidates = lineRecords("vertical");
+    const horizontalCandidates = lineRecords("horizontal");
+    const requested = Math.max(1, Math.round(Number(panelCount) || 10));
+    const chooseAxisLines = (records, count, extent) => {
+      if (count === 0) return { lines: [], score: 1, balance: 1, regularity: 1, lineStrength: 1 };
+      const pool = records
+        .filter(item => item.position >= extent * 0.035 && item.position <= extent * 0.965)
+        .slice(0, 14);
+      if (pool.length < count) return null;
+      let best = null;
+      const walk = (start, chosen) => {
+        if (chosen.length === count) {
+          const lines = chosen.slice().sort((left, right) => left.position - right.position);
+          const bounds = [0, ...lines.map(item => item.position), extent];
+          const sizes = bounds.slice(1).map((value, index) => value - bounds[index]);
+          const minSize = Math.min(...sizes);
+          const maxSize = Math.max(...sizes);
+          if (minSize < extent * 0.055 || maxSize <= 0) return;
+          const mean = sizes.reduce((sum, value) => sum + value, 0) / sizes.length;
+          const variance = sizes.reduce((sum, value) => sum + ((value - mean) ** 2), 0) / sizes.length;
+          const balance = minSize / maxSize;
+          const regularity = Math.max(0, 1 - (Math.sqrt(variance) / Math.max(1, mean)));
+          const lineStrength = lines.reduce((sum, item) => sum + item.strength, 0) / lines.length;
+          const score = balance * 0.44 + regularity * 0.22 + lineStrength * 0.34;
+          if (!best || score > best.score) best = { lines, score, balance, regularity, lineStrength };
+          return;
+        }
+        for (let index = start; index <= pool.length - (count - chosen.length); index += 1) {
+          chosen.push(pool[index]);
+          walk(index + 1, chosen);
+          chosen.pop();
+        }
+      };
+      walk(0, []);
+      return best;
+    };
+    const verticalCandidatesForBand = (top, bottom) => {
+      const inset = Math.max(2, Math.round((bottom - top) * 0.025));
+      const startY = Math.max(0, Math.round(top) + inset);
+      const endY = Math.min(height, Math.round(bottom) - inset);
+      const samples = Math.max(1, endY - startY);
+      const records = [];
+      for (let position = 1; position < width - 1; position += 1) {
+        if (position < width * 0.025 || position > width * 0.975) continue;
+        let bright = 0;
+        let dark = 0;
+        let sharp = 0;
+        for (let y = startY; y < endY; y += 1) {
+          const index = y * width + position;
+          const value = frame[index];
+          if (value >= 238) bright += 1;
+          if (value <= 17) dark += 1;
+          if (Math.abs(value - frame[index - 1]) >= 72) sharp += 1;
+        }
+        const brightRatio = bright / samples;
+        const darkRatio = dark / samples;
+        const sharpRatio = sharp / samples;
+        const strength = Math.max(brightRatio, darkRatio * 0.92, sharpRatio * 0.9);
+        if (brightRatio >= 0.64 || darkRatio >= 0.88 || sharpRatio >= 0.68) {
+          records.push({ position, strength: round(strength, 4), brightRatio: round(brightRatio, 4), darkRatio: round(darkRatio, 4), sharpRatio: round(sharpRatio, 4) });
+        }
+      }
+      const mergeGap = Math.max(2, Math.round(width * 0.018));
+      const groups = [];
+      for (const record of records) {
+        const current = groups.at(-1);
+        if (!current || record.position > current.at(-1).position + mergeGap) groups.push([record]);
+        else current.push(record);
+      }
+      return groups.map(group => {
+        const strongest = group.slice().sort((left, right) => right.strength - left.strength)[0];
+        return {
+          position: strongest.position,
+          start: group[0].position,
+          end: group.at(-1).position,
+          strength: strongest.strength
+        };
+      }).filter(group => group.end - group.start <= width * 0.14);
+    };
+    const layouts = [];
+    for (let candidateRows = 1; candidateRows <= Math.min(8, requested); candidateRows += 1) {
+      const yAxis = chooseAxisLines(horizontalCandidates, candidateRows - 1, height);
+      if (!yAxis) continue;
+      const yBounds = [0, ...yAxis.lines.map(item => item.position), height];
+      const rowOptions = [];
+      let usable = true;
+      for (let row = 0; row < candidateRows; row += 1) {
+        const candidates = verticalCandidatesForBand(yBounds[row], yBounds[row + 1]);
+        const options = [];
+        for (let candidateColumns = 1; candidateColumns <= Math.min(6, requested); candidateColumns += 1) {
+          const xAxis = chooseAxisLines(candidates, candidateColumns - 1, width);
+          if (xAxis) options.push({ columns: candidateColumns, xAxis, candidates });
+        }
+        if (!options.length) {
+          usable = false;
+          break;
+        }
+        rowOptions.push(options);
+      }
+      if (!usable) continue;
+      let states = [{ total: 0, scoreSum: 0, choices: [] }];
+      for (const options of rowOptions) {
+        const next = new Map();
+        for (const state of states) {
+          for (const option of options) {
+            const total = state.total + option.columns;
+            if (total > requested + 2) continue;
+            const candidate = {
+              total,
+              scoreSum: state.scoreSum + option.xAxis.score,
+              choices: [...state.choices, option]
+            };
+            const existing = next.get(total);
+            if (!existing || candidate.scoreSum > existing.scoreSum) next.set(total, candidate);
+          }
+        }
+        states = [...next.values()];
+      }
+      for (const state of states.filter(item => item.total >= requested)) {
+        const meanColumns = state.total / candidateRows;
+        const columnVariance = state.choices.reduce((sum, item) => sum + ((item.columns - meanColumns) ** 2), 0) / candidateRows;
+        const variationPenalty = Math.min(0.08, Math.sqrt(columnVariance) / Math.max(1, meanColumns) * 0.08);
+        const excessPenalty = ((state.total - requested) / requested) * 0.42;
+        const rowScore = state.scoreSum / candidateRows;
+        const score = yAxis.score * 0.46 + rowScore * 0.54 - variationPenalty - excessPenalty;
+        layouts.push({ rows: candidateRows, capacity: state.total, yAxis, yBounds, rowChoices: state.choices, score });
+      }
+    }
+    layouts.sort((left, right) => right.score - left.score);
+    const layout = layouts[0] || null;
+    const rows = layout?.rows || 0;
+    const columns = layout?.rowChoices?.length ? Math.max(...layout.rowChoices.map(item => item.columns)) : 0;
+    const verticalLines = layout?.rowChoices?.flatMap((item, row) => item.xAxis.lines.map(line => ({ ...line, row }))) || [];
+    const horizontalLines = layout?.yAxis?.lines || [];
+    const detectedCells = layout?.capacity || 0;
+    const plausible = Boolean(layout && layout.score >= 0.56 && detectedCells >= requested);
+    const cells = [];
+    if (layout) {
+      for (let row = 0; row < rows; row += 1) {
+        const rowChoice = layout.rowChoices[row];
+        const xBounds = [0, ...rowChoice.xAxis.lines.map(item => item.position), width];
+        const top = layout.yBounds[row];
+        const bottom = layout.yBounds[row + 1];
+        for (let column = 0; column < rowChoice.columns; column += 1) {
+          if (cells.length >= requested) break;
+          const left = xBounds[column];
+          const right = xBounds[column + 1];
+          cells.push({
+            index: cells.length,
+            column,
+            row,
+            x: round(left / width, 6),
+            y: round(top / height, 6),
+            width: round((right - left) / width, 6),
+            height: round((bottom - top) / height, 6)
+          });
+        }
+      }
+    }
+    return {
+      ok: plausible && cells.length >= requested,
+      dimensions,
+      sampledWidth: width,
+      sampledHeight: height,
+      requestedPanelCount: requested,
+      columns,
+      rows,
+      detectedCells,
+      verticalLines,
+      horizontalLines,
+      verticalCandidates,
+      horizontalCandidates,
+      layoutScore: layout ? round(layout.score, 4) : 0,
+      rowColumns: layout?.rowChoices?.map(item => item.columns) || [],
+      cells,
+      error: plausible ? "" : `无法从合图安全识别 ${requested} 个分镜画格`
+    };
+  } catch (error) {
+    return { ok: false, dimensions, columns: 0, rows: 0, cells: [], error: error.message };
+  }
+}
+
 /** Coarse skin-tone occupancy used to reject people leaking into empty scene plates. */
 async function analyzeImageSkinOccupancy(ffmpeg, filePath) {
   const width = 48;
@@ -536,6 +801,65 @@ function assessEmptySceneImage(image, skin = null, characterReferences = [], fac
     failures.push(...(options.fourView.failures || [{ code: "SCENE_FOUR_VIEW_INVALID", message: "场景资产不是合格的一张2×2四视图" }]));
   }
   return { ok: failures.length === 0, failures, advisories, closestCharacter, matches, skin, faceProbe };
+}
+
+function frameTechnicalIntegrity(frame, width, height, sampleIndex = 0, sampleFps = 1) {
+  const limit = QUALITY_LIMITS.technicalVisual;
+  const values = [...frame];
+  const mean = values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+  const variance = values.reduce((sum, value) => sum + ((value - mean) ** 2), 0) / Math.max(1, values.length);
+  const stdDev = Math.sqrt(variance);
+  const whiteRatio = values.filter(value => value >= 245).length / Math.max(1, values.length);
+  const blackRatio = values.filter(value => value <= 10).length / Math.max(1, values.length);
+  const edgeLineRatio = (axis, position, predicate) => {
+    let matching = 0;
+    const total = axis === "column" ? height : width;
+    for (let offset = 0; offset < total; offset += 1) {
+      const index = axis === "column" ? offset * width + position : position * width + offset;
+      if (predicate(frame[index])) matching += 1;
+    }
+    return matching / Math.max(1, total);
+  };
+  const contiguousFraction = (axis, fromEnd, predicate) => {
+    const total = axis === "column" ? width : height;
+    let count = 0;
+    for (let step = 0; step < total; step += 1) {
+      const position = fromEnd ? total - 1 - step : step;
+      if (edgeLineRatio(axis, position, predicate) < limit.edgeExtremePixelRatio) break;
+      count += 1;
+    }
+    return count / Math.max(1, total);
+  };
+  const white = value => value >= 245;
+  const black = value => value <= 10;
+  const edgeFractions = {
+    leftWhite: contiguousFraction("column", false, white),
+    rightWhite: contiguousFraction("column", true, white),
+    topWhite: contiguousFraction("row", false, white),
+    bottomWhite: contiguousFraction("row", true, white),
+    leftBlack: contiguousFraction("column", false, black),
+    rightBlack: contiguousFraction("column", true, black),
+    topBlack: contiguousFraction("row", false, black),
+    bottomBlack: contiguousFraction("row", true, black)
+  };
+  const [edgeKind, maxSolidEdgeFraction] = Object.entries(edgeFractions)
+    .sort((left, right) => right[1] - left[1])[0] || ["", 0];
+  const nearSolid = stdDev <= limit.nearSolidStdDev
+    || whiteRatio >= limit.nearSolidExtremePixelRatio
+    || blackRatio >= limit.nearSolidExtremePixelRatio;
+  const solidEdgeBand = maxSolidEdgeFraction >= limit.minSolidEdgeFraction;
+  return {
+    sampleIndex,
+    time: round(sampleIndex / Math.max(1, sampleFps), 3),
+    mean: round(mean),
+    stdDev: round(stdDev),
+    whiteRatio: round(whiteRatio, 4),
+    blackRatio: round(blackRatio, 4),
+    edgeKind,
+    maxSolidEdgeFraction: round(maxSolidEdgeFraction, 4),
+    nearSolid,
+    solidEdgeBand
+  };
 }
 
 function sceneDescriptionImpliesPeople(text = "", characters = []) {
@@ -717,6 +1041,199 @@ function signatureSimilarity(left = [], right = []) {
   return { aligned: round(aligned, 4), best: round(best, 4), score: round(aligned * 0.8 + best * 0.2, 4) };
 }
 
+function overlayTextFrameMetrics(frame, width, height, sampleIndex = 0, sampleFps = 1) {
+  const limit = QUALITY_LIMITS.technicalVisual;
+  const x0 = Math.max(2, Math.floor(width * 0.06));
+  const x1 = Math.min(width - 2, Math.ceil(width * 0.94));
+  const y0 = Math.max(2, Math.floor(height * 0.22));
+  const y1 = Math.min(height - 2, Math.ceil(height * 0.95));
+  const mask = new Uint8Array(width * height);
+  const at = (x, y) => frame[y * width + x];
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      const value = at(x, y);
+      if (value < 178) continue;
+      const darkest = Math.min(
+        at(x - 1, y), at(x + 1, y), at(x, y - 1), at(x, y + 1),
+        at(x - 2, y), at(x + 2, y), at(x, y - 2), at(x, y + 2)
+      );
+      if (value - darkest >= 68) mask[y * width + x] = 1;
+    }
+  }
+
+  const visited = new Uint8Array(width * height);
+  const components = [];
+  const queueX = [];
+  const queueY = [];
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      const root = y * width + x;
+      if (!mask[root] || visited[root]) continue;
+      visited[root] = 1;
+      queueX.length = 0;
+      queueY.length = 0;
+      queueX.push(x);
+      queueY.push(y);
+      let cursor = 0;
+      let pixels = 0;
+      let minX = x;
+      let maxX = x;
+      let minY = y;
+      let maxY = y;
+      while (cursor < queueX.length) {
+        const currentX = queueX[cursor];
+        const currentY = queueY[cursor];
+        cursor += 1;
+        pixels += 1;
+        minX = Math.min(minX, currentX);
+        maxX = Math.max(maxX, currentX);
+        minY = Math.min(minY, currentY);
+        maxY = Math.max(maxY, currentY);
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (!dx && !dy) continue;
+            const nextX = currentX + dx;
+            const nextY = currentY + dy;
+            if (nextX < x0 || nextX >= x1 || nextY < y0 || nextY >= y1) continue;
+            const next = nextY * width + nextX;
+            if (!mask[next] || visited[next]) continue;
+            visited[next] = 1;
+            queueX.push(nextX);
+            queueY.push(nextY);
+          }
+        }
+      }
+      const componentWidth = maxX - minX + 1;
+      const componentHeight = maxY - minY + 1;
+      if (pixels >= 2 && pixels <= 160 && componentWidth <= Math.ceil(width * 0.16)
+        && componentHeight <= Math.ceil(height * 0.08)) {
+        components.push({ pixels, minX, maxX, minY, maxY, width: componentWidth, height: componentHeight });
+      }
+    }
+  }
+
+  const bandHeight = Math.max(8, Math.round(height * 0.045));
+  let strongest = null;
+  for (let top = y0; top + bandHeight <= y1; top += Math.max(2, Math.floor(bandHeight / 3))) {
+    const bottom = top + bandHeight;
+    const inBand = components.filter(item => item.maxY >= top && item.minY < bottom);
+    if (inBand.length < 3) continue;
+    const minX = Math.min(...inBand.map(item => item.minX));
+    const maxX = Math.max(...inBand.map(item => item.maxX));
+    const pixels = inBand.reduce((sum, item) => sum + item.pixels, 0);
+    const glyphShapes = inBand.filter(item => {
+      const aspect = item.width / Math.max(1, item.height);
+      const density = item.pixels / Math.max(1, item.width * item.height);
+      return item.width >= 2 && item.height >= 3 && aspect >= 0.12 && aspect <= 3.8
+        && density >= 0.12 && density <= 0.92;
+    });
+    const sortedHeights = glyphShapes.map(item => item.height).sort((a, b) => a - b);
+    const medianHeight = sortedHeights.length ? sortedHeights[Math.floor(sortedHeights.length / 2)] : 0;
+    const coherentGlyphs = glyphShapes.filter(item => !medianHeight
+      || (item.height >= medianHeight * 0.55 && item.height <= medianHeight * 1.85));
+    const glyphPixels = coherentGlyphs.reduce((sum, item) => sum + item.pixels, 0);
+    const glyphMinX = coherentGlyphs.length ? Math.min(...coherentGlyphs.map(item => item.minX)) : minX;
+    const glyphMaxX = coherentGlyphs.length ? Math.max(...coherentGlyphs.map(item => item.maxX)) : maxX;
+    const glyphSpanFraction = (glyphMaxX - glyphMinX + 1) / Math.max(1, width);
+    const glyphCenterX = (glyphMinX + glyphMaxX) / 2 / Math.max(1, width);
+    const glyphBottomSpread = coherentGlyphs.length
+      ? Math.max(...coherentGlyphs.map(item => item.maxY)) - Math.min(...coherentGlyphs.map(item => item.maxY))
+      : 0;
+    const spanFraction = (maxX - minX + 1) / Math.max(1, width);
+    const centerX = (minX + maxX) / 2 / Math.max(1, width);
+    const lowerCaptionBand = top >= height * 0.48;
+    const compactHorizontalLine = spanFraction >= limit.minOverlayTextSpanFraction
+      && spanFraction <= 0.88
+      && centerX >= 0.16
+      && centerX <= 0.84;
+    const score = pixels * Math.max(1, inBand.length) * Math.max(0.1, spanFraction);
+    const alignedGlyphLine = coherentGlyphs.length >= limit.minOverlayTextComponents
+      && glyphPixels >= 80
+      && medianHeight >= 4
+      && glyphSpanFraction >= limit.minOverlayTextSpanFraction
+      && glyphCenterX >= 0.16
+      && glyphCenterX <= 0.84;
+    const shortStrongGlyphLine = coherentGlyphs.length >= 3
+      && glyphPixels >= 110
+      && medianHeight >= 7
+      && glyphBottomSpread <= 5
+      && glyphSpanFraction >= limit.minOverlayTextSpanFraction;
+    const glyphEvidence = alignedGlyphLine || shortStrongGlyphLine;
+    const glyphScore = glyphPixels * Math.max(1, coherentGlyphs.length) * Math.max(0.1, glyphSpanFraction);
+    const likelyText = glyphEvidence
+      && compactHorizontalLine
+      && (lowerCaptionBand || coherentGlyphs.length >= limit.minOverlayTextComponents + 2)
+      && glyphScore >= limit.minOverlayTextScore;
+    if (!strongest || score > strongest.score) {
+      strongest = {
+        top,
+        bottom,
+        centerY: round((top + bottom) / 2 / Math.max(1, height), 4),
+        componentCount: inBand.length,
+        glyphShapeCount: glyphShapes.length,
+        coherentGlyphCount: coherentGlyphs.length,
+        medianGlyphHeight: medianHeight,
+        glyphPixels,
+        glyphSpanFraction: round(glyphSpanFraction, 4),
+        glyphCenterX: round(glyphCenterX, 4),
+        glyphBottomSpread,
+        glyphScore: round(glyphScore, 2),
+        pixels,
+        spanFraction: round(spanFraction, 4),
+        centerX: round(centerX, 4),
+        likelyText,
+        score: round(score, 2)
+      };
+    }
+  }
+  return {
+    sampleIndex,
+    time: round(sampleIndex / Math.max(1, sampleFps), 3),
+    componentCount: components.length,
+    strongest,
+    likelyText: strongest?.likelyText === true
+  };
+}
+
+async function analyzeOverlayVisualFile(ffmpeg, filePath, duration, sampleFps = QUALITY_LIMITS.technicalVisual.overlaySampleFps) {
+  const width = 180;
+  const height = 320;
+  const frameBytes = width * height;
+  try {
+    const output = await spawnBuffer(ffmpeg, [
+      "-hide_banner", "-loglevel", "error", "-i", filePath,
+      "-t", String(Math.max(1, Number(duration) || 10)),
+      "-vf", `fps=${sampleFps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=gray`,
+      "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"
+    ], Math.max(180_000, Math.ceil(Number(duration) || 10) * 1000 + 60_000), Math.ceil(Math.max(1, Number(duration) || 10) * sampleFps + 2) * frameBytes);
+    const frameCount = Math.floor(output.length / frameBytes);
+    const frames = Array.from({ length: frameCount }, (_, index) => output.subarray(index * frameBytes, (index + 1) * frameBytes));
+    const records = frames.map((frame, index) => overlayTextFrameMetrics(frame, width, height, index, sampleFps));
+    const likelyFrames = records.filter(item => item.likelyText);
+    const clusters = new Map();
+    for (const item of likelyFrames) {
+      const key = Math.round(Number(item.strongest?.centerY || 0) * 16);
+      clusters.set(key, [...(clusters.get(key) || []), item]);
+    }
+    const persistentCluster = [...clusters.entries()]
+      .map(([key, items]) => ({ key, count: items.length, items }))
+      .sort((left, right) => right.count - left.count)[0] || { key: -1, count: 0, items: [] };
+    const detected = persistentCluster.count >= QUALITY_LIMITS.technicalVisual.minOverlayTextFrames;
+    return {
+      ok: frameCount > 0,
+      sampleFps,
+      frameCount,
+      detected,
+      likelyFrameCount: likelyFrames.length,
+      persistentFrameCount: persistentCluster.count,
+      persistentCenterY: persistentCluster.key >= 0 ? round(persistentCluster.key / 16, 4) : 0,
+      samples: likelyFrames.slice(0, 24)
+    };
+  } catch (error) {
+    return { ok: false, sampleFps, frameCount: 0, detected: false, likelyFrameCount: 0, persistentFrameCount: 0, persistentCenterY: 0, samples: [], error: error.message };
+  }
+}
+
 async function analyzeVisualFile(ffmpeg, filePath, duration, sampleFps = 2) {
   const width = 32;
   const height = 32;
@@ -747,12 +1264,16 @@ async function analyzeVisualFile(ffmpeg, filePath, duration, sampleFps = 2) {
     }
     const sortedMotion = motion.slice().sort((a, b) => a - b);
     const hashes = frames.map(frame => frameHash(frame, width, height));
+    const technicalFrames = frames.map((frame, index) => frameTechnicalIntegrity(frame, width, height, index, sampleFps));
+    const nearSolidFrames = technicalFrames.filter(item => item.nearSolid);
+    const solidEdgeBandFrames = technicalFrames.filter(item => item.solidEdgeBand);
     let repeated = 0;
     for (let index = 0; index < hashes.length; index += 1) {
       const hasNonAdjacentMatch = hashes.some((hash, otherIndex) => Math.abs(otherIndex - index) > Math.max(3, sampleFps * 3) && hashSimilarity(hashes[index], hash) >= 0.984375);
       if (hasNonAdjacentMatch) repeated += 1;
     }
     const signatureIndexes = frameCount ? [0.2, 0.5, 0.8].map(ratio => Math.min(frameCount - 1, Math.max(0, Math.floor((frameCount - 1) * ratio)))) : [];
+    const overlayText = await analyzeOverlayVisualFile(ffmpeg, filePath, duration, QUALITY_LIMITS.technicalVisual.overlaySampleFps);
     return {
       ok: frameCount > 0,
       sampleFps,
@@ -764,10 +1285,22 @@ async function analyzeVisualFile(ffmpeg, filePath, duration, sampleFps = 2) {
       repeatedFrameRatio: round(repeated / Math.max(1, hashes.length), 4),
       sceneChangeCount,
       sceneChangesPerMinute: round(sceneChangeCount / Math.max(Number(duration) / 60, 1 / 60), 2),
-      signatures: signatureIndexes.map(index => hashes[index])
+      signatures: signatureIndexes.map(index => hashes[index]),
+      sampleHashes: hashes.map((hash, index) => ({
+        time: round(index / Math.max(1, sampleFps), 3),
+        hash
+      })),
+      technicalIntegrityVersion: TECHNICAL_VISUAL_AUDIT_VERSION,
+      overlayText,
+      nearSolidFrameCount: nearSolidFrames.length,
+      nearSolidFrameRatio: round(nearSolidFrames.length / Math.max(1, frameCount), 4),
+      solidEdgeBandFrameCount: solidEdgeBandFrames.length,
+      solidEdgeBandFrameRatio: round(solidEdgeBandFrames.length / Math.max(1, frameCount), 4),
+      maxSolidEdgeFraction: round(Math.max(...technicalFrames.map(item => item.maxSolidEdgeFraction), 0), 4),
+      technicalFailureSamples: technicalFrames.filter(item => item.nearSolid || item.solidEdgeBand).slice(0, 24)
     };
   } catch (error) {
-    return { ok: false, sampleFps, frameCount: 0, meanMotion: 0, medianMotion: 0, nearFreezeRatio: 1, longestNearFreezeSeconds: Number(duration) || 0, repeatedFrameRatio: 1, sceneChangeCount: 0, sceneChangesPerMinute: 0, signatures: [], error: error.message };
+    return { ok: false, sampleFps, frameCount: 0, meanMotion: 0, medianMotion: 0, nearFreezeRatio: 1, longestNearFreezeSeconds: Number(duration) || 0, repeatedFrameRatio: 1, sceneChangeCount: 0, sceneChangesPerMinute: 0, signatures: [], sampleHashes: [], technicalIntegrityVersion: TECHNICAL_VISUAL_AUDIT_VERSION, overlayText: { ok: false, detected: false, samples: [] }, nearSolidFrameCount: 0, nearSolidFrameRatio: 0, solidEdgeBandFrameCount: 0, solidEdgeBandFrameRatio: 0, maxSolidEdgeFraction: 0, technicalFailureSamples: [], error: error.message };
   }
 }
 
@@ -842,6 +1375,85 @@ function assessVisualQuality(visual, { final = false } = {}) {
   return { ok: failures.length === 0, limits: limit, failures };
 }
 
+function assessTechnicalVisualIntegrity(visual) {
+  const failures = [];
+  if (!visual?.ok || !visual.frameCount) {
+    failures.push({ code: "VIDEO_TECHNICAL_DECODE_FAILED", message: "视频没有可完整解码的画面" });
+  }
+  if (Number(visual?.nearSolidFrameCount) > 0) {
+    const first = visual.technicalFailureSamples?.find(item => item.nearSolid);
+    failures.push({
+      code: "VIDEO_BLANK_OR_SOLID_FRAME",
+      message: `检测到 ${visual.nearSolidFrameCount} 个空白/纯色异常采样帧${first ? `，首个约在 ${first.time} 秒` : ""}`,
+      samples: (visual.technicalFailureSamples || []).filter(item => item.nearSolid).slice(0, 8)
+    });
+  }
+  if (Number(visual?.solidEdgeBandFrameCount) > 0) {
+    const first = visual.technicalFailureSamples?.find(item => item.solidEdgeBand);
+    failures.push({
+      code: "VIDEO_SOLID_EDGE_WIPE_OR_BOARD",
+      message: `检测到 ${visual.solidEdgeBandFrameCount} 个带大面积纯白/纯黑边栏的异常帧${first ? `，首个约在 ${first.time} 秒` : ""}；可能是错误转场、画布露底或参考板泄漏`,
+      samples: (visual.technicalFailureSamples || []).filter(item => item.solidEdgeBand).slice(0, 8)
+    });
+  }
+  if (visual?.overlayText?.ok === false) {
+    failures.push({
+      code: "VIDEO_OVERLAY_TEXT_AUDIT_FAILED",
+      message: "无法完成画面文字硬检测，禁止跳过字幕、时间码和分镜标记检查"
+    });
+  } else if (visual?.overlayText?.detected === true) {
+    failures.push({
+      code: "VIDEO_BAKED_TEXT_OR_SUBTITLE",
+      message: `检测到 ${visual.overlayText.persistentFrameCount || visual.overlayText.likelyFrameCount || 0} 个持续出现可读文字笔画的采样帧，疑似字幕、时间码、标题或分镜标记`,
+      samples: (visual.overlayText.samples || []).slice(0, 12)
+    });
+  }
+  return {
+    ok: failures.length === 0,
+    version: TECHNICAL_VISUAL_AUDIT_VERSION,
+    limits: QUALITY_LIMITS.technicalVisual,
+    failures
+  };
+}
+
+function assessReferenceAssetLeak(visual, references = [], options = {}) {
+  const threshold = Number(options.threshold) > 0
+    ? Number(options.threshold)
+    : QUALITY_LIMITS.technicalVisual.referenceAssetLeakSimilarity;
+  const samples = Array.isArray(visual?.sampleHashes) ? visual.sampleHashes : [];
+  const usableReferences = (Array.isArray(references) ? references : [])
+    .filter(item => item?.hash)
+    .map(item => ({
+      hash: item.hash,
+      candidateId: item.candidateId || "",
+      entityId: item.entityId || "",
+      sourceStage: item.sourceStage || item.type || "reference_asset",
+      label: item.label || item.entityId || item.sourceStage || "reference asset"
+    }));
+  const matches = samples.flatMap(sample => usableReferences.map(reference => ({
+    time: sample.time,
+    similarity: hashSimilarity(sample.hash, reference.hash),
+    candidateId: reference.candidateId,
+    entityId: reference.entityId,
+    sourceStage: reference.sourceStage,
+    label: reference.label
+  }))).filter(item => item.similarity >= threshold)
+    .sort((left, right) => right.similarity - left.similarity);
+  const strongest = matches[0] || null;
+  const failures = strongest
+    ? [{
+        code: "VIDEO_REFERENCE_ASSET_BOARD_LEAK",
+        message: `约 ${strongest.time} 秒画面与内部${strongest.label}相似度 ${Math.round(strongest.similarity * 100)}%，疑似把身份图、四视图或资产板当成正片播放`,
+        sampleTime: strongest.time,
+        similarity: strongest.similarity,
+        relatedCandidateId: strongest.candidateId,
+        relatedEntityId: strongest.entityId,
+        sourceStage: strongest.sourceStage
+      }]
+    : [];
+  return { ok: failures.length === 0, threshold, strongest, matches: matches.slice(0, 16), failures };
+}
+
 function findDuplicateShotPairs(items = []) {
   const pairs = [];
   for (let left = 0; left < items.length; left += 1) {
@@ -872,13 +1484,20 @@ function buildRepairDirective(failures = []) {
   if (["VISUAL_TOO_STATIC", "VISUAL_INTERNAL_REPEAT", "VISUAL_DUPLICATE_SHOT"].some(code => codes.has(code))) {
     directives.push("严格执行本单元独有的动作结果和分镜切换；改变人物调度、景别与焦点，必须拍到新的物证/动作/反应，禁止复用前面镜头的同一站位、同一脸部特写、同一文件特写或静态摆拍");
   }
-  if (["VIDEO_START_FRAME_WRONG_ASSET", "STORYBOARD_IS_CHARACTER_SHEET", "CHARACTER_INTRO_IS_SHEET", "VIDEO_USED_CHARACTER_SHEET_REFERENCE", "VIDEO_REFERENCE_LINEAGE_UNVERIFIED"].some(code => codes.has(code))) {
+  if (["VIDEO_START_FRAME_WRONG_ASSET", "STORYBOARD_IS_CHARACTER_SHEET", "CHARACTER_INTRO_IS_SHEET", "VIDEO_USED_CHARACTER_SHEET_REFERENCE", "VIDEO_REFERENCE_LINEAGE_UNVERIFIED", "VIDEO_REFERENCE_ASSET_BOARD_LEAK"].some(code => codes.has(code))) {
     directives.push("首帧必须是本镜真实剧情场景，禁止出现人物三视图、棚拍设定板、角色排排站、灰底素材板或任何参考资产展示画面；从正确分镜首帧进入动作");
+  }
+  if (["VIDEO_BLANK_OR_SOLID_FRAME", "VIDEO_SOLID_EDGE_WIPE_OR_BOARD", "VIDEO_TECHNICAL_DECODE_FAILED", "VIDEO_REFERENCE_ASSET_BOARD_LEAK"].some(code => codes.has(code))) {
+    directives.push("全程保持完整9:16剧情画面并只用直接硬切；禁止白闪、黑闪、纯色帧、擦除/推拉转场、画布露底、边栏、残缺人物、身份参考图或资产板进入任何一帧");
+  }
+  if (["VIDEO_BAKED_TEXT_OR_SUBTITLE", "VIDEO_OVERLAY_TEXT_AUDIT_FAILED"].some(code => codes.has(code))) {
+    directives.push("最终画面必须完全无字：禁止对白字幕、标题、时间码、秒数、角标、贴纸、Logo、水印、分镜序号和任何UI；对白只能存在于音轨和演员口型中");
   }
   return directives.join("；");
 }
 
 module.exports = {
+  TECHNICAL_VISUAL_AUDIT_VERSION,
   QUALITY_LIMITS,
   parseAudioAnalysis,
   analyzeAudioFile,
@@ -886,14 +1505,18 @@ module.exports = {
   audibleIntervalsFromSilence,
   selectVoiceExtractPlan,
   analyzeVisualFile,
+  analyzeOverlayVisualFile,
   analyzeTimedHardCuts,
   analyzeImageFile,
   analyzeSceneFourViewLayout,
   analyzeImageDimensions,
+  analyzeStoryboardSheetGrid,
   analyzeImageSkinOccupancy,
   analyzeVideoEndpointFrames,
   assessAudioQuality,
   assessVisualQuality,
+  assessTechnicalVisualIntegrity,
+  assessReferenceAssetLeak,
   assessReferenceAnchors,
   assessStoryboardImage,
   assessEmptySceneImage,

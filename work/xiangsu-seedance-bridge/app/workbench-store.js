@@ -1176,7 +1176,7 @@ function mergeRecordsById(diskRecords = [], memoryRecords = []) {
   return [...byId.values()];
 }
 
-function summarizeMergedAssetBatch(items = [], waveLabel = "") {
+function summarizeMergedAssetBatch(items = [], waveLabel = "", metadata = {}) {
   const total = items.length;
   const completed = items.filter(item => item.status === "completed" || item.status === "skipped").length;
   const failed = items.filter(item => item.status === "failed").length;
@@ -1191,7 +1191,10 @@ function summarizeMergedAssetBatch(items = [], waveLabel = "") {
     running,
     percent: total ? Math.round((completed / total) * 100) : 100,
     waveLabel: waveLabel || "",
-    items
+    items,
+    ...(metadata.batchId ? { batchId: String(metadata.batchId) } : {}),
+    ...(metadata.batchStartedAt ? { batchStartedAt: String(metadata.batchStartedAt) } : {}),
+    updatedAt: new Date().toISOString()
   };
 }
 
@@ -1199,6 +1202,18 @@ function mergeAssetBatchProgress(diskProgress, memoryProgress) {
   if (memoryProgress?.kind !== "asset_batch" && diskProgress?.kind !== "asset_batch") return memoryProgress ?? diskProgress;
   if (memoryProgress?.kind !== "asset_batch") return diskProgress;
   if (diskProgress?.kind !== "asset_batch") return memoryProgress;
+  const diskBatchId = String(diskProgress.batchId || "");
+  const memoryBatchId = String(memoryProgress.batchId || "");
+  if (diskBatchId !== memoryBatchId && (diskBatchId || memoryBatchId)) {
+    // A fresh asset run owns an exact plan. Never union obsolete scene/character
+    // rows from a previous run into that plan. The timestamp also prevents a
+    // late save from an older worker from replacing a newer batch.
+    if (!diskBatchId) return memoryProgress;
+    if (!memoryBatchId) return diskProgress;
+    const diskStartedAt = String(diskProgress.batchStartedAt || diskProgress.updatedAt || "");
+    const memoryStartedAt = String(memoryProgress.batchStartedAt || memoryProgress.updatedAt || "");
+    return memoryStartedAt >= diskStartedAt ? memoryProgress : diskProgress;
+  }
   const byKey = new Map();
   for (const item of diskProgress.items || []) {
     if (item?.key) byKey.set(item.key, item);
@@ -1217,7 +1232,10 @@ function mergeAssetBatchProgress(diskProgress, memoryProgress) {
     seen.add(key);
     items.push(byKey.get(key));
   }
-  return summarizeMergedAssetBatch(items, memoryProgress.waveLabel || diskProgress.waveLabel || "");
+  return summarizeMergedAssetBatch(items, memoryProgress.waveLabel || diskProgress.waveLabel || "", {
+    batchId: memoryBatchId || diskBatchId,
+    batchStartedAt: memoryProgress.batchStartedAt || diskProgress.batchStartedAt || ""
+  });
 }
 
 function mergeAutomationState(diskAutomation = {}, memoryAutomation = {}) {
@@ -1325,10 +1343,14 @@ class WorkbenchStore {
     this.indexPath = path.join(rootDir, "projects.json");
     this.settingsPath = path.join(rootDir, "settings.json");
     this.accountSwitchPath = path.join(rootDir, "account-switch.json");
-    this.voiceLibraryDir = path.join(rootDir, "voice-library");
+    // Agent mode and Simple mode keep independent projects, checkpoints,
+    // queues, costs and settings. The only shared creative-data boundary is
+    // this explicit library root.
+    this.sharedLibraryRoot = path.resolve(secretCodec.sharedLibraryRoot || rootDir);
+    this.voiceLibraryDir = path.join(this.sharedLibraryRoot, "voice-library");
     this.voiceLibraryIndexPath = path.join(this.voiceLibraryDir, "index.json");
     this.voiceLibraryFilesDir = path.join(this.voiceLibraryDir, "files");
-    this.reusableAssetLibraryDir = path.join(rootDir, "reusable-asset-library");
+    this.reusableAssetLibraryDir = path.join(this.sharedLibraryRoot, "reusable-asset-library");
     this.reusableAssetLibraryIndexPath = path.join(this.reusableAssetLibraryDir, "index.json");
     this.reusableAssetLibraryFilesDir = path.join(this.reusableAssetLibraryDir, "files");
     // A valid persisted library index is authoritative. Re-scanning every
@@ -1413,11 +1435,29 @@ class WorkbenchStore {
     }
     const voices = this.listVoiceLibrary();
     const index = voices.findIndex(item => item.id === entry.id);
+    const previous = index >= 0 ? voices[index] : null;
+    const sourceKey = source => JSON.stringify({
+      projectId: String(source?.projectId || ""),
+      characterId: String(source?.characterId || ""),
+      candidateId: String(source?.candidateId || "")
+    });
+    const sourceHistory = [];
+    const seenSources = new Set();
+    for (const source of [...(previous?.sourceHistory || []), previous?.source, entry.source].filter(Boolean)) {
+      const key = sourceKey(source);
+      if (seenSources.has(key)) continue;
+      seenSources.add(key);
+      sourceHistory.push(source);
+    }
     const next = {
-      ...(index >= 0 ? voices[index] : {}),
+      ...(previous || {}),
       ...entry,
       id: entry.id,
-      createdAt: index >= 0 ? (voices[index].createdAt || now()) : (entry.createdAt || now()),
+      // The first source is immutable provenance. Later uses are appended so a
+      // shared mode/project cannot erase the candidate that created the voice.
+      source: previous?.source || entry.source || null,
+      sourceHistory,
+      createdAt: previous ? (previous.createdAt || now()) : (entry.createdAt || now()),
       updatedAt: now()
     };
     if (index >= 0) voices[index] = next;
@@ -2455,6 +2495,7 @@ class WorkbenchStore {
       createdAt: now(),
       selected: false,
       productionRevision: project.productionRevision || "",
+      sourceScriptFingerprint: String(project.script?.sourceFingerprint || ""),
       ...candidate
     };
     record.selectionBaselineCandidateId = String(selectionBaseline?.id || "");

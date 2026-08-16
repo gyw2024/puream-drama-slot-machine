@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { WorkbenchStore } = require("../app/workbench-store");
+const { WorkbenchWorkflow, candidateReady } = require("../app/workbench-workflow");
 const { stageCounts } = require("../app/project-overview");
 
 const root = path.resolve(__dirname, "..");
@@ -45,6 +46,60 @@ test("historical selected candidate can be restored and becomes selected in curr
   forced.candidates.find(item => item.id === restored.id).stale = true;
   store.saveProject(forced);
   assert.equal(stageCounts(store.getProject(project.id), store.getSettings()).storyboards.ready, 1, "manual selection must remain current even if an old freshness flag returns");
+});
+
+test("same-source reanalysis reuses identity assets but a changed script never auto-restores them", t => {
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "puream-source-asset-restore-"));
+  t.after(() => fs.rmSync(dataRoot, { recursive: true, force: true }));
+  const store = new WorkbenchStore(dataRoot);
+  const created = store.createProject("同原稿资产复用");
+  let project = store.getProject(created.id);
+  project.productionRevision = "revision-old";
+  project.script = { ...(project.script || {}), raw: "同一份原稿", sourceFingerprint: "source-fingerprint-A" };
+  project.characters = [{ id: "C01", name: "林娜" }];
+  store.saveProject(project);
+  const imagePath = path.join(dataRoot, "character.png");
+  fs.writeFileSync(imagePath, "identity-image");
+  const archived = store.addCandidate(created.id, {
+    entityType: "character",
+    entityId: "C01",
+    stage: "character_sheet",
+    filePath: imagePath,
+    selected: true,
+    qualityAudit: { ok: true }
+  });
+  const introPath = path.join(dataRoot, "identity-reference.png");
+  fs.writeFileSync(introPath, "single-face-identity-reference");
+  const archivedIntro = store.addCandidate(created.id, {
+    entityType: "character",
+    entityId: "C01",
+    stage: "character_intro",
+    filePath: introPath,
+    selected: true,
+    qualityAudit: { ok: true }
+  });
+  assert.equal(archived.sourceScriptFingerprint, "source-fingerprint-A");
+  assert.equal(archivedIntro.sourceScriptFingerprint, "source-fingerprint-A");
+  project = store.getProject(created.id);
+  project.productionRevision = "revision-retimed";
+  store.saveProject(project);
+  const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: dataRoot });
+  const restored = workflow.restoreUnchangedScriptAssets(created.id);
+  assert.equal(restored.length, 2);
+  let latest = store.getProject(created.id);
+  const restoredSheet = latest.candidates.find(item => item.restoredFromCandidateId === archived.id);
+  const restoredIntro = latest.candidates.find(item => item.restoredFromCandidateId === archivedIntro.id);
+  assert.equal(restoredSheet?.productionRevision, "revision-retimed");
+  assert.equal(restoredIntro?.productionRevision, "revision-retimed");
+  assert.ok(candidateReady(latest, "character", "C01", "character_sheet", store.getSettings()));
+  assert.ok(candidateReady(latest, "character", "C01", "character_intro", store.getSettings()));
+  assert.equal(latest.characters[0].activeIdentityCandidateId, restoredIntro.id, "dependency order must leave the video identity reference active");
+
+  latest.productionRevision = "revision-new-script";
+  latest.script.sourceFingerprint = "source-fingerprint-B";
+  store.saveProject(latest);
+  assert.deepEqual(workflow.restoreUnchangedScriptAssets(created.id), []);
+  assert.equal(store.getProject(created.id).candidates.some(item => item.productionRevision === "revision-new-script"), false);
 });
 
 test("upload fallback, immediate character voice extraction and provider masking are wired", () => {

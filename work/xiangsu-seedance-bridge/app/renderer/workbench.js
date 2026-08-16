@@ -159,7 +159,7 @@ const pureamTextModels = Object.freeze(["claude-opus-5", "gpt-5-6-sol"]);
 const stageLabels = {
   character_sheet: "人物合板",
   character_three_view: "人物三视图",
-  character_intro: "人物介绍图",
+  character_intro: "人物身份参考图（不进成片）",
   storyboard_sheet: "逐秒分镜合图",
   character_video: "人物视频",
   character_voice: "人物音色",
@@ -184,7 +184,7 @@ const promptLabels = {
   characterSheet: "角色身份合板",
   characterThreeView: "角色三视图",
   seedanceFaceMesh: "云端算力人物一致性检查",
-  characterIntro: "角色介绍定妆图",
+  characterIntro: "人物身份参考图（不进成片）",
   characterVideo: "单人数字资产视频",
   hailuoCharacterVideo: "云端算力单人数字资产视频",
   hailuoPromptCompiler: "云端算力镜头编译器",
@@ -226,7 +226,7 @@ const promptLabels = {
   referenceParityScriptAnalysis: "参考成片对标·剧本拆解",
   referenceParityAcceptance: "参考成片对标·交付验收",
   referenceParityCharacterAssetImage: "参考成片对标·人物资产图",
-  referenceParityCharacterPortraitImage: "参考成片对标·人物介绍图",
+  referenceParityCharacterPortraitImage: "参考成片对标·人物身份参考图",
   referenceParitySceneAssetImage: "参考成片对标·场景资产图",
   referenceParityObjectAssetImage: "参考成片对标·商品服装道具图",
   referenceParityStoryboardImage: "参考成片对标·分镜关键帧",
@@ -273,7 +273,7 @@ function promptDefinitionForKey(key) {
     [/scriptBlueprint|scriptStoryBible|storyCore|reversalMatrix|tragedyShot|faceSlapShot|misunderstandingArc|docxFusionStoryBible|docxFusionShotPlan|referenceParityShotPlan/i, "故事规划", "剧本与商品", "约束故事因果、人物动机、反转与目标时长", "选题、人物关系、商品信息和目标时长", "故事圣经、段落职责与事件顺序"],
     [/scriptPlanBatch|scriptUnitGeneration|dialogueRewrite|dialogueUnitMold|dialogueEmotion|eyelineConversation|docxFusionUnits|referenceParityUnits/i, "剧本写作", "剧本与商品", "把故事规划写成可表演、可拆镜的对白与动作", "故事圣经、前后文、说话人、语气和商品节点", "带完整对白、语气、表演和时间节拍的剧本单元"],
     [/scriptAnalysis|scriptSemanticReview|scriptRepair|continuityAudit|qualityReview|deliveryAcceptance|docxFusion.*Review|referenceParityAcceptance/i, "拆解与审核", "剧本与商品 / 合成与交付", "拆解剧本或检查指定质量项；只有审核蓝图开启时审核项才会拦截", "完整剧本、逐句对白账本、项目模式与已开启审核项", "人物、场景、分镜结构或定向修订建议"],
-    [/characterSheet|characterThreeView|characterIntro|characterVideo|CharacterAssetImage|CharacterPortraitImage|FaceMesh/i, "人物资产", "角色与场景", "生成或校验跨镜稳定的人物形象与单人表演资产", "人物身份、外形、服装、声音和项目视频模式", "人物合板、三视图、介绍图或人物视频提示词"],
+    [/characterSheet|characterThreeView|characterIntro|characterVideo|CharacterAssetImage|CharacterPortraitImage|FaceMesh/i, "人物资产", "角色与场景", "生成或校验跨镜稳定的人物形象与单人表演资产", "人物身份、外形、服装、声音和项目视频模式", "人物合板、三视图、身份参考图或人物视频提示词"],
     [/sceneAsset|SceneAssetImage/i, "场景资产", "角色与场景", "生成同一空间的 2×2 四视图并锁定空间拓扑", "场景结构、时段、光向、门窗家具与剧情用途", "同一场景四个角度的资产图提示词"],
     [/productAsset|wardrobeAsset|propAsset|ObjectAssetImage/i, "物件资产", "角色与场景", "生成商品、服装或道具的一致性资产", "用户商品原图与卖点，或服装/道具的材质和状态", "可被分镜引用的物件资产提示词"],
     [/PromptCompiler|continuationVideo|keyframeVideo|storyboardSheetVideo|SeedanceVideo|HailuoVideo|generationPhysics|InModelMix/i, "分镜视频", "分镜视频", "编译视频模型实际提交稿，保留说话人、听者、语气、表情和完整对白", "当前分镜、人物/场景/商品资产、参考帧和视频模式", "与所选云端或本地模式匹配的视频提示词"],
@@ -2013,7 +2013,7 @@ function renderAssets(force = false) {
         <button class="mini-button${voiceWork?.active ? " is-loading" : ""}" data-long-action data-action="extract-voice" data-id="${character.id}" ${voiceWork?.active ? "disabled" : ""}>${voiceWork?.active ? "提取中…" : "提取音色"}</button>
         <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_sheet" data-id="${character.id}">上传人物合板</button>
         <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_three_view" data-id="${character.id}">上传人物三视图</button>
-        <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_intro" data-id="${character.id}">上传人物介绍图</button>
+        <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_intro" data-id="${character.id}">上传人物身份参考图</button>
         <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_video" data-id="${character.id}">上传人物视频</button>
         <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_voice" data-id="${character.id}">上传音色</button>
         <button class="mini-button" data-action="select-reusable-asset" data-entity-type="character" data-id="${character.id}">从独立人物库选择</button>
@@ -2843,7 +2843,7 @@ function promptSuggestionText(stage, target, label = "") {
     semantic_review: "检查观众能否看懂故事、每句对白是否完整且角色正确、表演与语气是否贴合、商品是否在正确剧情节点出现。",
     character_sheet: `为${subject}制作同一身份、同一年龄体型发型和整套服装的人物设定合板；中性背景，无额外人物、字幕或水印。`,
     character_three_view: `为${subject}制作同一人物的正面、侧面、背面三视图；脸、体型、发型、服装和配饰完全一致。`,
-    character_intro: `为${subject}制作独立正脸介绍图；双眼清楚、面部居中、整套身份与人物设定一致，中性无缝背景。`,
+    character_intro: `为${subject}制作仅供 H3 锁脸、绝不进入成片的独立正脸身份参考图；双眼清楚、面部居中、整套身份与人物设定一致，中性无缝背景。`,
     character_video: `让${subject}正脸中近景完成自然表演与清晰说话；身份服装稳定，语气有起伏，口型同步，无他人、字幕、水印或背景音乐。`,
     wardrobe_asset: `为${subject}制作可复用服装资产图；清楚展示材质、颜色、版型和完整穿着关系，不加入无关人物或文字。`,
     prop_asset: `为${subject}制作单一道具资产图；准确展示外形、材质、数量、磨损和使用状态，不加入人物或文字。`,
@@ -4535,7 +4535,7 @@ document.addEventListener("click", async event => {
     return showToast("已请求暂停该项目自动化");
   }
   if (action === "remesh-character") {
-    if (!button.dataset.candidateId) return showToast("请先生成或上传人物合板（旧项目可用三视图/介绍图）", "error");
+    if (!button.dataset.candidateId) return showToast("请先生成或上传人物合板（旧项目可用三视图/身份参考图）", "error");
     return runLong("正在抽取人物一致性检查资产…", () => api.workbench.remeshCharacterAsset(state.project.id, button.dataset.candidateId), { entityType: "character", entityId: id });
   }
   if (action === "apply-grid") {
@@ -4545,15 +4545,15 @@ document.addEventListener("click", async event => {
     if (portraitId) {
       const c = state.project.candidates.find(item => item.id === portraitId);
       if (c?.filePath) {
-        const label = c.stage === "character_sheet" ? "合板" : c.stage === "character_intro" ? "介绍图" : "三视图";
+        const label = c.stage === "character_sheet" ? "合板" : c.stage === "character_intro" ? "身份参考图" : "三视图";
         targets.push({ id: portraitId, filePath: c.filePath, label });
       }
     }
     if (introId && introId !== portraitId) {
       const c = state.project.candidates.find(item => item.id === introId);
-      if (c?.filePath) targets.push({ id: introId, filePath: c.filePath, label: c.stage === "character_sheet" ? "合板" : "介绍图" });
+      if (c?.filePath) targets.push({ id: introId, filePath: c.filePath, label: c.stage === "character_sheet" ? "合板" : "身份参考图" });
     }
-    if (!targets.length) return showToast("请先生成或上传人物合板（旧项目可用三视图/介绍图）", "error");
+    if (!targets.length) return showToast("请先生成或上传人物合板（旧项目可用三视图/身份参考图）", "error");
     return runLong(`正在本地检测${targets.map(t => t.label).join("、")}中的真实人脸并添加网格…`, async () => {
       const results = [];
       for (const t of targets) {
@@ -5963,7 +5963,10 @@ async function refreshWallet(force = false) {
   if (!force && Date.now() - state.walletLastRefreshAt < 30_000) return state.wallet;
   state.walletRefreshing = true;
   try {
-    const result = await api.workbench.walletStatus();
+    const result = await Promise.race([
+      api.workbench.walletStatus(),
+      new Promise(resolve => setTimeout(() => resolve({ ok: false, code: "WALLET_UI_TIMEOUT", message: "余额读取超时" }), 12_000))
+    ]);
     if (!result?.ok) throw new Error(result?.message || "余额刷新失败");
     state.wallet = result.wallet || result.data || {};
     state.walletLastRefreshAt = Date.now();
@@ -5971,6 +5974,7 @@ async function refreshWallet(force = false) {
     return state.wallet;
   } catch (error) {
     console.warn("wallet refresh deferred", error?.message || error);
+    if (!state.wallet && $("#walletBalance")) $("#walletBalance").textContent = "点击重试";
     return state.wallet;
   } finally {
     state.walletRefreshing = false;
@@ -6171,6 +6175,12 @@ function applyCaptureScenario(scenario) {
 
 function bindProductSurfaceEvents() {
   installInfoTooltipLayer();
+  const switchToSimpleMode = async () => {
+    const result = await api.appMode.select("simple");
+    if (!result?.ok) showToast(result?.message || "简易模式切换失败", "error");
+  };
+  $("#switchSimpleMode")?.addEventListener("click", switchToSimpleMode);
+  $("#settingsSwitchSimpleMode")?.addEventListener("click", switchToSimpleMode);
   api.onUpdateStatus?.(renderAppUpdateStatus);
   $("#appVersionUpdate")?.addEventListener("click", () => handleAppUpdateClick().catch(error => showToast(error.message || "更新检查失败", "error")));
   $("#sidebarImportVoiceLibrary")?.addEventListener("click", async () => {

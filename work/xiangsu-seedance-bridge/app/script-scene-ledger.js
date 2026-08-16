@@ -42,13 +42,23 @@ function splitCompoundSceneName(value = "") {
 function parseSceneHeading(line = "") {
   const text = String(line || "").trim();
   if (!text || text.length > 180) return null;
-  let match = text.match(/^(?:#{1,6}\s*)?【\s*场景\s*】\s*(.+)$/i);
+  let match = text.match(/^(?:唯一\s*)?场景\s*(?:固定|设定|锁定)\s*[:：]\s*(.+)$/i);
+  if (match) {
+    const raw = clean(match[1])
+      .split(/[，,；;。]/, 1)[0]
+      .replace(/^SC\s*0*\d+\s*/i, "")
+      .trim();
+    return raw ? { raw, kind: "fixed_scene" } : null;
+  }
+  match = text.match(/^(?:#{1,6}\s*)?【\s*场景\s*】\s*(.+)$/i);
   if (match) return { raw: clean(match[1]), kind: "bracketed" };
   match = text.match(/^(?:#{1,6}\s*)?场景\s*[:：]\s*(.+)$/i);
   if (match) return { raw: clean(match[1]), kind: "labelled" };
   match = text.match(/^(?:#{1,6}\s*)?第[一二三四五六七八九十百千零〇\d]+(?:场|幕)\s*[:：、.-]?\s*(.+)$/i);
   if (match) return { raw: clean(match[1]), kind: "numbered_chinese" };
-  match = text.match(/^(?:#{1,6}\s*)?(?:S|SC)\d{1,4}\b\s*[:：、.\-]?\s*(.+)$/i);
+  // SC01 is a scene identifier. S01 is a shot identifier and must never be
+  // promoted into a scene asset, even when it contains time/camera/action fields.
+  match = text.match(/^(?:#{1,6}\s*)?SC\d{1,4}\b\s*[:：、.\-]?\s*(.+)$/i);
   if (match) return { raw: clean(match[1]), kind: "structured" };
   match = text.match(/^(?:#{1,6}\s*)?(?:INT\.?|EXT\.?|INT\s*\/\s*EXT\.?|I\s*\/\s*E\.?)\s+(.+)$/i);
   if (match) return { raw: clean(match[1]).replace(/\s+[-—]\s*(?:DAY|NIGHT|日|夜|晨|晚).*$/i, ""), kind: "fountain" };

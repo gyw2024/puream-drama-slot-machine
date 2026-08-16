@@ -16,7 +16,7 @@ const {
 } = require("../app/foundry/production-contract");
 const { evaluateProject } = require("../app/foundry/quality-lab");
 const { FoundryRuntimeStore } = require("../app/foundry/runtime-store");
-const { buildScriptUnderstanding } = require("../app/foundry/script-understanding");
+const { SCRIPT_UNDERSTANDING_VERSION, buildScriptUnderstanding } = require("../app/foundry/script-understanding");
 const { AdaptiveDramaKernel } = require("../app/foundry/kernel");
 const { WorkbenchStore, atomicWriteJson } = require("../app/workbench-store");
 const { relocateCopiedWorkbenchData } = require("../app/foundry/storage-relocation");
@@ -132,6 +132,53 @@ test("compound scene headings stay split while transition notes never become cha
   assert.ok(report.scenes.occurrences.some(item => item.sceneName === "总裁办公室"));
   assert.equal(report.scenes.catalogue.some(item => /\/|->/.test(item.name)), false);
   assert.deepEqual(report.cast.names.sort(), ["小李", "收银员", "看房大妈", "秦深"].sort());
+});
+
+test("compiler-version changes invalidate stale scene semantics even when the raw script is unchanged", t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "puream-foundry-understanding-version-"));
+  const kernel = new AdaptiveDramaKernel({ rootDir: temp });
+  t.after(() => {
+    kernel.close();
+    fs.rmSync(temp, { recursive: true, force: true });
+  });
+  const project = projectFixture({
+    generation: { targetDurationSeconds: 20, aspectRatio: "9:16" },
+    script: {
+      raw: [
+        "全片20秒。",
+        "唯一场景固定：SC01旧宅客厅，雨夜。",
+        "S01【0-10秒｜旧宅客厅｜林娜近景切秦添反应】林娜按住信封：你凭什么烧掉它？",
+        "S02【10-20秒｜同一客厅｜秦添反打近景切林娜反应】秦添松手：是我错怪了她。"
+      ].join("\n")
+    },
+    scenes: [{ id: "SRC_SC001", name: "旧宅客厅" }],
+    shots: [
+      { id: "S01", duration: 10, sceneId: "SRC_SC001", sourceSceneId: "SRC_SC001", action: "林娜按住信封质问", causalLink: "秦添被迫停手", mainlineStage: "hook" },
+      { id: "S02", duration: 10, sceneId: "SRC_SC001", sourceSceneId: "SRC_SC001", action: "秦添松手承认误会", causalLink: "信封回到林娜手中", mainlineStage: "resolution" }
+    ]
+  });
+  const contract = compileProductionContract(project);
+  project.foundry = { contract };
+  const current = buildScriptUnderstanding(project.script.raw, project, { contract });
+  assert.equal(current.scenes.catalogue.length, 1);
+  project.script.sourceSceneLedger = current.scenes;
+  project.foundry.scriptUnderstanding = {
+    ...current,
+    version: "foundry.script-understanding.v1",
+    contractFingerprint: contract.fingerprint,
+    scenes: {
+      ...current.scenes,
+      catalogue: [
+        { id: "SRC_SC001", name: "0-10秒" },
+        { id: "SRC_SC002", name: "旧宅客厅" },
+        { id: "SRC_SC003", name: "整段动作误识别场景" }
+      ]
+    }
+  };
+  const prepared = kernel.prepareProject(project, { settings: {} });
+  assert.equal(prepared.understanding.version, SCRIPT_UNDERSTANDING_VERSION);
+  assert.deepEqual(prepared.understanding.scenes.catalogue.map(item => item.name), ["旧宅客厅"]);
+  assert.equal(prepared.quality.levels.story.issues.some(item => item.id === "source_scene_coverage"), false);
 });
 
 test("quality laboratory blocks policy conflicts and admits a coherent complete story", () => {

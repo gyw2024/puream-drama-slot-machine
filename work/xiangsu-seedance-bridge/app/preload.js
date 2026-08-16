@@ -3,6 +3,13 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("dramaSlot", {
+  appMode: {
+    get: () => ipcRenderer.invoke("app-mode:get"),
+    select: mode => ipcRenderer.invoke("app-mode:select", mode)
+  },
+  simple: {
+    call: (method, ...args) => ipcRenderer.invoke("simple:call", method, args)
+  },
   defaults: () => ipcRenderer.invoke("app:defaults"),
   checkUpdate: () => ipcRenderer.invoke("app:check-update"),
   installUpdate: () => ipcRenderer.invoke("app:install-update"),

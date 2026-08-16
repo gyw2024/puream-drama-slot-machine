@@ -27,6 +27,7 @@
         <button id="pausePipeline" class="outline-button" type="button" title="暂停当前自动化/抽卡">暂停任务</button>
         <button id="stopPipeline" class="danger-button" type="button" title="结束当前自动化/抽卡">结束任务</button>
         <button id="walletShortcut" class="wallet-chip" type="button" title="查看余额并充值"><span>余额</span><b id="walletBalance">读取中</b><i>充值</i></button>
+        <button id="switchSimpleMode" class="mode-switch-button" type="button" title="切换到简易短剧工作台">简易模式</button>
         <div id="bridgeBadge" class="bridge-badge offline"><i></i><b>像塑检测中</b></div>
         <button id="qualityBlueprintToggle" class="review-blueprint-toggle" type="button" aria-pressed="false" aria-expanded="false"><span class="review-blueprint-indicator" aria-hidden="true"></span><span id="qualityBlueprintToggleLabel">审核蓝图：关闭</span></button>
         <div id="qualityBlueprintMenu" class="quality-blueprint-menu hidden" role="dialog" aria-labelledby="qualityBlueprintMenuTitle" tabindex="-1">
@@ -287,6 +288,12 @@
       <section class="stage-panel" data-panel="settings">
         <div class="stage-head"><div><span class="eyebrow">SYSTEM SETTINGS</span><h2>纯梦官网算力与本地像塑</h2><p>默认使用纯梦官网完成文本与图片生成；视频可选本地像塑或云端算力。纯梦官网地址由软件锁定，用户只需填写授权码。</p></div><div class="head-actions"><button id="resetSettings" class="outline-button">恢复系统默认</button><button id="saveSettings" class="primary-button">保存全部设置</button></div></div>
         <div class="settings-grid">
+          <div class="settings-card workspace-mode-card panel-card">
+            <div class="card-title"><div><span class="step-tag">WORKSPACE MODE</span><h3>当前：Agent 模式</h3></div><b class="state-pill">高级调度</b></div>
+            <p>切换到简易模式后，当前 Agent 项目、任务、费用、设置和成片都保留在原处；两种模式只共享人物、场景、道具、商品和音色资产库。</p>
+            <div class="card-actions"><button id="settingsSwitchSimpleMode" class="primary-button" type="button">切换到简易模式</button></div>
+            <p class="settings-note">切换只改变默认入口，不迁移、不合并、不删除任何项目。</p>
+          </div>
           <div id="accountSwitchCard" class="settings-card account-switch-card panel-card">
             <div class="card-title"><div><span class="step-tag">XIANGSU OFFICIAL LOGIN</span><h3>安全切换像塑账号</h3></div><b id="accountSwitchState" class="state-pill">未在切换</b></div>
             <div class="account-switch-flow" role="group" aria-label="切换账号流程"><span>1 收拢旧任务</span><i>→</i><span>2 自动退出原账号</span><i>→</i><span>3 只显示一个登录窗</span><i>→</i><span>4 扫码/手机号验证后续做</span></div>

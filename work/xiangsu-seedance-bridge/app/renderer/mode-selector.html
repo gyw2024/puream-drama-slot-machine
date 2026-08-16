@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'none'; img-src 'self' data:; media-src 'none'; style-src 'self'; script-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>选择短剧制作模式 · 纯梦短剧老虎机</title>
+  <link rel="stylesheet" href="mode-selector.css">
+</head>
+<body>
+  <div class="ambient ambient-one" aria-hidden="true"></div>
+  <div class="ambient ambient-two" aria-hidden="true"></div>
+  <main class="mode-shell">
+    <header class="brand-row">
+      <span class="brand-mark"><img src="../assets/drama-slot-mark.svg" alt=""></span>
+      <span><b>纯梦短剧老虎机</b><small>PUREAM CREATIVE STUDIO</small></span>
+    </header>
+
+    <section class="mode-intro" aria-labelledby="modeTitle">
+      <span class="eyebrow">CHOOSE YOUR WORKSPACE</span>
+      <h1 id="modeTitle">这次想怎样做剧？</h1>
+      <p>两个模式使用同一套人物、场景、道具、商品和音色资产库；项目、任务、费用、设置与成片彼此独立，随时可在设置里切换。</p>
+    </section>
+
+    <section class="mode-grid" aria-label="工作模式">
+      <button class="mode-card simple-card" type="button" data-mode="simple" aria-describedby="simpleDescription">
+        <span class="mode-number">01</span>
+        <span class="mode-badge">推荐新用户</span>
+        <span class="mode-icon" aria-hidden="true">▶</span>
+        <span class="mode-copy">
+          <strong>简易模式</strong>
+          <small id="simpleDescription">像短剧工作台一样，从剧本、角色、分镜到 H3 成片按步骤推进，也可一键完成。</small>
+        </span>
+        <span class="feature-list" aria-hidden="true">
+          <i>分集与剧本</i><i>角色场景道具</i><i>分镜准备</i><i>H3 视频</i><i>成片导出</i>
+        </span>
+        <span class="enter-label">进入简易工作台 <b>→</b></span>
+      </button>
+
+      <button class="mode-card agent-card" type="button" data-mode="agent" aria-describedby="agentDescription">
+        <span class="mode-number">02</span>
+        <span class="mode-badge">高级调度</span>
+        <span class="mode-icon agent-icon" aria-hidden="true">✦</span>
+        <span class="mode-copy">
+          <strong>Agent 模式</strong>
+          <small id="agentDescription">保留现有完整界面与功能，由全局导演 Agent 规划、续跑、纠错并调度所有生产环节。</small>
+        </span>
+        <span class="feature-list" aria-hidden="true">
+          <i>导演 Agent</i><i>全流程编排</i><i>多模式控制</i><i>高级提示词</i><i>跨项目总控</i>
+        </span>
+        <span class="enter-label">进入 Agent 工作台 <b>→</b></span>
+      </button>
+    </section>
+
+    <footer>
+      <span><i></i>共享资产库已启用</span>
+      <span>选择只决定默认入口，不会迁移或删除任何数据</span>
+    </footer>
+  </main>
+  <div id="modeStatus" class="mode-status" role="status" aria-live="polite" hidden></div>
+  <script src="mode-selector.js"></script>
+</body>
+</html>

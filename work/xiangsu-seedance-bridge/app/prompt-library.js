@@ -14,7 +14,7 @@ const {
  * Production defaults — v24 continuity-block video.
  * Text LLM: full K3. Video models: per-clip facts only. Hailuo: official Subject/Picture tags.
  */
-const PROMPT_LIBRARY_VERSION = "2026.08-continuity-block-v33.0";
+const PROMPT_LIBRARY_VERSION = "2026.08-exact-dialogue-lineage-v34.0";
 
 function compactWritingPromptTemplates() {
   return {
@@ -726,7 +726,7 @@ Seedance 或其他引擎：生成阶段仍写满 soundCueSheet（bed/sfx，可�
 ################################################################################
 三、角色音色采集视频`,
 
-    characterIntro: `以图1中角色"{{characterName}}"为唯一身份和服装基准，生成独立单人物竖屏介绍定妆图。外貌与设定：{{characterDescription}}。可识别特征：{{identitySignature}}。角色必须正脸面对镜头，脸部位于视觉中心，头部偏转不超过15度，双眼同时清晰可见；采用胸像或三分之二身，手部自然落在画内，保留非对称五官、年龄纹理和职业痕迹。脸型、五官、年龄、体型、发型、服装、配饰与图1完全一致，不得磨皮、瘦脸、幼化或生成网红妆。背景固定为纯色 #D9D9D9 无缝棚拍背景，整幅像素颜色一致；禁止渐变、烟雾、云纹、阴影墙、地平线、暗角、黑边、留黑和透明底。光线柔和均匀，不得出现生活场景、家具、门窗、文字、标题、姓名、字幕、Logo、水印、拼贴、额外人物、多视图、三视图或手指畸形。只画这个人。`,
+    characterIntro: `以图1中角色"{{characterName}}"为唯一身份和服装基准，生成独立单人物身份锁定参考图；该图只供后续生成引用，严禁作为剧情镜头或进入成片。外貌与设定：{{characterDescription}}。可识别特征：{{identitySignature}}。角色必须正脸面对镜头，脸部位于视觉中心，头部偏转不超过15度，双眼同时清晰可见；采用胸像或三分之二身，手部自然落在画内，保留非对称五官、年龄纹理和职业痕迹。脸型、五官、年龄、体型、发型、服装、配饰与图1完全一致，不得磨皮、瘦脸、幼化或生成网红妆。背景固定为纯色 #D9D9D9 无缝棚拍背景，整幅像素颜色一致；禁止渐变、烟雾、云纹、阴影墙、地平线、暗角、黑边、留黑和透明底。光线柔和均匀，不得出现生活场景、家具、门窗、文字、标题、姓名、字幕、Logo、水印、拼贴、额外人物、多视图、三视图或手指畸形。只画这个人。`,
 
     characterVideo: `【Seedance 人物音色采集｜本镜自洽】图1是角色"{{characterName}}"唯一身份基准。角色：{{characterDescription}}。指纹：{{identitySignature}}。声线：{{voiceDescription}}。
 固定写实中近景，完整 {{duration}} 秒连续中文口播。0.0秒到结束前0.5秒必须一直说话，换气≤0.25秒。台词：{{speechScript}}（约 {{speechCharTarget}} 字）。无配乐、无第二人、无字幕。最后0.5秒收尾音并稳定尾帧。`,

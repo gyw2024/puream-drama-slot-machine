@@ -133,11 +133,36 @@ class AdaptiveProductionAgent {
         }
       }
     }
-    throw Object.assign(new Error(`Agent Skill ${key} 执行失败：${lastError?.message || "unknown error"}`), {
-      code: "AGENT_SKILL_FAILED",
+    // Preserve the provider's actionable code and message. The Agent boundary
+    // adds trace metadata, but must not replace a network/auth/balance cause
+    // with a generic wrapper that leaves the user unable to recover.
+    const providerRecoveryFields = [
+      "retryable",
+      "taskId",
+      "remoteSubmissionUnknown",
+      "remoteGenerationPending",
+      "remoteGenerationCompleted",
+      "remoteUrl",
+      "chargeYuan",
+      "chargeCents",
+      "settlementStatus",
+      "clientRequestId",
+      "status",
+      "upstream"
+    ];
+    const providerRecovery = {};
+    for (const field of providerRecoveryFields) {
+      if (lastError && Object.prototype.hasOwnProperty.call(lastError, field)) {
+        providerRecovery[field] = lastError[field];
+      }
+    }
+    throw Object.assign(new Error(lastError?.message || `Agent Skill ${key} 执行失败`), {
+      code: lastError?.code || "AGENT_SKILL_FAILED",
       skill: key,
       trace,
-      cause: lastError
+      cause: lastError,
+      agentSkillFailed: true,
+      ...providerRecovery
     });
   }
 

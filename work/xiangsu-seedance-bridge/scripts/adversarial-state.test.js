@@ -9,7 +9,7 @@ const test = require("node:test");
 const { BridgeClient, safeRemoteTaskFilename } = require("../app/bridge-client");
 const { buildCloudSubmit, createConcurrencyLimiter, openUploadBody } = require("../app/puream-video-adapters");
 const { hydratePureamDefaults } = require("../app/puream-auth-config");
-const { WorkbenchStore, isPathInside } = require("../app/workbench-store");
+const { WorkbenchStore, isPathInside, mergeAutomationState } = require("../app/workbench-store");
 const { WorkbenchWorkflow, executeShotVideoBatch, imageBatchConcurrency } = require("../app/workbench-workflow");
 const XiangsuPlugin = require("../plugin/lib/plugin/index");
 
@@ -44,6 +44,32 @@ test("stale project snapshots preserve concurrent records while explicit deletio
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a new asset batch replaces obsolete rows and rejects late saves from the old batch", () => {
+  const oldProgress = {
+    kind: "asset_batch",
+    batchId: "asset-batch-old",
+    batchStartedAt: "2026-08-15T00:00:00.000Z",
+    items: [
+      { key: "scene_asset:SRC_SC001", status: "completed", updatedAt: "2026-08-15T00:00:10.000Z" },
+      { key: "scene_asset:SRC_SC006", status: "failed", updatedAt: "2026-08-15T00:00:10.000Z" }
+    ]
+  };
+  const newProgress = {
+    kind: "asset_batch",
+    batchId: "asset-batch-new",
+    batchStartedAt: "2026-08-16T00:00:00.000Z",
+    items: [
+      { key: "scene_asset:SRC_SC001", status: "queued", updatedAt: "2026-08-16T00:00:00.000Z" }
+    ]
+  };
+  const replaced = mergeAutomationState({ progress: oldProgress }, { progress: newProgress }).progress;
+  assert.equal(replaced.batchId, "asset-batch-new");
+  assert.deepEqual(replaced.items.map(item => item.key), ["scene_asset:SRC_SC001"]);
+  const lateOldSave = mergeAutomationState({ progress: newProgress }, { progress: oldProgress }).progress;
+  assert.equal(lateOldSave.batchId, "asset-batch-new");
+  assert.deepEqual(lateOldSave.items.map(item => item.key), ["scene_asset:SRC_SC001"]);
 });
 
 test("corrupt indexes rebuild from projects and project backup restores the last valid JSON", () => {

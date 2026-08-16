@@ -32,6 +32,7 @@ async function main() {
   const auditAutolaunch = process.env.PUREAM_MCP_AUDIT_AUTOLAUNCH === "1";
   fs.mkdirSync(userDataDir, { recursive: true });
   fs.mkdirSync(workbenchDir, { recursive: true });
+  fs.writeFileSync(path.join(userDataDir, "workspace-mode.json"), JSON.stringify({ version: 1, mode: "agent", updatedAt: new Date().toISOString() }, null, 2), "utf8");
   const licenseSource = process.env.DRAMA_SLOT_AUDIT_LICENSE_SOURCE
     || path.join(process.env.APPDATA || "", packageJson.name, "drama-license.json");
   assert.ok(fs.existsSync(licenseSource), "packaged MCP audit requires an existing activation snapshot");

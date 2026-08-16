@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
@@ -25,9 +26,88 @@ const {
 const BRIDGE_ORIGIN = LOCAL_XIANGSU_ORIGIN;
 const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_REMOTE_VIDEO_BYTES = 500 * 1024 * 1024;
+const MAX_LOCAL_BRIDGE_RESPONSE_BYTES = 5 * 1024 * 1024;
+let localBridgeRecoveryPromise = null;
 
 function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+function localBridgeReadyForSubmission(health) {
+  return health?.ok === true
+    && health?.ready === true
+    && health?.restartRequired !== true
+    && health?.sessionReady !== false;
+}
+
+function isLocalPreconnectFailure(error) {
+  return ["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"].includes(String(error?.code || "").toUpperCase());
+}
+
+/**
+ * Node's built-in fetch currently inherits an internal response-header deadline
+ * even when AbortSignal has no timeout. Local Xiangsu submissions intentionally
+ * keep the HTTP response open while native reference uploads finish, so use the
+ * lower-level client whose production path has no implicit wall-clock cutoff.
+ */
+function requestLocalBridge(requestUrl, init = {}, expectedOrigin = BRIDGE_ORIGIN) {
+  const target = new URL(requestUrl);
+  if (target.origin !== new URL(expectedOrigin).origin) {
+    throw Object.assign(new Error("本地像塑桥地址无效"), { code: "LOCAL_BRIDGE_ORIGIN_INVALID" });
+  }
+  const body = init.body === undefined || init.body === null ? null : Buffer.from(String(init.body), "utf8");
+  const headers = { ...(init.headers || {}) };
+  if (body && !Object.keys(headers).some(key => key.toLowerCase() === "content-length")) headers["content-length"] = String(body.length);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      init.signal?.removeEventListener("abort", onAbort);
+      callback(value);
+    };
+    const request = http.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: init.method || "GET",
+      headers,
+      agent: false
+    }, response => {
+      const chunks = [];
+      let size = 0;
+      response.on("data", chunk => {
+        const buffer = Buffer.from(chunk);
+        size += buffer.length;
+        if (size > MAX_LOCAL_BRIDGE_RESPONSE_BYTES) {
+          request.destroy(Object.assign(new Error("本地像塑桥响应超过安全上限"), { code: "LOCAL_BRIDGE_RESPONSE_TOO_LARGE" }));
+          return;
+        }
+        chunks.push(buffer);
+      });
+      response.on("end", () => finish(resolve, {
+        ok: Number(response.statusCode) >= 200 && Number(response.statusCode) < 300,
+        status: Number(response.statusCode) || 0,
+        text: async () => Buffer.concat(chunks).toString("utf8")
+      }));
+      response.on("error", error => finish(reject, error));
+    });
+    const onAbort = () => {
+      const reason = init.signal?.reason instanceof Error
+        ? init.signal.reason
+        : Object.assign(new Error("本地像塑桥请求已取消"), { name: "AbortError", code: "PROVIDER_REQUEST_ABORTED" });
+      request.destroy(reason);
+    };
+    request.on("error", error => finish(reject, error));
+    if (init.signal?.aborted) {
+      onAbort();
+      return;
+    }
+    init.signal?.addEventListener("abort", onAbort, { once: true });
+    if (body) request.write(body);
+    request.end();
+  });
 }
 
 function normalizeRemoteTaskId(taskId) {
@@ -272,7 +352,8 @@ function controlXiangsuWindows(executable, launchedAt, mode, controlPath, contro
 
 class BridgeClient {
   constructor(options = {}) {
-    this.fetch = typeof options.fetchImpl === "function" ? options.fetchImpl : globalThis.fetch.bind(globalThis);
+    this.fetchImpl = typeof options.fetchImpl === "function" ? options.fetchImpl : null;
+    this.fetch = this.fetchImpl || globalThis.fetch.bind(globalThis);
     this.tokenPath = options.tokenPath || process.env.SEEDANCE_BRIDGE_TOKEN_PATH || path.join(process.env.LOCALAPPDATA || os.tmpdir(), "SeedanceBridge", "bridge-token");
     this.stateDir = path.dirname(this.tokenPath);
     this.remoteTasksPath = path.join(this.stateDir, "remote-tasks.json");
@@ -281,7 +362,7 @@ class BridgeClient {
   }
 
   fork(config = this.config) {
-    const client = new BridgeClient({ fetchImpl: this.fetch, tokenPath: this.tokenPath });
+    const client = new BridgeClient({ ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}), tokenPath: this.tokenPath });
     client.configure(config);
     return client;
   }
@@ -351,11 +432,15 @@ class BridgeClient {
       ? Number(options.timeoutMs)
       : REQUEST_TIMEOUT_MS;
     const timeout = requestedTimeoutMs > 0 ? setTimeout(() => controller.abort(), requestedTimeoutMs) : null;
+    const externalSignal = options.signal;
+    const abortFromExternal = () => controller.abort(externalSignal?.reason);
+    if (externalSignal?.aborted) abortFromExternal();
+    else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
 
     try {
       const requestUrl = `${this.config.baseUrl}${route}`;
       if (this.isRemote()) assertPureamCloudRequestUrl(requestUrl);
-      const response = await this.fetch(requestUrl, {
+      const requestInit = {
         method: options.method || "GET",
         headers: {
           "authorization": `Bearer ${token}`,
@@ -365,7 +450,10 @@ class BridgeClient {
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         signal: controller.signal,
         redirect: this.isRemote() ? "error" : "follow"
-      });
+      };
+      const response = !this.isRemote() && !this.fetchImpl
+        ? await requestLocalBridge(requestUrl, requestInit)
+        : await this.fetch(requestUrl, requestInit);
       const text = await response.text();
       let payload;
       try {
@@ -378,11 +466,23 @@ class BridgeClient {
         error.code = payload.code || "BRIDGE_HTTP_ERROR";
         error.status = response.status;
         error.details = payload.result || null;
+        error.retryable = payload.retryable === true;
         throw error;
       }
       return payload;
+    } catch (error) {
+      if (externalSignal?.aborted) {
+        throw externalSignal.reason instanceof Error
+          ? externalSignal.reason
+          : Object.assign(new Error("视频生产任务已取消"), { code: "PROVIDER_REQUEST_ABORTED" });
+      }
+      if (error?.name === "AbortError" && requestedTimeoutMs > 0) {
+        throw Object.assign(new Error("视频服务连接超时"), { code: "BRIDGE_REQUEST_TIMEOUT", cause: error });
+      }
+      throw error;
     } finally {
       if (timeout) clearTimeout(timeout);
+      externalSignal?.removeEventListener("abort", abortFromExternal);
     }
   }
 
@@ -414,13 +514,34 @@ class BridgeClient {
           message: `${providerDisplayName(this.config.kind)}网络与授权校验通过；校验不创建计费任务`
         };
       }
-      return await this.request("/v1/health", { timeoutMs: 2_500 });
+      const installation = this.ensurePluginInstalled();
+      const localHealth = await this.request("/v1/health", { timeoutMs: 2_500 });
+      const runningVersion = String(localHealth?.version || "").trim();
+      if (runningVersion !== installation.version) {
+        return {
+          ...localHealth,
+          ok: false,
+          ready: false,
+          code: "XIANGSU_PLUGIN_RESTART_REQUIRED",
+          runningVersion,
+          expectedVersion: installation.version,
+          pluginUpdated: installation.updated === true,
+          restartRequired: true,
+          message: `像塑桥接插件已更新到 ${installation.version}，请退出并重新打开像塑后继续；不会重新提交已存在的任务`
+        };
+      }
+      return {
+        ...localHealth,
+        expectedVersion: installation.version,
+        pluginUpdated: installation.updated === true,
+        restartRequired: false
+      };
     } catch (error) {
       return {
         ok: false,
         code: error.name === "AbortError" ? "BRIDGE_TIMEOUT" : (error.code || "BRIDGE_OFFLINE"),
         remote: this.isRemote(),
-        message: this.isRemote() ? `${providerDisplayName(this.config.kind)}配置不可用：${error.message}` : "像塑后台桥未连接"
+        message: this.isRemote() ? `${providerDisplayName(this.config.kind)}配置不可用：${error.message}` : (error.message || "像塑后台桥未连接")
       };
     }
   }
@@ -536,7 +657,7 @@ class BridgeClient {
     this.writeRemoteTasks(tasks);
   }
 
-  async submit(payload) {
+  async submit(payload, options = {}) {
     // Payload providerKind is the job contract. Never let a stale BridgeClient
     // default (local-xiangsu) swallow a Hailuo H3 / Seedance cloud submission —
     // local plugin only accepts ability SD_2.0_MINI and returns ABILITY_NOT_ALLOWED.
@@ -548,10 +669,71 @@ class BridgeClient {
         ? LOCAL_XIANGSU_ORIGIN
         : (/^https:\/\/([a-z0-9.-]+\.)?puream\.cn(\/|$)/i.test(String(this.config.baseUrl || "")) ? this.config.baseUrl : "https://puream.cn")
     };
-    return this.fork(scopedConfig).submitScoped(payload);
+    return this.fork(scopedConfig).submitScoped(payload, options);
   }
 
-  async submitScoped(payload) {
+  async ensureLocalSubmissionBridge(options = {}) {
+    if (this.isRemote()) return { ok: true, ready: true, sessionReady: true, remote: true };
+    if (localBridgeRecoveryPromise) return localBridgeRecoveryPromise;
+
+    const timeoutMs = Math.max(5_000, Number(options.timeoutMs) || 45_000);
+    const stabilizeMs = Math.max(0, Object.prototype.hasOwnProperty.call(options, "stabilizeMs")
+      ? Number(options.stabilizeMs) || 0
+      : 700);
+    const recover = async () => {
+      let health = options.forceLaunch === true ? null : await this.health();
+      if (health?.restartRequired) {
+        throw Object.assign(new Error(health.message || "The Xiangsu bridge plugin must be restarted before video submission."), {
+          code: health.code || "XIANGSU_PLUGIN_RESTART_REQUIRED",
+          health
+        });
+      }
+      if (!localBridgeReadyForSubmission(health)) {
+        this.launchXiangsuBridge();
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          health = await this.health();
+          if (health?.restartRequired) {
+            throw Object.assign(new Error(health.message || "The Xiangsu bridge plugin must be restarted before video submission."), {
+              code: health.code || "XIANGSU_PLUGIN_RESTART_REQUIRED",
+              health
+            });
+          }
+          if (localBridgeReadyForSubmission(health)) break;
+          await delay(500);
+        }
+      }
+      if (!localBridgeReadyForSubmission(health)) {
+        throw Object.assign(new Error(health?.message || "Xiangsu did not become ready for video submission."), {
+          code: health?.code || "XIANGSU_SUBMISSION_BRIDGE_NOT_READY",
+          health
+        });
+      }
+
+      // Keep the native editor available as a background service. The hider is
+      // token-controlled, so the explicit login action can still reveal only
+      // the official login window without racing this background guard.
+      try { this.hideRunningXiangsuWindows(); } catch {}
+      if (stabilizeMs > 0) await delay(stabilizeMs);
+      const stableHealth = await this.health();
+      if (!localBridgeReadyForSubmission(stableHealth)) {
+        throw Object.assign(new Error(stableHealth?.message || "Xiangsu closed while preparing the video submission."), {
+          code: stableHealth?.code || "XIANGSU_SUBMISSION_BRIDGE_UNSTABLE",
+          health: stableHealth
+        });
+      }
+      return stableHealth;
+    };
+
+    localBridgeRecoveryPromise = recover();
+    try {
+      return await localBridgeRecoveryPromise;
+    } finally {
+      localBridgeRecoveryPromise = null;
+    }
+  }
+
+  async submitScoped(payload, options = {}) {
     if (!this.isRemote()) {
       const ability = String(payload?.ability || "SD_2.0_MINI");
       if (ability !== "SD_2.0_MINI") {
@@ -561,7 +743,26 @@ class BridgeClient {
           providerKind: this.config.kind
         });
       }
-      const result = await this.request("/v1/videos", { method: "POST", body: payload, timeoutMs: 0 });
+      await this.ensureLocalSubmissionBridge();
+      let result;
+      try {
+        result = await this.request("/v1/videos", { method: "POST", body: payload, timeoutMs: 0, signal: options.signal });
+      } catch (error) {
+        // ECONNREFUSED happens before a TCP connection is accepted, so no paid
+        // upstream task can exist. It is therefore safe to relaunch and replay
+        // the same stable clientRequestId once. Other transport failures remain
+        // response-unknown and are never blindly duplicated.
+        if (!isLocalPreconnectFailure(error)) {
+          if (["ECONNRESET", "EPIPE"].includes(String(error?.code || "").toUpperCase())) {
+            error.code = "VIDEO_SUBMISSION_RESPONSE_UNKNOWN";
+            error.remoteSubmissionUnknown = true;
+            error.clientRequestId = payload?.clientRequestId || "";
+          }
+          throw error;
+        }
+        await this.ensureLocalSubmissionBridge({ forceLaunch: true });
+        result = await this.request("/v1/videos", { method: "POST", body: payload, timeoutMs: 0, signal: options.signal });
+      }
       if (result?.taskId) this.saveRemoteTask(result.taskId, {
         outputDir: payload.outputDir,
         providerKind: "local-xiangsu",
@@ -569,14 +770,15 @@ class BridgeClient {
       });
       return result;
     }
-    const cloud = await buildCloudSubmit(this.config, payload, this.fetch, fs);
+    const cloud = await buildCloudSubmit(this.config, payload, this.fetch, fs, options);
     let raw;
     try {
       raw = await this.request(apiRoutes(this.config.kind).submit, {
         method: "POST",
         body: cloud.body,
         headers: { "idempotency-key": cloud.requestId },
-        timeoutMs: 0
+        timeoutMs: 0,
+        signal: options.signal
       });
     } catch (error) {
       const status = Number(error?.status) || 0;
@@ -642,7 +844,7 @@ class BridgeClient {
     return writeResponseToFile(response, target);
   }
 
-  async query(taskId) {
+  async query(taskId, options = {}) {
     taskId = normalizeRemoteTaskId(taskId);
     const task = this.readRemoteTasks()[taskId];
     const taskKind = task?.providerKind ? normalizeProviderKind(task.providerKind) : this.config.kind;
@@ -653,12 +855,23 @@ class BridgeClient {
         ? LOCAL_XIANGSU_ORIGIN
         : (/^https:\/\/([a-z0-9.-]+\.)?puream\.cn(\/|$)/i.test(String(this.config.baseUrl || "")) ? this.config.baseUrl : "https://puream.cn")
     };
-    return this.fork(scopedConfig).queryScoped(taskId, task);
+    return this.fork(scopedConfig).queryScoped(taskId, task, options);
   }
 
-  async queryScoped(taskId, task = null) {
-    if (!this.isRemote()) return this.request(`/v1/videos/${encodeURIComponent(taskId)}`, { timeoutMs: 120_000 });
-    const raw = await this.request(apiRoutes(this.config.kind, taskId).query, { timeoutMs: 120_000 });
+  async queryScoped(taskId, task = null, options = {}) {
+    if (!this.isRemote()) {
+      const outputDir = typeof task?.outputDir === "string" && path.isAbsolute(task.outputDir)
+        ? `?outputDir=${encodeURIComponent(task.outputDir)}`
+        : "";
+      try {
+        return await this.request(`/v1/videos/${encodeURIComponent(taskId)}${outputDir}`, { timeoutMs: 0, signal: options.signal });
+      } catch (error) {
+        if (!isLocalPreconnectFailure(error)) throw error;
+        await this.ensureLocalSubmissionBridge({ forceLaunch: true });
+        return this.request(`/v1/videos/${encodeURIComponent(taskId)}${outputDir}`, { timeoutMs: 0, signal: options.signal });
+      }
+    }
+    const raw = await this.request(apiRoutes(this.config.kind, taskId).query, { timeoutMs: 0, signal: options.signal });
     const result = mapQueryResponse(raw, this.config.kind, taskId);
     if (this.config.kind === "puream-hailuo-h3") result.requestedMode = task?.requestedMode || "auto";
     if (result.status === "finished") {
@@ -685,6 +898,17 @@ class BridgeClient {
       path.resolve(__dirname, "..", "plugin")
     ].filter(Boolean);
     return candidates.find(candidate => fs.existsSync(path.join(candidate, "plugin.manifest.json"))) || null;
+  }
+
+  resolveBundledPluginVersion(sourceDir = this.resolveBundledPluginDir()) {
+    if (!sourceDir) return "";
+    for (const name of ["plugin.manifest.json", "package.json"]) {
+      try {
+        const version = String(JSON.parse(fs.readFileSync(path.join(sourceDir, name), "utf8"))?.version || "").trim();
+        if (/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) return version;
+      } catch {}
+    }
+    return "";
   }
 
   locatePluginSlots() {
@@ -718,12 +942,30 @@ class BridgeClient {
       error.code = "XIANGSU_PLUGIN_SLOT_NOT_FOUND";
       throw error;
     }
+    const pluginVersion = this.resolveBundledPluginVersion(sourceDir);
+    if (!pluginVersion) {
+      const error = new Error("像塑桥接插件缺少有效版本信息");
+      error.code = "PLUGIN_VERSION_INVALID";
+      throw error;
+    }
 
     const destinations = [];
+    let updated = false;
+    const sourceEntry = path.join(sourceDir, "lib", "plugin", "index.js");
+    const sourceEntryHash = fs.existsSync(sourceEntry)
+      ? crypto.createHash("sha256").update(fs.readFileSync(sourceEntry)).digest("hex")
+      : "";
     for (const slot of slots) {
       fs.mkdirSync(slot, { recursive: true });
-      const destination = path.join(slot, "SeedanceBridge@0.2.0");
-      fs.cpSync(sourceDir, destination, { recursive: true, force: true });
+      const destination = path.join(slot, `SeedanceBridge@${pluginVersion}`);
+      const destinationEntry = path.join(destination, "lib", "plugin", "index.js");
+      const destinationEntryHash = fs.existsSync(destinationEntry)
+        ? crypto.createHash("sha256").update(fs.readFileSync(destinationEntry)).digest("hex")
+        : "";
+      if (!sourceEntryHash || sourceEntryHash !== destinationEntryHash) {
+        fs.cpSync(sourceDir, destination, { recursive: true, force: true });
+        updated = true;
+      }
 
       const configPath = path.join(slot, "plugins.config.json");
       let config = { plugins: [] };
@@ -733,15 +975,17 @@ class BridgeClient {
       if (!Array.isArray(config.plugins)) config.plugins = [];
       const existing = config.plugins.find(item => item && item.name === "SeedanceBridge");
       if (existing) {
-        existing.version = "0.2.0";
+        if (existing.version !== pluginVersion || existing.loadOnStartup !== true) updated = true;
+        existing.version = pluginVersion;
         existing.loadOnStartup = true;
       } else {
-        config.plugins.push({ name: "SeedanceBridge", version: "0.2.0", loadOnStartup: true });
+        config.plugins.push({ name: "SeedanceBridge", version: pluginVersion, loadOnStartup: true });
+        updated = true;
       }
-      fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+      if (updated || !fs.existsSync(configPath)) atomicWriteJsonWithBackup(configPath, config);
       destinations.push(destination);
     }
-    return { ok: true, destinations };
+    return { ok: true, version: pluginVersion, updated, destinations };
   }
 
   locateXiangsu() {
@@ -846,4 +1090,4 @@ class BridgeClient {
   }
 }
 
-module.exports = { BridgeClient, BRIDGE_ORIGIN, buildWindowHiderCommand, safeRemoteTaskFilename };
+module.exports = { BridgeClient, BRIDGE_ORIGIN, buildWindowHiderCommand, requestLocalBridge, safeRemoteTaskFilename };

@@ -50,11 +50,14 @@ app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 
 const bridge = new BridgeClient();
+const simpleBridge = new BridgeClient();
 let dramaLicense;
 const integrityGuard = createIntegrityGuard({ app });
 let mainWindow;
 let workbenchStore;
 let workbenchWorkflow;
+let simpleModeStore;
+let simpleModeWorkflow;
 let foundryKernel;
 let mcpControlGateway;
 let accountSwitchRequest = null;
@@ -74,6 +77,42 @@ let updateState = {
 
 function storageLocationConfigPath() {
   return path.join(app.getPath("userData"), "storage-location.json");
+}
+
+function workspaceModeConfigPath() {
+  return path.join(app.getPath("userData"), "workspace-mode.json");
+}
+
+function normalizeWorkspaceMode(value) {
+  return value === "simple" ? "simple" : "agent";
+}
+
+function readWorkspaceMode() {
+  const forced = String(process.env.DRAMA_SLOT_WORKSPACE_MODE || "").trim().toLowerCase();
+  if (!app.isPackaged && ["agent", "simple"].includes(forced)) {
+    return { selected: true, mode: forced, updatedAt: "test-runtime-override" };
+  }
+  try {
+    const saved = JSON.parse(fs.readFileSync(workspaceModeConfigPath(), "utf8"));
+    if (["agent", "simple"].includes(saved?.mode)) {
+      return { selected: true, mode: normalizeWorkspaceMode(saved.mode), updatedAt: saved.updatedAt || "" };
+    }
+  } catch {}
+  return { selected: false, mode: "", updatedAt: "" };
+}
+
+function saveWorkspaceMode(mode) {
+  const normalized = normalizeWorkspaceMode(mode);
+  const configPath = workspaceModeConfigPath();
+  const temporary = `${configPath}.${process.pid}.tmp`;
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(temporary, JSON.stringify({ version: 1, mode: normalized, updatedAt: new Date().toISOString() }, null, 2), "utf8");
+  fs.renameSync(temporary, configPath);
+  return { selected: true, mode: normalized };
+}
+
+function workspaceModePage(mode) {
+  return normalizeWorkspaceMode(mode) === "simple" ? "simple-mode.html" : "workbench.html";
 }
 
 function defaultWorkbenchDataRoot() {
@@ -247,8 +286,8 @@ async function downloadAppUpdate() {
   return updateDownloadRequest;
 }
 
-function hydratePureamDefaults(store, activationCode = "") {
-  return applyPureamAuthorization(store, activationCode, { bridge });
+function hydratePureamDefaults(store, activationCode = "", targetBridge = bridge) {
+  return applyPureamAuthorization(store, activationCode, { bridge: targetBridge });
 }
 
 function storedWorkbenchAuthorizationCode() {
@@ -472,7 +511,14 @@ function createWindow() {
     const saved = workbenchStore.saveSettings(settings);
     bridge.configure(saved.videoProvider);
   }
-  const startPage = captureScenario === "hailuoquick" ? "index.html" : "workbench.html";
+  const modeState = readWorkspaceMode();
+  const startPage = captureScenario === "hailuoquick"
+    ? "index.html"
+    : capturePath
+      ? "workbench.html"
+      : modeState.selected
+        ? workspaceModePage(modeState.mode)
+        : "mode-selector.html";
   mainWindow.loadFile(path.join(__dirname, "renderer", startPage), captureFragment ? { hash: captureFragment } : undefined);
   if (capturePath) {
     mainWindow.webContents.once("did-finish-load", () => {
@@ -1379,12 +1425,12 @@ function manualAssetCategory(entityType, mediaType) {
   return mediaType === "video" ? "videos" : "audio";
 }
 
-async function importCandidateFromPath(projectId, entityType, entityId, stage, sourcePath, source = "manual-upload", reusableAssetId = "") {
+async function importCandidateFromPath(projectId, entityType, entityId, stage, sourcePath, source = "manual-upload", reusableAssetId = "", context = null) {
   const mediaType = manualStageMediaType(stage);
   if (!mediaType || !["character", "scene", "shot", "library"].includes(entityType)) {
     throw Object.assign(new Error("手动资产类型无效"), { code: "IMPORT_STAGE_INVALID" });
   }
-  const { store, workflow } = requireWorkbench();
+  const { store, workflow } = context || requireWorkbench();
   const described = await describeMedia(sourcePath, mediaType);
   if (stage === "shot_video" && Number(described.duration) > 15.05) {
     throw Object.assign(new Error("分镜视频时长不能超过 15 秒"), { code: "VIDEO_DURATION_INVALID" });
@@ -1444,8 +1490,8 @@ async function importCandidateFromPath(projectId, entityType, entityId, stage, s
   return { candidate, described, extractedVoice, warning: libraryWarning };
 }
 
-async function importProductFromPath(projectId, sourcePath, source = "manual-upload", reusableAssetId = "") {
-  const { store, workflow } = requireWorkbench();
+async function importProductFromPath(projectId, sourcePath, source = "manual-upload", reusableAssetId = "", context = null) {
+  const { store, workflow } = context || requireWorkbench();
   const described = await describeMedia(sourcePath, "image");
   const imported = workflow.importAsset(projectId, "product", described.importPath || sourcePath, "product-manual");
   const project = store.replaceProductAsset(projectId, {
@@ -1471,8 +1517,8 @@ async function importProductFromPath(projectId, sourcePath, source = "manual-upl
   return { asset: imported, project: store.getProject(projectId) };
 }
 
-async function importFinalVideoFromPath(projectId, sourcePath, source = "manual-upload", reusableAssetId = "") {
-  const { store, workflow } = requireWorkbench();
+async function importFinalVideoFromPath(projectId, sourcePath, source = "manual-upload", reusableAssetId = "", context = null) {
+  const { store, workflow } = context || requireWorkbench();
   const described = await describeMedia(sourcePath, "video");
   const imported = workflow.importAsset(projectId, "final", sourcePath, "final-manual");
   const project = store.getProject(projectId);
@@ -1523,8 +1569,8 @@ async function importFinalVideoFromPath(projectId, sourcePath, source = "manual-
   return { asset: imported, described, project: store.getProject(projectId) };
 }
 
-async function importVoiceLibraryFromPath(sourcePath) {
-  const { store, workflow } = requireWorkbench();
+async function importVoiceLibraryFromPath(sourcePath, context = null) {
+  const { store, workflow } = context || requireWorkbench();
   const described = await describeMedia(sourcePath, "audio");
   if (Number(described.duration) > 15.05) {
     throw Object.assign(new Error("单个音色参考不能超过音频总上限 15 秒"), { code: "AUDIO_DURATION_INVALID" });
@@ -1559,8 +1605,8 @@ async function importVoiceLibraryFromPath(sourcePath) {
   return { entry, voices: workflow.listVoiceLibrary() };
 }
 
-function reusableAssetsForRenderer(kind = "") {
-  const { store, workflow } = requireWorkbench();
+function reusableAssetsForRenderer(kind = "", context = null) {
+  const { store, workflow } = context || requireWorkbench();
   const normalizedKind = String(kind || "").trim();
   const assets = normalizedKind === "voice" ? [] : store.listReusableAssets(normalizedKind);
   if (normalizedKind && normalizedKind !== "voice") return assets;
@@ -1993,13 +2039,34 @@ ipcMain.handle("file:reveal", async (_event, targetPath) => {
   return true;
 });
 
+ipcMain.handle("app-mode:get", () => ({ ok: true, ...readWorkspaceMode() }));
+ipcMain.handle("app-mode:select", async (_event, mode) => {
+  try {
+    if (!["agent", "simple"].includes(String(mode || ""))) {
+      throw Object.assign(new Error("工作模式无效"), { code: "WORKSPACE_MODE_INVALID" });
+    }
+    const saved = saveWorkspaceMode(mode);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      await mainWindow.loadFile(path.join(__dirname, "renderer", workspaceModePage(saved.mode)));
+    }
+    return { ok: true, ...saved };
+  } catch (error) {
+    return publicError(error);
+  }
+});
+
 function requireWorkbench() {
   if (!workbenchStore || !workbenchWorkflow) throw Object.assign(new Error("漫剧工作台尚未初始化"), { code: "WORKBENCH_NOT_READY" });
   return { store: workbenchStore, workflow: workbenchWorkflow };
 }
 
-function projectForRenderer(projectId, { reconcile = true } = {}) {
-  const { store, workflow } = requireWorkbench();
+function requireSimpleMode() {
+  if (!simpleModeStore || !simpleModeWorkflow) throw Object.assign(new Error("简易工作台尚未初始化"), { code: "SIMPLE_MODE_NOT_READY" });
+  return { store: simpleModeStore, workflow: simpleModeWorkflow };
+}
+
+function projectForRendererFrom(context, projectId, { reconcile = true } = {}) {
+  const { store, workflow } = context;
   if (reconcile) workflow.reconcileDetachedAutomations(projectId);
   const project = store.getProject(projectId);
   const activeVideoJobs = store.listActiveVideoJobs(projectId);
@@ -2013,6 +2080,94 @@ function projectForRenderer(projectId, { reconcile = true } = {}) {
       checkedAt: new Date().toISOString()
     }
   };
+}
+
+function projectForRenderer(projectId, { reconcile = true } = {}) {
+  return projectForRendererFrom(requireWorkbench(), projectId, { reconcile });
+}
+
+function enforceSimpleH3Settings(incoming = {}, current = {}) {
+  const merged = {
+    ...(current || {}),
+    ...(incoming || {}),
+    generation: {
+      ...(current?.generation || {}),
+      ...(incoming?.generation || {})
+    },
+    videoProvider: {
+      ...(current?.videoProvider || {}),
+      ...(incoming?.videoProvider || {}),
+      kind: "puream-hailuo-h3",
+      baseUrl: "https://puream.cn",
+      model: "hailuo-h3",
+      hailuoApiMode: incoming?.videoProvider?.hailuoApiMode || current?.videoProvider?.hailuoApiMode || "auto"
+    }
+  };
+  return merged;
+}
+
+function createSimpleProject(context, title, options = {}) {
+  const requested = options && typeof options === "object" ? options : {};
+  const project = context.store.createProject(title, {
+    ...requested,
+    engine: "hailuo-h3",
+    videoProviderKind: "puream-hailuo-h3",
+    modeConfirmed: true,
+    executionMode: requested.executionMode === "step" ? "step" : "full",
+    inputMode: requested.inputMode === "ai" ? "ai" : "manual"
+  });
+  context.store.patchProject(project.id, {
+    generation: {
+      ...(project.generation || {}),
+      engine: "hailuo-h3",
+      videoProviderKind: "puream-hailuo-h3",
+      modeConfirmed: true,
+      modeConfirmedAt: new Date().toISOString()
+    },
+    productionPlan: {
+      ...(project.productionPlan || {}),
+      executionMode: requested.executionMode === "step" ? "step" : "full",
+      inputMode: requested.inputMode === "ai" ? "ai" : "manual",
+      scriptHandling: requested.scriptHandling || (requested.inputMode === "ai" ? "optimize" : "respect")
+    },
+    activitySummary: "已创建简易模式 H3 项目"
+  });
+  return projectForRendererFrom(context, project.id, { reconcile: false });
+}
+
+async function importReusableAssetForContext(kind, context) {
+  const normalizedKind = String(kind || "").trim();
+  const mediaType = ["character", "scene", "prop", "wardrobe", "product", "image"].includes(normalizedKind)
+    ? "image"
+    : normalizedKind === "voice" ? "audio" : normalizedKind;
+  if (!["character", "scene", "prop", "wardrobe", "product", "image", "video", "audio", "voice"].includes(normalizedKind)) {
+    throw Object.assign(new Error("独立资产类型无效"), { code: "REUSABLE_ASSET_KIND_INVALID" });
+  }
+  const labels = { character: "人物图", scene: "场景图", prop: "道具图", wardrobe: "服装图", product: "商品图", voice: "人物音色" };
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: `上传${labels[normalizedKind] || (mediaType === "image" ? "通用图片" : mediaType === "video" ? "视频" : "音频")}到共享资产库`,
+    properties: ["openFile", "multiSelections"],
+    filters: MEDIA_RULES[mediaType].filters
+  });
+  if (result.canceled) return { ok: true, canceled: true };
+  const entries = [];
+  for (const filePath of result.filePaths) {
+    if (normalizedKind === "voice") {
+      entries.push((await importVoiceLibraryFromPath(filePath, context)).entry);
+      continue;
+    }
+    const described = await describeMedia(filePath, mediaType);
+    entries.push(context.store.importReusableAsset(described.importPath || filePath, {
+      kind: normalizedKind,
+      mediaType,
+      label: path.basename(filePath, path.extname(filePath)),
+      duration: described.duration,
+      width: described.width,
+      height: described.height,
+      qualityAudit: { ok: true, mode: "manual-probe", checkedAt: new Date().toISOString() }
+    }));
+  }
+  return { ok: true, entries, assets: reusableAssetsForRenderer("", context) };
 }
 
 function publicPendingJobs(records) {
@@ -2216,6 +2371,201 @@ ipcMain.handle("workbench:cancel-account-switch", async () => {
     });
     return { ok: true, state };
   } catch (error) { return publicError(error); }
+});
+
+ipcMain.handle("simple:call", async (_event, method, args = []) => {
+  try {
+    const context = requireSimpleMode();
+    const { store, workflow } = context;
+    const values = Array.isArray(args) ? args : [];
+    switch (String(method || "")) {
+      case "listProjects":
+        workflow.reconcileDetachedAutomations();
+        return { ok: true, projects: store.listProjects() };
+      case "createProject": {
+        const project = createSimpleProject(context, values[0], values[1] || {});
+        return { ok: true, project, settings: redactSettingsForRenderer(store.getSettings()) };
+      }
+      case "deleteProject": {
+        const projectId = String(values[0] || "");
+        if (workflow.hasActiveOperation(projectId) || store.listActiveVideoJobs(projectId).length > 0) {
+          throw Object.assign(new Error("该项目仍有任务运行，结束或等待任务完成后才能删除"), { code: "PROJECT_DELETE_ACTIVE" });
+        }
+        return { ok: true, result: store.deleteProject(projectId) };
+      }
+      case "listDeletedProjects":
+        return { ok: true, projects: store.listDeletedProjects() };
+      case "restoreProject": {
+        const restored = store.restoreProject(values[0]);
+        return { ok: true, project: projectForRendererFrom(context, restored.id) };
+      }
+      case "getProject":
+        return { ok: true, project: projectForRendererFrom(context, values[0]) };
+      case "patchProject": {
+        const patch = values[1] && typeof values[1] === "object" ? { ...values[1] } : {};
+        if (patch.generation) {
+          patch.generation = {
+            ...patch.generation,
+            engine: "hailuo-h3",
+            videoProviderKind: "puream-hailuo-h3"
+          };
+        }
+        store.patchProject(values[0], patch);
+        return { ok: true, project: projectForRendererFrom(context, values[0], { reconcile: false }) };
+      }
+      case "getSettings":
+        return { ok: true, settings: redactSettingsForRenderer(store.getSettings()) };
+      case "saveSettings": {
+        const saved = store.saveSettings(enforceSimpleH3Settings(values[0] || {}, store.getSettings()));
+        simpleBridge.configure(saved.videoProvider);
+        return { ok: true, settings: redactSettingsForRenderer(saved) };
+      }
+      case "resetSettings": {
+        const reset = store.resetSettings({ preserveSecrets: true });
+        const saved = store.saveSettings(enforceSimpleH3Settings(reset, reset));
+        simpleBridge.configure(saved.videoProvider);
+        return { ok: true, settings: redactSettingsForRenderer(saved) };
+      }
+      case "storageLocation":
+        return { ok: true, projectRoot: store.rootDir, sharedLibraryRoot: store.sharedLibraryRoot };
+      case "licenseStatus": {
+        if (licenseBypassAllowed()) return { ok: true, activated: true, bypass: true };
+        const result = await ensurePureamLicenseSession(dramaLicense, store.getSettings());
+        if (result.snapshot?.activated) hydratePureamDefaults(store, result.snapshot.activationCode, simpleBridge);
+        return { ok: true, activated: Boolean(result.snapshot?.activated), snapshot: result.snapshot, recoveredStoredAuthorization: result.recovered };
+      }
+      case "walletStatus":
+        return { ok: true, wallet: await dramaLicense.walletStatus() };
+      case "testProvider": {
+        const kind = String(values[0] || "video");
+        if (kind === "video") {
+          simpleBridge.configure(enforceSimpleH3Settings({}, store.getSettings()).videoProvider);
+          return await simpleBridge.health();
+        }
+        return await testProvider(kind, values[1] || store.getSettings()[`${kind}Provider`]);
+      }
+      case "importTextFile": {
+        const result = await dialog.showOpenDialog(mainWindow, {
+          title: "上传剧本文件",
+          properties: ["openFile"],
+          filters: [
+            { name: "剧本文本", extensions: ["txt", "md", "markdown", "json", "csv"] },
+            { name: "所有文件", extensions: ["*"] }
+          ]
+        });
+        if (result.canceled || !result.filePaths?.[0]) return { ok: true, canceled: true };
+        const filePath = result.filePaths[0];
+        return { ok: true, text: readBoundedTextFile(filePath, SCRIPT_IMPORT_MAX_CHARS), fileName: path.basename(filePath), filePath };
+      }
+      case "chooseProduct": {
+        const result = await dialog.showOpenDialog(mainWindow, { title: "选择带货商品参考图", properties: ["openFile"], filters: MEDIA_RULES.image.filters });
+        if (result.canceled) return { ok: true, canceled: true };
+        return { ok: true, ...(await importProductFromPath(values[0], result.filePaths[0], "simple-manual-upload", "", context)) };
+      }
+      case "importCandidate": {
+        const stage = String(values[3] || "");
+        const mediaType = manualStageMediaType(stage);
+        if (!mediaType) throw Object.assign(new Error("手动资产类型无效"), { code: "IMPORT_STAGE_INVALID" });
+        const result = await dialog.showOpenDialog(mainWindow, { title: "上传候选资产", properties: ["openFile"], filters: MEDIA_RULES[mediaType].filters });
+        if (result.canceled) return { ok: true, canceled: true };
+        const imported = await importCandidateFromPath(values[0], values[1], values[2], stage, result.filePaths[0], "simple-manual-upload", "", context);
+        return { ok: true, ...imported, project: projectForRendererFrom(context, values[0], { reconcile: false }) };
+      }
+      case "listReusableAssets":
+        return { ok: true, assets: reusableAssetsForRenderer(values[0] || "", context) };
+      case "importReusableAsset":
+        return await importReusableAssetForContext(values[0], context);
+      case "deleteReusableAsset": {
+        const voice = store.getVoiceLibraryEntry(values[0]);
+        const removed = voice ? store.deleteVoiceLibraryEntry(values[0]) : store.deleteReusableAsset(values[0]);
+        return { ok: true, removed, assets: reusableAssetsForRenderer("", context) };
+      }
+      case "bindReusableAsset":
+        return { ok: true, candidate: store.bindReusableAsset(values[0], values[1], values[2], values[3]), project: projectForRendererFrom(context, values[0], { reconcile: false }) };
+      case "bindLibraryAsset": {
+        const projectId = values[0];
+        const target = values[1] || {};
+        const assetId = values[2];
+        const voiceEntry = store.getVoiceLibraryEntry(assetId);
+        const entry = voiceEntry || store.readReusableAssetLibrary().find(item => item.id === assetId);
+        if (!entry?.filePath || !fs.existsSync(entry.filePath)) {
+          throw Object.assign(new Error("所选共享资产不存在或文件已丢失"), { code: "REUSABLE_ASSET_NOT_FOUND" });
+        }
+        const entityType = String(target.entityType || "");
+        const stage = String(target.stage || "");
+        const mediaType = voiceEntry ? "audio" : entry.mediaType || (["character", "scene", "prop", "wardrobe", "product", "image"].includes(entry.kind) ? "image" : entry.kind);
+        const expectedType = entityType === "product" ? "image" : entityType === "final" ? "video" : manualStageMediaType(stage);
+        if (!expectedType || mediaType !== expectedType) {
+          throw Object.assign(new Error("该共享资产不能用于当前目标"), { code: "REUSABLE_ASSET_KIND_MISMATCH" });
+        }
+        let payload;
+        if (voiceEntry && entityType === "character" && ["character_voice", "voice_asset"].includes(stage)) {
+          payload = { candidate: workflow.bindCharacterVoiceLibrary(projectId, String(target.entityId || ""), entry.id) };
+        } else if (entityType === "product") {
+          payload = await importProductFromPath(projectId, entry.filePath, "reusable-asset-library", entry.id, context);
+        } else if (entityType === "final") {
+          payload = await importFinalVideoFromPath(projectId, entry.filePath, "reusable-asset-library", entry.id, context);
+        } else {
+          payload = await importCandidateFromPath(projectId, entityType, String(target.entityId || ""), stage, entry.filePath, "reusable-asset-library", entry.id, context);
+        }
+        if (!voiceEntry) store.touchReusableAssetUse(entry.id);
+        return { ok: true, ...payload, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
+      }
+      case "analyzeScript":
+        return { ok: true, project: await workflow.analyzeScript(values[0]) };
+      case "rewriteDialogueScript":
+        return { ok: true, project: await workflow.rewriteDialogueScript(values[0], values[1]) };
+      case "generateTopics":
+        return { ok: true, project: await workflow.generateTopicOptions(values[0]) };
+      case "generateCompleteScript":
+        return { ok: true, project: await workflow.generateCompleteScript(values[0]) };
+      case "runIdeaPipeline":
+        return { ok: true, result: await workflow.runIdeaToFullPipeline(values[0]) };
+      case "generateAllAssets":
+        return { ok: true, candidates: await workflow.generateAllAssets(values[0]) };
+      case "generateAllStoryboards":
+        return { ok: true, candidates: await workflow.generateAllStoryboards(values[0]) };
+      case "generateAllShotVideos":
+        return { ok: true, candidates: await workflow.generateAllShotVideos(values[0]) };
+      case "runFullPipeline":
+        return { ok: true, result: await workflow.runFullPipeline(values[0]) };
+      case "runPipelineFromStage":
+        return { ok: true, result: await workflow.runPipelineFromStage(values[0], values[1] || "script") };
+      case "pausePipeline":
+        return { ok: true, automation: workflow.pausePipeline(values[0], values[1] || "pause") };
+      case "stitch":
+        return { ok: true, result: await workflow.stitchProject(values[0]) };
+      case "generateImage":
+        return { ok: true, candidate: await workflow.generateImageCandidate(values[0], values[1], values[2], values[3]) };
+      case "generateLibraryAsset":
+        return { ok: true, candidate: await workflow.generateLibraryAssetImage(values[0], values[1], values[2]) };
+      case "generateShotVideo":
+        return { ok: true, candidate: await workflow.generateShotVideo(values[0], values[1], values[2]) };
+      case "previewImagePrompt":
+        return { ok: true, preview: redactPromptPreview(workflow.previewImagePrompt(values[0], values[1], values[2])) };
+      case "previewShotVideoPrompt":
+        return { ok: true, preview: redactPromptPreview(await workflow.previewShotVideoPrompt(values[0], values[1])) };
+      case "refreshCreatorPrompts":
+        return { ok: true, project: await workflow.refreshCreatorPrompts(values[0], values[1] || {}) };
+      case "confirmCandidate":
+        return { ok: true, candidate: store.confirmCandidate(values[0], values[1], values[2] !== false), project: projectForRendererFrom(context, values[0], { reconcile: false }) };
+      case "discardCandidate":
+        return { ok: true, ...store.discardCandidate(values[0], values[1]), project: projectForRendererFrom(context, values[0], { reconcile: false }) };
+      case "listProjectsOverview": {
+        const { listProjectsOverview } = require("./project-overview");
+        workflow.reconcileDetachedAutomations();
+        const projects = store.listProjects().map(summary => {
+          try { return projectForRendererFrom(context, summary.id, { reconcile: false }); }
+          catch { return summary; }
+        });
+        return { ok: true, projects: listProjectsOverview(projects, store.getSettings()) };
+      }
+      default:
+        throw Object.assign(new Error("简易模式调用不存在"), { code: "SIMPLE_METHOD_NOT_ALLOWED" });
+    }
+  } catch (error) {
+    return publicError(error);
+  }
 });
 
 ipcMain.handle("workbench:list-projects", () => {
@@ -2923,6 +3273,38 @@ if (!app.requestSingleInstanceLock()) {
       integrityGuard,
       foundryKernel
     });
+    const simpleRoot = path.join(dataRoot, "simple-mode");
+    simpleModeStore = new WorkbenchStore(simpleRoot, {
+      sharedLibraryRoot: dataRoot,
+      encode: value => {
+        if (!value) return "";
+        if (!safeStorage.isEncryptionAvailable()) {
+          throw Object.assign(new Error("系统安全存储不可用，供应商凭据未保存"), { code: "SECRET_STORAGE_UNAVAILABLE" });
+        }
+        return `enc:${safeStorage.encryptString(value).toString("base64")}`;
+      },
+      decode: value => {
+        if (!String(value || "").startsWith("enc:")) return value || "";
+        if (!safeStorage.isEncryptionAvailable()) return "";
+        try { return safeStorage.decryptString(Buffer.from(String(value).slice(4), "base64")); }
+        catch { return ""; }
+      }
+    });
+    // Simple mode owns its settings from the first launch. Authorization is an
+    // app-level entitlement, while projects, prompts, costs, queues and outputs
+    // never cross the mode boundary. Only the explicit shared libraries above
+    // point at the Agent mode data root.
+    simpleModeStore.saveSettings(enforceSimpleH3Settings(simpleModeStore.getSettings(), simpleModeStore.getSettings()));
+    hydratePureamDefaults(simpleModeStore, dramaLicense.storedActivationCode(), simpleBridge);
+    simpleBridge.configure(simpleModeStore.getSettings().videoProvider);
+    simpleModeWorkflow = new WorkbenchWorkflow({
+      store: simpleModeStore,
+      bridge: simpleBridge,
+      locateFfmpeg,
+      stagingRoot: path.join(process.env.LOCALAPPDATA || app.getPath("temp"), "PureamDramaSlot", "simple-staging"),
+      licenseClient: licenseBypassAllowed() ? null : dramaLicense,
+      integrityGuard
+    });
     try {
       const mcpController = new McpAppController({
         appVersion: app.getVersion(),
@@ -2948,6 +3330,7 @@ if (!app.requestSingleInstanceLock()) {
     // Resolve stale persisted “running” flags before the first renderer paint.
     // This is local state reconciliation only; it never submits or bills work.
     workbenchWorkflow.reconcileDetachedAutomations();
+    simpleModeWorkflow.reconcileDetachedAutomations();
     createWindow();
   });
   app.on("window-all-closed", () => app.quit());

@@ -6,9 +6,13 @@
  * runtime compilers append this contract so generation and review cannot drift.
  */
 
-const DRAMA_WRITING_CONTRACT_VERSION = "2026.08.15-continuity-block-v4";
+const { NO_TOTAL_DEADLINE_MS } = require("./production-liveness");
+
+const DRAMA_WRITING_CONTRACT_VERSION = "2026.08.15-continuity-block-v5";
 const TOPIC_TO_ASSETS_SLA_MS = 15 * 60_000;
-const TOPIC_REQUEST_TIMEOUT_MS = 45_000;
+// Kept as an exported compatibility name. It is a no-deadline policy, not a
+// timer. The 15 minute value above remains an observability target only.
+const TOPIC_REQUEST_TIMEOUT_MS = NO_TOTAL_DEADLINE_MS;
 
 function clampDuration(value) {
   return Math.max(5, Math.min(15, Math.round(Number(value) || 10)));
@@ -64,13 +68,13 @@ function sharedDramaWritingContract(totalSeconds = 300) {
 }
 
 function theoreticalTopicToAssetsUpperBoundMs(unitCount, options = {}) {
-  const count = Math.max(1, Math.floor(Number(unitCount) || 1));
-  const segmentUnits = Math.max(1, Math.floor(Number(options.segmentUnits) || 5));
-  const concurrency = Math.max(1, Math.floor(Number(options.concurrency) || 2));
-  const requestTimeoutMs = Math.max(1_000, Number(options.requestTimeoutMs) || 60_000);
-  const topicTimeoutMs = Math.max(1_000, Number(options.topicTimeoutMs) || TOPIC_REQUEST_TIMEOUT_MS);
-  const segmentCount = Math.ceil(count / segmentUnits);
-  return topicTimeoutMs + requestTimeoutMs * (1 + Math.ceil(segmentCount / concurrency));
+  // There is deliberately no theoretical hard upper bound. Provider latency,
+  // account queues and long reasoning can be unbounded while the task remains
+  // healthy. Callers should compare elapsed time with the SLA target for
+  // telemetry, never convert it into a business failure.
+  void unitCount;
+  void options;
+  return null;
 }
 
 module.exports = {

@@ -8,16 +8,59 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   WorkbenchWorkflow,
+  assertShotReferenceBundle,
   h3ExactStitchFilter,
   probeMediaStreamDuration
 } = require("../app/workbench-workflow");
-const { analyzeTimedHardCuts } = require("../app/media-quality");
+const { analyzeTimedHardCuts, analyzeImageDimensions, analyzeStoryboardSheetGrid } = require("../app/media-quality");
 
 const ffmpeg = path.join(__dirname, "..", "media-tools", "ffmpeg.exe");
 
 function run(args) {
   execFileSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", ...args], { windowsHide: true, stdio: "pipe" });
 }
+
+test("a sanitized storyboard derivative keeps verifiable parent lineage", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-sheet-lineage-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const parent = path.join(root, "storyboard-sheet.png");
+  const derived = path.join(root, "storyboard-panel-anchor.png");
+  fs.writeFileSync(parent, "parent-sheet");
+  fs.writeFileSync(derived, "sanitized-live-story-panel");
+  const project = {
+    productionRevision: "revision-1",
+    generation: { engine: "seedance", mode: "storyboard_sheet", modeConfirmed: true },
+    candidates: [{
+      id: "sheet-1",
+      filePath: parent,
+      stage: "storyboard_sheet",
+      entityType: "shot",
+      entityId: "S01",
+      productionRevision: "revision-1"
+    }]
+  };
+  const shot = { id: "S01", number: 1, duration: 5 };
+  const references = {
+    images: [derived],
+    imageRoles: [{
+      type: "storyboard_panel_anchor",
+      path: derived,
+      parentFilePath: parent,
+      candidateId: "sheet-1",
+      sourceStage: "storyboard_sheet",
+      entityType: "shot",
+      entityId: "S01"
+    }]
+  };
+  assert.equal(assertShotReferenceBundle(
+    project,
+    shot,
+    "storyboard_sheet",
+    references,
+    null,
+    { generation: { qualityGatesEnabled: false } }
+  ), true);
+});
 
 test("atomic hard-cut stitch survives a provider clip with no audio stream", async t => {
   assert.equal(fs.existsSync(ffmpeg), true, "bundled FFmpeg is required");
@@ -60,7 +103,21 @@ test("multi-frame storyboard is cropped into a take-only timeline before video s
   const source = path.join(root, "parent-sheet.png");
   const outputDir = path.join(root, "storyboards");
   fs.mkdirSync(outputDir, { recursive: true });
-  run(["-f", "lavfi", "-i", "color=c=gray:s=1080x1280", "-frames:v", "1", source]);
+  run([
+    "-f", "lavfi", "-i", "color=c=gray:s=1080x1280",
+    "-vf", [
+      "drawbox=x=0:y=0:w=540:h=640:color=0x713a35:t=fill",
+      "drawbox=x=540:y=0:w=540:h=640:color=0x355b71:t=fill",
+      "drawbox=x=0:y=640:w=540:h=640:color=0x4e7135:t=fill",
+      "drawbox=x=540:y=640:w=540:h=640:color=0x6f3571:t=fill",
+      "drawbox=x=536:y=0:w=8:h=1280:color=white:t=fill",
+      "drawbox=x=0:y=636:w=1080:h=8:color=white:t=fill"
+    ].join(","),
+    "-frames:v", "1", source
+  ]);
+  const detected = await analyzeStoryboardSheetGrid(ffmpeg, source, 4);
+  assert.equal(detected.ok, true);
+  assert.deepEqual(detected.rowColumns, [2, 2]);
   const workflow = new WorkbenchWorkflow({
     store: { assetDir: () => outputDir },
     bridge: {},
@@ -76,6 +133,9 @@ test("multi-frame storyboard is cropped into a take-only timeline before video s
   );
   assert.equal(fs.existsSync(result), true);
   assert.ok(fs.statSync(result).size > 100);
+  const dimensions = await analyzeImageDimensions(ffmpeg, result);
+  assert.equal(dimensions.width, 720);
+  assert.equal(dimensions.height, 640);
   run(["-i", result, "-frames:v", "1", "-f", "null", process.platform === "win32" ? "NUL" : "/dev/null"]);
 });
 

@@ -1,0 +1,100 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+const { WorkbenchStore } = require("../app/workbench-store");
+
+function secretCodec() {
+  return { encode: value => String(value || ""), decode: value => String(value || "") };
+}
+
+test("Simple and Agent modes isolate every data domain except the explicit shared asset libraries", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "puream-simple-isolation-"));
+  try {
+    const agentRoot = path.join(tempRoot, "workbench");
+    const simpleRoot = path.join(agentRoot, "simple-mode");
+    const agent = new WorkbenchStore(agentRoot, secretCodec());
+    const simple = new WorkbenchStore(simpleRoot, { ...secretCodec(), sharedLibraryRoot: agentRoot });
+
+    const agentProject = agent.createProject("Agent 独立项目", { inputMode: "manual" });
+    const simpleProject = simple.createProject("简易独立项目", { inputMode: "manual", videoProviderKind: "puream-hailuo-h3" });
+    assert.deepEqual(agent.listProjects().map(item => item.id), [agentProject.id]);
+    assert.deepEqual(simple.listProjects().map(item => item.id), [simpleProject.id]);
+    assert.equal(agent.listProjects().some(item => item.id === simpleProject.id), false);
+    assert.equal(simple.listProjects().some(item => item.id === agentProject.id), false);
+
+    const agentSettings = agent.saveSettings({ ...agent.getSettings(), generation: { ...agent.getSettings().generation, visualStyle: "Agent 专属风格" } });
+    const simpleSettings = simple.saveSettings({ ...simple.getSettings(), generation: { ...simple.getSettings().generation, visualStyle: "简易专属风格" } });
+    assert.equal(agentSettings.generation.visualStyle, "Agent 专属风格");
+    assert.equal(simpleSettings.generation.visualStyle, "简易专属风格");
+    assert.equal(agent.getSettings().generation.visualStyle, "Agent 专属风格");
+    assert.equal(simple.getSettings().generation.visualStyle, "简易专属风格");
+
+    agent.beginCostEntry(agentProject.id, { category: "text", operation: "agent-only", status: "settled", amountYuan: 1.25, sourceKey: "agent-only" });
+    simple.beginCostEntry(simpleProject.id, { category: "video", operation: "simple-only", status: "settled", amountYuan: 2.5, sourceKey: "simple-only" });
+    assert.deepEqual(agent.getProject(agentProject.id).costLedger.entries.map(item => item.operation), ["agent-only"]);
+    assert.deepEqual(simple.getProject(simpleProject.id).costLedger.entries.map(item => item.operation), ["simple-only"]);
+
+    const sourceImage = path.join(__dirname, "..", "app", "assets", "drama-slot-mark.png");
+    const shared = agent.importReusableAsset(sourceImage, { kind: "character", mediaType: "image", label: "跨模式人物" });
+    assert.equal(simple.listReusableAssets("character").some(item => item.id === shared.id), true);
+    assert.equal(path.resolve(agent.reusableAssetLibraryDir), path.resolve(simple.reusableAssetLibraryDir));
+    assert.equal(path.resolve(agent.voiceLibraryDir), path.resolve(simple.voiceLibraryDir));
+
+    const voiceFile = path.join(agent.voiceLibraryFilesDir, "shared-voice.wav");
+    fs.writeFileSync(voiceFile, "voice");
+    agent.upsertVoiceLibraryEntry({
+      id: "voice-shared",
+      label: "林娜",
+      filePath: voiceFile,
+      source: { projectId: agentProject.id, characterId: "C01", candidateId: "agent-candidate" }
+    });
+    simple.upsertVoiceLibraryEntry({
+      id: "voice-shared",
+      label: "林娜",
+      filePath: voiceFile,
+      source: { projectId: simpleProject.id, characterId: "C01", candidateId: "simple-candidate" }
+    });
+    const sharedVoice = agent.getVoiceLibraryEntry("voice-shared");
+    assert.equal(sharedVoice.source.candidateId, "agent-candidate", "后续模式不得覆盖音色的最初来源");
+    assert.deepEqual(sharedVoice.sourceHistory.map(item => item.candidateId), ["agent-candidate", "simple-candidate"]);
+
+    assert.notEqual(path.resolve(agent.projectsDir), path.resolve(simple.projectsDir));
+    assert.notEqual(path.resolve(agent.settingsPath), path.resolve(simple.settingsPath));
+    assert.notEqual(path.resolve(agent.deletedProjectsDir), path.resolve(simple.deletedProjectsDir));
+    assert.notEqual(path.resolve(agent.trashDir), path.resolve(simple.trashDir));
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("first-run mode choice, later switching, H3 lock and Simple allowlist are all wired", () => {
+  const root = path.join(__dirname, "..");
+  const main = fs.readFileSync(path.join(root, "app", "main.js"), "utf8");
+  const preload = fs.readFileSync(path.join(root, "app", "preload.js"), "utf8");
+  const selector = fs.readFileSync(path.join(root, "app", "renderer", "mode-selector.html"), "utf8");
+  const simple = fs.readFileSync(path.join(root, "app", "renderer", "simple-mode.html"), "utf8");
+  const simpleJs = fs.readFileSync(path.join(root, "app", "renderer", "simple-mode.js"), "utf8");
+  const agent = fs.readFileSync(path.join(root, "app", "renderer", "workbench.html"), "utf8");
+
+  assert.match(main, /modeState\.selected[\s\S]*workspaceModePage\(modeState\.mode\)[\s\S]*mode-selector\.html/);
+  assert.match(main, /ipcMain\.handle\("app-mode:select"/);
+  assert.match(main, /ipcMain\.handle\("simple:call"/);
+  assert.match(main, /kind:\s*"puream-hailuo-h3"[\s\S]*model:\s*"hailuo-h3"/);
+  assert.match(main, /const simpleRoot = path\.join\(dataRoot, "simple-mode"\)/);
+  assert.match(main, /sharedLibraryRoot:\s*dataRoot/);
+  assert.match(preload, /appMode:[\s\S]*select:[\s\S]*simple:[\s\S]*simple:call/);
+  assert.match(selector, /data-mode="simple"/);
+  assert.match(selector, /data-mode="agent"/);
+  assert.match(simple, /H3 生成工作台/);
+  assert.match(simple, /共享资产库/);
+  assert.match(simple, /settingsSwitchSimpleMode|switchAgent/);
+  assert.doesNotMatch(simple, /local-xiangsu|puream-seedance/);
+  assert.match(simpleJs, /stageState\(project\)/);
+  assert.match(simpleJs, /任务没有总时限/);
+  assert.match(agent, /id="switchSimpleMode"/);
+  assert.match(agent, /id="settingsSwitchSimpleMode"/);
+});

@@ -54,7 +54,7 @@ test("blueprint master off accepts old failed assets, videos and local Hailuo pr
   assert.equal(spec.subshots.length, 1);
 });
 
-test("blueprint master off invokes zero audit functions across newly generated and recovered media", async t => {
+test("blueprint master off skips subjective audits but keeps mandatory video integrity checks", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-blueprint-zero-audit-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -71,6 +71,7 @@ test("blueprint master off invokes zero audit functions across newly generated a
   });
   const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "ffmpeg", stagingRoot: root, textGenerator: async () => { throw new Error("text provider must not run"); } });
   let auditCalls = 0;
+  let technicalAuditCalls = 0;
   for (const name of ["auditSceneAssetCandidate", "auditCharacterIntroCandidate", "auditStoryboardCandidate", "auditCharacterVideoCandidate", "auditShotCandidate"]) {
     workflow[name] = async () => {
       auditCalls += 1;
@@ -98,6 +99,11 @@ test("blueprint master off invokes zero audit functions across newly generated a
     fs.writeFileSync(filePath, "video");
     return store.addCandidate(projectId, { entityType: "shot", entityId: shotId, stage: "shot_video", filePath });
   };
+  workflow.auditTechnicalShotCandidate = async () => {
+    technicalAuditCalls += 1;
+    return { ok: true, version: "test", checkedAt: new Date().toISOString(), mandatory: true, failures: [], repairDirective: "" };
+  };
+  workflow.technicalVideoAuditIsCurrent = () => false;
 
   await workflow.ensureSceneAssetCandidate(created.id, "SC01");
   await workflow.ensureCharacterIntroCandidate(created.id, "C01");
@@ -110,4 +116,5 @@ test("blueprint master off invokes zero audit functions across newly generated a
   await workflow.auditRecoveredVideoCandidate(created.id, recovered);
 
   assert.equal(auditCalls, 0, "master off must prevent audit invocation, not merely return a skipped result from inside the auditor");
+  assert.equal(technicalAuditCalls, 2, "generated and recovered shot videos must still receive objective integrity checks");
 });

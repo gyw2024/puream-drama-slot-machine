@@ -117,6 +117,19 @@ test("supported heading matrix remains deterministic", () => {
   assert.deepEqual(splitCompoundSceneName("A → B / C"), ["A", "B", "C"]);
 });
 
+test("compact S01 shot headers never become scenes and a fixed scene stays authoritative", () => {
+  const source = [
+    "全片20秒，9:16竖屏现实短剧。",
+    "唯一场景固定：SC01旧宅客厅，雨夜，木桌上只有一只发黄信封。",
+    "S01【0-10秒｜旧宅客厅｜林娜近景切秦添反应】林娜按住信封质问。",
+    "S02【10-20秒｜同一客厅｜秦添反打近景】秦添把信封推回。"
+  ].join("\n");
+  const ledger = buildSourceSceneLedger(source);
+  assert.deepEqual(ledger.catalogue.map(item => item.name), ["旧宅客厅"]);
+  assert.equal(ledger.occurrences.length, 1);
+  assert.equal(ledger.headingKinds.includes("fixed_scene"), true);
+});
+
 test("explicit source scenes fail closed when a later stage drops them", () => {
   const ledger = buildSourceSceneLedger("【场景】客厅\n甲：一。\n【场景】门口\n乙：二。");
   assert.throws(

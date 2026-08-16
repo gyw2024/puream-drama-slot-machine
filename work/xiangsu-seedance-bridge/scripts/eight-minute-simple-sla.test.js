@@ -67,9 +67,9 @@ test("eight-minute simple mode fails closed when the creative Agent is unavailab
   const schedule = planFilmSchedule(480, "puream-hailuo-h3", { engine: "hailuo-h3" });
   assert.equal(Object.values(store.getSettings().generation.blueprintAuditChecks).every(Boolean), true);
   const theoretical = theoreticalTopicToAssetsUpperBoundMs(schedule.unitCount);
-  assert.equal(TOPIC_REQUEST_TIMEOUT_MS, 45_000);
+  assert.equal(TOPIC_REQUEST_TIMEOUT_MS, 0);
   assert.equal(TOPIC_TO_ASSETS_SLA_MS, 15 * 60_000);
-  assert.ok(theoretical <= TOPIC_TO_ASSETS_SLA_MS, `bounded worst case ${theoretical}ms must fit the 15-minute SLA`);
+  assert.equal(theoretical, null, "the SLA is a performance target and must never become a production deadline");
 });
 
 test("writing and blueprint review use one shared dialogue contract", () => {

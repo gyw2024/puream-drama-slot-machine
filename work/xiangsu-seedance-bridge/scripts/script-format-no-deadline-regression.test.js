@@ -158,7 +158,7 @@ test("all projects expose three persistent script examples with preview and TXT 
   assert.match(renderer, /纯梦老虎机-\$\{names\[normalized\]\}-示例\.txt/);
 });
 
-test("script writing has a bounded request deadline while image and video polling stay unchanged", () => {
+test("all production generation has no total deadline and keeps cancellation controls", () => {
   const workflow = source("app/workbench-workflow.js");
   const provider = source("app/ai-provider.js");
   const bridge = source("app/bridge-client.js");
@@ -166,10 +166,15 @@ test("script writing has a bounded request deadline while image and video pollin
   assert.doesNotMatch(workflow, /scriptFastRequestBudgetMs/);
   assert.doesNotMatch(workflow, /const maxAttempts = providerLabel\(\)/);
   assert.match(provider, /const timeoutMs = Math\.max\(0, Number\(options\.timeoutMs\) \|\| 0\)/);
-  assert.match(provider, /const maxAttempts = Math\.max\(1, Math\.min\(3, Number\(options\.maxReconnectAttempts\) \|\| 3\)\)/);
-  assert.match(workflow, /timeoutMs: Math\.max\(1_000, Number\(options\.timeoutMs\) \|\| SCRIPT_TEXT_REQUEST_TIMEOUT_MS\)/);
+  assert.match(provider, /resolveAttemptLimit\(options\.maxReconnectAttempts, 3\)/);
+  assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = NO_TOTAL_DEADLINE_MS/);
+  assert.match(workflow, /timeoutMs: NO_TOTAL_DEADLINE_MS/);
+  assert.match(workflow, /maxReconnectAttempts: UNLIMITED_ATTEMPTS/);
+  assert.doesNotMatch(workflow, /\battempts:\s*[1-9]\d*/);
   assert.doesNotMatch(provider, /Date\.now\(\) - startedAt < 600_000/);
   assert.doesNotMatch(provider, /纯梦 GPT Image 2 生成超时/);
   assert.doesNotMatch(provider, /纯梦清波视频等待超时/);
   assert.match(bridge, /timeoutMs: 0/);
+  assert.doesNotMatch(source("app/puream-video-adapters.js"), /AbortSignal\.timeout\(600_000\)/);
+  assert.doesNotMatch(provider, /AbortSignal\.timeout\(120_000\)/);
 });

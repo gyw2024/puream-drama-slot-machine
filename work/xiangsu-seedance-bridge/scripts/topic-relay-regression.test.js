@@ -114,12 +114,46 @@ test("user cancellation interrupts text recovery without another provider reques
   }
 });
 
-test("topic generation allows five minutes for a long reasoning response", () => {
+test("topic generation has no total deadline", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
   const topicStart = source.indexOf("async generateTopicOptions");
   const scriptStart = source.indexOf("async generateCompleteScript", topicStart);
   const topicSource = source.slice(topicStart, scriptStart);
-  assert.doesNotMatch(topicSource, /timeoutMs:\s*300_000/);
+  assert.match(topicSource, /this\.productionTextOptions\(projectId, "topics"/);
+  assert.doesNotMatch(topicSource, /timeoutMs:\s*(?:45_000|60_000|300_000)/);
+});
+
+test("unlimited production reconnect survives beyond the historic retry cap with one idempotency key", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (_url, init = {}) => {
+    calls.push({ headers: init.headers, body: JSON.parse(init.body) });
+    if (calls.length <= 6) throw Object.assign(new Error("fetch failed"), { code: "UND_ERR_SOCKET" });
+    return new Response([
+      'event: delta\ndata: {"text":"recovered after six interruptions"}',
+      'event: done\ndata: {"sessionId":"same-request","charge_cents":0,"billing_status":"charged"}',
+      ""
+    ].join("\n\n"), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    const value = await generateText({
+      kind: "puream-relay",
+      baseUrl: "https://puream.invalid",
+      apiKey: "test-only",
+      model: "claude-opus-5"
+    }, [{ role: "user", content: "test" }], {
+      sessionId: "unlimited-logical-request",
+      timeoutMs: 0,
+      maxReconnectAttempts: 0,
+      retryBaseDelayMs: 1
+    });
+    assert.equal(value, "recovered after six interruptions");
+    assert.equal(calls.length, 7);
+    assert.ok(calls.every(call => call.headers["idempotency-key"] === "unlimited-logical-request"));
+    assert.ok(calls.every(call => call.body.clientRequestId === "unlimited-logical-request"));
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test("topic JSON parser accepts a root array without weakening other schemas", () => {

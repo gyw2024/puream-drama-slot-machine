@@ -6,7 +6,7 @@ const { ERROR_KINDS, FoundryError } = require("./errors");
 const { applyProductionContract, assertAbsolutePolicies } = require("./production-contract");
 const { evaluateProject } = require("./quality-lab");
 const { FoundryRuntimeStore } = require("./runtime-store");
-const { buildScriptUnderstanding } = require("./script-understanding");
+const { SCRIPT_UNDERSTANDING_VERSION, buildScriptUnderstanding } = require("./script-understanding");
 
 class AdaptiveDramaKernel {
   constructor(options = {}) {
@@ -27,7 +27,10 @@ class AdaptiveDramaKernel {
     if (source.trim()) {
       const sourceFingerprint = fingerprint(source.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n"));
       const sourceRawSha256 = sha256(source);
-      if (options.forceUnderstanding || understanding?.sourceFingerprint !== sourceFingerprint || understanding?.contractFingerprint !== contract.fingerprint) {
+      if (options.forceUnderstanding
+        || understanding?.version !== SCRIPT_UNDERSTANDING_VERSION
+        || understanding?.sourceFingerprint !== sourceFingerprint
+        || understanding?.contractFingerprint !== contract.fingerprint) {
         const userAuthored = project.productionPlan?.inputMode === "manual" && !String(project.script?.generatedFromTopicId || "").trim();
         const sourceSceneLedger = userAuthored && project.script?.sourceSceneLedger?.explicit
           ? project.script.sourceSceneLedger

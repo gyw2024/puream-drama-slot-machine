@@ -120,7 +120,7 @@ test("官网授权必须换取管理后台真实令牌并使用服务端租约",
   await client.releaseLease(lease.leaseId, "project-a-video-001");
 });
 
-test("升级旧官网假令牌时强制迁移，管理后台不可达时生成失败关闭", async (t) => {
+test("升级旧官网假令牌后，管理后台暂不可达会无限等待同一租约直至用户取消", async (t) => {
   const originalFetch = global.fetch;
   t.after(() => { global.fetch = originalFetch; });
   const store = createStateStore({
@@ -134,6 +134,7 @@ test("升级旧官网假令牌时强制迁移，管理后台不可达时生成�
     lastHeartbeatOkAt: new Date().toISOString()
   });
   let leaseTransportFailures = 0;
+  const controller = new AbortController();
 
   global.fetch = async (url, options = {}) => {
     const pathname = new URL(String(url)).pathname;
@@ -153,6 +154,9 @@ test("升级旧官网假令牌时强制迁移，管理后台不可达时生成�
     }
     if (pathname === "/api/lease/acquire") {
       leaseTransportFailures += 1;
+      if (leaseTransportFailures === 4) {
+        controller.abort(Object.assign(new Error("用户暂停生产"), { code: "SCRIPT_GENERATION_PAUSED" }));
+      }
       throw new Error("simulated transport outage");
     }
     throw new Error(`unexpected fetch ${url}`);
@@ -172,11 +176,52 @@ test("升级旧官网假令牌时强制迁移，管理后台不可达时生成�
   assert.equal(store.snapshot().token, "migrated-server-token");
 
   await assert.rejects(
-    () => client.acquireLease("image", "project-c-image-001", { projectId: "project-c" }),
-    error => error?.code === "CONCURRENCY_AUTHORITY_OFFLINE"
+    () => client.acquireLease("image", "project-c-image-001", { projectId: "project-c" }, { signal: controller.signal }),
+    error => error?.code === "SCRIPT_GENERATION_PAUSED"
   );
   assert.equal(leaseTransportFailures, 4);
   assert.equal(client.offlineLeases.size, 0);
+});
+
+test("服务端并发队列没有总时长上限并复用同一任务编号", async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  const store = createStateStore({
+    token: "server-issued-admin-token",
+    activationCode: "ABCDEF0123456789",
+    machineId: "",
+    imageConcurrency: 2,
+    videoConcurrency: 1,
+    sessionAuthority: WEBSITE_SESSION_AUTHORITY,
+    concurrencyAuthority: ADMIN_CONCURRENCY_AUTHORITY,
+    activatedAt: new Date().toISOString(),
+    lastHeartbeatOkAt: new Date().toISOString()
+  });
+  const taskIds = [];
+  global.fetch = async (url, options = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const body = options.body ? JSON.parse(options.body) : {};
+    if (pathname === "/api/auth/heartbeat") {
+      return jsonResponse(200, { ok: true, account: { imageConcurrency: 2, videoConcurrency: 1 } });
+    }
+    if (pathname === "/api/lease/acquire") {
+      taskIds.push(body.taskId);
+      if (taskIds.length < 7) return jsonResponse(429, { ok: false, code: "QUEUE", message: "排队中" });
+      return jsonResponse(200, { ok: true, leaseId: "lease-after-unbounded-queue", taskId: body.taskId, kind: body.kind, limit: 1 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const client = new DramaLicenseClient({
+    baseUrl: "https://drama-slot.puream.cn",
+    stateReader: store.read,
+    stateWriter: store.write,
+    leaseRetrySleep: async () => {}
+  });
+  t.after(() => client.stopHeartbeat());
+  const lease = await client.acquireLease("video", "stable-idempotency-key", { projectId: "project-queue" });
+  assert.equal(lease.leaseId, "lease-after-unbounded-queue");
+  assert.equal(taskIds.length, 7);
+  assert.deepEqual([...new Set(taskIds)], ["stable-idempotency-key"]);
 });
 
 test("旧视频直提入口也必须申请管理后台视频租约", () => {
