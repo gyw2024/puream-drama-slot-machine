@@ -141,3 +141,37 @@ test("custom text-provider profiles persist API key, endpoint, model and token b
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+test("legacy official Claude settings migrate to Sol without changing custom providers", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "puream-text-model-migration-"));
+  try {
+    const custom = {
+      kind: "openai-compatible",
+      baseUrl: "https://provider.example/v1",
+      apiKey: "preserve-this-key",
+      model: "custom-model",
+      maxTokens: 32768,
+      authSource: "user"
+    };
+    fs.mkdirSync(tempRoot, { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, "settings.json"), JSON.stringify({
+      settingsVersion: 15,
+      textProvider: { kind: "puream-relay", baseUrl: "https://puream.cn", model: "claude-opus-5" },
+      textProviderProfiles: {
+        "puream-relay": { kind: "puream-relay", baseUrl: "https://puream.cn", model: "claude-opus-5" },
+        "openai-compatible": custom
+      }
+    }), "utf8");
+
+    const settings = new WorkbenchStore(tempRoot, secretCodec()).getSettings();
+    assert.equal(settings.settingsVersion, 16);
+    assert.equal(settings.textProvider.model, "gpt-5-6-sol");
+    assert.equal(settings.textProviderProfiles["puream-relay"].model, "gpt-5-6-sol");
+    assert.equal(settings.textProviderProfiles["openai-compatible"].apiKey, custom.apiKey);
+    assert.equal(settings.textProviderProfiles["openai-compatible"].baseUrl, custom.baseUrl);
+    assert.equal(settings.textProviderProfiles["openai-compatible"].model, custom.model);
+    assert.equal(settings.textProviderProfiles["openai-compatible"].maxTokens, custom.maxTokens);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});

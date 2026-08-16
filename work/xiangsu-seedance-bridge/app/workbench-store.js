@@ -21,12 +21,12 @@ const {
 } = require("./project-costs");
 
 const PROJECT_VERSION = 13;
-const SETTINGS_VERSION = 15;
+const SETTINGS_VERSION = 16;
 const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MAX_SCRIPT_CHARS = 500_000;
 const MAX_MANUAL_PROMPT_CHARS = 60_000;
 const MAX_SETTINGS_PROMPT_CHARS = 100_000;
-const PUREAM_TEXT_MODELS = Object.freeze(["claude-opus-5", "gpt-5-6-sol"]);
+const PUREAM_TEXT_MODELS = Object.freeze(["gpt-5-6-sol", "claude-opus-5"]);
 const DEFAULT_QUALITY_GATE_MODULES = Object.freeze({
   script: false,
   assets: false,
@@ -687,7 +687,7 @@ function defaultTextProviderProfiles() {
       kind: "puream-relay",
       baseUrl: "https://puream.cn",
       apiKey: "",
-      model: "claude-opus-5",
+      model: "gpt-5-6-sol",
       modelStrategy: "explicit",
       authSource: "official-desktop",
       temperature: 0.2,
@@ -2801,7 +2801,8 @@ class WorkbenchStore {
         errorCode: "SETTINGS_FILE_CORRUPTED",
         errorMessage: "系统设置文件已损坏，且没有可用备份；已停止覆盖设置"
       });
-      const legacy = Number(saved.settingsVersion || 0) < 3;
+      const savedSettingsVersion = Number(saved.settingsVersion || 0);
+      const legacy = savedSettingsVersion < 3;
       const textProvider = legacy
         ? { ...defaults.textProvider }
         : { ...defaults.textProvider, ...(saved.textProvider || {}), apiKey: this.decodeSecret(saved.textProvider?.apiKey || "") };
@@ -2815,6 +2816,10 @@ class WorkbenchStore {
           apiKey: this.decodeSecret(savedProfiles[kind]?.apiKey || "")
         }
       ]));
+      if (savedSettingsVersion < SETTINGS_VERSION && textProviderProfiles["puream-relay"]?.model === "claude-opus-5") {
+        textProviderProfiles["puream-relay"].model = "gpt-5-6-sol";
+        if (textProvider.kind === "puream-relay") textProvider.model = "gpt-5-6-sol";
+      }
       textProviderProfiles[textProvider.kind] = {
         ...(textProviderProfiles[textProvider.kind] || {}),
         ...textProvider,

@@ -86,7 +86,7 @@ const textProviderPresets = Object.freeze({
   "puream-relay": {
     tag: "PUREAM OFFICIAL",
     baseUrl: "https://puream.cn",
-    model: "claude-opus-5",
+    model: "gpt-5-6-sol",
     temperature: 0.2,
     maxTokens: 16384,
     authSource: "official-desktop",
@@ -94,7 +94,7 @@ const textProviderPresets = Object.freeze({
     keyLabel: "管理员授权码",
     modelLabel: "官网写作模型",
     basePlaceholder: "https://puream.cn",
-    modelPlaceholder: "claude-opus-5",
+    modelPlaceholder: "gpt-5-6-sol",
     help: "默认使用纯梦官网智能写作算力；一键选题、故事圣经、分段规划、完整剧本、拆镜和文本终审都通过纯梦官网。"
   },
   "openai-native": {
@@ -154,7 +154,7 @@ const textProviderPresets = Object.freeze({
     help: "使用 Anthropic 原生 Messages API；系统提示词与多轮消息会自动转换。"
   }
 });
-const pureamTextModels = Object.freeze(["claude-opus-5", "gpt-5-6-sol"]);
+const pureamTextModels = Object.freeze(["gpt-5-6-sol", "claude-opus-5"]);
 
 const stageLabels = {
   character_sheet: "人物合板",

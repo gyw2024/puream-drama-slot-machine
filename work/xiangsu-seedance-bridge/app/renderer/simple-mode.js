@@ -5,7 +5,7 @@ const $$ = selector => [...document.querySelectorAll(selector)];
 const api = (...args) => window.dramaSlot.simple.call(...args);
 
 const textProviderPresets = Object.freeze({
-  "puream-relay": { baseUrl: "https://puream.cn", model: "claude-opus-5", maxTokens: 16384, help: "纯梦官网由系统自动调度，无需填写 API Key。" },
+  "puream-relay": { baseUrl: "https://puream.cn", model: "gpt-5-6-sol", maxTokens: 16384, help: "纯梦官网由系统自动调度，无需填写 API Key。" },
   "openai-native": { baseUrl: "https://api.openai.com/v1", model: "", maxTokens: 16384, help: "填写 OpenAI API Key 和账号可用的模型名称。" },
   "openai-compatible": { baseUrl: "", model: "", maxTokens: 16384, help: "填写兼容 /chat/completions 的 Base URL、API Key 和实际模型 ID。" },
   "gemini-native": { baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "", maxTokens: 16384, help: "填写 Gemini API Key 和账号可用的模型名称。" },
