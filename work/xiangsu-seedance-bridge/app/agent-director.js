@@ -706,7 +706,10 @@ function mergeAgentTakeDraft(basePlan, raw, project = {}, shot = {}, options = {
       if (!Object.prototype.hasOwnProperty.call(authored, "mouthOwnerId")) failures.push(`${baseTake.id}.mouthOwnerId must be authored`);
       if (/internal cut|morph|switch speaker|shot 2/i.test(clean(authored.cameraEn))) failures.push(`${baseTake.id}.cameraEn contains an internal transition`);
       if (/\bbgm\b|background music|underscore|score|soundtrack|non[- ]?diegetic|song/i.test(clean(authored.soundEn))) failures.push(`${baseTake.id}.soundEn requests music`);
-      if (/speak|dialogue|subtitle|caption|title|text/i.test(clean(authored.listenerReactionEn))) failures.push(`${baseTake.id}.listenerReactionEn violates silent-listener ownership`);
+      // listenerReactionEn is sanitized by safeCreativeField below. A model
+      // may accidentally echo a dialogue-oriented phrase here; replace that
+      // single field with the deterministic silent-listener fallback instead
+      // of discarding an otherwise valid continuity plan.
     }
     const allowedCameraOwners = unique([baseTake.speakerId, ...list(baseTake.listenerIds), ...list(baseTake.visibleCharacterIds)]);
     const requestedCameraOwner = clean(authored?.cameraOwnerId);
