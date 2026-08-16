@@ -16838,6 +16838,25 @@ ${shotAnchor}
       }, { projectId, shotId, stage: "director_continuity_plan" });
     } catch (error) {
       if (isOperationControlError(error)) throw error;
+      const transientTimeout = String(error?.code || "").toUpperCase() === "PROVIDER_TIMEOUT"
+        || /timeout|timed out|中转请求超时/i.test(String(error?.message || ""));
+      if (transientTimeout) {
+        // A continuity timeout must not stall the whole prompt fan-out. The
+        // locked local plan already preserves every dialogue/take contract;
+        // persist it as a deterministic fallback without replaying a paid
+        // request or changing the authored story structure.
+        const fallbackPlan = {
+          ...basePlan,
+          authoredBy: "deterministic-local-continuity-fallback",
+          authoredAt: new Date().toISOString(),
+          sourceFingerprint: fingerprint,
+          version: AGENT_DIRECTOR_VERSION
+        };
+        try { validateCameraTakePlan(fallbackPlan, project, shot); } catch (validationError) { throw validationError; }
+        project.shots = project.shots.map(item => item.id === shotId ? { ...item, agentCameraTakePlan: fallbackPlan } : item);
+        this.store.saveProject(project);
+        return fallbackPlan;
+      }
       throw Object.assign(new Error(`导演 Agent 无法生成可执行的连续切镜方案：${error.message || error}`), {
         code: "AGENT_CONTINUITY_PLAN_COMPILE_FAILED",
         shotId,
