@@ -3625,7 +3625,13 @@ function isTransientProviderError(error) {
   // unlimited recovery loop will hammer the provider forever.
   const terminalProviderCode = String(error?.code || "");
   if (/^(?:SEEDANCE_DAILY_QUOTA_EXHAUSTED|ACCOUNT_SWITCH_IN_PROGRESS|LICENSE_REQUIRED|LICENSE_EXPIRED|AUTH(?:ENTICATION)?_FAILED|INSUFFICIENT_(?:BALANCE|CREDIT)|CONTENT_POLICY|MODERATION_BLOCKED)$/i.test(terminalProviderCode)) return false;
-  if (String(error?.code || "") === "MEDIA_UPLOAD_STALLED") return true;
+  const providerCode = String(error?.code || "").trim().toUpperCase();
+  if ([
+    "MEDIA_UPLOAD_STALLED",
+    "PUREAM_TEXT_STREAM_ERROR",
+    "PUREAM_TRANSPORT_INTERRUPTED",
+    "TEXT_RESULT_EMPTY"
+  ].includes(providerCode)) return true;
   const text = `${error?.code || ""} ${error?.status || ""} ${error?.message || ""}`;
   return /502|503|504|429|408|500|SERVER_ERROR|PROVIDER_HTTP|PROVIDER_TIMEOUT|TIMEOUT|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|network|VIDEO_REMOTE_PENDING|VIDEO_DOWNLOAD_PENDING|REMOTE_TASK_PENDING|BRIDGE_HTTP_ERROR|网关|超时|限流|繁忙|远端待恢复|稍后再试|Bad Gateway|Service Unavailable|Too Many Requests|Internal Server Error/i.test(text);
 }
@@ -20453,11 +20459,11 @@ ${shotAnchor}
             status: "provider_failover",
             providerKind: String(fallback.kind || "")
           });
-          this.setAutomation(projectId, {
-            status: "running",
-            stage: "agent_provider_failover",
-            message: "PUREAM 文本中转连续超时，Agent 已切换到已配置的备用文本模型，并从当前剧本断点继续"
-          });
+      this.setAutomation(projectId, {
+        status: "running",
+        stage: "agent_provider_failover",
+        message: "PUREAM 文本中转超时或连接中断，Agent 已切换到已配置的备用文本模型，并从当前剧本断点继续"
+      });
           return true;
         }
       }

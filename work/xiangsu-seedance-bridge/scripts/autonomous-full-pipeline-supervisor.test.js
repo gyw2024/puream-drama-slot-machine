@@ -95,6 +95,34 @@ test("persistent relay timeouts fail over to a configured text provider within t
   assert.equal(project.automation.repairJournal[0].status, "provider_failover");
 });
 
+test("relay stream disconnects fail over instead of terminating the one-click goal", async () => {
+  const project = projectFixture();
+  const workflow = Object.create(WorkbenchWorkflow.prototype);
+  workflow.store = {
+    getProject: () => structuredClone(project),
+    getSettings: () => ({ textProviderProfiles: {
+      "puream-relay": { kind: "puream-relay", baseUrl: "https://puream.cn", model: "gpt-5-6-sol", apiKey: "relay" },
+      "openai-compatible": { kind: "openai-compatible", baseUrl: "https://example.invalid/v1", model: "backup-model", apiKey: "configured" }
+    } }),
+    saveProject: () => project
+  };
+  workflow.operationControls = new Map();
+  workflow.assertOperationActive = () => {};
+  workflow.appendAutonomousRepairJournal = (_id, entry) => { project.automation.repairJournal.unshift(entry); };
+  workflow.setAutomation = (_id, patch) => { project.automation = { ...project.automation, ...patch }; };
+  const supervisor = { repairs: 0, scriptRewrites: 0, transientRetries: 0, textProviderOverride: null, failuresByCode: new Map() };
+  const error = Object.assign(new Error("文本模型连接失败，请稍后重试"), {
+    code: "PUREAM_TEXT_STREAM_ERROR",
+    noAutomaticRetry: true
+  });
+  const recovered = await workflow.recoverAutonomousPipelineFailure("P01", error, supervisor);
+  assert.equal(recovered, true);
+  assert.equal(supervisor.textProviderOverride.kind, "openai-compatible");
+  assert.equal(project.automation.stage, "agent_provider_failover");
+  assert.equal(project.automation.repairJournal[0].code, "PUREAM_TEXT_STREAM_ERROR");
+  assert.equal(project.automation.repairJournal[0].status, "provider_failover");
+});
+
 test("script repair archives provenance outside the production-media category allowlist", t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-agent-script-history-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
