@@ -135,10 +135,11 @@ test("external account and billing blockers are never hidden by automatic retrie
   assert.equal(workflow.autonomousPipelineExternalBlocker({ code: "FOUNDRY_FORMAL_QUALITY_GATE_FAILED", retryable: true }), false);
 });
 
-test("transient provider recovery has no retry-count stop condition", () => {
+test("transient provider recovery is bounded by a hard retry cap", () => {
   const source = fs.readFileSync(path.join(__dirname, "../app/workbench-workflow.js"), "utf8");
-  assert.match(source, /不设次数上限/);
-  assert.doesNotMatch(source, /transientRetries\s*>\s*AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES/);
+  assert.doesNotMatch(source, /不设次数上限/);
+  assert.match(source, /transientRetries\s*>\s*AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES/);
+  assert.match(source, /AUTONOMOUS_PIPELINE_TRANSIENT_EXHAUSTED/);
 });
 
 test("persistent relay timeouts fail over to a configured text provider within the same goal", async () => {

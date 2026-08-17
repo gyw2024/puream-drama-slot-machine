@@ -362,6 +362,11 @@ function backfillProjectCosts(project = {}, options = {}) {
       .filter(entry => entry.category === "video" && entry.taskId)
       .map(entry => [entry.taskId, entry])
   );
+  const byJob = new Map(
+    ledger.entries
+      .filter(entry => entry.category === "video" && entry.jobId)
+      .map(entry => [entry.jobId, entry])
+  );
   const jobs = Array.isArray(project.jobs) ? project.jobs : [];
   for (const job of jobs) {
     if (!["shot_video", "character_video"].includes(job?.type)) continue;
@@ -384,7 +389,7 @@ function backfillProjectCosts(project = {}, options = {}) {
       ? "本地像塑或上游标明不计费 · 历史任务回填"
       : "视频上游返回的实际人民币结算 · 历史任务回填";
 
-    const existing = (job.taskId && byTask.get(job.taskId)) || bySource.get(sourceKey) || null;
+    const existing = (job.taskId && byTask.get(job.taskId)) || (job.id && byJob.get(job.id)) || bySource.get(sourceKey) || null;
     if (existing) {
       if (hasActual && ["estimated", "pending", "unpriced"].includes(existing.status) && !notCharged) {
         const upgraded = normalizeCostEntry({

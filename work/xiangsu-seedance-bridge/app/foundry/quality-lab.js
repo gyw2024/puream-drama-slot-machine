@@ -13,7 +13,7 @@ function affirmativePolicyViolation(value = "") {
   for (const line of lines) {
     if (/(?:禁止|不得|不要|不出现|无|去除|避免|without|no\s|never|forbid)/i.test(line)) continue;
     if (/(?:添加|配上|显示|出现|使用|叠加|保留).{0,12}(?:字幕|标题|姓名条|价格字|水印|BGM|背景音乐|人物介绍)/i.test(line)
-      || /(?:字幕|标题|姓名条|价格字|水印|BGM|背景音乐)s*[:：]s*(?!无|禁止|不)/i.test(line)) hits.push(line.slice(0, 180));
+      || /(?:字幕|标题|姓名条|价格字|水印|BGM|背景音乐)\s*[:：]\s*(?!无|禁止|不)/i.test(line)) hits.push(line.slice(0, 180));
   }
   return hits;
 }

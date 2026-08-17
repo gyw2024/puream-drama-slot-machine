@@ -40,7 +40,10 @@ function buildPassport(project, candidate, activeCandidateId, contract = {}) {
   const active = String(candidate.id || "") === String(activeCandidateId || "");
   const productionRevision = String(project.productionRevision || "");
   const revisionMatch = !candidate.productionRevision || !productionRevision || String(candidate.productionRevision) === productionRevision;
-  const qualityAccepted = candidate.qualityAudit?.ok === true || candidate.qualityAudit?.accepted === true || candidate.manualSelectionOverride === true || candidate.source === "manual";
+  // 与工作流侧 qualityAccepted 语义对齐：仅显式的人工选择豁免
+  // （manualSelectionOverride）可以越过质检；「来源是手动导入」本身不是豁免，
+  // 否则手动导入但质检失败的资产在护照里 eligible、在工作流里被拦，两道门禁打架。
+  const qualityAccepted = candidate.qualityAudit?.ok === true || candidate.qualityAudit?.accepted === true || candidate.manualSelectionOverride === true;
   const backgroundVerified = !["character_sheet", "character_three_view"].includes(stage)
     || candidate.qualityAudit?.uniformBackground === true
     || candidate.qualityAudit?.backgroundColor === contract.policies?.characterSheet?.background?.fixedColor;

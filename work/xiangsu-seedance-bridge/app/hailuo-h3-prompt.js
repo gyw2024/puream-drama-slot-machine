@@ -1167,6 +1167,10 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
       ? "Continuation mode: start only from the previous confirmed video's final temporal state, without replay, reset, or a second opening. Keep unequal beats and distinct face/body/action per subshot. Speakers look at listeners, never the camera. Continuous bed + synced SFX only; non-diegetic music N/A."
       : "Keyframe mode: preserve the supplied first and last narrative frames as exact temporal endpoints of one causally continuous action chain. Keep unequal beats and distinct face/body/action per subshot. Speakers look at listeners, never the camera. Continuous bed + synced SFX only; non-diegetic music N/A.";
   const description = [
+    // 首行就是标准 FINAL OUTPUT LOCK：让 compactFullReferencePrompt 的快路径
+    // （原样保留）能真正命中，未超长的提示词不再被重渲染丢掉表演/音频洁净/
+    // 边界等质量锁。压缩路径会剥离旧行并在重组时重新注入同一常量。
+    HAILUO_FINAL_OUTPUT_LOCK_EN,
     replaceCharacterIds(spec.styleEn, context.subjectByCharacterId),
     modeInstruction,
     dramaSpineDirective(shot)

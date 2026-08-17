@@ -31,6 +31,9 @@ const QUALITY_LIMITS = Object.freeze({
     nearSolidExtremePixelRatio: 0.88,
     edgeExtremePixelRatio: 0.9,
     minSolidEdgeFraction: 0.21875,
+    // 单个采样帧（250ms）的近纯色/边栏多半是正常的黑场转场、关灯夜戏或
+    // 白闪硬切；要求至少 2 个连续采样帧才判技术失败，避免误杀整镜/成片。
+    minSolidFrames: 2,
     referenceAssetLeakSimilarity: 0.74,
     minOverlayTextFrames: 3,
     minOverlayTextComponents: 4,
@@ -1418,10 +1421,11 @@ function assessVisualQuality(visual, { final = false } = {}) {
 
 function assessTechnicalVisualIntegrity(visual) {
   const failures = [];
+  const minSolidFrames = Math.max(1, Number(QUALITY_LIMITS.technicalVisual.minSolidFrames) || 1);
   if (!visual?.ok || !visual.frameCount) {
     failures.push({ code: "VIDEO_TECHNICAL_DECODE_FAILED", message: "视频没有可完整解码的画面" });
   }
-  if (Number(visual?.nearSolidFrameCount) > 0) {
+  if (Number(visual?.nearSolidFrameCount) >= minSolidFrames) {
     const first = visual.technicalFailureSamples?.find(item => item.nearSolid);
     failures.push({
       code: "VIDEO_BLANK_OR_SOLID_FRAME",
@@ -1429,7 +1433,7 @@ function assessTechnicalVisualIntegrity(visual) {
       samples: (visual.technicalFailureSamples || []).filter(item => item.nearSolid).slice(0, 8)
     });
   }
-  if (Number(visual?.solidEdgeBandFrameCount) > 0) {
+  if (Number(visual?.solidEdgeBandFrameCount) >= minSolidFrames) {
     const first = visual.technicalFailureSamples?.find(item => item.solidEdgeBand);
     failures.push({
       code: "VIDEO_SOLID_EDGE_WIPE_OR_BOARD",

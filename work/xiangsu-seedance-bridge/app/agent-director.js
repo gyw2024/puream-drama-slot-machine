@@ -723,13 +723,21 @@ function mergeAgentTakeDraft(basePlan, raw, project = {}, shot = {}, options = {
     const allowedCameraOwners = unique([baseTake.speakerId, ...list(baseTake.listenerIds), ...list(baseTake.visibleCharacterIds)]);
     const requestedCameraOwner = clean(authored?.cameraOwnerId);
     const cameraOwnerId = allowedCameraOwners.includes(requestedCameraOwner) ? requestedCameraOwner : baseTake.cameraOwnerId;
-    const onScreenSpeaker = baseTake.speakerId
-      ? authored?.onScreenSpeaker !== false && cameraOwnerId === baseTake.speakerId
+    const speakerId = baseTake.speakerId || "";
+    const authoredOnScreenSpeaker = typeof authored?.onScreenSpeaker === "boolean" ? authored.onScreenSpeaker : null;
+    const cameraOwnerIsSpeaker = Boolean(speakerId) && cameraOwnerId === speakerId;
+    if (authoredOnScreenSpeaker === true && !cameraOwnerIsSpeaker) {
+      // 草稿自相矛盾：导演明确写了“说话人上镜说话”却把机位交给听者。
+      // 必须记失败触发修复重写；静默降级为画外音会产出无口型的镜头且无从发现。
+      failures.push(`${baseTake.id} marks the speaker as on-screen but assigns the camera to ${cameraOwnerId || "an unknown subject"}`);
+    }
+    const onScreenSpeaker = speakerId
+      ? authoredOnScreenSpeaker !== false && cameraOwnerIsSpeaker
       : false;
-    const mouthOwnerId = baseTake.speakerId && onScreenSpeaker ? baseTake.speakerId : "";
+    const mouthOwnerId = speakerId && onScreenSpeaker ? speakerId : "";
     const direction = {
-      styleEn: safeCreativeField(authored?.styleEn, fallback.styleEn, 90, /subtitle|caption|title|text|asset board|contact sheet|multi-view/i),
-      visualEn: safeCreativeField(authored?.visualEn, fallback.visualEn, 150, /subtitle|caption|title|readable text|asset board|contact sheet|multi-view|character intro/i),
+      styleEn: safeCreativeField(authored?.styleEn, fallback.styleEn, 90, /subtitle|caption|title|text|narration|voice[- ]?over|biography|portrait|logo|watermark|price|name tag|asset board|contact sheet|multi-view/i),
+      visualEn: safeCreativeField(authored?.visualEn, fallback.visualEn, 150, /subtitle|caption|title|readable text|narration|voice[- ]?over|biography|portrait|logo|watermark|price|name tag|asset board|contact sheet|multi-view|character intro/i),
       cameraEn: safeCreativeField(authored?.cameraEn, fallback.cameraEn, 90, /internal cut|morph|switch speaker|shot 2/i),
       performanceEn: safeCreativeField(authored?.performanceEn, fallback.performanceEn, 150, /two speakers|both speak|simultaneous|subtitle|caption/i),
       listenerReactionEn: safeCreativeField(authored?.listenerReactionEn, fallback.listenerReactionEn, 90, /speak|dialogue|subtitle|caption|title|text/i),
@@ -1129,10 +1137,14 @@ function validateDialogueOccurrenceMultiplicity(expectedDialogue = [], text = ""
     const line = clean(turn?.text);
     if (line) expectedCounts.set(line, (expectedCounts.get(line) || 0) + 1);
   }
+  // 按 <d>[Chinese] 对白块整体精确计数。禁止在全提示词上做子串计数：
+  // 当一条对白是另一条的子串（如「什么？」与「你说什么？」）时，子串计数
+  // 会把合法出现误数成多次，导致确定性的 HAILUO_*_PROMPT_INVALID 硬失败。
+  const blocks = [...String(text || "").matchAll(/<d>\s*\[Chinese\]\s*([\s\S]*?)<\/d>/gi)].map(match => clean(match[1]));
   let lineIndex = 0;
   for (const [line, expectedCount] of expectedCounts) {
     lineIndex += 1;
-    const actualCount = text.split(line).length - 1;
+    const actualCount = blocks.filter(block => block === line).length;
     if (actualCount !== expectedCount) failures.push(`dialogue text ${lineIndex} appears ${actualCount}/${expectedCount} times`);
   }
 }

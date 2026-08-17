@@ -95,6 +95,10 @@ class AdaptiveDramaKernel {
     return project;
   }
 
+  deleteProject(projectId) {
+    return this.runtime.deleteProject(projectId);
+  }
+
   beginOperation(project, operation, targetId = "", payload = {}) {
     const contractFingerprint = String(project?.foundry?.contract?.fingerprint || "");
     const inputFingerprint = fingerprint({

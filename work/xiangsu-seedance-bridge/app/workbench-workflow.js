@@ -212,6 +212,13 @@ const HAILUO_VOICE_REFERENCE_TARGET_SECONDS = 3.2;
 const HAILUO_VOICE_REFERENCE_MAX_SECONDS = 5;
 const AUTONOMOUS_PIPELINE_MAX_REPAIRS = 12;
 const AUTONOMOUS_PIPELINE_MAX_SCRIPT_REWRITES = 3;
+// 瞬时错误（上游空返回/超时/5xx）同样必须有硬上限：无上限的退避重试会在
+// 上游持续故障时永久卡死一键流程，并且每次重试都可能再次扣费。30 次、
+// 退避封顶 60 秒约等于 25 分钟的自动恢复预算，之后明确失败并保留断点。
+const AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES = 30;
+// 同一镜头的导演结构修复（清空重排是付费文本生成）最多 3 次：确定性复发的
+// 结构错误重排也无法消除，继续重试只会无限烧钱。
+const AUTONOMOUS_PIPELINE_MAX_DIRECTOR_SHOT_RETRIES = 3;
 
 const AUTONOMOUS_PIPELINE_EXTERNAL_BLOCKERS = new Set([
   "TOPIC_SELECTION_REQUIRED",
@@ -256,11 +263,16 @@ function upstreamBillingReceipt(...sources) {
   const amountYuan = explicitYuan !== null ? explicitYuan : (cents !== null ? Number((cents / 100).toFixed(6)) : null);
   const billingStatus = records.map(record => String(record.billingStatus || record.billing_status || record.settlementStatus || record.settlement_status || "").trim()).find(Boolean) || "";
   const normalizedStatus = billingStatus.toLowerCase();
+  // 上游明确说已扣费（charged/settled/paid/completed）但没给金额：钱确实动了，
+  // 不能记成 pending/0 把真实扣费藏起来；由结算层按定价估算并落 estimated。
+  const chargedWithoutAmount = amountYuan === null
+    && ["charged", "settled", "paid", "completed"].includes(normalizedStatus);
   return {
     amountYuan,
     chargeCents: cents !== null ? cents : (amountYuan !== null ? Math.round(amountYuan * 100) : null),
     billingStatus,
     hasActual: amountYuan !== null,
+    chargedWithoutAmount,
     pending: ["pending", "reserved", "processing", "billing_pending"].includes(normalizedStatus),
     notCharged: ["not_charged", "refunded", "free", "failed", "cancelled", "canceled"].includes(normalizedStatus)
   };
@@ -10329,18 +10341,26 @@ class WorkbenchWorkflow {
     const inputTokens = Number(usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens) || estimateTextTokens(inputText);
     const outputTokens = Number(usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens) || (hasResult ? estimateTextTokens(outputText) : 0);
     const trustedReceipt = ["puream.desktop.done", "puream.desktop.billing"].includes(usage.receiptSource);
-    const receipt = trustedReceipt ? upstreamBillingReceipt(usage) : { amountYuan: null, hasActual: false, pending: true, notCharged: false, billingStatus: "" };
-    const status = receipt.notCharged ? "not_charged" : (receipt.hasActual && !receipt.pending ? "settled" : "pending");
+    const receipt = trustedReceipt
+      ? upstreamBillingReceipt(usage)
+      : { amountYuan: null, hasActual: false, chargedWithoutAmount: false, pending: true, notCharged: false, billingStatus: "" };
+    const status = receipt.notCharged
+      ? "not_charged"
+      : receipt.chargedWithoutAmount
+        ? "estimated"
+        : (receipt.hasActual && !receipt.pending ? "settled" : "pending");
     const textPricing = this.store.getSettings()?.textPricing || {};
     const hasBillableOutputEvidence = outputTokens > 0 && (trustedReceipt || hasResult || !(options.errorCode || usage.errorCode));
-    const estimatedAmount = status === "pending" && hasBillableOutputEvidence
+    const estimatedAmount = (status === "pending" && hasBillableOutputEvidence) || status === "estimated"
       ? estimateTextCost({ inputTokens, outputTokens }, textPricing)
       : null;
     const amountYuan = status === "settled"
       ? receipt.amountYuan
-      : status === "pending" && estimatedAmount !== null
-        ? estimatedAmount
-        : 0;
+      : status === "estimated"
+        ? (estimatedAmount !== null ? estimatedAmount : 0)
+        : status === "pending" && estimatedAmount !== null
+          ? estimatedAmount
+          : 0;
     const receiptAttempt = Number(usage.attempt) || Number(options.receiptIndex) || 0;
     const receiptSession = String(usage.sessionId || options.sessionId || Date.now());
     const entryPayload = {
@@ -10355,9 +10375,11 @@ class WorkbenchWorkflow {
         ? "文本上游返回的实际人民币结算"
         : status === "not_charged"
           ? "上游明确返回不计费、退款或失败"
-          : estimatedAmount !== null
-            ? `等待文本上游实扣回执；${textPricingBasis(inputTokens, outputTokens, textPricing)}`
-            : "等待文本上游返回实际扣费金额（尚无完整输出 token，暂不估算）",
+          : status === "estimated"
+            ? `上游已确认扣费但未返回金额，按文本定价估算；${textPricingBasis(inputTokens, outputTokens, textPricing)}`
+            : estimatedAmount !== null
+              ? `等待文本上游实扣回执；${textPricingBasis(inputTokens, outputTokens, textPricing)}`
+              : "等待文本上游返回实际扣费金额（尚无完整输出 token，暂不估算）",
       inputTokens,
       outputTokens,
       entityType: options.entityType || "",
@@ -10368,7 +10390,7 @@ class WorkbenchWorkflow {
     let entry = this.store.beginCostEntry(projectId, entryPayload);
     let shouldReportActual = entry?.__created === true && status === "settled" && amountYuan > 0;
     const canUpgradeExisting = entry?.__created !== true
-      && ["settled", "not_charged"].includes(status)
+      && ["settled", "not_charged", "estimated"].includes(status)
       && !["settled", "not_charged"].includes(String(entry?.status || ""));
     const canRefreshPendingEstimate = entry?.__created !== true
       && status === "pending"
@@ -10794,8 +10816,11 @@ class WorkbenchWorkflow {
     const requestOptions = {
       json: true,
       sessionId,
-      timeoutMs: NO_TOTAL_DEADLINE_MS,
-      maxReconnectAttempts: UNLIMITED_ATTEMPTS
+      // 语义审核只是“建议”，失败时下方 catch 会放行本地确定性验收。
+      // 必须给它有限预算：无总超时+无限重连会让它在中转悬挂时永远
+      // 重试下去，catch 的放行兜底永远执行不到，一键流程卡死。
+      timeoutMs: TEXT_STAGE_ATTEMPT_TIMEOUT_MS,
+      maxReconnectAttempts: 2
     };
     try {
       const data = await this.generateText(settings.textProvider, [
@@ -11034,30 +11059,6 @@ class WorkbenchWorkflow {
             }
             checkpoint.scriptRepair = null;
           } catch {}
-        }
-      }
-      if (maxSpeakingCharacters === 1 && speakerNames.size === 1) {
-        const speakerId = [...speakerNames][0];
-        if (String(shot.cameraOwnerId || "").toUpperCase() !== String(speakerId).toUpperCase()
-          || String(shot.mouthOwnerId || "").toUpperCase() !== String(speakerId).toUpperCase()) {
-          contractFailures.push({
-            code: "HAILUO_CAMERA_MOUTH_OWNERSHIP_INVALID",
-            shotId: plan.id,
-            message: `${plan.id}唯一说话人${speakerId}必须同时拥有cameraOwnerId与mouthOwnerId`
-          });
-        }
-        for (const subshot of shot.subshots || []) {
-          const subSpeakers = normalizeStringArray(subshot.speakerIds).map(value => value.toUpperCase());
-          if (subSpeakers.some(value => value !== String(speakerId).toUpperCase())
-            || String(subshot.cameraOwnerId || "").toUpperCase() !== String(speakerId).toUpperCase()
-            || String(subshot.mouthOwnerId || "").toUpperCase() !== String(speakerId).toUpperCase()) {
-            contractFailures.push({
-              code: "HAILUO_SUBSHOT_OWNERSHIP_DRIFT",
-              shotId: plan.id,
-              message: `${plan.id}的3段subshots必须保持唯一说话人${speakerId}的同一cameraOwnerId/mouthOwnerId，禁止内部切到听者`
-            });
-            break;
-          }
         }
       }
     }
@@ -12401,10 +12402,11 @@ class WorkbenchWorkflow {
         ? { ...checkpointFailoverProvider, authSource: "user" }
         : null)
       || settings.textProvider;
+    const configuredFastModel = String(configuredTextProvider?.model || "").trim();
     const scriptTextProvider = useFastScriptPath && configuredTextProvider?.kind === "puream-relay"
       ? {
           ...configuredTextProvider,
-          model: SCRIPT_FAST_PUREAM_MODEL,
+          model: configuredFastModel || SCRIPT_FAST_PUREAM_MODEL,
           modelStrategy: "explicit",
           temperature: Math.min(0.2, Number(configuredTextProvider.temperature) || 0.2)
         }
@@ -13594,7 +13596,7 @@ class WorkbenchWorkflow {
     }
     let project = this.store.getProject(projectId);
     assertProjectGenerationMode(project);
-    if (!project.shots.length || project.script?.ideaSignature !== ideaSignature(project)) {
+    if (!Array.isArray(project.shots) || !project.shots.length || project.script?.ideaSignature !== ideaSignature(project)) {
       await this.generateCompleteScript(projectId, { track: false });
       project = this.store.getProject(projectId);
     }
@@ -17630,8 +17632,12 @@ ${shotAnchor}
       const errorCode = String(error?.code || "").toUpperCase();
       const transientTimeout = errorCode === "PROVIDER_TIMEOUT"
         || /timeout|timed out|中转请求超时/i.test(String(error?.message || ""));
+      // 任何上游传输类故障（fetch failed / ECONNRESET / 502/503/504 / 429 /
+      // 流中断 / 空返回）都应走确定性本地兜底，而不是被包装成编译失败抛进
+      // 恢复循环（那会清空计划并反复重跑付费的导演生成）。
+      const transportFailure = isTransientProviderError(error);
       const creativeStructureFailure = /^(?:AGENT_|MODEL_JSON_INVALID)/.test(errorCode);
-      if (transientTimeout || creativeStructureFailure) {
+      if (transientTimeout || transportFailure || creativeStructureFailure) {
         // The locked local plan already preserves every dialogue, performance,
         // speaker, mouth and continuity contract. If the creative director
         // response times out or remains structurally invalid after its bounded
@@ -20021,7 +20027,22 @@ ${shotAnchor}
     }
     if (this.foundryKernel && ["assets", "shots", "videos", "final"].some(shouldRun)) {
       project = this.store.getProject(projectId);
-      this.foundryKernel.assertPaidGenerationReady(project, order[Math.max(start, 1)] || "assets");
+      const scriptQualityGateOn = this.qualityGatesEnabled(this.store.getSettings(), "script");
+      try {
+        this.foundryKernel.assertPaidGenerationReady(project, order[Math.max(start, 1)] || "assets");
+      } catch (error) {
+        // 用户质检开关是权威契约：关闭时任何评审模块不得阻断/回滚/重写用户作品。
+        // 正式质检降级为提醒继续生产；绝对策略与结构错误仍然照常抛出。
+        if (scriptQualityGateOn || error?.code !== "FOUNDRY_FORMAL_QUALITY_GATE_FAILED") throw error;
+        project.foundry = {
+          ...(project.foundry || {}),
+          formalQualityAdvisory: {
+            downgradedAt: new Date().toISOString(),
+            reason: "质检开关已关闭，正式质检仅作提醒，不再阻断付费生成",
+            summary: String(error?.message || "")
+          }
+        };
+      }
       // Persist the exact pre-cost understanding and L1/L2/L3 report that made
       // this run eligible. It becomes replayable evidence for every later job.
       this.store.saveProject(project);
@@ -20394,6 +20415,14 @@ ${shotAnchor}
       ? project.costLedger?.entries?.find(item => item.category === "video" && item.taskId === job.taskId)
       : null;
     if (byTask) return byTask;
+    // taskId 可能在提交响应到达后才回填：此前用本地 job.id 记的 sourceKey 不会
+    // 被 byTask 命中，需按 sourceKey / jobId 兜底，否则会重复建行、成本膨胀。
+    const bySourceKey = project.costLedger?.entries?.find(item => String(item.sourceKey || "") === `video:${job.taskId || job.id}`) || null;
+    if (bySourceKey) return bySourceKey;
+    const byJobId = job.id
+      ? project.costLedger?.entries?.find(item => item.category === "video" && String(item.jobId || "") === String(job.id))
+      : null;
+    if (byJobId) return byJobId;
     const providerKind = job.providerKind || "local-xiangsu";
     const duration = Number(job.duration) || 5;
     return this.store.beginCostEntry(projectId, {
@@ -20946,6 +20975,9 @@ ${shotAnchor}
 
   async recoverAutonomousPipelineFailure(projectId, error, supervisor) {
     const code = String(error?.code || "OPERATION_FAILED").trim().toUpperCase();
+    // 终态错误不得再次进入恢复流程：恢复自身抛出的 EXHAUSTED 若被外层
+    // catch 后重喂回来，会形成无 sleep 的热循环（旧缺陷，一并堵住）。
+    if (code === "AUTONOMOUS_PIPELINE_REPAIR_EXHAUSTED" || code === "AUTONOMOUS_PIPELINE_TRANSIENT_EXHAUSTED") return false;
     const count = (supervisor.failuresByCode.get(code) || 0) + 1;
     supervisor.failuresByCode.set(code, count);
     if (this.autonomousPipelineExternalBlocker(error)) return false;
@@ -20957,6 +20989,21 @@ ${shotAnchor}
       const affectedShot = (project.shots || []).find(shot => String(shot.id || "") === nestedShotId)
         || (project.shots || []).find(shot => Number(shot.number) === messageShotNumber);
       if (affectedShot) {
+        // 同一镜头反复复发时（编译失败/stale 并不能靠清空计划修复），
+        // 按镜头计数并设上限，避免付费导演生成的无限重排循环。
+        const perShotKey = `${code}:${affectedShot.id}`;
+        const shotFailures = (supervisor.failuresByCode.get(perShotKey) || 0) + 1;
+        supervisor.failuresByCode.set(perShotKey, shotFailures);
+        if (shotFailures > AUTONOMOUS_PIPELINE_MAX_DIRECTOR_SHOT_RETRIES) {
+          this.appendAutonomousRepairJournal(projectId, {
+            attempt: shotFailures,
+            code,
+            status: "director_shot_repair_exhausted",
+            shotId: affectedShot.id,
+            shotNumber: Number(affectedShot.number) || 0
+          });
+          return false;
+        }
         project.shots = project.shots.map(shot => shot.id === affectedShot.id
           ? {
               ...shot,
@@ -21069,9 +21116,13 @@ ${shotAnchor}
       || code === "SHOT_DIALOGUE_MOUTH_OWNER_MISMATCH"
       || code === "SHOT_SPEAKER_IDENTITY_AMBIGUOUS"
       || code === "SHOT_SPEAKER_NAME_DUPLICATED";
-    const transientFailure = !scriptQualityFailure && (isTransientProviderError(error)
-      || error?.retryable === true
-      || /TIMEOUT|NETWORK|EMPTY_RESPONSE|REMOTE_PENDING|QUARANTINED|BUSY/.test(code));
+    const transientFailure = !scriptQualityFailure
+      // 批次远端待同步必须走下方 agent_batch_recovery（带较短退避、仅补缺失项）；
+      // 被 transient 正则抢先会退化成整链路无限重跑。
+      && code !== "SHOT_VIDEO_BATCH_REMOTE_PENDING"
+      && (isTransientProviderError(error)
+        || error?.retryable === true
+        || /TIMEOUT|NETWORK|EMPTY_RESPONSE|REMOTE_PENDING|QUARANTINED|BUSY/.test(code));
     if (code === "MODEL_JSON_INVALID") {
       const project = this.store.getProject(projectId);
       const checkpoint = project.script?.generationCheckpoint;
@@ -21126,6 +21177,14 @@ ${shotAnchor}
         return true;
       }
       supervisor.transientRetries += 1;
+      if (supervisor.transientRetries > AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES) {
+        throw Object.assign(new Error(`文本模型连续 ${AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES} 次返回不完整结构（${code}），已停止自动重试；请检查模型输出质量或更换模型后从断点继续`), {
+          code: "AUTONOMOUS_PIPELINE_TRANSIENT_EXHAUSTED",
+          cause: error,
+          retryable: false,
+          transientRetryCount: supervisor.transientRetries
+        });
+      }
       this.appendAutonomousRepairJournal(projectId, {
         attempt: supervisor.transientRetries,
         code,
@@ -21135,13 +21194,27 @@ ${shotAnchor}
       this.setAutomation(projectId, {
         status: "running",
         stage: "agent_json_structure_repair",
-        message: `文本模型返回结构不完整，Agent 已保留全部成功批次并将在 2 秒后仅重试缺失批次（第 ${supervisor.transientRetries} 次）`
+        message: `文本模型返回结构不完整，Agent 已保留全部成功批次并将在 2 秒后仅重试缺失批次（第 ${supervisor.transientRetries}/${AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES} 次）`
       });
       await abortableDelay(2000, this.operationControls.get(projectId)?.controller?.signal);
       return true;
     }
     if (transientFailure) {
       supervisor.transientRetries += 1;
+      if (supervisor.transientRetries > AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES) {
+        this.appendAutonomousRepairJournal(projectId, {
+          attempt: supervisor.transientRetries,
+          code,
+          message: String(error?.message || ""),
+          status: "transient_retry_exhausted"
+        });
+        throw Object.assign(new Error(`上游连续 ${AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES} 次瞬时失败（${code}），已停止自动重试以避免无限等待与重复扣费；请检查文本供应商状态或在系统设置中配置可用的备用模型，然后从断点继续`), {
+          code: "AUTONOMOUS_PIPELINE_TRANSIENT_EXHAUSTED",
+          cause: error,
+          retryable: false,
+          transientRetryCount: supervisor.transientRetries
+        });
+      }
       if (!supervisor.textProviderOverride && supervisor.transientRetries >= 1) {
         const configuredProfiles = this.store.getSettings?.()?.textProviderProfiles;
         const fallback = configuredProfiles && typeof configuredProfiles === "object"
@@ -21177,7 +21250,7 @@ ${shotAnchor}
       this.setAutomation(projectId, {
         status: "running",
         stage: "agent_transient_recovery",
-        message: `上游暂时波动，Agent 将在 ${Math.ceil(delayMs / 1000)} 秒后从本地断点继续（已自动恢复 ${supervisor.transientRetries} 次，不设次数上限）`
+        message: `上游暂时波动，Agent 将在 ${Math.ceil(delayMs / 1000)} 秒后从本地断点继续（已自动恢复 ${supervisor.transientRetries}/${AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES} 次）`
       });
       await abortableDelay(delayMs, this.operationControls.get(projectId)?.controller?.signal);
       return true;
@@ -21206,8 +21279,12 @@ ${shotAnchor}
     }
 
     if (/CHARACTER_REFERENCE|SPEAKER_UNKNOWN/.test(code)) {
-      this.setAutomation(projectId, { status: "running", stage: "agent_character_repair", message: "人物引用不一致，Agent 正在重建唯一人物映射并复检" });
+      // 纯本地重建可能确定性复发（模型每次仍生成未知人物）：
+      // 计入 repairs 上限并加退避，避免无 sleep 的热循环。
+      if (count > 6) return false;
+      this.setAutomation(projectId, { status: "running", stage: "agent_character_repair", message: `人物引用不一致，Agent 正在重建唯一人物映射并复检（第 ${count} 次）` });
       this.reconcileProjectCharacterReferences(projectId, { clearFailure: false, allowCharacterCreation: true });
+      await abortableDelay(2000, this.operationControls.get(projectId)?.controller?.signal);
       return true;
     }
 
@@ -21242,13 +21319,21 @@ ${shotAnchor}
       "ASSET_VIDEO_DEPENDENCIES_PENDING",
       "SHOT_VIDEO_TECHNICAL_INTEGRITY_FAILED"
     ].includes(code)) {
-      this.setAutomation(projectId, { status: "running", stage: "agent_batch_recovery", message: "批次存在失败项，Agent 正在保留已完成结果并仅重试缺失或不合格项" });
+      if (count > AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES) {
+        this.appendAutonomousRepairJournal(projectId, { attempt: count, code, message: String(error?.message || ""), status: "batch_recovery_exhausted" });
+        return false;
+      }
+      this.setAutomation(projectId, { status: "running", stage: "agent_batch_recovery", message: `批次存在失败项，Agent 正在保留已完成结果并仅重试缺失或不合格项（第 ${count} 次）` });
       await abortableDelay(Math.min(5000, 750 * count), this.operationControls.get(projectId)?.controller?.signal);
       return true;
     }
 
     if (code === "FINAL_VIDEO_TECHNICAL_INTEGRITY_FAILED" || code === "FINAL_DURATION_CONTRACT_FAILED") {
-      this.setAutomation(projectId, { status: "running", stage: "agent_delivery_repair", message: "成片验收未通过，Agent 正在定位坏镜、局部重生并重新合成" });
+      if (count > 6) {
+        this.appendAutonomousRepairJournal(projectId, { attempt: count, code, message: String(error?.message || ""), status: "delivery_repair_exhausted" });
+        return false;
+      }
+      this.setAutomation(projectId, { status: "running", stage: "agent_delivery_repair", message: `成片验收未通过，Agent 正在定位坏镜、局部重生并重新合成（第 ${count} 次）` });
       if (count > 1) await this.repairFailedMedia(projectId, { track: false });
       return true;
     }

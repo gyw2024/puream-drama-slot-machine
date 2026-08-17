@@ -167,13 +167,45 @@ class FoundryRuntimeStore {
     return this.db.prepare("SELECT project_id,revision,snapshot_json,snapshot_sha256,contract_fingerprint,updated_at FROM project_state WHERE project_id=?").get(String(projectId));
   }
 
+  deleteProject(projectId) {
+    const id = String(projectId || "");
+    if (!id) return { deleted: false };
+    return this.transaction(() => {
+      this.db.prepare("DELETE FROM project_state WHERE project_id=?").run(id);
+      this.db.prepare("DELETE FROM project_revisions WHERE project_id=?").run(id);
+      this.db.prepare("DELETE FROM operation_outbox WHERE project_id=?").run(id);
+      this.db.prepare("DELETE FROM checkpoints WHERE project_id=?").run(id);
+      this.db.prepare("DELETE FROM asset_passports WHERE project_id=?").run(id);
+      this.db.prepare("DELETE FROM provider_receipts WHERE project_id=?").run(id);
+      // audit_events 属只读审计流水，保留以便追溯删除前操作；其余可变状态一并清理。
+      return { deleted: true };
+    });
+  }
+
   loadProject(projectId) {
     const row = this.projectRow(projectId);
     if (!row) return null;
-    try { return JSON.parse(row.snapshot_json); }
-    catch (error) {
+    try {
+      return this.withRowRevision(JSON.parse(row.snapshot_json), row);
+    } catch (error) {
       throw new FoundryError("V2 项目当前快照无法解析", { code: "FOUNDRY_PROJECT_STATE_CORRUPTED", kind: ERROR_KINDS.INTERNAL_INVARIANT, cause: error, details: { projectId } });
     }
+  }
+
+  // 快照在分配新 revision 之前序列化，blob 内嵌的 foundry.runtimeRevision 比
+  // 自身行号落后一拍。任何未经规范化的读取方拿它当 beginOperation 幂等键输入
+  // 都会造成 operation_key 漂移（同一付费操作被判为不同操作而重复执行）。
+  // 在读取源头统一以行号为权威值。
+  withRowRevision(project, row) {
+    if (!project || typeof project !== "object") return project;
+    return {
+      ...project,
+      foundry: {
+        ...(project.foundry || {}),
+        runtimeRevision: Number(row.revision) || 0,
+        runtimeSnapshotSha256: String(row.snapshot_sha256 || "")
+      }
+    };
   }
 
   listProjectStates() {
@@ -185,7 +217,7 @@ class FoundryRuntimeStore {
         snapshotSha256: String(row.snapshot_sha256 || ""),
         contractFingerprint: String(row.contract_fingerprint || ""),
         updatedAt: String(row.updated_at || ""),
-        project: JSON.parse(row.snapshot_json || "{}")
+        project: this.withRowRevision(JSON.parse(row.snapshot_json || "{}"), row)
       }));
   }
 
@@ -260,7 +292,7 @@ class FoundryRuntimeStore {
     const text = zlib.gunzipSync(row.snapshot_gzip).toString("utf8");
     const parsed = JSON.parse(text);
     if (fingerprint(parsed) !== row.snapshot_sha256) throw new FoundryError("V2 历史快照校验失败", { code: "FOUNDRY_REVISION_HASH_MISMATCH", kind: ERROR_KINDS.INTERNAL_INVARIANT, details: { projectId, revision } });
-    return parsed;
+    return this.withRowRevision(parsed, { revision, snapshot_sha256: row.snapshot_sha256 });
   }
 
   beginOperation(input = {}) {

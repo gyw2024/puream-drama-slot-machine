@@ -1118,7 +1118,15 @@ function readJsonFile(filePath, options = {}) {
 function atomicWriteJson(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const temporary = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  // 写入后 fsync 再 rename，确保掉电时临时文件内容已落到磁盘，而不是
+  // 只有目录项可见、数据丢失（否则断电可能丢最近一次保存）。
+  const fd = fs.openSync(temporary, "w");
+  try {
+    fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   if (fs.existsSync(filePath)) {
     let backupTemporary = "";
     try {
@@ -1238,8 +1246,12 @@ function mergeAssetBatchProgress(diskProgress, memoryProgress) {
   });
 }
 
-function mergeAutomationState(diskAutomation = {}, memoryAutomation = {}) {
-  const merged = { ...diskAutomation, ...memoryAutomation };
+function mergeAutomationState(diskAutomation = {}, memoryAutomation = {}, baselineAutomation = null) {
+  // 有三方基线时按三方合并：memory 未改而 disk 改时以 disk 为准，避免旧内存态
+  // 覆盖磁盘上更新的自动化 status/stage/progress（否则续跑会状态倒退或重复执行）。
+  const merged = baselineAutomation && typeof baselineAutomation === "object"
+    ? mergeThreeWay(baselineAutomation, memoryAutomation, diskAutomation)
+    : { ...diskAutomation, ...memoryAutomation };
   merged.progress = mergeAssetBatchProgress(diskAutomation?.progress, memoryAutomation?.progress);
   return merged;
 }
@@ -1280,7 +1292,7 @@ function mergeProjectForConcurrentSave(diskProject, memoryProject, baselineProje
   const merged = baselineProject
     ? mergeThreeWay(baselineProject, memoryProject, diskProject)
     : { ...diskProject, ...memoryProject };
-  merged.automation = mergeAutomationState(diskProject.automation, memoryProject.automation);
+  merged.automation = mergeAutomationState(diskProject.automation, memoryProject.automation, baselineProject?.automation);
   merged.costLedger = mergeCostLedger(diskProject.costLedger, memoryProject.costLedger);
   if (memoryProject.textProviderDiagnostics || diskProject.textProviderDiagnostics) {
     merged.textProviderDiagnostics = mergeTextProviderDiagnostics(
@@ -1938,6 +1950,12 @@ class WorkbenchStore {
     try {
       this.writeIndex({ ...index, projects: index.projects.filter(item => item.id !== id) });
       if (Array.isArray(this.activeVideoJobsCache)) this.activeVideoJobsCache = this.activeVideoJobsCache.filter(item => item.projectId !== id);
+      // 同步清理 V2 运行时 SQLite 状态：否则删除后 project_state/checkpoints/
+      // operation_outbox/asset_passports/provider_receipts 孤儿化，恢复项目时
+      // getProject 会读到残留旧快照，断点/成本/任务错乱。
+      try { this.foundryKernel?.deleteProject(id); } catch (error) {
+        console.warn(`[workbench-store] 清理 V2 运行时状态失败（项目已移入回收区，不影响删除）: ${error?.message || error}`);
+      }
     } catch (error) {
       if (moved && fs.existsSync(archiveDir) && !fs.existsSync(sourceDir)) fs.renameSync(archiveDir, sourceDir);
       throw error;

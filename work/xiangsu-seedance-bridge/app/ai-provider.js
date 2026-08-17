@@ -13,6 +13,14 @@ const { abortableDelay, resolveAttemptLimit } = require("./production-liveness")
 const MAX_REMOTE_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_REMOTE_VIDEO_BYTES = 500 * 1024 * 1024;
 const PROVIDER_VIDEO_PROMPT_LIMIT = 1900;
+// 提交与轮询都必须有界：无超时的提交 POST 在网关悬挂时永不返回；无截止的
+// while(true) 轮询在上游任务卡死（永远 queued/running）时永不退出，任务已
+// 计费却不产出，且外层无限重试无法介入。超时后抛出带 remoteGenerationPending
+// 的错误，由上层按“远端待恢复”语义用 taskId 续查，而不是假装失败重建任务。
+const IMAGE_SUBMIT_TIMEOUT_MS = 120_000;
+const IMAGE_POLL_DEADLINE_MS = 15 * 60_000;
+const VIDEO_SUBMIT_TIMEOUT_MS = 180_000;
+const VIDEO_POLL_DEADLINE_MS = 30 * 60_000;
 
 function compactProviderVideoPrompt(prompt, maxLength = PROVIDER_VIDEO_PROMPT_LIMIT) {
   const original = String(prompt || "").replace(/\r/g, "").trim();
@@ -538,6 +546,7 @@ function parsePureamSse(sse) {
   let streamErrorCode = "";
   let currentEvent = "";
   let sessionId = "";
+  let streamModel = "";
   let usage = {};
   const events = [];
   const finiteValue = (...values) => {
@@ -628,15 +637,22 @@ function parsePureamSse(sse) {
     }
     const wrapped = payload?.data || payload?.result || payload?.response || payload?.meta || {};
     if (payload?.sessionId || wrapped?.sessionId) sessionId = String(payload.sessionId || wrapped.sessionId);
+    // 中转实际调度的模型（meta 帧的 modelSlug）必须保留：账本按“实际模型”记账，
+    // 否则客户端请求 A、上游调度 B 时归属失真且无从发现。
+    const frameModel = String(payload?.modelSlug ?? payload?.model ?? wrapped?.modelSlug ?? wrapped?.model ?? "").trim();
+    if (frameModel) streamModel = frameModel;
     const hasUsageEnvelope = [payload, payload?.data, payload?.result, payload?.response, payload?.meta].some(item => item && typeof item === "object" && (
       item.usage || item.billing || item.receipt || item.settlement || item.cost
       || item.charge_cents != null || item.charge_yuan != null || item.totalChargeCents != null
       || item.chargeCents != null || item.chargeYuan != null || item.amountYuan != null
+      // 顶层 billing_status/settlement_status 字符串同样是回执：done 前先收到它再断流时，
+      // 不合并就会把已扣费的请求误判成传输中断而重试（可能二次计费）。
+      || String(item.billing_status ?? item.billingStatus ?? item.settlement_status ?? item.settlementStatus ?? "").trim() !== ""
     ));
     if (currentEvent === "done" || hasUsageEnvelope) mergeUsage(payload);
     events.push({ event: currentEvent || "data", keys: payload && typeof payload === "object" ? Object.keys(payload) : [], textLength: typeof chunk === "string" ? chunk.length : 0, outputTokens: Number(payload?.outputTokens) || 0 });
   }
-  return { text, streamError, streamErrorCode, events, sessionId, usage };
+  return { text, streamError, streamErrorCode, events, sessionId, usage: { ...(streamModel ? { model: streamModel } : {}), ...usage } };
 }
 
 async function readPureamSse(response, onDelta) {
@@ -809,14 +825,15 @@ async function generatePureamTextOnce(config, messages, options = {}) {
         : Object.assign(new Error("文本生成已取消"), { code: "PROVIDER_REQUEST_ABORTED" });
     }
     if (error?.name === "AbortError") {
+      // 计时器中止的请求从未得到上游响应，不会发生“已扣费的重放”，
+      // 因此这里不标 noAutomaticRetry（外层安全重连是设计行为）。
       throw Object.assign(new Error(
         timedOut
           ? "纯梦文本中转请求超时"
           : "纯梦文本连接被中断，请稍后重试"
       ), {
         code: timedOut ? "PROVIDER_TIMEOUT" : "PUREAM_TRANSPORT_INTERRUPTED",
-        cause: error,
-        noAutomaticRetry: true
+        cause: error
       });
     }
     throw error;
@@ -865,6 +882,8 @@ async function generatePureamText(config, messages, options = {}) {
         && error?.upstreamDone !== true
         && !error?.upstreamReceipt
         && !String(error?.partialText || "").trim()
+        // done/回执已到的请求可能已被上游计费，绝不自动重发同一逻辑请求。
+        && error?.noAutomaticRetry !== true
         && isTransportInterruption(error);
       if (recoverable && !String(error?.code || "").startsWith("PUREAM_")) {
         error = Object.assign(new Error("文本链路正在自动恢复"), {
@@ -1229,7 +1248,7 @@ async function generatePureamImage(config, prompt, targetPath, options = {}) {
     headers: pureamApiHeaders(config),
     body: JSON.stringify(body),
     signal: options.signal
-  }, 0);
+  }, IMAGE_SUBMIT_TIMEOUT_MS);
   let charge = qingboCharge(payload);
   const taskId = taskIdOf(payload);
   let resultUrl = "";
@@ -1245,7 +1264,15 @@ async function generatePureamImage(config, prompt, targetPath, options = {}) {
     });
   }
   if (!urls.length) {
+    const pollDeadline = Date.now() + IMAGE_POLL_DEADLINE_MS;
     while (true) {
+      if (Date.now() > pollDeadline) {
+        throw Object.assign(new Error(`图片任务 ${taskId} 超过 ${Math.round(IMAGE_POLL_DEADLINE_MS / 60000)} 分钟仍未返回结果，已停止等待；任务仍在远端，稍后会按任务编号续查`), {
+          code: "IMAGE_REMOTE_TIMEOUT",
+          taskId,
+          remoteGenerationPending: true
+        });
+      }
       await waitForRetry(2_000, options.signal);
       try {
         payload = await providerFetch(endpoint(config.baseUrl, `/api/ai/gpt-image-2/v1/tasks/${encodeURIComponent(taskId)}`), {
@@ -1495,7 +1522,7 @@ async function generatePureamVideo(config, prompt, targetPath, options = {}) {
           headers: request.headers,
           body: JSON.stringify(request.body),
           signal: options.signal
-        }, 0);
+        }, VIDEO_SUBMIT_TIMEOUT_MS);
         break;
       } catch (error) {
         if (attempt === 4 || !isQingboTransientError(error)) throw error;
@@ -1516,7 +1543,19 @@ async function generatePureamVideo(config, prompt, targetPath, options = {}) {
   if (!urls.length) {
     const basePollDelayMs = Number.isFinite(Number(options.pollIntervalMs)) ? Math.max(0, Number(options.pollIntervalMs)) : 5_000;
     let pollDelayMs = basePollDelayMs;
+    const pollDeadlineMs = Number.isFinite(Number(options.pollDeadlineMs)) && Number(options.pollDeadlineMs) > 0
+      ? Number(options.pollDeadlineMs)
+      : VIDEO_POLL_DEADLINE_MS;
+    const pollDeadline = Date.now() + pollDeadlineMs;
     while (true) {
+      if (Date.now() > pollDeadline) {
+        throw Object.assign(new Error(`视频任务 ${taskId} 超过 ${Math.round(pollDeadlineMs / 60000)} 分钟仍未完成，已停止等待；任务仍在远端，稍后会按任务编号续查而非重复付费重建`), {
+          code: "VIDEO_REMOTE_TIMEOUT",
+          taskId,
+          remoteGenerationPending: true,
+          upstream: payload
+        });
+      }
       const queryUrl = assertPureamCloudRequestUrl(endpoint(new URL(request.createUrl).origin, request.queryPath(taskId)));
       try {
         await waitForRetry(pollDelayMs, options.signal);
