@@ -133,6 +133,32 @@ test("a full five-turn 15-second exchange still compiles to one bounded H3 clip"
   assert.equal(assertAgentGenerationBlockPrompt(project, shot, block, blockReferences, prompt), true);
 });
 
+test("overflow dialogue turns attach to the final subshot without losing text or speaker ownership", () => {
+  const { project, shot } = fixture();
+  shot.duration = 12;
+  shot.dialogueTurns = [
+    { speakerId: "C01", listenerIds: ["C02"], text: "第一句完整保留。", subshotNumber: 1 },
+    { speakerId: "C02", listenerIds: ["C01"], text: "第二句完整保留。", subshotNumber: 2 },
+    { speakerId: "C01", listenerIds: ["C02"], text: "第三句完整保留。", subshotNumber: 3 },
+    { speakerId: "C02", listenerIds: ["C01"], text: "第四句也不能丢。", subshotNumber: 4 }
+  ];
+  shot.subshots = [
+    { start: 0, end: 3, visibleCharacterIds: ["C01", "C02"] },
+    { start: 3, end: 7, visibleCharacterIds: ["C01", "C02"] },
+    { start: 7, end: 12, visibleCharacterIds: ["C01", "C02"] }
+  ];
+
+  const plan = buildCameraTakePlan(project, shot);
+  const plannedTurns = plan.takes.flatMap(take => take.dialogueTurns);
+
+  assert.equal(validateCameraTakePlan(plan, project, shot), true);
+  assert.deepEqual(plannedTurns.map(turn => turn.text), shot.dialogueTurns.map(turn => turn.text));
+  assert.deepEqual(plannedTurns.map(turn => turn.speakerId), ["C01", "C02", "C01", "C02"]);
+  assert.equal(plannedTurns[3].authoredSubshotNumber, 4);
+  assert.equal(plannedTurns[3].subshotNumber, 3);
+  assert.deepEqual(plan.takes.slice(-2).map(take => take.mouthOwnerId), ["C01", "C02"]);
+});
+
 test("director-agent creativity cannot inject unsafe transitions or invalid camera ownership", () => {
   const { project, shot } = fixture();
   const base = buildCameraTakePlan(project, shot);

@@ -17574,17 +17574,21 @@ ${shotAnchor}
       }, { projectId, shotId, stage: "director_continuity_plan" });
     } catch (error) {
       if (isOperationControlError(error)) throw error;
-      const transientTimeout = String(error?.code || "").toUpperCase() === "PROVIDER_TIMEOUT"
+      const errorCode = String(error?.code || "").toUpperCase();
+      const transientTimeout = errorCode === "PROVIDER_TIMEOUT"
         || /timeout|timed out|中转请求超时/i.test(String(error?.message || ""));
-      if (transientTimeout) {
-        // A continuity timeout must not stall the whole prompt fan-out. The
-        // locked local plan already preserves every dialogue/take contract;
-        // persist it as a deterministic fallback without replaying a paid
-        // request or changing the authored story structure.
+      const creativeStructureFailure = /^(?:AGENT_|MODEL_JSON_INVALID)/.test(errorCode);
+      if (transientTimeout || creativeStructureFailure) {
+        // The locked local plan already preserves every dialogue, performance,
+        // speaker, mouth and continuity contract. If the creative director
+        // response times out or remains structurally invalid after its bounded
+        // repair turn, persist that verified plan instead of replaying the
+        // whole paid fan-out.
         const fallbackPlan = {
           ...basePlan,
           authoredBy: "deterministic-local-continuity-fallback",
           authoredAt: new Date().toISOString(),
+          fallbackReason: transientTimeout ? "director_provider_timeout" : `director_structure_${errorCode || "invalid"}`,
           sourceFingerprint: fingerprint,
           version: AGENT_DIRECTOR_VERSION
         };

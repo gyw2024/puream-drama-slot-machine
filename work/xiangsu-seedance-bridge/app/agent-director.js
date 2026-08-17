@@ -443,7 +443,16 @@ function buildCameraTakePlan(project = {}, shot = {}, options = {}) {
   const subshots = normalizeSubshots(shot);
   const rawTakes = [];
   for (const subshot of subshots) {
-    const assigned = turns.filter(turn => turn.subshotNumber === subshot.number);
+    // Some generated scripts contain more dialogue turns than authored camera
+    // subshots (for example four alternating lines across three subshots).
+    // Keep every utterance in order by attaching overflow turns to the final
+    // subshot; groupConsecutiveTurns still creates a separate speaker-owned
+    // camera segment whenever the speaker changes.
+    const assigned = turns
+      .filter(turn => Math.min(turn.subshotNumber, subshots.length) === subshot.number)
+      .map(turn => turn.subshotNumber > subshots.length
+        ? { ...turn, authoredSubshotNumber: turn.subshotNumber, subshotNumber: subshot.number }
+        : turn);
     if (!assigned.length) {
       const cameraOwnerId = defaultCameraOwner(project, shot, subshot);
       rawTakes.push({
