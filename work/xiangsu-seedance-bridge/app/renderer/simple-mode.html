@@ -26,7 +26,6 @@
         <button id="runAll" class="primary-button" type="button"><img src="../assets/icons/sparkle.png" alt="">一键做完整部剧</button>
         <button id="pauseRun" class="outline-button" type="button">暂停</button>
         <button id="walletButton" class="wallet-button" type="button"><span>余额</span><b id="walletBalance">读取中</b></button>
-        <button id="switchAgent" class="mode-switch" type="button">切换 Agent 模式</button>
       </div>
     </header>
 
@@ -39,12 +38,18 @@
         <button class="nav-button" type="button" data-panel="storyboard"><em>04</em><span><b>分镜准备</b><small>画面与提示词</small></span></button>
         <button class="nav-button" type="button" data-panel="generate"><em>05</em><span><b>H3 生成工作台</b><small>分镜视频生产</small></span></button>
         <button class="nav-button" type="button" data-panel="final"><em>06</em><span><b>成片导出</b><small>拼接与交付</small></span></button>
-        <button class="nav-button" type="button" data-panel="tasks"><em>07</em><span><b>任务中心</b><small>状态、费用、失败</small></span></button>
-        <button class="nav-button shared-nav" type="button" data-panel="library"><em>08</em><span><b>共享资产库</b><small>与 Agent 模式互通</small></span></button>
       </nav>
       <div class="sidebar-spacer"></div>
-      <button class="nav-button" type="button" data-panel="settings"><em>⚙</em><span><b>简易模式设置</b><small>H3 与并发控制</small></span></button>
-      <button id="versionButton" class="version-button" type="button"><span>VERSION</span><b id="versionText">读取中</b><small id="updateText">检查更新</small></button>
+      <details id="simpleMore" class="sidebar-more">
+        <summary>更多</summary>
+        <div class="sidebar-more-menu">
+          <button class="nav-button" type="button" data-panel="tasks"><em>任</em><span><b>任务与费用</b><small>查看状态和失败原因</small></span></button>
+          <button class="nav-button shared-nav" type="button" data-panel="library"><em>库</em><span><b>共享资产库</b><small>管理可复用素材</small></span></button>
+          <button class="nav-button" type="button" data-panel="settings"><em>设</em><span><b>设置与连接</b><small>文本模型、H3 与存储</small></span></button>
+          <button id="switchAgent" class="nav-button mode-switch" type="button"><em>高</em><span><b>高级模式</b><small>进入完整专业工作台</small></span></button>
+          <button id="versionButton" class="version-button" type="button"><span>版本与更新</span><b id="versionText">读取中</b><small id="updateText">检查更新</small></button>
+        </div>
+      </details>
     </aside>
 
     <main class="workspace">

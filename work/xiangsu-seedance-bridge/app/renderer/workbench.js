@@ -2019,16 +2019,21 @@ function renderAssets(force = false) {
         ${cloudSeedanceMesh ? `<button class="mini-button grid-draw-button" data-long-action data-action="apply-grid" data-id="${character.id}" data-portrait-id="${escapeHtml(sheetGridSource?.id || portraitGridSource?.id || "")}" data-intro-id="${escapeHtml(introGridSource?.id || "")}" ${sheetGridSource || portraitGridSource || introGridSource ? "" : "disabled"} title="本地检测真实人脸后添加棋盘网格，不调用付费模型">一键检测并加网格</button>` : ""}
         <button class="mini-button draw-button${videoWork?.active ? " is-loading" : ""}" data-long-action data-action="character-video" data-id="${character.id}" ${videoWork?.active ? "disabled" : ""}>${videoWork?.active ? "生成中…" : "抽卡：人物视频"}</button>
         <button class="mini-button${voiceWork?.active ? " is-loading" : ""}" data-long-action data-action="extract-voice" data-id="${character.id}" ${voiceWork?.active ? "disabled" : ""}>${voiceWork?.active ? "提取中…" : "提取音色"}</button>
-        <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_sheet" data-id="${character.id}">上传人物合板</button>
-        <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_three_view" data-id="${character.id}">上传人物三视图</button>
-        <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_intro" data-id="${character.id}">上传人物身份参考图</button>
-        <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_video" data-id="${character.id}">上传人物视频</button>
-        <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_voice" data-id="${character.id}">上传音色</button>
-        <button class="mini-button" data-action="select-reusable-asset" data-entity-type="character" data-id="${character.id}">从独立人物库选择</button>
-        <button class="mini-button" data-action="select-independent-asset" data-entity-type="character" data-stage="character_video" data-id="${character.id}">从库选人物视频</button>
-        <button class="mini-button" data-action="select-independent-asset" data-entity-type="character" data-stage="character_voice" data-id="${character.id}">从库选音频</button>
+        <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_sheet" data-id="${character.id}">上传人物参考图</button>
         <button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="character" data-id="${character.id}">当前角色版本</button>
       </div>
+      <details class="card-more-actions">
+        <summary>更多人物素材与专业类型</summary>
+        <div class="card-actions">
+          <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_three_view" data-id="${character.id}">上传三视图</button>
+          <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_intro" data-id="${character.id}">上传身份参考图</button>
+          <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_video" data-id="${character.id}">上传人物视频</button>
+          <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_voice" data-id="${character.id}">上传音色</button>
+          <button class="mini-button" data-action="select-reusable-asset" data-entity-type="character" data-id="${character.id}">从人物库选择</button>
+          <button class="mini-button" data-action="select-independent-asset" data-entity-type="character" data-stage="character_video" data-id="${character.id}">从库选人物视频</button>
+          <button class="mini-button" data-action="select-independent-asset" data-entity-type="character" data-stage="character_voice" data-id="${character.id}">从库选音色</button>
+        </div>
+      </details>
     </article>`;
   }).join("") : `<div class="empty-hint">先在“剧本与商品”阶段完成 AI 拆镜，人物会自动出现在这里。</div>`;
   const wardrobes = project.assetLibraries?.wardrobes || [];
@@ -2257,11 +2262,6 @@ function videoCardMarkup(project, shot) {
   const view = videoCardView(project, shot);
   const { videoState, video, taskJob, ratio, aspectStyle, emptyText, drawLabel, candidateCount, qualityLabel, drawing, assetSignature, stateSignature } = view;
   const manualPrompt = shot.promptMode === "manual";
-  const videoCandidate = chosenCandidate("shot", shot.id, "shot_video");
-  // A generated candidate records the exact paid-API submission prompt. Prefer
-  // that immutable truth over any older cached draft left by a previous app.
-  const systemPromptText = String(videoCandidate?.prompt || shot.systemVideoPrompt || "").trim();
-  const prompt = manualPrompt ? String(shot.manualVideoPrompt || "") : systemPromptText;
   return `<article class="video-card status-${escapeHtml(videoState.key)}${drawing ? " is-drawing has-active-task" : ""}${taskJob && videoStatusApi.isActiveVideoJob(taskJob) ? " has-active-task" : ""}" data-shot-id="${escapeHtml(shot.id)}" data-asset-signature="${escapeHtml(assetSignature)}" data-state-signature="${escapeHtml(stateSignature)}">
   <div class="drawing-banner" aria-hidden="true"><i></i><span>正在抽卡</span></div>
   <div class="video-preview-shell" style="--video-aspect:${aspectStyle}">${video?.filePath ? `<video class="video-preview" src="${escapeHtml(video.fileUrl || fileUrl(video.filePath))}" controls preload="metadata" playsinline></video>` : `<div class="video-empty status-${escapeHtml(videoState.key)}"><b>${escapeHtml(emptyText)}</b><span>${escapeHtml(videoState.detail || "")}</span></div>`}<span class="aspect-badge">${escapeHtml(ratio)}</span></div>
@@ -2269,16 +2269,11 @@ function videoCardMarkup(project, shot) {
     ${videoState.key === "failed" && video?.filePath ? `<div class="video-quality-warning" role="status"><b>${escapeHtml(videoState.label)}</b><span>${escapeHtml(videoState.detail || "该候选不能进入成片")}</span></div>` : ""}
     ${taskJob ? `<div class="video-card-task">${videoJobProgressMarkup(taskJob)}${taskJob.message ? `<p>${escapeHtml(taskJob.message)}</p>` : ""}</div>` : ""}
     <details class="creator-panel video-prompt-panel" data-editor-key="shot:${escapeHtml(shot.id)}:video-prompt">
-      <summary>创作控制 · 视频提示词（点击展开）</summary>
-      <div class="creator-panel-body shot-prompt creator-prompt-block video-prompt-block">
-        <div class="prompt-mode"><button type="button" data-action="prompt-mode" data-id="${shot.id}" data-mode="system" class="${shot.promptMode !== "manual" ? "active" : ""}">系统编译稿</button><button type="button" data-action="prompt-mode" data-id="${shot.id}" data-mode="manual" class="${shot.promptMode === "manual" ? "active" : ""}">手动改写</button></div>
-        <textarea data-shot-prompt="${shot.id}" maxlength="60000" ${manualPrompt ? "" : "readonly"} placeholder="${manualPrompt ? "填写本镜完整自定义视频提示词" : "系统编译稿会显示在这里；切到「手动改写」后可直接编辑"}">${manualPrompt ? escapeHtml(prompt || "") : escapePublicText(prompt || "")}</textarea>
-        <div class="creator-prompt-actions shot-prompt-actions">
-          ${manualPrompt ? `<button type="button" class="mini-button" data-action="save-shot-prompt" data-id="${shot.id}">保存自定义提示词</button>` : `<button type="button" class="mini-button" data-action="promote-shot-prompt" data-id="${shot.id}">基于系统稿改写</button>`}
-          <button type="button" class="mini-button" data-action="preview-shot-video-prompt" data-id="${shot.id}">大窗查看/刷新编译稿</button>
-          <button type="button" class="mini-button" data-action="edit-shot-prompt-dialog" data-id="${shot.id}">大窗编辑</button>
-          <button type="button" class="mini-button" data-action="import-shot-prompt" data-id="${shot.id}">上传提示词</button>
-        </div>
+      <summary>视频提示词 · ${manualPrompt ? "已使用自定义稿" : "使用系统编译稿"}</summary>
+      <div class="creator-panel-body video-prompt-toolbar">
+        <p>${manualPrompt ? "当前镜头使用已保存的自定义提示词。" : "系统会根据对白、语气、情绪、场景和运镜自动编译完整提交稿。"}</p>
+        <button type="button" class="mini-button accent" data-action="edit-shot-prompt-dialog" data-id="${shot.id}">查看 / 编辑提示词</button>
+        <details class="inline-more-actions"><summary>更多</summary><button type="button" class="mini-button" data-action="import-shot-prompt" data-id="${shot.id}">上传本镜提示词</button></details>
       </div>
     </details>
     <div class="video-card-footer"><div><b>镜头 ${shot.number}</b><div class="muted" data-role="video-candidate-count">候选 ${candidateCount} · ${shot.duration} 秒${qualityLabel ? ` · ${escapeHtml(qualityLabel)}` : ""}</div></div><div class="video-card-actions"><button class="mini-button asset-open-button" ${assetActionAttributes(video, `镜头 ${shot.number} · 分镜视频`, "video", ratio)}>打开视频</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="shot" data-id="${shot.id}">本镜资产库</button><button class="mini-button" data-action="import-candidate" data-entity-type="shot" data-stage="shot_video" data-id="${shot.id}">上传本镜视频</button><button class="mini-button" data-action="select-independent-asset" data-entity-type="shot" data-stage="shot_video" data-id="${shot.id}">从独立库选视频</button><button class="mini-button draw-button" data-long-action data-action="shot-video" data-id="${shot.id}">${drawLabel}</button></div></div>
@@ -3694,9 +3689,6 @@ function renderAutomationQueue(project = state.project) {
   const ignoreQualityButton = canIgnoreQuality
     ? `<button class="mini-button" id="queueIgnoreQualityBtn" type="button">忽略并继续执行</button>`
     : "";
-  const resumePipelineButton = resumable && !canResumeScript && !canRepairContract && !canIgnoreQuality
-    ? `<button class="mini-button accent" id="queueResumePipelineBtn" type="button">继续任务</button>`
-    : "";
   const phaseIndex = pipelinePhaseIndex(automation);
   const phase = pipelinePhases[phaseIndex];
   const ownsProgress = progressBelongsToPhase(progress, phase.id);
@@ -3709,7 +3701,7 @@ function renderAutomationQueue(project = state.project) {
     <small class="automation-last-update">${escapeHtml(automationFreshness(automation.updatedAt, active))}</small>
     ${running.length ? `<div class="automation-running-list">${running.slice(0, 8).map(item => `<span class="drawing-chip">${escapeHtml(currentAssetLabel(item.label || item.key))}</span>`).join("")}</div>` : ""}
     ${failedItems.length ? `<details class="automation-fail-details"><summary>查看 ${failedItems.length} 条失败明细</summary><div class="automation-fail-list">${failedItems.map(item => `<p title="${escapeHtml(item.message || "")}"><b>${escapeHtml(currentAssetLabel(item.label || item.key))}</b>${escapeHtml(item.message || item.errorCode || "失败")}</p>`).join("")}</div></details>` : ""}
-    <div class="card-actions">${repairCharacterButton}${repairContractButton}${resumeScriptButton}${repairQualityButton}${ignoreQualityButton}${resumePipelineButton}${active ? `<button class="mini-button" id="queuePauseBtn" type="button">暂停任务</button><button class="mini-button danger-mini" id="queueStopBtn" type="button">结束任务</button>` : ""}${failedItems.length || (project.jobs || []).some(job => ["failed", "error", "discarded"].includes(String(job.status || ""))) ? `<button class="mini-button danger-mini" id="queueClearFailedBtn" type="button">清理失败记录</button>` : ""}</div>
+    ${repairCharacterButton || repairContractButton || resumeScriptButton || repairQualityButton || ignoreQualityButton || failedItems.length ? `<details class="queue-recovery-actions"><summary>异常处理</summary><div class="card-actions">${repairCharacterButton}${repairContractButton}${resumeScriptButton}${repairQualityButton}${ignoreQualityButton}${failedItems.length || (project.jobs || []).some(job => ["failed", "error", "discarded"].includes(String(job.status || ""))) ? `<button class="mini-button danger-mini" id="queueClearFailedBtn" type="button">清理失败记录</button>` : ""}</div></details>` : ""}
   </div>`;
   $("#queueRepairContractBtn")?.addEventListener("click", () => runLong("AI 正按蓝图失败项定点改错并自动复检…", () => api.workbench.repairProductionContracts(project.id)));
   $("#queueRepairCharactersBtn")?.addEventListener("click", () => repairCharacterReferencesAndContinue(project));
@@ -3723,11 +3715,8 @@ function renderAutomationQueue(project = state.project) {
         ? "正在复用已完成片段并继续拆镜…"
         : "正在按已保存失败报告继续修订…", () => api.workbench.resumeScriptGeneration(project.id), operation);
   });
-  $("#queueResumePipelineBtn")?.addEventListener("click", () => continuePipeline(project));
   $("#queueRepairQualityBtn")?.addEventListener("click", () => continuePipeline(project));
   $("#queueIgnoreQualityBtn")?.addEventListener("click", () => ignoreQualityAndContinue(project));
-  $("#queuePauseBtn")?.addEventListener("click", () => controlPipeline("pause"));
-  $("#queueStopBtn")?.addEventListener("click", () => controlPipeline("stop"));
   $("#queueClearFailedBtn")?.addEventListener("click", () => clearAutomationFailures());
 }
 
@@ -4139,12 +4128,25 @@ async function openCreatorPromptDialog(spec) {
       const shot = project.shots.find(item => item.id === spec.shotId);
       if (!shot) throw new Error("分镜不存在");
       const result = await api.workbench.previewShotVideoPrompt(project.id, spec.shotId);
-      if (!result?.ok) throw new Error(result?.message || "预览失败");
-      populateCreatorPromptDialog({
+      const dialogSpec = {
         ...spec,
         shotNumber: shot.number,
         strategyLabel: shotStrategyLabel(project, shot)
-      }, result.preview);
+      };
+      if (!result?.ok) {
+        const manualVideoPrompt = String(shot.manualVideoPrompt || "").trim();
+        if (shot.promptMode === "manual" && manualVideoPrompt) {
+          populateCreatorPromptDialog(dialogSpec, {
+            promptMode: "manual",
+            manualVideoPrompt,
+            active: manualVideoPrompt
+          });
+          showToast("系统稿暂时无法重新编译，已打开当前手动稿", "warning");
+          return;
+        }
+        throw new Error(result?.message || "预览失败");
+      }
+      populateCreatorPromptDialog(dialogSpec, result.preview);
       return;
     }
     if (spec.kind === "character-video") {
@@ -4170,7 +4172,7 @@ async function openCreatorPromptDialog(spec) {
   } catch (error) {
     const message = String(error?.message || "打开提示词失败");
     showToast(message.includes("stale") || message.includes("编译")
-      ? `提示词编译失败：${message}。可先点「刷新视频系统提示词」再打开。`
+      ? `提示词编译失败：${message}。可到「系统设置」重新编译全部系统提示词后再打开。`
       : message, "error");
   }
 }

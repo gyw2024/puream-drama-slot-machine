@@ -242,6 +242,16 @@ async function main() {
     await page.evaluate(() => document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close()));
 
     assert.equal(await page.locator("#projectSelect").inputValue(), projectId, "the seeded audit project must be selected");
+    const topMore = page.locator(".top-more-menu");
+    assert.equal(await topMore.evaluate(node => node.open), false, "advanced controls must start collapsed");
+    await topMore.locator(":scope > summary").click();
+    for (const selector of ["#switchSimpleMode", "#qualityBlueprintToggle", "#accountSwitchShortcut", "#startBridge"]) {
+      assert.equal(await page.locator(selector).isVisible(), true, `${selector} must remain reachable from More`);
+    }
+    const topMoreShot = path.join(evidenceDir, "top-more-menu-100.png");
+    await captureWindow(electronApp, topMoreShot);
+    screenshots.push(topMoreShot);
+    await topMore.locator(":scope > summary").click();
     await page.locator('.stage-button[data-stage="assets"]').click();
     await page.waitForTimeout(250);
 
@@ -358,11 +368,23 @@ async function main() {
 
     await page.locator('.stage-button[data-stage="videos"]').click();
     const videoPanel = page.locator('details[data-editor-key="shot:S01:video-prompt"]');
-    await videoPanel.locator("summary").click();
+    await videoPanel.locator(":scope > summary").click();
     for (let index = 0; index < 4; index += 1) {
       await page.evaluate(async id => eval("loadProject")(id, false), projectId);
     }
     assert.equal(await videoPanel.evaluate(node => node.open), true, "video prompt panel must remain open during polling");
+    assert.equal(await videoPanel.locator('[data-action="edit-shot-prompt-dialog"]').count(), 1, "each shot must expose one prompt editor entry");
+    assert.equal(await videoPanel.locator('[data-action="preview-shot-video-prompt"],[data-action="promote-shot-prompt"]').count(), 0, "duplicate prompt actions must stay removed");
+    const compactVideoPromptShot = path.join(evidenceDir, "video-prompt-single-entry-100.png");
+    await captureWindow(electronApp, compactVideoPromptShot);
+    screenshots.push(compactVideoPromptShot);
+    await videoPanel.locator('[data-action="edit-shot-prompt-dialog"]').click();
+    await page.locator("#creatorPromptDialog[open]").waitFor();
+    assert.equal(await page.locator("#creatorPromptMode button").count(), 2, "prompt dialog must preserve system and custom modes");
+    const videoPromptDialogShot = path.join(evidenceDir, "video-prompt-dialog-100.png");
+    await captureWindow(electronApp, videoPromptDialogShot);
+    screenshots.push(videoPromptDialogShot);
+    await page.locator("#creatorPromptCancel").click();
 
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.locator('.stage-button[data-stage="assets"]').click();
@@ -406,6 +428,29 @@ async function main() {
     const zoomCardsShot = path.join(evidenceDir, "assets-three-running-zoom-200.png");
     await captureWindow(electronApp, zoomCardsShot);
     screenshots.push(zoomCardsShot);
+
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win) {
+        win.setContentSize(1024, 720);
+        win.webContents.setZoomFactor(1);
+      }
+    });
+    await page.locator('.stage-button[data-stage="script"]').click();
+    await page.waitForTimeout(200);
+    const narrowLayout = await page.evaluate(() => ({
+      horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+      runVisible: Boolean(document.querySelector("#runFullPipeline")?.getClientRects().length),
+      moreVisible: Boolean(document.querySelector(".top-more-menu > summary")?.getClientRects().length),
+      navVisible: [...document.querySelectorAll(".stage-button")].filter(node => node.getClientRects().length).length
+    }));
+    assert.equal(narrowLayout.horizontalOverflow, false, "1024x720 must not create page-level horizontal overflow");
+    assert.equal(narrowLayout.runVisible, true, "one-click production must remain visible at 1024x720");
+    assert.equal(narrowLayout.moreVisible, true, "advanced controls must remain reachable at 1024x720");
+    assert.ok(narrowLayout.navVisible >= 6, "all production stages must remain reachable at 1024x720");
+    const narrowShot = path.join(evidenceDir, "script-1024x720-zoom-100.png");
+    await captureWindow(electronApp, narrowShot);
+    screenshots.push(narrowShot);
 
     await electronApp.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];

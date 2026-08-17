@@ -101,6 +101,13 @@ async function main() {
       screenshots.push(screenshotPath);
       return screenshotPath;
     };
+    const revealAdvancedControl = async selector => {
+      const control = page.locator(selector);
+      if (!await control.isVisible()) {
+        await page.locator(".top-more-menu > summary").click();
+        await control.waitFor({ state: "visible" });
+      }
+    };
     const auditViews = [
       { width: 1024, height: 720, zoom: 1 },
       { width: 1280, height: 800, zoom: 1 },
@@ -161,6 +168,7 @@ async function main() {
           document.querySelector("#qualityBlueprintClose")?.click();
         }
       });
+      await revealAdvancedControl("#qualityBlueprintToggle");
       await page.click("#qualityBlueprintToggle");
       await page.waitForTimeout(100);
       const masterChecked = await page.isChecked("#qualityBlueprintMaster");
@@ -409,6 +417,7 @@ async function main() {
       stageMatrix.push(snapshot);
       await captureBackground(`stage-${stage}`);
     }
+    fs.writeFileSync(path.join(runDir, "stage-matrix.json"), JSON.stringify(stageMatrix, null, 2));
 
     const dialogMatrix = [];
     for (const dialogId of ["newProjectDialog", "projectStrategyDialog", "scriptFormatDialog", "rechargeDialog", "reusableAssetDialog", "candidateLibraryDialog", "restoreProjectDialog"]) {
@@ -456,6 +465,7 @@ async function main() {
     }));
     const defaults = await page.evaluate(() => window.dramaSlot.defaults());
     const settings = await page.evaluate(() => window.dramaSlot.workbench.getSettings());
+    await revealAdvancedControl("#qualityBlueprintToggle");
     await page.focus("#qualityBlueprintToggle");
     await page.keyboard.press("Enter");
     const blueprintKeyboardOpened = await page.evaluate(() => (
@@ -470,6 +480,7 @@ async function main() {
     ));
     await page.keyboard.press("Tab");
     const keyboardTabMoved = await page.evaluate(() => document.activeElement !== document.body && document.activeElement?.id !== "qualityBlueprintToggle");
+    await revealAdvancedControl("#qualityBlueprintToggle");
     await page.click("#qualityBlueprintToggle");
     await page.click("#qualityBlueprintMaster");
     await page.waitForFunction(async () => (await window.dramaSlot.workbench.getSettings()).settings?.generation?.qualityGatesEnabled === false);
@@ -735,8 +746,12 @@ async function main() {
     await page.evaluate(() => document.querySelector('.stage-button[data-stage="shots"]')?.click());
     const selectedStoryboardMode = await page.evaluate(() => document.querySelector("#generationMode")?.value || "");
     await page.evaluate(() => document.querySelector('.stage-button[data-stage="videos"]')?.click());
+    const videoPromptPanel = page.locator('[data-editor-key="shot:S01:video-prompt"]');
+    await videoPromptPanel.locator(":scope > summary").click();
+    await videoPromptPanel.locator('[data-action="edit-shot-prompt-dialog"]').click();
+    await page.locator("#creatorPromptDialog[open]").waitFor();
     const concurrencyUi = await page.evaluate(async seeded => {
-      const prompt = document.querySelector(`[data-shot-prompt="S01"]`)?.value || "";
+      const prompt = document.querySelector("#creatorPromptText")?.value || "";
       const systemSurface = document.body.innerText || "";
       const first = await window.dramaSlot.workbench.getProject(seeded.firstId);
       return {
@@ -754,6 +769,7 @@ async function main() {
         specialFileUrl: fileUrl("D:\\素材\\片段#1?.mp4")
       };
     }, stateTransitions);
+    await page.locator("#creatorPromptCancel").click();
     const deleted = await page.evaluate(async projectId => {
       const api = window.dramaSlot.workbench;
       const removal = await api.deleteProject(projectId);

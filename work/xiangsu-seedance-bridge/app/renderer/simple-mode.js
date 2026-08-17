@@ -196,6 +196,8 @@ function setPanel(name) {
   state.activePanel = next;
   $$(".nav-button[data-panel]").forEach(button => button.classList.toggle("active", button.dataset.panel === next));
   $$(".panel[data-content]").forEach(panel => panel.classList.toggle("active", panel.dataset.content === next));
+  const more = $("#simpleMore");
+  if (more) more.open = ["tasks", "library", "settings"].includes(next);
   $(".workspace").scrollTo({ top: 0, behavior: "smooth" });
   if (next === "library") loadLibrary();
   if (next === "settings") renderSettings();

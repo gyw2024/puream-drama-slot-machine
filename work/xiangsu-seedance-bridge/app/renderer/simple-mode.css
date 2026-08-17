@@ -74,6 +74,16 @@ label { display: grid; gap: 7px; color: #aaa99f; font-size: 11px; }
 .shared-nav { margin-top: 6px; border-top: 1px solid rgba(255,255,255,.05); }
 .shared-nav em { color: var(--green); }
 .sidebar-spacer { flex: 1; min-height: 8px; }
+.sidebar-more { position:relative; }
+.sidebar-more > summary { min-height:44px; display:flex; align-items:center; justify-content:space-between; padding:0 12px; border:1px solid rgba(255,255,255,.08); border-radius:9px; background:#0e100d; color:#c8c5bb; cursor:pointer; list-style:none; font-size:12px; font-weight:700; }
+.sidebar-more > summary::-webkit-details-marker { display:none; }
+.sidebar-more > summary::after { content:"+"; color:var(--amber); font-size:16px; }
+.sidebar-more[open] > summary::after { content:"−"; }
+.sidebar-more-menu { display:grid; gap:4px; margin-top:6px; padding:6px; border:1px solid rgba(240,165,28,.18); border-radius:10px; background:#090a08; }
+.sidebar-more:not([open]) > .sidebar-more-menu { display:none; }
+.sidebar-more-menu .nav-button { min-height:48px; }
+.sidebar-more-menu .shared-nav { margin-top:0; border-top:0; }
+.sidebar-more-menu .mode-switch { display:grid; border-color:transparent; border-radius:9px; background:transparent; color:inherit; }
 .version-button { width: 100%; min-height: 52px; display: grid; grid-template-columns: 1fr auto; align-items: center; padding: 8px 10px; text-align: left; }
 .version-button span { color: var(--green); font: 700 8px/1 ui-monospace, Consolas, monospace; letter-spacing: .16em; }
 .version-button b { font-size: 11px; }
@@ -276,6 +286,7 @@ label { display: grid; gap: 7px; color: #aaa99f; font-size: 11px; }
 
 @media (max-height: 820px) {
   .nav-button { min-height: 49px; }
+  .sidebar-more-menu { position:absolute; left:100%; bottom:0; z-index:30; width:220px; box-shadow:0 18px 48px rgba(0,0,0,.72); }
   .sidebar-title { padding-bottom: 10px; }
   .workspace { padding-top: 17px; }
   .workspace-status { top: -17px; margin-top: -17px; }
@@ -299,6 +310,10 @@ label { display: grid; gap: 7px; color: #aaa99f; font-size: 11px; }
   .nav-button { min-height:45px; grid-template-columns:1fr; justify-items:center; padding:5px; }
   .nav-button em { font-size:9px; }
   .nav-button.active { box-shadow:inset 2px 0 var(--amber); }
+  .sidebar-more > summary { min-height:42px; justify-content:center; padding:0; font-size:0; }
+  .sidebar-more > summary::before { content:"•••"; color:#c8c5bb; font-size:11px; letter-spacing:2px; }
+  .sidebar-more > summary::after { display:none; }
+  .sidebar-more-menu { position:fixed; left:80px; bottom:10px; width:220px; }
   .version-button { min-height:42px; display:grid; grid-template-columns:1fr; justify-items:center; padding:5px 2px; }
   .version-button span, .version-button small { display:none; }
   .workspace { padding:12px 12px 50px; }

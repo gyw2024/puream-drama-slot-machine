@@ -195,9 +195,15 @@ async function capture(page, filePath) {
   return filePath;
 }
 
+async function openPanel(page, panelName) {
+  const button = page.locator(`.nav-button[data-panel="${panelName}"]`);
+  if (!await button.isVisible()) await page.locator("#simpleMore > summary").click();
+  await button.click();
+}
+
 async function runAxe(page, panelName) {
   await page.evaluate(axeSource);
-  if (panelName) await page.locator(`.nav-button[data-panel="${panelName}"]`).click();
+  if (panelName) await openPanel(page, panelName);
   const result = await page.evaluate(async () => window.axe.run(document, {
     runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"] }
   }));
@@ -274,6 +280,9 @@ async function auditSimple(root, runDir, workbenchDir) {
           workspaceHorizontalOverflow: document.querySelector(".workspace").scrollWidth > document.querySelector(".workspace").clientWidth + 1,
           topControlOverlaps: overlaps,
           visibleNavCount: [...document.querySelectorAll(".nav-button")].filter(visible).length,
+          visibleCoreNavCount: [...document.querySelectorAll(".sidebar > nav > .nav-button")].filter(visible).length,
+          visibleSecondaryNavCount: [...document.querySelectorAll(".sidebar-more-menu .nav-button")].filter(visible).length,
+          moreOpen: Boolean(document.querySelector("#simpleMore")?.open),
           currentStatus,
           progressPercent: document.querySelector("#progressPercent")?.textContent || "",
           activeJobCount: [...document.querySelectorAll(".job-row")].filter(row => ["queued", "submitting", "submitted", "processing", "running", "downloading"].includes(String(row.querySelector("small")?.textContent || ""))).length
@@ -286,11 +295,11 @@ async function auditSimple(root, runDir, workbenchDir) {
 
     await setWindowView(electronApp, page, { width: 1440, height: 900, zoom: 1 });
     for (const panel of ["assets", "storyboard", "generate", "tasks", "library", "settings"]) {
-      await page.locator(`.nav-button[data-panel="${panel}"]`).click();
+      await openPanel(page, panel);
       await page.waitForTimeout(panel === "library" ? 400 : 100);
       screenshots.push(await capture(page, path.join(runDir, `simple-${panel}-1440x900.png`)));
     }
-    await page.locator('.nav-button[data-panel="settings"]').click();
+    await openPanel(page, "settings");
     await page.locator("#textProviderKind").selectOption("openai-compatible");
     await page.waitForTimeout(100);
     const providerContract = await page.evaluate(() => {
@@ -311,7 +320,7 @@ async function auditSimple(root, runDir, workbenchDir) {
       };
     });
     screenshots.push(await capture(page, path.join(runDir, "simple-settings-custom-provider-1440x900.png")));
-    await page.locator('.nav-button[data-panel="assets"]').click();
+    await openPanel(page, "assets");
     await page.waitForTimeout(150);
     const imageAudit = await page.evaluate(async () => {
       const images = [...document.images].filter(image => image.getClientRects().length > 0);
@@ -351,6 +360,8 @@ async function auditSimple(root, runDir, workbenchDir) {
     assert.ok(layouts.every(item => !item.horizontalOverflow), "Simple mode has page-level horizontal overflow");
     assert.ok(layouts.every(item => !item.workspaceHorizontalOverflow), "Simple workspace has horizontal overflow");
     assert.ok(layouts.every(item => item.topControlOverlaps.length === 0), "Simple top controls overlap");
+    assert.ok(layouts.every(item => item.visibleCoreNavCount === 6), "Simple mode must show exactly six core production steps");
+    assert.ok(layouts.every(item => item.visibleSecondaryNavCount === 0 && item.moreOpen === false), "Secondary tools must stay collapsed on the main workflow");
     assert.ok(imageAudit.every(item => item.complete && item.naturalWidth > 0), "Visible Simple mode images must load");
     assert.equal(stageContract.completedSteps, 2, "Only script and AI analysis may be complete in the seeded asset-stage project");
     assert.ok(stageContract.assetLoadingRings >= 1, "Asset generation must expose a live loading indicator");

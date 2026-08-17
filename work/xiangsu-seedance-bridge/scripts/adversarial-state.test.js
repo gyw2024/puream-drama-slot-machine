@@ -477,8 +477,8 @@ test("manual text limits fail before persistence and renderer never rewrites use
 
     const renderer = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.js"), "utf8");
     assert.doesNotMatch(renderer, /if \(masked !== value\) control\.value = masked/);
-    assert.match(renderer, /manualPrompt \? escapeHtml\(prompt \|\| ""\) : escapePublicText/);
     assert.match(renderer, /text\.value = preview\.promptMode === "manual"/);
+    assert.match(renderer, /\? \(preview\.manualVideoPrompt \|\| compiledText\)/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

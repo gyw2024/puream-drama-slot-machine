@@ -27,9 +27,16 @@
         <button id="pausePipeline" class="outline-button" type="button" title="暂停当前自动化/抽卡">暂停任务</button>
         <button id="stopPipeline" class="danger-button" type="button" title="结束当前自动化/抽卡">结束任务</button>
         <button id="walletShortcut" class="wallet-chip" type="button" title="查看余额并充值"><span>余额</span><b id="walletBalance">读取中</b><i>充值</i></button>
-        <button id="switchSimpleMode" class="mode-switch-button" type="button" title="切换到简易短剧工作台">简易模式</button>
         <div id="bridgeBadge" class="bridge-badge offline"><i></i><b>像塑检测中</b></div>
-        <button id="qualityBlueprintToggle" class="review-blueprint-toggle" type="button" aria-pressed="false" aria-expanded="false"><span class="review-blueprint-indicator" aria-hidden="true"></span><span id="qualityBlueprintToggleLabel">审核蓝图：关闭</span></button>
+        <details class="top-more-menu">
+          <summary>更多</summary>
+          <div class="top-more-panel">
+            <button id="switchSimpleMode" class="mode-switch-button" type="button" title="切换到简易短剧工作台">切换简易模式</button>
+            <button id="qualityBlueprintToggle" class="review-blueprint-toggle" type="button" aria-pressed="false" aria-expanded="false"><span class="review-blueprint-indicator" aria-hidden="true"></span><span id="qualityBlueprintToggleLabel">审核蓝图：关闭</span></button>
+            <button id="accountSwitchShortcut" class="outline-button" type="button" title="切换像塑账号"><img src="../assets/icons/history.png" alt="">切换像塑账号</button>
+            <button id="startBridge" class="outline-button" type="button" title="后台隐藏启动像塑"><img src="../assets/icons/lock.png" alt="">后台启动像塑</button>
+          </div>
+        </details>
         <div id="qualityBlueprintMenu" class="quality-blueprint-menu hidden" role="dialog" aria-labelledby="qualityBlueprintMenuTitle" tabindex="-1">
           <div class="quality-blueprint-menu-head">
             <span><b id="qualityBlueprintMenuTitle">审核蓝图</b><small>只启用你需要的审核与返修规则</small></span>
@@ -63,8 +70,6 @@
             <p>关闭总开关时不会因创作规则打回或清空已生成内容。</p>
           </div>
         </div>
-        <button id="accountSwitchShortcut" class="outline-button" type="button" title="切换像塑账号"><img src="../assets/icons/history.png" alt="">切换账号</button>
-        <button id="startBridge" class="outline-button" type="button" title="后台隐藏启动像塑"><img src="../assets/icons/lock.png" alt="">隐藏启动像塑</button>
       </div>
     </header>
 
@@ -133,16 +138,18 @@
         <div class="stage-head">
           <div><span class="eyebrow">PHASE 01 · IDEA TO SCRIPT</span><h2>一键选题，自动写完整短剧</h2><p>AI 先给出 10 个适合中老年观众的爆款题材；选中一个，填入商品图、商品名和卖点即可生产。</p></div>
           <div class="head-actions">
-            <button id="continueFromScript" class="outline-button" type="button">运行当前阶段</button>
-            <button id="refreshScriptPrompts" class="outline-button" type="button">刷新拆镜提示词</button>
             <button id="saveScript" class="outline-button">保存剧本</button>
             <button id="analyzeScript" class="primary-button"><img src="../assets/icons/sparkle.png" alt="">AI 标准化并拆镜</button>
           </div>
         </div>
-        <div class="manual-entry-bar" role="region" aria-label="剧本手动导入通道">
-          <div><span>MANUAL INPUT</span><b>剧本与本阶段提示词都可从 0 上传</b><small>可上传自己的剧本；也可先批量上传写作/拆镜提示词，等流程执行时自动使用。系统建议仅供下载参考，不会覆盖用户提示词。</small></div>
-          <div class="manual-entry-actions"><button id="importScriptFile" class="outline-button manual-button" type="button">上传自己的剧本</button><button id="importDialogueRewrite" class="outline-button manual-button" type="button">上传对白稿并轻改</button><button class="outline-button manual-button" type="button" data-action="import-prompt-batch" data-prompt-scope="script">批量上传剧本提示词</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="script">下载系统建议</button></div>
+        <div class="primary-entry-bar" role="region" aria-label="上传已有剧本">
+          <div><span>已有剧本</span><b>上传后自动标准化、提取资产并拆镜</b><small>支持任意常见排版；系统保留剧情、人物和完整对白，再转换为稳定生产格式。</small></div>
+          <button id="importScriptFile" class="outline-button manual-button" type="button">上传剧本</button>
         </div>
+        <details class="advanced-entry-bar">
+          <summary>专业导入与提示词工具</summary>
+          <div class="manual-entry-actions"><button id="importDialogueRewrite" class="outline-button manual-button" type="button">上传对白稿并轻改</button><button class="outline-button manual-button" type="button" data-action="import-prompt-batch" data-prompt-scope="script">导入剧本提示词包</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="script">下载系统建议</button></div>
+        </details>
         <section id="scriptExampleLibrary" class="script-example-library" aria-labelledby="scriptExampleLibraryTitle">
           <div class="script-example-library-copy"><span>WRITING EXAMPLES</span><b id="scriptExampleLibraryTitle">三种七分钟完整剧本案例</b><small>每种案例均为 420 秒、42 个完整生产单元，可直接照此上传；人物介绍和故事简介只建资产，绝不进入成片。</small></div>
           <div class="script-example-library-actions" role="group" aria-label="查看或下载三种剧本模式示例">
@@ -197,16 +204,14 @@
         <div class="stage-head">
           <div><span class="eyebrow">PHASE 02 · ASSETS</span><h2>角色、音色与场景资产库</h2><p>每次点击都是一次抽卡；未确认前保留全部历史，确认后才清理同类其他候选。</p></div>
           <div class="head-actions">
-            <button id="continueFromAssets" class="outline-button" type="button">运行当前阶段</button>
-            <button id="refreshAssetPrompts" class="outline-button" type="button">刷新全部系统提示词</button>
             <div class="mode-chip">已就绪资产自动跳过</div>
             <button id="generateAllAssets" class="primary-button draw-button">AI 抽齐全部资产</button>
           </div>
         </div>
-        <div class="manual-entry-bar" role="region" aria-label="资产手动导入通道">
-          <div><span>AI / MANUAL</span><b>资产提示词与图、视频、音频都可从 0 上传</b><small>可先上传 C01 / SC01 等提示词，角色场景尚未生成也能保存；生成后自动匹配。场景资产统一是一张 2×2 四角度视图。</small></div>
-          <div class="manual-entry-actions"><button class="outline-button manual-button" type="button" data-action="import-prompt-batch" data-prompt-scope="assets">批量上传资产提示词</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="assets">下载系统建议</button><button class="outline-button manual-button" type="button" data-action="open-independent-library">管理独立资产库</button></div>
-        </div>
+        <details class="advanced-entry-bar">
+          <summary>专业资产导入与独立资产库</summary>
+          <div class="manual-entry-actions"><button class="outline-button manual-button" type="button" data-action="import-prompt-batch" data-prompt-scope="assets">导入资产提示词包</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="assets">下载系统建议</button><button class="outline-button manual-button" type="button" data-action="open-independent-library">管理独立资产库</button></div>
+        </details>
         <div id="assetBatchProgress" class="asset-batch-progress" aria-live="polite"></div>
         <div class="section-label library-legacy-section"><span>VOICE BANK</span><h3>长期音色库</h3><b id="voiceLibraryCount">0</b></div>
         <div class="build-banner" role="status"><b>跨项目可复用</b><span>提取或上传过的音色会沉淀到这里；匹配到的角色可直接复用，无需再生成人物视频抽声线。</span></div>
@@ -231,7 +236,7 @@
       <section class="stage-panel" data-panel="shots">
         <div class="stage-head">
           <div><span class="eyebrow">PHASE 03 · STORYBOARD</span><h2>逐镜可控的分镜工作台</h2><p>本阶段只管拆镜字段、首尾帧与引用资产；完整视频提示词在「04 分镜视频」编辑与提交。</p></div>
-          <div class="head-actions"><button id="continueFromShots" class="outline-button" type="button">运行当前阶段</button><button id="refreshCreatorPrompts" class="outline-button" type="button">刷新拆镜系统提示词</button><button id="generateAllStoryboards" class="primary-button draw-button">AI 抽卡：全部首尾帧</button><div class="mode-controls">
+          <div class="head-actions"><button id="generateAllStoryboards" class="primary-button draw-button">AI 抽卡：全部首尾帧</button><div class="mode-controls">
             <label>已确认模式<select id="generationMode" disabled><option value="continuation">视频延续模式</option><option value="keyframe">首尾帧模式</option><option value="smart">智能首尾帧+视频延续</option><option value="storyboard_sheet">逐秒分镜合图</option></select></label>
             <button id="editGenerationMode" class="outline-button" type="button">修改模式</button>
           </div></div>
@@ -248,15 +253,13 @@
         <div class="stage-head">
           <div><span class="eyebrow">PHASE 04 · VIDEO</span><h2 id="videoStageTitle">分镜视频生产线</h2><p id="videoModeDescription">延续模式串行：第1镜用首尾帧开场；第2镜起只抽尾帧，时间起点引用上一镜完整视频。</p></div>
           <div class="head-actions">
-            <button id="continueFromVideos" class="outline-button" type="button">运行当前阶段</button>
-            <button id="refreshVideoPrompts" class="outline-button" type="button">刷新视频系统提示词</button>
             <button id="generateAllVideos" class="primary-button draw-button">AI 抽卡：全部分镜视频</button>
           </div>
         </div>
-        <div class="manual-entry-bar" role="region" aria-label="分镜视频手动导入通道">
-          <div><span>AI / MANUAL</span><b>视频提示词和分镜视频都可从 0 整批上传</b><small>S01.txt / S02.txt 或建议 JSON 均可在拆镜前上传；用户提示词原样提交，系统只提供可下载建议，不会暗中追加或改写。</small></div>
-          <div class="manual-entry-actions"><button id="importShotPromptsBatch" class="outline-button manual-button" type="button">批量上传视频提示词</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="videos">下载系统建议</button><button id="importShotVideosBatch" class="outline-button manual-button" type="button">批量上传分镜视频</button><button class="outline-button" type="button" data-action="open-independent-library">打开独立资产库</button></div>
-        </div>
+        <details class="advanced-entry-bar">
+          <summary>专业视频导入与独立资产库</summary>
+          <div class="manual-entry-actions"><button id="importShotPromptsBatch" class="outline-button manual-button" type="button">导入视频提示词包</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="videos">下载系统建议</button><button id="importShotVideosBatch" class="outline-button manual-button" type="button">批量上传分镜视频</button><button class="outline-button" type="button" data-action="open-independent-library">打开独立资产库</button></div>
+        </details>
         <div class="build-banner" role="status"><b>视频提示词在这里</b><span>每镜「创作控制」默认折叠，点开可改/预览完整提交稿；提交时会自动整理参考素材编号。</span></div>
         <div id="jobStrip" class="job-strip"></div>
         <div id="videoGrid" class="video-grid"></div>
@@ -324,7 +327,7 @@
             <p id="videoProviderPolicy" class="provider-policy" role="status" aria-live="polite"></p><p class="settings-note">默认使用纯梦托管存储；也可明确切换到自己的阿里云 OSS。安装包不内置用户的 OSS 凭据。</p></div>
         <div class="settings-card panel-card"><div class="card-title"><div><span class="step-tag">PRODUCTION DEFAULTS</span><h3>全局画面与当前项目参数</h3></div></div><label>全局视觉风格<textarea id="visualStyle" rows="4" placeholder="写实真人影视短剧，人物、服装、场景和商品跨镜一致"></textarea></label><label>当前项目画幅<select id="aspectRatio"><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option><option value="1:1">1:1 方形</option><option value="4:3">4:3 横屏</option><option value="3:4">3:4 竖屏</option><option value="21:9">21:9 超宽</option></select></label><div class="settings-inline"><label>人物视频引擎<select id="characterVideoModel"><option value="inherit-project" selected>跟随项目视频引擎</option><option value="puream-grok">纯梦人物视频算力</option><option value="puream-gemini" disabled>备用算力（当前不支持人物图）</option></select></label><label>分镜视频<select id="shotVideoModel" disabled><option value="inherit-project">跟随项目视频引擎（锁定）</option></select></label></div><label class="settings-toggle"><input id="qualityGatesEnabled" type="checkbox"> 开启智能审核蓝图</label><div class="settings-quality-modules"><label><input type="checkbox" data-quality-module="script">剧本与对白</label><label><input type="checkbox" data-quality-module="assets">人物与资产</label><label><input type="checkbox" data-quality-module="storyboards">分镜图</label><label><input type="checkbox" data-quality-module="videos">分镜视频</label><label><input type="checkbox" data-quality-module="delivery">成片交付</label></div><details class="settings-audit-details"><summary>展开剧本审核明细</summary><div class="quality-blueprint-details-head"><span><small>逐项控制审查与返修</small></span><div><button type="button" data-blueprint-bulk="all">一键全开</button><button type="button" data-blueprint-bulk="none">一键全关</button></div></div><div class="quality-blueprint-checks"><label><input type="checkbox" data-blueprint-check="productionStructure">制作结构与时长合同</label><label><input type="checkbox" data-blueprint-check="clarity">信息清晰</label><label><input type="checkbox" data-blueprint-check="storyCore">故事核心</label><label><input type="checkbox" data-blueprint-check="causality">因果承接</label><label><input type="checkbox" data-blueprint-check="escalation">冲突加压</label><label><input type="checkbox" data-blueprint-check="reversalStructure">伏笔与反转</label><label><input type="checkbox" data-blueprint-check="tragedyCraft">悲剧代价</label><label><input type="checkbox" data-blueprint-check="faceSlapCraft">打脸清算</label><label><input type="checkbox" data-blueprint-check="dialogue">对白准确</label><label><input type="checkbox" data-blueprint-check="emotionalDelivery">语气表演</label><label><input type="checkbox" data-blueprint-check="productIntegration">商品因果</label><label><input type="checkbox" data-blueprint-check="soundDesign">声音设计</label><label><input type="checkbox" data-blueprint-check="visualVariety">画面差异</label></div></details><p class="settings-note">镜头时长不设固定默认值：AI 全生成按项目设置秒数规划；自己输入/上传剧本则按逐句对白、语速、停顿和动作节拍自适应。</p><p class="settings-note">关闭总开关后，所有审核、拦截、回滚和自动返修均关闭；仅保留程序读取 JSON 与上游接口必填项。开启后可按模块和剧本明细选择审核。</p></div>
           <div class="settings-card panel-card"><div class="card-title"><div><span class="step-tag">LOCAL STORAGE</span><h3>项目与素材保存位置</h3></div></div><p id="storageLocationPath" class="provider-policy" role="status" aria-live="polite">正在读取当前保存位置…</p><div class="card-actions"><button id="chooseStorageLocation" class="outline-button" type="button">更改保存位置</button></div><p class="settings-note">人物、场景、分镜、视频、成片、项目记录与独立资产库都会保存在这里。更改时软件会完整复制现有数据、保留旧目录，并自动重启；不会删除历史项目。</p></div>
-          <div class="settings-card prompt-settings prompt-library-card panel-card"><div class="card-title"><div><span class="step-tag">PROMPT LIBRARY</span><h3>系统提示词与自定义覆盖</h3></div><span id="promptLibraryVersion" class="muted"></span></div><p class="settings-note">系统默认提示词由软件维护并隐藏；需要个性化时，可对单项切换为“自定义填写”。示例仅说明输入输出格式，不包含系统默认正文。</p><div id="promptEditor" class="prompt-editor"></div></div>
+          <div class="settings-card prompt-settings prompt-library-card panel-card"><div class="card-title"><div><span class="step-tag">PROMPT LIBRARY</span><h3>系统提示词与自定义覆盖</h3></div><div class="card-title-actions"><span id="promptLibraryVersion" class="muted"></span><button id="refreshCreatorPrompts" class="outline-button" type="button">重新编译全部系统提示词</button></div></div><p class="settings-note">系统默认提示词由软件维护并隐藏；需要个性化时，可对单项切换为“自定义填写”。重新编译只用于剧本或资产被外部修改后的低频维护，正常生产会自动更新。</p><div id="promptEditor" class="prompt-editor"></div></div>
         </div>
       </section>
     </main>

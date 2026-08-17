@@ -85,7 +85,7 @@ test("one-click repair is wired through renderer, preload and main process", () 
 test("blueprint, live status and toast layers no longer cover primary content", () => {
   const css = source("app/renderer/workbench.css");
   assert.match(css, /\.topbar\s*\{[^}]*position:\s*relative;[^}]*z-index:\s*2000;/);
-  assert.match(css, /\.quality-blueprint-menu\s*\{[^}]*right:\s*346px;[^}]*max-height:\s*calc\(100dvh - 96px\);/);
+  assert.match(css, /\.quality-blueprint-menu\s*\{[^}]*right:\s*158px;[^}]*width:\s*min\(420px,calc\(100vw - 174px\)\);[^}]*max-height:\s*calc\(100dvh - 96px\);/);
   assert.match(css, /\.pipeline-live-status\s*\{[^}]*position:\s*relative;[^}]*z-index:\s*2;/);
   assert.doesNotMatch(css, /\.pipeline-live-status\s*\{[^}]*position:\s*sticky;/);
   assert.match(css, /\.toast\s*\{[^}]*right:\s*346px;[^}]*top:\s*82px;/);
