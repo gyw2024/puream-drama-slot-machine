@@ -123,6 +123,42 @@ test("relay stream disconnects fail over instead of terminating the one-click go
   assert.equal(project.automation.repairJournal[0].status, "provider_failover");
 });
 
+test("a billed malformed unit is archived and only that missing batch is regenerated", async () => {
+  const project = projectFixture();
+  project.script.generationCheckpoint = {
+    fastGeneration: true,
+    fastUnitResultCache: { 1: { batch: [{ id: "S01" }] }, 6: { batch: [{ id: "S06" }] } },
+    unitContractFailure: {
+      id: "failure-11-15",
+      code: "MODEL_JSON_INVALID",
+      startNumber: 11,
+      endNumber: 15,
+      rawTextSha256: "abc123",
+      retryRequiresExplicitResume: true
+    }
+  };
+  const workflow = Object.create(WorkbenchWorkflow.prototype);
+  workflow.store = {
+    getProject: () => structuredClone(project),
+    getSettings: () => ({ textProviderProfiles: {
+      "openai-compatible": { kind: "openai-compatible", baseUrl: "https://example.invalid/v1", model: "backup-model", apiKey: "configured" }
+    } }),
+    saveProject: next => { Object.assign(project, structuredClone(next)); return project; }
+  };
+  workflow.appendAutonomousRepairJournal = (_id, entry) => { project.automation.repairJournal.unshift(entry); };
+  workflow.setAutomation = (_id, patch) => { project.automation = { ...project.automation, ...patch }; };
+  const supervisor = { repairs: 0, scriptRewrites: 0, transientRetries: 0, textProviderOverride: null, failuresByCode: new Map() };
+  const recovered = await workflow.recoverAutonomousPipelineFailure("P01", Object.assign(new Error("bad json"), { code: "MODEL_JSON_INVALID" }), supervisor);
+  assert.equal(recovered, true);
+  assert.equal(project.script.generationCheckpoint.unitContractFailure, null);
+  assert.equal(project.script.generationCheckpoint.unitContractFailureHistory[0].id, "failure-11-15");
+  assert.equal(project.script.generationCheckpoint.fastUnitResultCache[1].batch[0].id, "S01");
+  assert.equal(project.script.generationCheckpoint.unitReplacementContext.startNumber, 11);
+  assert.equal(supervisor.textProviderOverride.kind, "openai-compatible");
+  assert.equal(project.automation.stage, "agent_paid_unit_repair");
+  assert.equal(project.automation.repairJournal[0].status, "paid_unit_targeted_replacement");
+});
+
 test("script repair archives provenance outside the production-media category allowlist", t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-agent-script-history-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

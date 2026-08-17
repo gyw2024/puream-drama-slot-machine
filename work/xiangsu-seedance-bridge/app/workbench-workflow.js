@@ -20470,6 +20470,60 @@ ${shotAnchor}
     const transientFailure = !scriptQualityFailure && (isTransientProviderError(error)
       || error?.retryable === true
       || /TIMEOUT|NETWORK|EMPTY_RESPONSE|REMOTE_PENDING|QUARANTINED|BUSY/.test(code));
+    if (code === "MODEL_JSON_INVALID") {
+      const project = this.store.getProject(projectId);
+      const checkpoint = project.script?.generationCheckpoint;
+      const failedUnit = checkpoint?.unitContractFailure;
+      if (failedUnit?.retryRequiresExplicitResume === true) {
+        const configuredProfiles = this.store.getSettings?.()?.textProviderProfiles;
+        const fallback = configuredProfiles && typeof configuredProfiles === "object"
+          ? Object.values(configuredProfiles).find(profile => profile
+            && profile.kind !== "puream-relay"
+            && String(profile.baseUrl || "").trim()
+            && String(profile.model || "").trim()
+            && String(profile.apiKey || "").trim())
+          : null;
+        project.script = {
+          ...(project.script || {}),
+          generationCheckpoint: {
+            ...checkpoint,
+            unitContractFailure: null,
+            unitContractFailureHistory: [
+              ...(Array.isArray(checkpoint.unitContractFailureHistory) ? checkpoint.unitContractFailureHistory : []),
+              {
+                ...failedUnit,
+                consumedAt: new Date().toISOString(),
+                consumedReason: "autonomous_targeted_batch_replacement"
+              }
+            ].slice(-20),
+            unitReplacementContext: {
+              failureId: String(failedUnit.id || ""),
+              code,
+              startNumber: Number(failedUnit.startNumber) || 0,
+              endNumber: Number(failedUnit.endNumber) || 0,
+              rawTextSha256: String(failedUnit.rawTextSha256 || ""),
+              authorizedAt: new Date().toISOString()
+            }
+          }
+        };
+        this.store.saveProject(project);
+        if (fallback) supervisor.textProviderOverride = { ...fallback, authSource: "user" };
+        this.appendAutonomousRepairJournal(projectId, {
+          attempt: count,
+          code,
+          status: "paid_unit_targeted_replacement",
+          startNumber: Number(failedUnit.startNumber) || 0,
+          endNumber: Number(failedUnit.endNumber) || 0,
+          providerKind: String(fallback?.kind || "")
+        });
+        this.setAutomation(projectId, {
+          status: "running",
+          stage: "agent_paid_unit_repair",
+          message: `已付费的 S${String(failedUnit.startNumber || 0).padStart(2, "0")}-S${String(failedUnit.endNumber || 0).padStart(2, "0")} 原文无法安全恢复，Agent 已保留证据并仅重写该缺失批次${fallback ? "，同时切换备用文本模型" : ""}`
+        });
+        return true;
+      }
+    }
     if (transientFailure) {
       supervisor.transientRetries += 1;
       if (!supervisor.textProviderOverride && supervisor.transientRetries >= 1) {
