@@ -12233,7 +12233,20 @@ class WorkbenchWorkflow {
     }
     const sessionId = checkpoint.sessionId;
     const useFastScriptPath = checkpoint.fastGeneration === true && options.fast !== false;
-    const configuredTextProvider = options.textProviderOverride || settings.textProvider;
+    const checkpointFailoverKind = canResume
+      ? String((project.automation?.repairJournal || []).find(entry => entry?.status === "provider_failover")?.providerKind || "")
+      : "";
+    const checkpointFailoverProvider = checkpointFailoverKind
+      ? settings.textProviderProfiles?.[checkpointFailoverKind]
+      : null;
+    const configuredTextProvider = options.textProviderOverride
+      || (checkpointFailoverProvider
+        && String(checkpointFailoverProvider.baseUrl || "").trim()
+        && String(checkpointFailoverProvider.model || "").trim()
+        && String(checkpointFailoverProvider.apiKey || "").trim()
+        ? { ...checkpointFailoverProvider, authSource: "user" }
+        : null)
+      || settings.textProvider;
     const scriptTextProvider = useFastScriptPath && configuredTextProvider?.kind === "puream-relay"
       ? {
           ...configuredTextProvider,

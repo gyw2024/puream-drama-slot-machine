@@ -302,6 +302,8 @@ test("five to ten minute script path matches relay slots and preserves failed se
   assert.match(workflow, /mapWithConcurrency\(pendingPlanTasks, scriptFastConcurrency/);
   assert.match(workflow, /mapWithConcurrency\(pendingUnitTasks, scriptFastConcurrency/);
   assert.match(workflow, /fastPlanResultCache/);
+  assert.match(workflow, /checkpointFailoverKind/);
+  assert.match(workflow, /entry\?\.status === "provider_failover"/);
   assert.match(workflow, /fastUnitResultCache/);
   assert.match(workflow, /let fastUnitWaveFailed = false/);
   assert.match(workflow, /code: "SCRIPT_FAST_WAVE_FUSED"/);
