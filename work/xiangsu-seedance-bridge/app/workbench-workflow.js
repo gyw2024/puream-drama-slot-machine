@@ -9356,6 +9356,45 @@ function scriptFailureRepairRoute(failure, options = {}) {
   };
 }
 
+function normalizedRepairMatchText(value = "") {
+  return String(value || "")
+    .replace(/\s+/g, "")
+    .replace(/[，。！？；：,.!?;:'"“”‘’（）()\[\]{}<>《》]/g, "")
+    .toLowerCase();
+}
+
+function foundryFormalScriptFailures(error, project = {}) {
+  const report = error?.details?.report;
+  const issues = [
+    ...(Array.isArray(report?.levels?.technical?.issues) ? report.levels.technical.issues : []),
+    ...(Array.isArray(report?.levels?.story?.issues) ? report.levels.story.issues : [])
+  ].filter(item => item?.severity === "blocking");
+  const shots = Array.isArray(project.shots) ? project.shots : [];
+  return issues.map(item => {
+    const ids = new Set((String(item?.message || "").match(/S\d{1,4}/gi) || []).map(normalizeFailureShotId).filter(Boolean));
+    const repeated = new Set((Array.isArray(item?.details?.repeated) ? item.details.repeated : [])
+      .map(entry => normalizedRepairMatchText(Array.isArray(entry) ? entry[0] : entry?.text || entry?.value || ""))
+      .filter(Boolean));
+    if (repeated.size && item.id === "repeated_action_template") {
+      for (const shot of shots) {
+        if (repeated.has(normalizedRepairMatchText(shot.action || shot.visualBeat || shot.title || ""))) ids.add(normalizeFailureShotId(shot.id));
+      }
+    }
+    if (repeated.size && item.id === "repeated_dialogue") {
+      for (const shot of shots) {
+        const turns = Array.isArray(shot.dialogueTurns) ? shot.dialogueTurns : [{ text: shot.dialogue || "" }];
+        if (turns.some(turn => repeated.has(normalizedRepairMatchText(turn.spokenText || turn.text || "")))) ids.add(normalizeFailureShotId(shot.id));
+      }
+    }
+    return {
+      code: String(item?.id || "FOUNDRY_FORMAL_QUALITY_FAILURE").toUpperCase(),
+      owner: "shots",
+      shots: [...ids].filter(Boolean),
+      message: String(item?.message || "正式生产质检未通过")
+    };
+  });
+}
+
 function scriptRepairFailureSnapshot({ storyBible = null, shotPlan = [], shots = [] } = {}) {
   const payload = {
     storyBible: storyBible && typeof storyBible === "object" ? storyBible : null,
@@ -20413,17 +20452,98 @@ ${shotAnchor}
     return { scriptPath, reportPath };
   }
 
+  autonomousScopedScriptRepairCheckpoint(project, error) {
+    const shots = Array.isArray(project?.shots) ? project.shots : [];
+    if (!shots.length) return null;
+    const foundryFailures = foundryFormalScriptFailures(error, project);
+    const routedError = foundryFailures.length
+      ? { ...error, review: { hardFailures: foundryFailures } }
+      : error;
+    const route = scriptFailureRepairRoute(routedError, {
+      phase: "full",
+      unitCount: shots.length,
+      productEntryIndex: Number(project?.productionPlan?.productEntryIndex),
+      commerceShotCount: Number(project?.productionPlan?.commerceShotCount),
+      targetDurationSeconds: Number(project?.generation?.targetDurationSeconds)
+    });
+    if (!route.scoped) return null;
+
+    const affected = new Set();
+    for (const failure of scriptFailureItems(routedError)) {
+      for (const id of Array.isArray(failure?.shots) ? failure.shots : []) {
+        const normalized = normalizeFailureShotId(id);
+        if (normalized) affected.add(Number(normalized.slice(1)));
+      }
+    }
+    if (!affected.size) {
+      for (let number = route.startNumber; number <= route.reportedEndNumber; number += 1) affected.add(number);
+    }
+
+    const shotPlan = shots.map(shot => ({ ...shot }));
+    const fastUnitResultCache = {};
+    for (let index = 0; index < shots.length; index += SCRIPT_UNIT_BATCH_SIZE) {
+      const batch = shots.slice(index, index + SCRIPT_UNIT_BATCH_SIZE);
+      const intersectsFailure = batch.some((_shot, offset) => affected.has(index + offset + 1));
+      if (!intersectsFailure) {
+        fastUnitResultCache[String(index + 1)] = {
+          unitStartNumber: index + 1,
+          unitEndNumber: index + batch.length,
+          batch
+        };
+      }
+    }
+    const storyBible = {
+      title: String(project.title || ""),
+      story: project.script?.analysis || "",
+      characters: Array.isArray(project.characters) ? project.characters : [],
+      scenes: Array.isArray(project.scenes) ? project.scenes : []
+    };
+    const blueprint = {
+      ...storyBible,
+      shotPlan,
+      targetDurationSeconds: Number(project.generation?.targetDurationSeconds) || shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0)
+    };
+    return {
+      version: 1,
+      ideaSignature: ideaSignature(project),
+      scriptFormat: projectScriptFormat(project),
+      topicId: project.ideation?.selectedTopicId,
+      sessionId: `script-repair-${project.id}-${Date.now()}`,
+      startedAt: new Date().toISOString(),
+      fastGeneration: true,
+      blueprintAttempt: 1,
+      storyBible,
+      shotPlan,
+      blueprint,
+      blueprintFailures: [],
+      blueprintRetryContext: null,
+      draftAttempt: 1,
+      shots: [],
+      semanticReview: null,
+      fastUnitResultCache,
+      scriptRepair: scriptRepairMarker(routedError, route, scriptRepairFailureSnapshot({ storyBible, shotPlan, shots })),
+      autonomousRepair: true,
+      targetedRepair: {
+        affectedShotNumbers: [...affected].sort((left, right) => left - right),
+        preservedBatchCount: Object.keys(fastUnitResultCache).length,
+        totalBatchCount: Math.ceil(shots.length / SCRIPT_UNIT_BATCH_SIZE),
+        createdAt: new Date().toISOString()
+      }
+    };
+  }
+
   async rewriteScriptForAutonomousPipeline(projectId, error, supervisor) {
     supervisor.scriptRewrites += 1;
     if (supervisor.scriptRewrites > AUTONOMOUS_PIPELINE_MAX_SCRIPT_REWRITES) return false;
     const archived = this.archiveAutonomousScriptRepair(projectId, error, supervisor.scriptRewrites);
     let project = this.store.getProject(projectId);
+    const targetedCheckpoint = this.autonomousScopedScriptRepairCheckpoint(project, error);
     project.script = {
       ...(project.script || {}),
-      generationCheckpoint: null,
+      generationCheckpoint: targetedCheckpoint,
       analysisCheckpoint: null,
       autonomousRepair: {
-        status: "rewriting",
+        status: targetedCheckpoint ? "targeted_repair" : "rewriting",
         attempt: supervisor.scriptRewrites,
         sourceErrorCode: String(error?.code || ""),
         sourceErrorMessage: String(error?.message || ""),
@@ -20435,8 +20555,10 @@ ${shotAnchor}
     project.automation = {
       ...(project.automation || {}),
       status: "running",
-      stage: "agent_script_repair",
-      message: `剧本质检未通过，编剧 Agent 正在第 ${supervisor.scriptRewrites}/${AUTONOMOUS_PIPELINE_MAX_SCRIPT_REWRITES} 轮完整重写并复检；旧稿已归档，不会进入付费资产生成`,
+      stage: targetedCheckpoint ? "agent_script_targeted_repair" : "agent_script_repair",
+      message: targetedCheckpoint
+        ? `剧本质检未通过，编剧 Agent 仅重写 ${targetedCheckpoint.targetedRepair.affectedShotNumbers.map(number => `S${String(number).padStart(2, "0")}`).join("、")} 所在批次并复检；其余合格批次已保留`
+        : `剧本质检未通过，编剧 Agent 正在第 ${supervisor.scriptRewrites}/${AUTONOMOUS_PIPELINE_MAX_SCRIPT_REWRITES} 轮完整重写并复检；旧稿已归档，不会进入付费资产生成`,
       errorCode: "",
       recoverableFailure: false,
       updatedAt: new Date().toISOString()
@@ -20448,7 +20570,8 @@ ${shotAnchor}
       // bounded plan/unit batches so a 5-10 minute script meets the SLA.
       fast: true,
       directFast: false,
-      autonomousRepair: true
+      autonomousRepair: true,
+      textProviderOverride: supervisor.textProviderOverride || undefined
     });
     project = this.store.getProject(projectId);
     project.script = {

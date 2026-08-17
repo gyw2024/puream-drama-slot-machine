@@ -58,6 +58,54 @@ test("one-click supervisor rewrites a rejected script and continues the same goa
   assert.equal(project.automation.repairJournal[0].code, "FOUNDRY_FORMAL_QUALITY_GATE_FAILED");
 });
 
+test("formal quality failures repair only affected script batches and preserve the rest", async () => {
+  let project = projectFixture();
+  project.title = "Targeted repair";
+  project.ideation = {
+    selectedTopicId: "topic-1",
+    topics: [{ id: "topic-1", title: "Targeted repair" }]
+  };
+  project.product = { name: "product", sellingPoints: "point", imagePath: "product.png" };
+  project.generation = { targetDurationSeconds: 300, durationLocked: true };
+  project.productionPlan = { inputMode: "ai", productEntryIndex: 20, commerceShotCount: 3 };
+  project.characters = [{ id: "C01", name: "A" }];
+  project.scenes = [{ id: "SC01", name: "school" }];
+  project.script.analysis = "story";
+  project.shots = Array.from({ length: 30 }, (_, index) => ({
+    id: `S${String(index + 1).padStart(2, "0")}`,
+    duration: 10,
+    scene: "school",
+    action: index === 8 || index === 11 ? "same repeated action" : `action-${index + 1}`,
+    dialogueTurns: [{ speakerId: "C01", text: `line-${index + 1}` }]
+  }));
+  const workflow = Object.create(WorkbenchWorkflow.prototype);
+  workflow.store = {
+    getProject: () => structuredClone(project),
+    saveProject: next => { project = structuredClone(next); return structuredClone(project); }
+  };
+  workflow.archiveAutonomousScriptRepair = () => ({ scriptPath: "old.md", reportPath: "old.json" });
+  let generationOptions = null;
+  workflow.generateCompleteScript = async (_projectId, options) => { generationOptions = options; return project; };
+  const error = Object.assign(new Error("formal gate"), {
+    code: "FOUNDRY_FORMAL_QUALITY_GATE_FAILED",
+    details: { report: { levels: { technical: { issues: [] }, story: { issues: [{
+      id: "repeated_action_template",
+      severity: "blocking",
+      message: "repeated action",
+      details: { repeated: [["samerepeatedaction", 2]] }
+    }] } } } }
+  });
+  const supervisor = { scriptRewrites: 0, textProviderOverride: { kind: "openai-compatible" } };
+  await workflow.rewriteScriptForAutonomousPipeline(project.id, error, supervisor);
+  const checkpoint = project.script.generationCheckpoint;
+  assert.deepEqual(checkpoint.targetedRepair.affectedShotNumbers, [9, 12]);
+  assert.equal(checkpoint.targetedRepair.totalBatchCount, 6);
+  assert.equal(checkpoint.targetedRepair.preservedBatchCount, 4);
+  assert.deepEqual(Object.keys(checkpoint.fastUnitResultCache), ["1", "16", "21", "26"]);
+  assert.equal(project.automation.stage, "agent_script_targeted_repair");
+  assert.equal(generationOptions.textProviderOverride.kind, "openai-compatible");
+});
+
 test("the supervisor also repairs failures thrown by its own repair actions", async () => {
   const workflow = Object.create(WorkbenchWorkflow.prototype);
   workflow.assertOperationActive = () => {};
