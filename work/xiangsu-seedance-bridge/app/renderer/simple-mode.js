@@ -32,7 +32,7 @@ const stageDefinitions = [
   { key: "analysis", label: "AI 拆镜", panel: "script" },
   { key: "assets", label: "角色场景", panel: "assets" },
   { key: "storyboard", label: "分镜图", panel: "storyboard" },
-  { key: "videos", label: "H3 视频", panel: "generate" },
+  { key: "videos", label: "分镜视频", panel: "generate" },
   { key: "final", label: "成片", panel: "final" }
 ];
 
@@ -251,7 +251,7 @@ function renderOverview() {
   const completed = Object.values(stages).filter(Boolean).length;
   const summary = project.costLedger?.summary || {};
   const mode = generationLabels[project.generation?.mode] || "多帧合图";
-  $("#projectHero").innerHTML = `<div class="hero-copy"><small>${escapeHtml(project.productionPlan?.inputMode === "ai" ? "AI 起稿" : "用户剧本")} · ${escapeHtml(project.productionPlan?.executionMode === "step" ? "一步步制作" : "一键全流程")}</small><h2>${escapeHtml(project.title)}</h2><p>${escapeHtml((project.script?.raw || "").slice(0, 92) || "尚未上传剧本，先从剧本与分集开始。")}</p><div class="hero-tags"><i>海螺 H3</i><i>${escapeHtml(mode)}</i><i>${project.generation?.targetDurationSeconds || 0} 秒目标</i><i>${(project.characters || []).length} 人物</i><i>${(project.shots || []).length} 分镜</i><i>已结 ${money(summary.totalKnownYuan)}</i></div></div><div class="hero-score"><b>${completed}/6</b><span>制作阶段完成</span></div>`;
+  $("#projectHero").innerHTML = `<div class="hero-copy"><small>${escapeHtml(project.productionPlan?.inputMode === "ai" ? "AI 起稿" : "用户剧本")} · ${escapeHtml(project.productionPlan?.executionMode === "step" ? "一步步制作" : "一键全流程")}</small><h2>${escapeHtml(project.title)}</h2><p>${escapeHtml((project.script?.raw || "").slice(0, 92) || "尚未上传剧本，先从剧本与分集开始。")}</p><div class="hero-tags"><i>纯梦云端视频</i><i>${escapeHtml(mode)}</i><i>${project.generation?.targetDurationSeconds || 0} 秒目标</i><i>${(project.characters || []).length} 人物</i><i>${(project.shots || []).length} 分镜</i><i>已结 ${money(summary.totalKnownYuan)}</i></div></div><div class="hero-score"><b>${completed}/6</b><span>制作阶段完成</span></div>`;
   $("#stepGrid").innerHTML = stageDefinitions.map((item, index) => `<button class="step-card${stages[item.key] ? " complete" : firstIncompleteStage(project).key === item.key ? " current" : ""}" type="button" data-panel-jump="${item.panel}"><i>${stages[item.key] ? "✓" : index + 1}</i><b>${escapeHtml(item.label)}</b><small>${stages[item.key] ? "已完成" : firstIncompleteStage(project).key === item.key ? "现在做" : "等待前序"}</small></button>`).join("");
   const next = firstIncompleteStage(project);
   const copy = {
@@ -259,7 +259,7 @@ function renderOverview() {
     analysis: "保存原剧本后让 AI 拆出人物、场景、核心道具和完整分镜。",
     assets: "生成或从共享库绑定人物、场景与核心道具资产。",
     storyboard: "生成多帧合图或首尾帧，并核对镜头提示词。",
-    videos: "提交全部分镜到 H3；网络中断会保留断点继续。",
+    videos: "提交全部分镜视频；网络中断会保留断点继续。",
     final: "全部分镜视频完成后拼接，不添加字幕和背景音乐。"
   };
   $("#nextAction").innerHTML = `<b>${completed === 6 ? "成片已经准备好" : next.label}</b><button class="primary-button" type="button" data-panel-jump="${next.panel}">${completed === 6 ? "查看成片" : "现在去做"}</button><p>${escapeHtml(copy[next.key])}</p>`;
@@ -333,7 +333,7 @@ function renderStoryboards() {
   const slots = expectedStoryboardSlots(project);
   const ready = slots.filter(([shot, stage]) => selectedCandidate(project, "shot", shot.id, stage)).length;
   $("#storyboardMode").innerHTML = `<span><small>分镜模式</small><b>${escapeHtml(generationLabels[project.generation?.mode] || "多帧合图")}</b></span><span><small>分镜数量</small><b>${project.shots?.length || 0}</b></span><span><small>画面槽位</small><b>${ready}/${slots.length}</b></span><div class="progress-mini"><i style="width:${slots.length ? Math.round(ready / slots.length * 100) : 0}%"></i></div>`;
-  $("#shotEditorList").innerHTML = (project.shots || []).length ? project.shots.slice().sort((a, b) => Number(a.number) - Number(b.number)).map(shot => `<article class="shot-card" data-shot-id="${escapeHtml(shot.id)}"><div class="shot-index"><b>${String(shot.number || 0).padStart(2, "0")}</b><span>${shot.duration || 0} 秒</span><small>${escapeHtml(shot.shotSize || "景别待定")}</small></div><div class="shot-story"><h3>${escapeHtml(shot.title || `镜头 ${shot.number}`)}</h3><p>${escapeHtml(shot.action || shot.visualBeat || "暂无动作")}</p><p class="dialogue">${escapeHtml(shot.dialogue || "无对白")}</p><div class="asset-tags"><i>${escapeHtml(shot.sceneName || "场景待定")}</i><i>${escapeHtml(shot.cameraMove || "机位待定")}</i></div></div><div class="shot-edit-fields"><label>动作与画面<textarea data-shot-field="action">${escapeHtml(shot.action || "")}</textarea></label><label>对白<textarea data-shot-field="dialogue">${escapeHtml(shot.dialogue || "")}</textarea></label><label>H3 视频提示词<textarea data-shot-field="manualVideoPrompt" placeholder="留空则使用 AI 系统编译稿">${escapeHtml(shot.manualVideoPrompt || "")}</textarea></label></div></article>`).join("") : '<div class="empty-project"><h2>还没有分镜</h2><p>先到“剧本与分集”保存并执行 AI 拆镜。</p><button class="primary-button" type="button" data-panel-jump="script">去拆镜</button></div>';
+  $("#shotEditorList").innerHTML = (project.shots || []).length ? project.shots.slice().sort((a, b) => Number(a.number) - Number(b.number)).map(shot => `<article class="shot-card" data-shot-id="${escapeHtml(shot.id)}"><div class="shot-index"><b>${String(shot.number || 0).padStart(2, "0")}</b><span>${shot.duration || 0} 秒</span><small>${escapeHtml(shot.shotSize || "景别待定")}</small></div><div class="shot-story"><h3>${escapeHtml(shot.title || `镜头 ${shot.number}`)}</h3><p>${escapeHtml(shot.action || shot.visualBeat || "暂无动作")}</p><p class="dialogue">${escapeHtml(shot.dialogue || "无对白")}</p><div class="asset-tags"><i>${escapeHtml(shot.sceneName || "场景待定")}</i><i>${escapeHtml(shot.cameraMove || "机位待定")}</i></div></div><div class="shot-edit-fields"><label>动作与画面<textarea data-shot-field="action">${escapeHtml(shot.action || "")}</textarea></label><label>对白<textarea data-shot-field="dialogue">${escapeHtml(shot.dialogue || "")}</textarea></label><label>视频提示词<textarea data-shot-field="manualVideoPrompt" placeholder="留空则使用 AI 系统编译稿">${escapeHtml(shot.manualVideoPrompt || "")}</textarea></label></div></article>`).join("") : '<div class="empty-project"><h2>还没有分镜</h2><p>先到“剧本与分集”保存并执行 AI 拆镜。</p><button class="primary-button" type="button" data-panel-jump="script">去拆镜</button></div>';
 }
 
 function activeJobForShot(project, shotId) {
@@ -347,12 +347,12 @@ function renderVideos() {
   const ready = shots.filter(shot => selectedCandidate(project, "shot", shot.id, "shot_video")).length;
   const running = shots.filter(shot => activeJobForShot(project, shot.id)).length;
   const authorizedVideoConcurrency = project.automation?.concurrency?.video || state.license?.videoConcurrency || "读取后台";
-  $("#videoQueueSummary").innerHTML = `<span><small>H3 分镜视频</small><b>${ready}/${shots.length}</b></span><span><small>正在处理</small><b>${running}</b></span><span><small>视频并发</small><b>${escapeHtml(authorizedVideoConcurrency)}</b></span><span><small>总时限</small><b>不限</b></span><div class="progress-mini"><i style="width:${shots.length ? Math.round(ready / shots.length * 100) : 0}%"></i></div>`;
+  $("#videoQueueSummary").innerHTML = `<span><small>分镜视频</small><b>${ready}/${shots.length}</b></span><span><small>正在处理</small><b>${running}</b></span><span><small>视频并发</small><b>${escapeHtml(authorizedVideoConcurrency)}</b></span><span><small>总时限</small><b>不限</b></span><div class="progress-mini"><i style="width:${shots.length ? Math.round(ready / shots.length * 100) : 0}%"></i></div>`;
   $("#videoGrid").innerHTML = shots.length ? shots.slice().sort((a, b) => Number(a.number) - Number(b.number)).map(shot => {
     const candidate = selectedCandidate(project, "shot", shot.id, "shot_video");
     const job = activeJobForShot(project, shot.id);
-    const preview = candidate?.filePath ? `<video src="${escapeHtml(fileUrl(candidate.filePath))}" controls preload="metadata" playsinline></video>` : `<div class="video-empty">${job ? '<i aria-hidden="true"></i>' : '<img src="../assets/icons/video.png" alt="">'}<b>${job ? "H3 正在生成" : "等待生成"}</b><span>${escapeHtml(job?.message || "尚无分镜视频")}</span></div>`;
-    return `<article class="video-card${job ? " running" : ""}"><div class="video-preview">${preview}</div><div class="video-body"><header><b>镜头 ${shot.number}</b><span class="state-pill">${candidate ? "完成" : job ? "生成中" : "待生成"}</span></header><p>${escapeHtml(shot.manualVideoPrompt || shot.systemVideoPrompt || shot.dialogue || "系统将在提交时编译 H3 提示词")}</p><button type="button" data-action="generate-shot-video" data-shot-id="${escapeHtml(shot.id)}" ${job ? "disabled" : ""}>${candidate ? "重新生成" : "生成本镜"}</button></div></article>`;
+    const preview = candidate?.filePath ? `<video src="${escapeHtml(fileUrl(candidate.filePath))}" controls preload="metadata" playsinline></video>` : `<div class="video-empty">${job ? '<i aria-hidden="true"></i>' : '<img src="../assets/icons/video.png" alt="">'}<b>${job ? "正在生成" : "等待生成"}</b><span>${escapeHtml(job?.message || "尚无分镜视频")}</span></div>`;
+    return `<article class="video-card${job ? " running" : ""}"><div class="video-preview">${preview}</div><div class="video-body"><header><b>镜头 ${shot.number}</b><span class="state-pill">${candidate ? "完成" : job ? "生成中" : "待生成"}</span></header><p>${escapeHtml(shot.manualVideoPrompt || shot.systemVideoPrompt || shot.dialogue || "系统将在提交时编译视频提示词")}</p><button type="button" data-action="generate-shot-video" data-shot-id="${escapeHtml(shot.id)}" ${job ? "disabled" : ""}>${candidate ? "重新生成" : "生成本镜"}</button></div></article>`;
   }).join("") : '<div class="empty-project"><h2>没有可生成的分镜</h2><p>先完成剧本拆镜和分镜图。</p></div>';
 }
 
@@ -365,7 +365,7 @@ function renderFinal() {
   }
   const shots = project.shots || [];
   const ready = shots.filter(shot => selectedCandidate(project, "shot", shot.id, "shot_video")).length;
-  $("#finalStage").innerHTML = `<div class="final-empty"><img src="../assets/icons/play.png" alt=""><h2>${ready === shots.length && shots.length ? "分镜已齐，可以拼接" : "等待全部分镜视频"}</h2><p>当前 ${ready}/${shots.length} 个分镜视频完成。成片只按剧情顺序拼接，不会额外加入字幕、背景音乐或人物介绍。</p>${ready === shots.length && shots.length ? '<button class="primary-button" type="button" data-action="stitch-final">立即拼接</button>' : '<button class="outline-button" type="button" data-panel-jump="generate">查看 H3 任务</button>'}</div>`;
+  $("#finalStage").innerHTML = `<div class="final-empty"><img src="../assets/icons/play.png" alt=""><h2>${ready === shots.length && shots.length ? "分镜已齐，可以拼接" : "等待全部分镜视频"}</h2><p>当前 ${ready}/${shots.length} 个分镜视频完成。成片只按剧情顺序拼接，不会额外加入字幕、背景音乐或人物介绍。</p>${ready === shots.length && shots.length ? '<button class="primary-button" type="button" data-action="stitch-final">立即拼接</button>' : '<button class="outline-button" type="button" data-panel-jump="generate">查看视频任务</button>'}</div>`;
 }
 
 function renderTasks() {
@@ -584,9 +584,9 @@ async function runAll() {
   if (!state.project) return;
   await saveScriptFields({ toast: false });
   if (!String(state.project.script?.raw || "").trim()) return showToast("请先上传或粘贴完整剧本，再开始制作", "error");
-  const accepted = await confirmAction("一键制作完整短剧", "将调用 AI 图片与海螺 H3 视频服务并产生实际费用。任务没有总时限，可暂停和断点续跑。", "开始制作");
+  const accepted = await confirmAction("一键制作完整短剧", "将调用 AI 图片与纯梦云端视频服务并产生实际费用。任务没有总时限，可暂停和断点续跑。", "开始制作");
   if (!accepted) return;
-  runLong("一键全流程已启动", "AI 将依次完成剧本分析、资产、分镜、H3 视频与成片", () => api("runFullPipeline", state.project.id), { background: true });
+  runLong("一键全流程已启动", "AI 将依次完成剧本分析、资产、分镜、视频与成片", () => api("runFullPipeline", state.project.id), { background: true });
 }
 
 async function deleteProject() {
@@ -724,8 +724,8 @@ document.addEventListener("click", async event => {
   }
   if (action === "generate-shot-video") {
     const button = event.target.closest("[data-action]");
-    const accepted = await confirmAction("生成本镜 H3 视频", "该操作会提交真实 H3 视频任务并产生费用。", "提交本镜");
-    if (accepted) runLong("正在提交 H3 视频", "任务提交后会在后台持续同步", () => api("generateShotVideo", state.project.id, button.dataset.shotId, state.project.generation?.mode), { background: true });
+    const accepted = await confirmAction("生成本镜视频", "该操作会提交真实视频任务并产生费用。", "提交本镜");
+    if (accepted) runLong("正在提交分镜视频", "任务提交后会在后台持续同步", () => api("generateShotVideo", state.project.id, button.dataset.shotId, state.project.generation?.mode), { background: true });
   }
 });
 
@@ -802,8 +802,8 @@ $("#generateStoryboards").addEventListener("click", async () => {
 });
 $("#generateVideos").addEventListener("click", async () => {
   if (!state.project) return;
-  const accepted = await confirmAction("生成全部 H3 分镜视频", "将提交真实 H3 视频任务并产生实际费用。任务没有总时限，可在任务中心持续查看。", "提交全部");
-  if (accepted) runLong("H3 视频任务已启动", "所有分镜按设置并发提交并持续同步", () => api("generateAllShotVideos", state.project.id), { background: true });
+  const accepted = await confirmAction("生成全部分镜视频", "将提交真实视频任务并产生实际费用。任务没有总时限，可在任务中心持续查看。", "提交全部");
+  if (accepted) runLong("分镜视频任务已启动", "所有分镜按设置并发提交并持续同步", () => api("generateAllShotVideos", state.project.id), { background: true });
 });
 $("#stitchFinal").addEventListener("click", () => state.project && runLong("正在拼接成片", "按剧情顺序拼接，不添加字幕、背景音乐或人物介绍", () => api("stitch", state.project.id)));
 $("#refreshTasks").addEventListener("click", () => refreshCurrent());
@@ -867,12 +867,12 @@ $("#resetSettings").addEventListener("click", async () => {
 $("#testH3").addEventListener("click", async () => {
   const status = $("#h3Status");
   status.className = "test-status";
-  status.textContent = "正在检测 H3 连接…";
+  status.textContent = "正在检测视频连接…";
   try {
     const result = await Promise.race([api("testProvider", "video"), new Promise(resolve => setTimeout(() => resolve({ ok: false, message: "连接检测超时，请稍后重试" }), 15000))]);
     resultOrThrow(result);
     status.className = "test-status ok";
-    status.textContent = "H3 连接正常";
+    status.textContent = "视频连接正常";
   } catch (error) {
     status.className = "test-status error";
     status.textContent = error.message;

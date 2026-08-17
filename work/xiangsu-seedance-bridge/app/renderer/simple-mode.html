@@ -12,7 +12,7 @@
     <header class="topbar">
       <div class="brand">
         <span class="brand-icon"><img src="../assets/drama-slot-mark.svg" alt=""></span>
-        <span><b>纯梦短剧老虎机</b><small>简易模式 · H3 SHORT DRAMA STUDIO</small></span>
+        <span><b>纯梦短剧老虎机</b><small>简易模式 · SHORT DRAMA STUDIO</small></span>
         <em>简单、清楚、一步一步</em>
       </div>
       <div class="project-tools">
@@ -37,7 +37,7 @@
         <button class="nav-button" type="button" data-panel="script"><em>02</em><span><b>剧本与分集</b><small>上传、改写、拆镜</small></span></button>
         <button class="nav-button" type="button" data-panel="assets"><em>03</em><span><b>角色场景道具</b><small>共享或生成资产</small></span></button>
         <button class="nav-button" type="button" data-panel="storyboard"><em>04</em><span><b>分镜准备</b><small>画面与提示词</small></span></button>
-        <button class="nav-button" type="button" data-panel="generate"><em>05</em><span><b>H3 生成工作台</b><small>分镜视频生产</small></span></button>
+        <button class="nav-button" type="button" data-panel="generate"><em>05</em><span><b>分镜视频工作台</b><small>视频生产</small></span></button>
         <button class="nav-button" type="button" data-panel="final"><em>06</em><span><b>成片导出</b><small>拼接与交付</small></span></button>
       </nav>
       <div class="sidebar-spacer"></div>
@@ -46,7 +46,7 @@
         <div class="sidebar-more-menu">
           <button class="nav-button" type="button" data-panel="tasks"><em>任</em><span><b>任务与费用</b><small>查看状态和失败原因</small></span></button>
           <button class="nav-button shared-nav" type="button" data-panel="library"><em>库</em><span><b>共享资产库</b><small>管理可复用素材</small></span></button>
-          <button class="nav-button" type="button" data-panel="settings"><em>设</em><span><b>设置与连接</b><small>文本模型、H3 与存储</small></span></button>
+          <button class="nav-button" type="button" data-panel="settings"><em>设</em><span><b>设置与连接</b><small>文本模型、视频与存储</small></span></button>
           <button id="switchAgent" class="nav-button mode-switch" type="button"><em>高</em><span><b>高级模式</b><small>进入完整专业工作台</small></span></button>
           <button id="versionButton" class="version-button" type="button"><span>版本与更新</span><b id="versionText">读取中</b><small id="updateText">检查更新</small></button>
         </div>
@@ -66,7 +66,7 @@
           <button class="primary-button" type="button" data-action="next-step">带我做下一步</button>
         </header>
         <div id="emptyProject" class="empty-project" hidden>
-          <span class="empty-icon">＋</span><h2>新建第一部短剧</h2><p>简易模式只保留最清楚的制作步骤，底层仍由 AI 和海螺 H3 完成。</p><button class="primary-button" type="button" data-action="new-project">开始新项目</button>
+          <span class="empty-icon">＋</span><h2>新建第一部短剧</h2><p>简易模式只保留最清楚的制作步骤，底层仍由 AI 和纯梦云端视频服务完成。</p><button class="primary-button" type="button" data-action="new-project">开始新项目</button>
         </div>
         <div id="overviewContent">
           <div id="projectHero" class="project-hero"></div>
@@ -123,7 +123,7 @@
 
       <section class="panel" data-content="generate">
         <header class="panel-head">
-          <div><span>STEP 05 · HAILUO H3</span><h1>H3 生成工作台</h1><p>每个分镜都按说话人、听者、情绪、机位与切镜控制；任务无总时限，网络中断会保留断点续跑。</p></div>
+          <div><span>STEP 05 · VIDEO PRODUCTION</span><h1>分镜视频工作台</h1><p>每个分镜都按说话人、听者、情绪、机位与切镜控制；任务无总时限，网络中断会保留断点续跑。</p></div>
           <div class="head-actions"><button id="generateVideos" class="primary-button" type="button">生成全部分镜视频</button></div>
         </header>
         <div id="videoQueueSummary" class="summary-strip"></div>
@@ -153,7 +153,7 @@
         <header class="panel-head"><div><span>SIMPLE SETTINGS</span><h1>简易模式设置</h1><p>这些设置只属于简易模式；Agent 模式设置不会被覆盖。</p></div><div class="head-actions"><button id="resetSettings" class="outline-button" type="button">恢复默认</button><button id="saveSettings" class="primary-button" type="button">保存设置</button></div></header>
         <div class="settings-grid">
           <article class="card provider-card"><div class="card-head"><span><small>TEXT MODEL</small><b>AI 拆镜文本模型</b></span><button id="testTextProvider" class="text-button" type="button">测试连接</button></div><label>供应商<select id="textProviderKind"><option value="puream-relay">纯梦官网（默认）</option><option value="openai-native">OpenAI 官方</option><option value="openai-compatible">自定义 OpenAI 兼容厂商</option><option value="gemini-native">Google Gemini 原生</option><option value="anthropic-native">Anthropic Claude 原生</option></select></label><label id="textBaseUrlField">Base URL<input id="textBaseUrl" autocomplete="url"></label><label id="textApiKeyField">API Key<input id="textApiKey" type="password" autocomplete="off"></label><label id="textModelField">模型名称<input id="textModel"></label><label id="textMaxTokensField">最大输出 Token<input id="textMaxTokens" type="number" min="256" max="131072" step="256"></label><p id="textProviderHelp">纯梦官网由系统自动调度；选择自定义供应商后可填写完整连接参数。</p><div id="textProviderStatus" class="test-status">尚未检测</div></article>
-          <article class="card provider-card"><div class="card-head"><span><small>VIDEO ENGINE</small><b>海螺 H3</b></span><i class="locked-pill">固定接入</i></div><p>简易模式所有人物视频与分镜视频统一通过纯梦云端海螺 H3 生成，不能误切到其他引擎。</p><button id="testH3" class="outline-button" type="button">检测 H3 连接</button><div id="h3Status" class="test-status">尚未检测</div></article>
+          <article class="card provider-card"><div class="card-head"><span><small>VIDEO ENGINE</small><b>纯梦云端视频</b></span><i class="locked-pill">固定接入</i></div><p>简易模式所有人物视频与分镜视频统一通过纯梦云端视频服务生成，不能误切到其他引擎。</p><button id="testH3" class="outline-button" type="button">检测视频连接</button><div id="h3Status" class="test-status">尚未检测</div></article>
           <article class="card"><div class="card-head"><span><small>CONCURRENCY</small><b>生成并发</b></span></div><label>图片并发（后台额度）<input id="imageConcurrency" type="number" min="1" step="1" readonly aria-readonly="true"></label><label>视频并发（后台额度）<input id="videoConcurrency" type="number" min="1" step="1" readonly aria-readonly="true"></label><label>默认画幅<select id="aspectRatio"><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option><option value="1:1">1:1 方形</option></select></label><p>并发严格读取管理后台授权，不再由客户端写死或少开。</p></article>
           <article class="card"><div class="card-head"><span><small>STORAGE</small><b>数据边界</b></span></div><dl class="storage-list"><dt>简易模式项目</dt><dd id="simpleRoot">读取中</dd><dt>共享资产库</dt><dd id="sharedRoot">读取中</dd></dl><p class="boundary-note">项目、任务、费用、设置与成片不互通；只有资产库互通。</p></article>
           <article class="card switch-card"><div class="card-head"><span><small>WORKSPACE MODE</small><b>需要高级控制？</b></span></div><p>切换只改变默认入口，不搬迁、不合并、不删除任何项目。</p><button class="mode-switch large" type="button" data-action="switch-agent">切换到 Agent 模式</button></article>
@@ -172,7 +172,7 @@
       <div class="form-columns"><label>起步方式<select id="newInputMode" disabled aria-disabled="true"><option value="manual">上传 / 粘贴已有剧本</option></select></label><label>制作方式<select id="newExecutionMode"><option value="full">一键全流程</option><option value="step">一步步制作</option></select></label></div>
       <label>分镜模式<select id="newGenerationMode"><option value="storyboard_sheet">多帧合图</option><option value="smart">智能首尾帧 + 延续</option><option value="continuation">视频延续</option><option value="keyframe">首尾帧</option></select></label>
       <div class="form-columns"><label>目标时长（秒）<input id="newDuration" type="number" min="1" step="1" value="60"></label><label>带货方式<select id="newCommerceMode"><option value="none">不带货</option><option value="natural">自然植入</option><option value="explicit">明确带货</option></select></label></div>
-      <p>目标时长没有上限；实际分镜会按剧情完整性与 H3 单段能力自动拆分。</p>
+      <p>目标时长没有上限；实际分镜会按剧情完整性与云端单段能力自动拆分。</p>
       <footer><button type="button" class="outline-button" data-close-dialog="newProjectDialog">取消</button><button type="submit" class="primary-button">创建项目</button></footer>
     </form>
   </dialog>

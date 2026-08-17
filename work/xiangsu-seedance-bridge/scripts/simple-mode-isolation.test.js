@@ -71,7 +71,7 @@ test("Simple and Agent modes isolate every data domain except the explicit share
   }
 });
 
-test("first-run mode choice, later switching, H3 lock and Simple allowlist are all wired", () => {
+test("first-run mode choice, later switching, cloud video lock and Simple allowlist are all wired", () => {
   const root = path.join(__dirname, "..");
   const main = fs.readFileSync(path.join(root, "app", "main.js"), "utf8");
   const preload = fs.readFileSync(path.join(root, "app", "preload.js"), "utf8");
@@ -90,7 +90,9 @@ test("first-run mode choice, later switching, H3 lock and Simple allowlist are a
   assert.match(preload, /appMode:[\s\S]*select:[\s\S]*simple:[\s\S]*simple:call/);
   assert.match(selector, /data-mode="simple"/);
   assert.match(selector, /data-mode="agent"/);
-  assert.match(simple, /H3 生成工作台/);
+  assert.doesNotMatch(selector, /\bH3\b|Hailuo|海螺/i);
+  assert.match(simple, /分镜视频工作台/);
+  assert.doesNotMatch(simple, /\bH3\b|Hailuo|海螺/i);
   assert.match(simple, /共享资产库/);
   assert.match(simple, /settingsSwitchSimpleMode|switchAgent/);
   assert.doesNotMatch(simple, /local-xiangsu|puream-seedance/);

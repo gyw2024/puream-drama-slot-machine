@@ -253,6 +253,7 @@ async function auditSimple(root, runDir, workbenchDir) {
     ];
     const layouts = [];
     const screenshots = [];
+    const visibleInternalModelNames = [];
     for (const view of viewMatrix) {
       await setWindowView(electronApp, page, view);
       await page.locator('.nav-button[data-panel="overview"]').click();
@@ -308,6 +309,8 @@ async function auditSimple(root, runDir, workbenchDir) {
       await openPanel(page, panel);
       await page.waitForTimeout(panel === "library" ? 400 : 100);
       screenshots.push(await capture(page, path.join(runDir, `simple-${panel}-1440x900.png`)));
+      const forbidden = await page.evaluate(() => (document.body.innerText || "").match(/(?:\bH3\b|Hailuo|海螺)/gi) || []);
+      if (forbidden.length) visibleInternalModelNames.push({ panel, matches: forbidden });
     }
     await openPanel(page, "settings");
     await page.locator("#textProviderKind").selectOption("openai-compatible");
@@ -361,12 +364,14 @@ async function auditSimple(root, runDir, workbenchDir) {
       imageAudit,
       stageContract,
       providerContract,
+      visibleInternalModelNames,
       axe,
       screenshots
     }, null, 2), "utf8");
 
     assert.equal(runtime.pageErrors.length, 0, `Simple renderer errors: ${runtime.pageErrors.join("\n")}`);
     assert.equal(runtime.consoleErrors.length, 0, `Simple console errors: ${runtime.consoleErrors.join("\n")}`);
+    assert.deepEqual(visibleInternalModelNames, [], "Simple mode must not expose internal video model names in visible text");
     assert.ok(layouts.every(item => !item.horizontalOverflow), "Simple mode has page-level horizontal overflow");
     assert.ok(layouts.every(item => !item.workspaceHorizontalOverflow), "Simple workspace has horizontal overflow");
     assert.ok(layouts.every(item => item.topControlOverlaps.length === 0), "Simple top controls overlap");
@@ -416,13 +421,15 @@ async function auditSelector(root, runDir, workbenchDir) {
       visibleCards: [...document.querySelectorAll("[data-mode]")].filter(node => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
-      }).length
+      }).length,
+      forbiddenInternalModelNames: (document.body.innerText || "").match(/(?:\bH3\b|Hailuo|海螺)/gi) || []
     }));
     const axe = await runAxe(page, "");
     assert.equal(errors.length, 0, `Mode selector renderer errors: ${errors.join("\n")}`);
     assert.equal(layout.horizontalOverflow, false, "Mode selector overflows horizontally at 200% zoom");
     assert.equal(layout.cards, 2);
     assert.equal(layout.visibleCards, 2);
+    assert.deepEqual(layout.forbiddenInternalModelNames, [], "Mode selector must not expose internal video model names");
     assert.equal(axe.length, 0, "Mode selector has critical or serious accessibility violations");
     await setWindowView(electronApp, page, { width: 1280, height: 800, zoom: 1 });
     await page.locator('[data-mode="simple"]').click();
