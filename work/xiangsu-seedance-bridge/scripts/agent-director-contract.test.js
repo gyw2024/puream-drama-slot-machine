@@ -159,6 +159,23 @@ test("overflow dialogue turns attach to the final subshot without losing text or
   assert.deepEqual(plan.takes.slice(-2).map(take => take.mouthOwnerId), ["C01", "C02"]);
 });
 
+test("an intentionally repeated identical line is emitted and validated at its authored multiplicity", () => {
+  const { project, shot, references } = fixture();
+  shot.duration = 9;
+  shot.dialogueTurns = [
+    { speakerId: "C01", listenerIds: ["C02"], text: "妈不饿，你吃。", subshotNumber: 1 },
+    { speakerId: "C01", listenerIds: ["C02"], text: "妈不饿，你吃。", subshotNumber: 1 }
+  ];
+  shot.subshots = [{ start: 0, end: 9, visibleCharacterIds: ["C01", "C02"] }];
+  const plan = buildCameraTakePlan(project, shot);
+  const block = { ...plan.generationBlocks[0], takes: generationBlockTakes(plan, plan.generationBlocks[0]) };
+  const blockReferences = filterReferencesForGenerationBlock(references, block, { blockCount: 1 });
+  const prompt = buildHailuoGenerationBlockPrompt(project, shot, block, blockReferences);
+
+  assert.equal((prompt.match(/妈不饿，你吃。/g) || []).length, 2);
+  assert.equal(assertAgentGenerationBlockPrompt(project, shot, block, blockReferences, prompt), true);
+});
+
 test("director-agent creativity cannot inject unsafe transitions or invalid camera ownership", () => {
   const { project, shot } = fixture();
   const base = buildCameraTakePlan(project, shot);

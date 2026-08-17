@@ -1123,6 +1123,20 @@ function buildHailuoGenerationBlockPrompt(project = {}, shot = {}, block = {}, r
   return prompt;
 }
 
+function validateDialogueOccurrenceMultiplicity(expectedDialogue = [], text = "", failures = []) {
+  const expectedCounts = new Map();
+  for (const turn of expectedDialogue) {
+    const line = clean(turn?.text);
+    if (line) expectedCounts.set(line, (expectedCounts.get(line) || 0) + 1);
+  }
+  let lineIndex = 0;
+  for (const [line, expectedCount] of expectedCounts) {
+    lineIndex += 1;
+    const actualCount = text.split(line).length - 1;
+    if (actualCount !== expectedCount) failures.push(`dialogue text ${lineIndex} appears ${actualCount}/${expectedCount} times`);
+  }
+}
+
 function assertAgentGenerationBlockPrompt(project, shot, block, references, prompt) {
   const text = clean(prompt);
   const takes = list(block.takes);
@@ -1143,9 +1157,8 @@ function assertAgentGenerationBlockPrompt(project, shot, block, references, prom
   if (blocks.length !== expectedDialogue.length) failures.push(`dialogue block count ${blocks.length}/${expectedDialogue.length}`);
   expectedDialogue.forEach((turn, index) => {
     if (blocks[index] !== turn.text) failures.push(`dialogue ${index + 1} changed`);
-    const count = turn.text ? text.split(turn.text).length - 1 : 0;
-    if (count !== 1) failures.push(`dialogue ${index + 1} appears ${count} times`);
   });
+  validateDialogueOccurrenceMultiplicity(expectedDialogue, text, failures);
   const speakerIds = generationBlockSpeakerIds(takes);
   if (speakerIds.length > HAILUO_MAX_BLOCK_AUDIO_REFERENCES) failures.push("generation block exceeds the audio-reference limit");
   if (list(references.audios).length !== speakerIds.length) failures.push(`audio reference count ${list(references.audios).length}/${speakerIds.length}`);
@@ -1335,9 +1348,8 @@ function assertAgentTakePrompt(project, shot, take, references, prompt) {
   if (blocks.length !== expectedDialogue.length) failures.push(`dialogue block count ${blocks.length}/${expectedDialogue.length}`);
   expectedDialogue.forEach((turn, index) => {
     if (blocks[index] !== turn.text) failures.push(`dialogue ${index + 1} changed`);
-    const count = turn.text ? text.split(turn.text).length - 1 : 0;
-    if (count !== 1) failures.push(`dialogue ${index + 1} appears ${count} times`);
   });
+  validateDialogueOccurrenceMultiplicity(expectedDialogue, text, failures);
   if (expectedDialogue.length && !list(references.audios).length) failures.push("speaker voice reference is missing");
   if (list(references.audios).length > 1) failures.push("atomic take contains more than one audio reference");
   if (expectedDialogue.length && !text.includes("<Audio 1>")) failures.push("Audio 1 binding is missing");
