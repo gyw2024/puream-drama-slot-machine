@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { WorkbenchWorkflow, scriptPipelineEntryRoute, fastUnitCacheState, fastPlanCacheState } = require("../app/workbench-workflow");
+const { WorkbenchWorkflow, scriptPipelineEntryRoute, fastUnitCacheState, fastPlanCacheState, validateShotPlanBatch } = require("../app/workbench-workflow");
 
 function projectFixture() {
   return {
@@ -280,6 +280,86 @@ test("autonomous AI repair checkpoints outrank stale rejected shots and never en
     shots: [{ id: "S01", duration: 10 }]
   };
   assert.equal(scriptPipelineEntryRoute(project), "resume_generation");
+});
+
+test("AI live writing status is never parsed as an uploaded script", () => {
+  const project = {
+    productionPlan: { inputMode: "ai" },
+    generation: { targetDurationSeconds: 300 },
+    script: {
+      raw: "# AI 实时写作输出\n\n- 状态：模型仍在生成，以下内容会在本阶段完成后自动整理为制作剧本\n- 当前阶段：优先加速写作，8批单元规划正在并行生成"
+    },
+    shots: []
+  };
+  assert.equal(scriptPipelineEntryRoute(project), "missing");
+});
+
+test("widespread scene loss with polluted foundations rebuilds the story bible before rewriting shots", async () => {
+  let project = projectFixture();
+  project.ideation = { selectedTopicId: "TOPIC_06", topics: [{ id: "TOPIC_06", title: "校门口扇耳光" }] };
+  project.product = { name: "商品", sellingPoints: "卖点", imagePath: "product.png" };
+  project.generation = { targetDurationSeconds: 300, durationLocked: true };
+  project.productionPlan = { inputMode: "ai", productEntryIndex: 20, commerceShotCount: 3 };
+  project.characters = [{ id: "C01", name: "当前阶段" }, { id: "C02", name: "我会按 S17-S20 的实际时间职责承接" }];
+  project.scenes = [{ id: "SC01", name: "剧情主要空间" }];
+  project.script.analysis = "AI 实时写作输出：模型仍在生成，8批单元规划正在并行生成";
+  project.shots = Array.from({ length: 30 }, (_item, index) => ({ id: `S${String(index + 1).padStart(2, "0")}`, duration: 10, sceneId: "", sceneName: "", scene: "" }));
+  const workflow = Object.create(WorkbenchWorkflow.prototype);
+  workflow.store = {
+    getProject: () => structuredClone(project),
+    saveProject: next => { project = structuredClone(next); return structuredClone(project); }
+  };
+  workflow.archiveAutonomousScriptRepair = () => ({ scriptPath: "old.md", reportPath: "old.json" });
+  workflow.generateCompleteScript = async () => project;
+  const issues = project.shots.map(shot => ({ id: "shot_scene_missing", severity: "blocking", message: `分镜 ${shot.id} 没有场景绑定`, details: {} }));
+  const error = Object.assign(new Error("scene bindings missing"), {
+    code: "FOUNDRY_FORMAL_QUALITY_GATE_FAILED",
+    details: { report: { levels: { technical: { issues }, story: { issues: [] } } } }
+  });
+  const supervisor = { scriptRewrites: 0, textProviderOverride: { kind: "openai-compatible" } };
+  await workflow.rewriteScriptForAutonomousPipeline(project.id, error, supervisor);
+  const checkpoint = project.script.generationCheckpoint;
+  assert.equal(checkpoint.targetedRepair.foundationRebuild, true);
+  assert.equal(checkpoint.storyBible, null);
+  assert.deepEqual(checkpoint.shotPlan, []);
+  assert.equal(checkpoint.fastUnitResultCache, undefined);
+  assert.equal(project.automation.stage, "agent_story_bible_repair");
+  assert.match(project.automation.message, /重建人物、场景与全剧蓝图/);
+});
+
+test("planning rejects a shot before drafting when its scene is not in the story bible", () => {
+  const plan = {
+    id: "S02",
+    duration: 10,
+    mainlineStage: "pressure",
+    action: "角色继续追问",
+    sceneId: "",
+    sceneName: "",
+    scene: "",
+    scenePresenceCharacterIds: ["C01"],
+    visibleCharacterIds: ["C01"],
+    focusCharacterId: "C01"
+  };
+  assert.throws(() => validateShotPlanBatch({ shotPlan: [plan] }, 2, 1, {
+    totalUnitCount: 30,
+    priorHasReversal: true,
+    skipQualityGates: true,
+    characters: [{ id: "C01", name: "张三" }],
+    scenes: [{ id: "SC01", name: "校门口" }]
+  }), error => error?.code === "SCRIPT_PLAN_BATCH_CONTRACT_FAILED" && /场景绑定无效/.test(error.message));
+
+  const normalized = validateShotPlanBatch({ shotPlan: [{ ...plan, scene: "校门口" }] }, 2, 1, {
+    totalUnitCount: 30,
+    priorHasReversal: true,
+    skipQualityGates: true,
+    characters: [{ id: "C01", name: "张三" }],
+    scenes: [{ id: "SC01", name: "校门口" }]
+  });
+  assert.deepEqual({ sceneId: normalized[0].sceneId, sceneName: normalized[0].sceneName, scene: normalized[0].scene }, {
+    sceneId: "SC01",
+    sceneName: "校门口",
+    scene: "校门口"
+  });
 });
 
 test("fast script resume preserves successful non-contiguous batches and retries only gaps", () => {

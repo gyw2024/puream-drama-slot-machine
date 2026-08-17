@@ -601,7 +601,7 @@ function storyBibleSchema() {
 
 function shotPlanBatchSchema(startNumber) {
   const sample = blueprintSchema().shotPlan[0];
-  return { shotPlan: [{ ...sample, id: `S${String(startNumber).padStart(2, "0")}` }] };
+  return { shotPlan: [{ ...sample, id: `S${String(startNumber).padStart(2, "0")}`, sceneId: "SC01", sceneName: sample.scene }] };
 }
 
 const GENERATED_IDENTITY_FACES = ["偏长方脸", "圆阔脸", "窄长脸", "方圆脸", "菱形脸", "宽额鹅蛋脸", "下颌分明的方脸", "颧骨略高的长脸"];
@@ -925,6 +925,9 @@ function validateShotPlanBatch(data, startNumber, expectedCount = SCRIPT_PLAN_BA
     || priorPlan.some(item => String(item?.mainlineStage || "").trim() === "main_reversal");
   const reversalWindow = mainReversalWindow(totalUnits);
   const characters = Array.isArray(options.characters) ? options.characters : [];
+  const scenes = Array.isArray(options.scenes) ? options.scenes : [];
+  const sceneById = new Map(scenes.map(scene => [String(scene?.id || "").trim(), scene]).filter(([id]) => id));
+  const sceneByName = new Map(scenes.map(scene => [String(scene?.name || "").trim(), scene]).filter(([name]) => name));
   const characterIdByName = new Map(characters.map((character, index) => [
     String(character?.name || "").trim(),
     String(character?.id || `C${String(index + 1).padStart(2, "0")}`).trim()
@@ -984,6 +987,18 @@ function validateShotPlanBatch(data, startNumber, expectedCount = SCRIPT_PLAN_BA
     return plan;
   });
   normalized = reconcileOrphanCharacterReferences({ characters, shots: normalized }, { allowCharacterCreation: false }).project.shots;
+  const sceneBindingFailures = [];
+  normalized = normalized.map(item => {
+    if (!scenes.length) return item;
+    const authoredSceneId = String(item?.sceneId || "").trim();
+    const authoredSceneName = String(item?.sceneName || item?.scene || "").trim();
+    const canonicalScene = sceneById.get(authoredSceneId) || sceneByName.get(authoredSceneName) || null;
+    if (!canonicalScene) {
+      sceneBindingFailures.push(`${item.id}场景绑定无效；sceneId、sceneName、scene 必须对应故事圣经 scenes 中同一场景`);
+      return item;
+    }
+    return { ...item, sceneId: String(canonicalScene.id || "").trim(), sceneName: String(canonicalScene.name || "").trim(), scene: String(canonicalScene.name || "").trim() };
+  });
   normalized = normalizeRedundantMainReversalLabels(normalized, priorPlan);
   const stages = normalized.map(item => String(item.mainlineStage || "").trim());
   const reversalCount = stages.filter(stage => stage === "main_reversal").length;
@@ -992,6 +1007,12 @@ function validateShotPlanBatch(data, startNumber, expectedCount = SCRIPT_PLAN_BA
   const batchTouchesProductWindow = endNumber > productEntryIndex;
   const failures = [];
   const contractFailures = [];
+  if (sceneBindingFailures.length) {
+    throw Object.assign(new Error(`分段单元计划违反场景绑定硬合同：${sceneBindingFailures.join("；")}`), {
+      code: "SCRIPT_PLAN_BATCH_CONTRACT_FAILED",
+      failures: sceneBindingFailures
+    });
+  }
   contractFailures.push(...shotPlanCheckpointReversalFailures(priorPlan, totalUnits, targetDurationSeconds).map(item => item.message));
   if (startNumber === 1) {
     if (!stages.includes("hook") && !stages.includes("pressure")) failures.push("开场批次缺少 hook/pressure");
@@ -6351,6 +6372,20 @@ function projectDurationContract(project = {}) {
   };
 }
 
+function isAiLiveWritingStatus(value = "") {
+  const source = String(value || "").trim();
+  if (!source) return false;
+  if (/^#\s*AI\s*(?:实时)?写作(?:输出|状态)/i.test(source)) return true;
+  const statusSignals = [
+    /模型仍在生成/,
+    /以下内容会在本阶段完成后自动整理为制作剧本/,
+    /当前阶段[:：]?\s*优先加速写作/,
+    /批单元规划正在并行生成/,
+    /超过目标时间仍继续同一任务/
+  ];
+  return statusSignals.filter(pattern => pattern.test(source)).length >= 2;
+}
+
 function scriptPipelineEntryRoute(project = {}) {
   const duration = projectDurationContract(project);
   const raw = String(project?.script?.raw || "");
@@ -6372,7 +6407,10 @@ function scriptPipelineEntryRoute(project = {}) {
   }
   if (duration.hasShots) return "ready";
   if (generationCheckpoint) return "resume_generation";
-  if (String(project?.script?.raw || "").trim()) return "analyze_imported";
+  if (String(project?.script?.raw || "").trim()) {
+    if (projectInputMode(project) === "ai" && isAiLiveWritingStatus(project.script.raw)) return "missing";
+    return "analyze_imported";
+  }
   return "missing";
 }
 
@@ -9455,6 +9493,30 @@ function foundryFormalScriptFailures(error, project = {}) {
   });
 }
 
+function hasFoundationalScriptCorruption(project = {}, failures = []) {
+  const shots = Array.isArray(project?.shots) ? project.shots : [];
+  if (!shots.length) return false;
+  const missingSceneIds = new Set(failures
+    .filter(item => String(item?.code || "").toUpperCase() === "SHOT_SCENE_MISSING")
+    .flatMap(item => Array.isArray(item?.shots) ? item.shots : [])
+    .map(normalizeFailureShotId)
+    .filter(Boolean));
+  const widespreadSceneLoss = missingSceneIds.size >= Math.max(3, Math.ceil(shots.length * 0.8));
+  if (!widespreadSceneLoss) return false;
+
+  const characters = Array.isArray(project?.characters) ? project.characters : [];
+  const scenes = Array.isArray(project?.scenes) ? project.scenes : [];
+  const foundationText = JSON.stringify({
+    analysis: project?.script?.analysis || "",
+    characterNames: characters.map(item => item?.name || ""),
+    scenes: scenes.map(item => ({ name: item?.name || "", description: item?.description || "" }))
+  });
+  const pollutedFoundation = /AI\s*实时写作|模型仍在生成|当前阶段|批单元规划|我会按\s*S\d+|自动整理为制作剧本/.test(foundationText);
+  const invalidCharacters = characters.some(item => /^(?:讲述者|当前阶段|我会按|模型|系统|assistant|AI)/i.test(String(item?.name || "").trim()));
+  const genericSceneCatalog = !scenes.length || scenes.every(item => /^(?:剧情主要空间|主要空间|待生成|默认场景|空镜)$/i.test(String(item?.name || "").trim()));
+  return pollutedFoundation || invalidCharacters || genericSceneCatalog;
+}
+
 function scriptRepairFailureSnapshot({ storyBible = null, shotPlan = [], shots = [] } = {}) {
   const payload = {
     storyBible: storyBible && typeof storyBible === "object" ? storyBible : null,
@@ -12387,7 +12449,7 @@ class WorkbenchWorkflow {
                     ? "S01前2秒必须出现可见伤害或危险钩子，并立刻进入带刺对白。"
                     : `严格承接故事圣经六幕计划中对应的全剧位置 ${startNumber}/${unitCount}–${endNumber}/${unitCount}；首镜 causalLink 和 transitionReason 必须明确承接前一批应有的状态，不能另起故事。`,
                   `全片唯一 main_reversal 只能位于 S${String(mainReversalWindow(unitCount).startIndex + 1).padStart(2, "0")}–S${String(mainReversalWindow(unitCount).endIndex + 1).padStart(2, "0")}；不在该范围的批次绝对禁止写 main_reversal。商品只能在 S${String(filmSchedule.productEntryIndex + 1).padStart(2, "0")} 之后且主反转完成后出现。`,
-                  `【本批完整输出硬合同】根对象只能有 shotPlan，必须恰好 ${batchSize} 项；JSON 总字符不得超过 ${STRUCTURED_TEXT_MAX_CHARS}。所有人物ID只能来自锁定故事圣经。每项必须填写 reversalRole、storyCoreRefs、scenePresenceCharacterIds、visibleCharacterIds、focusCharacterId、counterpartCharacterId、shotFunction、sceneObjective、transitionReason、emotionArc、performanceBeats、productShotType、wardrobeBindings、propBindings。规划阶段不得输出 dialogueTurns、soundCueSheet、subshots、secondPanels、imagePrompt、videoPrompt、hailuoPrompt 或解释文字。`
+                  `【本批完整输出硬合同】根对象只能有 shotPlan，必须恰好 ${batchSize} 项；JSON 总字符不得超过 ${STRUCTURED_TEXT_MAX_CHARS}。所有人物ID只能来自锁定故事圣经。每项必须填写 sceneId、sceneName、scene，且三者必须绑定故事圣经 scenes 中同一真实场景；同时填写 reversalRole、storyCoreRefs、scenePresenceCharacterIds、visibleCharacterIds、focusCharacterId、counterpartCharacterId、shotFunction、sceneObjective、transitionReason、emotionArc、performanceBeats、productShotType、wardrobeBindings、propBindings。规划阶段不得输出 dialogueTurns、soundCueSheet、subshots、secondPanels、imagePrompt、videoPrompt、hailuoPrompt 或解释文字。`
                 ].filter(Boolean).join("\n") }
               ], this.scriptGenerationOptions(projectId, "script_plan", {
                 json: true,
@@ -12411,6 +12473,7 @@ class WorkbenchWorkflow {
                 commerceShotCount: filmSchedule.commerceShotCount,
                 productName: project.product.name,
                 characters: storyBible.characters,
+                scenes: storyBible.scenes,
                 priorPlan: []
               }).map((item, index) => {
                 const globalIndex = startNumber - 1 + index;
@@ -12494,6 +12557,7 @@ class WorkbenchWorkflow {
             commerceShotCount: filmSchedule.commerceShotCount,
             productName: project.product.name,
             characters: storyBible.characters,
+            scenes: storyBible.scenes,
             priorPlan: shotPlan,
             priorHasReversal: shotPlan.some(item => String(item?.mainlineStage || "").trim() === "main_reversal")
           };
@@ -12615,6 +12679,7 @@ class WorkbenchWorkflow {
                     : "",
                   planBatchContractHints(startNumber, endNumber, filmSchedule, shotPlan, storyBible),
                   shotPlan.length ? `前一批最后两个单元：${JSON.stringify(shotPlan.slice(-2))}。S${String(startNumber).padStart(2, "0")}必须承接上一尾帧且人物左右站位轴线连续。` : "S01前2秒必须出现可见伤害或危险钩子，并立刻进入带刺对白。",
+                  "【场景绑定硬合同】每项必须填写 sceneId、sceneName、scene，且三者必须绑定锁定故事圣经 scenes 中同一真实场景；禁止空值、泛化场景或临时发明 SCxx。",
                   `【本批完整输出硬合同】根对象只能有 shotPlan，必须恰好 ${batchSize} 项，只能使用系统给定 schema 的字段；JSON 总字符不得超过 ${STRUCTURED_TEXT_MAX_CHARS}。所有人物ID只能来自锁定故事圣经 characters；任何医生、护士、店员、保安、快递员、证人等只要出镜、说话或画外说话，都必须已经在角色圣经中，绝对禁止临时发明 Cxx。一次性功能信息优先交给已有且剧情身份合理的配角，不能让不存在的人物进入分镜。每项必须填写 reversalRole、storyCoreRefs、scenePresenceCharacterIds、visibleCharacterIds、focusCharacterId、counterpartCharacterId、shotFunction、sceneObjective、transitionReason、emotionArc、performanceBeats、productShotType、逐人物 wardrobeBindings、逐道具 propBindings。scenePresenceCharacterIds 只表示场内存在，visibleCharacterIds 才表示当前云端算力单元真正入画且严格0–2人；image/videoReferenceCharacterIds 必须与 visibleCharacterIds 完全一致。至少一半单元为单人镜；第三人必须拆到相邻反应/入场单元。商品 packshot/detail 必须 visibleCharacterIds=[]，use 最多2人，result/reaction优先单人。规划阶段不得输出 dialogueTurns、soundCueSheet、subshots、secondPanels、imagePrompt、videoPrompt、hailuoPrompt 或解释文字。action/stateBefore/stateAfter/causalLink/visualBeat/compositionPlan/audioPlan 每项各不超过55字，dialogueGoal不超过80字；接近上限时压缩措辞，绝不能截断 JSON。`,
                   planAttempt > 1 ? `上一版批次错误：${planError?.message}。只重写本批并返回完整JSON。` : ""
                 ].filter(Boolean).join("\n") }
@@ -12869,7 +12934,7 @@ class WorkbenchWorkflow {
         const pendingUnitTasks = fastCacheState.pending;
         this.setAutomation(projectId, {
           stage: "script_units",
-          message: `优先加速写作：已保存 ${unitTasks.length - pendingUnitTasks.length}/${unitTasks.length} 批，剩余 ${pendingUnitTasks.length} 批按 ${SCRIPT_FAST_CONCURRENCY} 路并行续写；不设总耗时截止线`
+          message: `优先加速写作：已保存 ${unitTasks.length - pendingUnitTasks.length}/${unitTasks.length} 批，剩余 ${pendingUnitTasks.length} 批按 ${scriptFastConcurrency} 路并行续写；不设总耗时截止线`
         });
         const unitTextStagePrompt = textStagePromptForProject(project, settings, "scriptUnitGeneration", "units");
         let fastUnitWaveFailed = false;
@@ -20561,6 +20626,54 @@ ${shotAnchor}
     const routedError = foundryFailures.length
       ? { ...error, review: { hardFailures: foundryFailures } }
       : error;
+    if (hasFoundationalScriptCorruption(project, foundryFailures)) {
+      const previousStoryBible = {
+        title: String(project.title || ""),
+        story: project.script?.analysis || "",
+        characters: Array.isArray(project.characters) ? project.characters : [],
+        scenes: Array.isArray(project.scenes) ? project.scenes : []
+      };
+      const route = {
+        scoped: false,
+        phase: "full",
+        target: "storyBible",
+        owner: "storyBible",
+        unitCount: shots.length,
+        reason: "foundational_story_bible_corruption",
+        failureCodes: foundryFailures.map(item => String(item.code || "FOUNDRY_FORMAL_QUALITY_FAILURE"))
+      };
+      return {
+        version: 1,
+        ideaSignature: ideaSignature(project),
+        scriptFormat: projectScriptFormat(project),
+        topicId: project.ideation?.selectedTopicId,
+        sessionId: `script-foundation-repair-${project.id}-${Date.now()}`,
+        startedAt: new Date().toISOString(),
+        fastGeneration: true,
+        blueprintAttempt: 1,
+        storyBible: null,
+        shotPlan: [],
+        blueprint: null,
+        blueprintFailures: [],
+        blueprintRetryContext: null,
+        draftAttempt: 1,
+        shots: [],
+        semanticReview: null,
+        scriptRepair: scriptRepairMarker(routedError, route, scriptRepairFailureSnapshot({
+          storyBible: previousStoryBible,
+          shotPlan: shots,
+          shots
+        })),
+        autonomousRepair: true,
+        targetedRepair: {
+          foundationRebuild: true,
+          affectedShotNumbers: shots.map((_shot, index) => index + 1),
+          preservedBatchCount: 0,
+          totalBatchCount: Math.ceil(shots.length / SCRIPT_UNIT_BATCH_SIZE),
+          createdAt: new Date().toISOString()
+        }
+      };
+    }
     const route = scriptFailureRepairRoute(routedError, {
       phase: "full",
       unitCount: shots.length,
@@ -20645,7 +20758,7 @@ ${shotAnchor}
       generationCheckpoint: targetedCheckpoint,
       analysisCheckpoint: null,
       autonomousRepair: {
-        status: targetedCheckpoint ? "targeted_repair" : "rewriting",
+        status: targetedCheckpoint?.targetedRepair?.foundationRebuild ? "foundation_rebuild" : targetedCheckpoint ? "targeted_repair" : "rewriting",
         attempt: supervisor.scriptRewrites,
         sourceErrorCode: String(error?.code || ""),
         sourceErrorMessage: String(error?.message || ""),
@@ -20657,8 +20770,10 @@ ${shotAnchor}
     project.automation = {
       ...(project.automation || {}),
       status: "running",
-      stage: targetedCheckpoint ? "agent_script_targeted_repair" : "agent_script_repair",
-      message: targetedCheckpoint
+      stage: targetedCheckpoint?.targetedRepair?.foundationRebuild ? "agent_story_bible_repair" : targetedCheckpoint ? "agent_script_targeted_repair" : "agent_script_repair",
+      message: targetedCheckpoint?.targetedRepair?.foundationRebuild
+        ? "检测到旧故事圣经被实时状态文本污染，编剧 Agent 正从已选题和商品资料重建人物、场景与全剧蓝图；失败旧稿已归档"
+        : targetedCheckpoint
         ? `剧本质检未通过，编剧 Agent 仅重写 ${targetedCheckpoint.targetedRepair.affectedShotNumbers.map(number => `S${String(number).padStart(2, "0")}`).join("、")} 所在批次并复检；其余合格批次已保留`
         : `剧本质检未通过，编剧 Agent 正在第 ${supervisor.scriptRewrites}/${AUTONOMOUS_PIPELINE_MAX_SCRIPT_REWRITES} 轮完整重写并复检；旧稿已归档，不会进入付费资产生成`,
       errorCode: "",
