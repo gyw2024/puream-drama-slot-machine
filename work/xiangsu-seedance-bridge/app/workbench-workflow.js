@@ -14566,7 +14566,12 @@ ${shotAnchor}
     const overwriteManual = options.overwriteManual === true;
     const agentH3 = projectVideoEngine(project) === "hailuo-h3";
     if (agentH3) {
-      for (const shot of project.shots) {
+      const compileConcurrency = Math.max(1, Math.min(4, imageBatchConcurrency(project)));
+      this.setAutomation(projectId, {
+        stage: "agent_continuity_plan",
+        message: `导演 Agent 正在并发编排整部对白、机位段与连续生成块（并发 ${compileConcurrency}，共 ${project.shots.length} 镜）`
+      });
+      await mapWithConcurrency(project.shots, compileConcurrency, async shot => {
         try {
           await this.ensureAgentCameraTakePlan(projectId, shot.id, mode, settings);
           const currentProject = this.store.getProject(projectId);
@@ -14584,7 +14589,7 @@ ${shotAnchor}
             code: error.code || "AGENT_CAMERA_TAKE_COMPILE_FAILED"
           });
         }
-      }
+      });
       project = annotateProjectShotStrategies(this.store.getProject(projectId));
     }
     project.shots = project.shots.map(shot => {
