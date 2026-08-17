@@ -210,6 +210,30 @@ const AUTHORITY_BATCH_MAX_CONCURRENCY = 64;
 const HAILUO_VOICE_REFERENCE_MIN_SECONDS = 3.05;
 const HAILUO_VOICE_REFERENCE_TARGET_SECONDS = 3.2;
 const HAILUO_VOICE_REFERENCE_MAX_SECONDS = 5;
+const AUTONOMOUS_PIPELINE_MAX_REPAIRS = 12;
+const AUTONOMOUS_PIPELINE_MAX_SCRIPT_REWRITES = 3;
+const AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES = 8;
+
+const AUTONOMOUS_PIPELINE_EXTERNAL_BLOCKERS = new Set([
+  "TOPIC_SELECTION_REQUIRED",
+  "PRODUCT_IMAGE_REQUIRED",
+  "PRODUCT_NAME_REQUIRED",
+  "PRODUCT_SELLING_POINTS_REQUIRED",
+  "AI_SCRIPT_FORMAT_CONFIRMATION_REQUIRED",
+  "PROJECT_MODE_CONFIRMATION_REQUIRED",
+  "SCRIPT_REQUIRED",
+  "PROVIDER_API_KEY_REQUIRED",
+  "PUREAM_AUTH_REQUIRED",
+  "PUREAM_AUTH_REJECTED",
+  "PUREAM_BALANCE_REQUIRED",
+  "BRIDGE_AUTH_REQUIRED",
+  "LICENSE_REQUIRED",
+  "LICENSE_EXPIRED",
+  "INTEGRITY_CHECK_FAILED",
+  "AGENT_ADAPTER_NOT_CONFIGURED",
+  "AGENT_SKILL_NOT_CONFIGURED",
+  "FFMPEG_NOT_FOUND"
+]);
 
 function fillTemplate(template, values) {
   return String(template || "").replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, key) => values[key] ?? "");
@@ -20183,7 +20207,208 @@ ${shotAnchor}
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "full_pipeline", "", () => this.runFullPipeline(projectId, { ...options, track: false }));
     }
-    return this.runPipelineFromStage(projectId, "script", { ...options, track: false, allowCrossStage: true });
+    const supervisor = {
+      repairs: 0,
+      scriptRewrites: 0,
+      transientRetries: 0,
+      failuresByCode: new Map()
+    };
+    while (true) {
+      this.assertOperationActive(projectId);
+      try {
+        return await this.runPipelineFromStage(projectId, "script", { ...options, track: false, allowCrossStage: true });
+      } catch (error) {
+        this.assertOperationActive(projectId);
+        const recovered = await this.recoverAutonomousPipelineFailure(projectId, error, supervisor);
+        if (!recovered) throw error;
+      }
+    }
+  }
+
+  autonomousPipelineExternalBlocker(error) {
+    const code = String(error?.code || "OPERATION_FAILED").trim().toUpperCase();
+    if (AUTONOMOUS_PIPELINE_EXTERNAL_BLOCKERS.has(code)) return true;
+    if (/AUTH|UNAUTHORIZED|FORBIDDEN|BALANCE|CREDIT|PAYMENT|LICENSE|ACTIVATION|API_KEY/.test(code)) return true;
+    return error?.retryable === false && /USER_ACTION_REQUIRED|PERMISSION|CONFIGURATION/.test(String(error?.kind || "").toUpperCase());
+  }
+
+  appendAutonomousRepairJournal(projectId, entry = {}) {
+    const project = this.store.getProject(projectId);
+    const current = Array.isArray(project.automation?.repairJournal) ? project.automation.repairJournal : [];
+    project.automation = {
+      ...(project.automation || {}),
+      repairJournal: [{ at: new Date().toISOString(), ...entry }, ...current].slice(0, 80),
+      updatedAt: new Date().toISOString()
+    };
+    this.store.saveProject(project);
+  }
+
+  archiveAutonomousScriptRepair(projectId, error, rewriteNumber) {
+    const project = this.store.getProject(projectId);
+    const dir = this.store.assetDir(projectId, "script-history");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const base = `${stamp}-agent-repair-${rewriteNumber}`;
+    const scriptPath = path.join(dir, `${base}.md`);
+    const reportPath = path.join(dir, `${base}.json`);
+    fs.writeFileSync(scriptPath, String(project.script?.raw || ""), "utf8");
+    fs.writeFileSync(reportPath, JSON.stringify({
+      projectId,
+      productionRevision: project.productionRevision || "",
+      errorCode: String(error?.code || ""),
+      errorMessage: String(error?.message || ""),
+      details: error?.details || null,
+      archivedAt: new Date().toISOString()
+    }, null, 2), "utf8");
+    return { scriptPath, reportPath };
+  }
+
+  async rewriteScriptForAutonomousPipeline(projectId, error, supervisor) {
+    supervisor.scriptRewrites += 1;
+    if (supervisor.scriptRewrites > AUTONOMOUS_PIPELINE_MAX_SCRIPT_REWRITES) return false;
+    const archived = this.archiveAutonomousScriptRepair(projectId, error, supervisor.scriptRewrites);
+    let project = this.store.getProject(projectId);
+    project.script = {
+      ...(project.script || {}),
+      generationCheckpoint: null,
+      analysisCheckpoint: null,
+      autonomousRepair: {
+        status: "rewriting",
+        attempt: supervisor.scriptRewrites,
+        sourceErrorCode: String(error?.code || ""),
+        sourceErrorMessage: String(error?.message || ""),
+        archivedScriptPath: archived.scriptPath,
+        archivedReportPath: archived.reportPath,
+        startedAt: new Date().toISOString()
+      }
+    };
+    project.automation = {
+      ...(project.automation || {}),
+      status: "running",
+      stage: "agent_script_repair",
+      message: `剧本质检未通过，编剧 Agent 正在第 ${supervisor.scriptRewrites}/${AUTONOMOUS_PIPELINE_MAX_SCRIPT_REWRITES} 轮完整重写并复检；旧稿已归档，不会进入付费资产生成`,
+      errorCode: "",
+      recoverableFailure: false,
+      updatedAt: new Date().toISOString()
+    };
+    this.store.saveProject(project);
+    await this.generateCompleteScript(projectId, {
+      track: false,
+      fast: false,
+      directFast: false,
+      autonomousRepair: true
+    });
+    project = this.store.getProject(projectId);
+    project.script = {
+      ...(project.script || {}),
+      autonomousRepair: {
+        ...(project.script?.autonomousRepair || {}),
+        status: "rechecking",
+        completedAt: new Date().toISOString()
+      }
+    };
+    this.store.saveProject(project);
+    return true;
+  }
+
+  async recoverAutonomousPipelineFailure(projectId, error, supervisor) {
+    const code = String(error?.code || "OPERATION_FAILED").trim().toUpperCase();
+    const count = (supervisor.failuresByCode.get(code) || 0) + 1;
+    supervisor.failuresByCode.set(code, count);
+    if (this.autonomousPipelineExternalBlocker(error)) return false;
+    if (supervisor.repairs >= AUTONOMOUS_PIPELINE_MAX_REPAIRS) {
+      throw Object.assign(new Error(`一键全流程已自动修复 ${supervisor.repairs} 次，但同一项目仍未达到交付条件：${error?.message || code}`), {
+        code: "AUTONOMOUS_PIPELINE_REPAIR_EXHAUSTED",
+        cause: error,
+        repairCount: supervisor.repairs
+      });
+    }
+    supervisor.repairs += 1;
+    this.appendAutonomousRepairJournal(projectId, {
+      attempt: supervisor.repairs,
+      code,
+      message: String(error?.message || ""),
+      status: "repairing"
+    });
+
+    const scriptQualityFailure = code === "FOUNDRY_FORMAL_QUALITY_GATE_FAILED"
+      || code === "PRODUCTION_HARD_CONTRACT_FAILED"
+      || code === "SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED"
+      || code === "SCRIPT_SEMANTIC_REVIEW_FAILED"
+      || code === "SCRIPT_REFERENCE_SPEC_FAILED"
+      || code === "SCRIPT_PLAN_BATCH_QUALITY_FAILED"
+      || code === "SHOT_DIALOGUE_LISTENER_BINDING_INVALID"
+      || code === "SHOT_DIALOGUE_MOUTH_OWNER_MISMATCH"
+      || code === "SHOT_SPEAKER_IDENTITY_AMBIGUOUS"
+      || code === "SHOT_SPEAKER_NAME_DUPLICATED";
+    if (scriptQualityFailure) {
+      if (code === "PRODUCTION_HARD_CONTRACT_FAILED") {
+        const repaired = await this.repairProductionContracts(projectId, { track: false });
+        if (repaired?.repaired === true) return true;
+      }
+      return this.rewriteScriptForAutonomousPipeline(projectId, error, supervisor);
+    }
+
+    if (/CHARACTER_REFERENCE|SPEAKER_UNKNOWN/.test(code)) {
+      this.setAutomation(projectId, { status: "running", stage: "agent_character_repair", message: "人物引用不一致，Agent 正在重建唯一人物映射并复检" });
+      this.reconcileProjectCharacterReferences(projectId, { clearFailure: false, allowCharacterCreation: true });
+      return true;
+    }
+
+    if (/VOICE|AUDIO|CHARACTER_IDENTITY/.test(code) && /SHOT_|HAILUO_/.test(code)) {
+      const project = this.store.getProject(projectId);
+      const affectedIds = new Set([
+        ...(Array.isArray(error?.characterIds) ? error.characterIds : []),
+        ...(Array.isArray(error?.missingAudio) ? error.missingAudio : []),
+        String(error?.characterId || "")
+      ].map(String).filter(Boolean));
+      const voiceFailure = /VOICE|AUDIO/.test(code);
+      for (const candidate of project.candidates || []) {
+        if (candidate.entityType !== "character" || !affectedIds.has(String(candidate.entityId || ""))) continue;
+        if (voiceFailure && !["character_voice", "character_video"].includes(candidate.stage)) continue;
+        if (!voiceFailure && !["character_sheet", "character_intro", "character_three_view"].includes(candidate.stage)) continue;
+        this.store.updateCandidate(projectId, candidate.id, {
+          selected: false,
+          stale: true,
+          staleAt: new Date().toISOString(),
+          staleReason: `Agent 自动修复人物一一绑定：${code}`
+        });
+      }
+      this.setAutomation(projectId, { status: "running", stage: "agent_binding_repair", message: "人物、音色或身份图绑定不唯一，Agent 正在局部重建相关资产并继续" });
+      return true;
+    }
+
+    if ([
+      "ASSET_BATCH_PARTIAL_FAILED",
+      "STORYBOARD_BATCH_PARTIAL_FAILED",
+      "SHOT_VIDEO_BATCH_PARTIAL_FAILED",
+      "SHOT_VIDEO_BATCH_REMOTE_PENDING",
+      "ASSET_VIDEO_DEPENDENCIES_PENDING",
+      "SHOT_VIDEO_TECHNICAL_INTEGRITY_FAILED"
+    ].includes(code)) {
+      this.setAutomation(projectId, { status: "running", stage: "agent_batch_recovery", message: "批次存在失败项，Agent 正在保留已完成结果并仅重试缺失或不合格项" });
+      await abortableDelay(Math.min(5000, 750 * count), this.operationControls.get(projectId)?.controller?.signal);
+      return true;
+    }
+
+    if (code === "FINAL_VIDEO_TECHNICAL_INTEGRITY_FAILED" || code === "FINAL_DURATION_CONTRACT_FAILED") {
+      this.setAutomation(projectId, { status: "running", stage: "agent_delivery_repair", message: "成片验收未通过，Agent 正在定位坏镜、局部重生并重新合成" });
+      if (count > 1) await this.repairFailedMedia(projectId, { track: false });
+      return true;
+    }
+
+    if (isTransientProviderError(error) || error?.retryable === true || /TIMEOUT|NETWORK|EMPTY_RESPONSE|REMOTE_PENDING|QUARANTINED|BUSY/.test(code)) {
+      supervisor.transientRetries += 1;
+      if (supervisor.transientRetries > AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES) return false;
+      const delayMs = Math.min(60_000, 2000 * 2 ** Math.min(5, supervisor.transientRetries - 1));
+      this.setAutomation(projectId, {
+        status: "running",
+        stage: "agent_transient_recovery",
+        message: `上游暂时波动，Agent 将在 ${Math.ceil(delayMs / 1000)} 秒后从本地断点继续（${supervisor.transientRetries}/${AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES}）`
+      });
+      await abortableDelay(delayMs, this.operationControls.get(projectId)?.controller?.signal);
+      return true;
+    }
+    return false;
   }
 
   async stitchProject(projectId) {
