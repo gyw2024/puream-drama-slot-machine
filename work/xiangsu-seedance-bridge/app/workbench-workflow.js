@@ -212,7 +212,6 @@ const HAILUO_VOICE_REFERENCE_TARGET_SECONDS = 3.2;
 const HAILUO_VOICE_REFERENCE_MAX_SECONDS = 5;
 const AUTONOMOUS_PIPELINE_MAX_REPAIRS = 12;
 const AUTONOMOUS_PIPELINE_MAX_SCRIPT_REWRITES = 3;
-const AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES = 8;
 
 const AUTONOMOUS_PIPELINE_EXTERNAL_BLOCKERS = new Set([
   "TOPIC_SELECTION_REQUIRED",
@@ -20409,6 +20408,36 @@ ${shotAnchor}
     const count = (supervisor.failuresByCode.get(code) || 0) + 1;
     supervisor.failuresByCode.set(code, count);
     if (this.autonomousPipelineExternalBlocker(error)) return false;
+    const scriptQualityFailure = code === "FOUNDRY_FORMAL_QUALITY_GATE_FAILED"
+      || code === "PRODUCTION_HARD_CONTRACT_FAILED"
+      || code === "SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED"
+      || code === "SCRIPT_SEMANTIC_REVIEW_FAILED"
+      || code === "SCRIPT_REFERENCE_SPEC_FAILED"
+      || code === "SCRIPT_PLAN_BATCH_QUALITY_FAILED"
+      || code === "SHOT_DIALOGUE_LISTENER_BINDING_INVALID"
+      || code === "SHOT_DIALOGUE_MOUTH_OWNER_MISMATCH"
+      || code === "SHOT_SPEAKER_IDENTITY_AMBIGUOUS"
+      || code === "SHOT_SPEAKER_NAME_DUPLICATED";
+    const transientFailure = !scriptQualityFailure && (isTransientProviderError(error)
+      || error?.retryable === true
+      || /TIMEOUT|NETWORK|EMPTY_RESPONSE|REMOTE_PENDING|QUARANTINED|BUSY/.test(code));
+    if (transientFailure) {
+      supervisor.transientRetries += 1;
+      this.appendAutonomousRepairJournal(projectId, {
+        attempt: supervisor.transientRetries,
+        code,
+        message: String(error?.message || ""),
+        status: "transient_recovery"
+      });
+      const delayMs = Math.min(60_000, 2000 * 2 ** Math.min(5, supervisor.transientRetries - 1));
+      this.setAutomation(projectId, {
+        status: "running",
+        stage: "agent_transient_recovery",
+        message: `上游暂时波动，Agent 将在 ${Math.ceil(delayMs / 1000)} 秒后从本地断点继续（已自动恢复 ${supervisor.transientRetries} 次，不设次数上限）`
+      });
+      await abortableDelay(delayMs, this.operationControls.get(projectId)?.controller?.signal);
+      return true;
+    }
     if (supervisor.repairs >= AUTONOMOUS_PIPELINE_MAX_REPAIRS) {
       throw Object.assign(new Error(`一键全流程已自动修复 ${supervisor.repairs} 次，但同一项目仍未达到交付条件：${error?.message || code}`), {
         code: "AUTONOMOUS_PIPELINE_REPAIR_EXHAUSTED",
@@ -20424,16 +20453,6 @@ ${shotAnchor}
       status: "repairing"
     });
 
-    const scriptQualityFailure = code === "FOUNDRY_FORMAL_QUALITY_GATE_FAILED"
-      || code === "PRODUCTION_HARD_CONTRACT_FAILED"
-      || code === "SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED"
-      || code === "SCRIPT_SEMANTIC_REVIEW_FAILED"
-      || code === "SCRIPT_REFERENCE_SPEC_FAILED"
-      || code === "SCRIPT_PLAN_BATCH_QUALITY_FAILED"
-      || code === "SHOT_DIALOGUE_LISTENER_BINDING_INVALID"
-      || code === "SHOT_DIALOGUE_MOUTH_OWNER_MISMATCH"
-      || code === "SHOT_SPEAKER_IDENTITY_AMBIGUOUS"
-      || code === "SHOT_SPEAKER_NAME_DUPLICATED";
     if (scriptQualityFailure) {
       if (code === "PRODUCTION_HARD_CONTRACT_FAILED") {
         const repaired = await this.repairProductionContracts(projectId, { track: false });
@@ -20490,18 +20509,6 @@ ${shotAnchor}
       return true;
     }
 
-    if (isTransientProviderError(error) || error?.retryable === true || /TIMEOUT|NETWORK|EMPTY_RESPONSE|REMOTE_PENDING|QUARANTINED|BUSY/.test(code)) {
-      supervisor.transientRetries += 1;
-      if (supervisor.transientRetries > AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES) return false;
-      const delayMs = Math.min(60_000, 2000 * 2 ** Math.min(5, supervisor.transientRetries - 1));
-      this.setAutomation(projectId, {
-        status: "running",
-        stage: "agent_transient_recovery",
-        message: `上游暂时波动，Agent 将在 ${Math.ceil(delayMs / 1000)} 秒后从本地断点继续（${supervisor.transientRetries}/${AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES}）`
-      });
-      await abortableDelay(delayMs, this.operationControls.get(projectId)?.controller?.signal);
-      return true;
-    }
     return false;
   }
 
