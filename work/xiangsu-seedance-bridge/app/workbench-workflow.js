@@ -3970,7 +3970,7 @@ async function executeShotVideoBatch(shots, runShot, concurrency = VIDEO_BATCH_M
         // remaining shot in the batch.  Let sibling workers settle, then return
         // the control signal once so the tracked operation can save a clean
         // resumable checkpoint without a red batch-failure cascade.
-        if (isScriptControlError(error)) {
+        if (isPipelineControlError(error)) {
           controlError ||= error;
           results[index] = null;
           break;
@@ -6353,6 +6353,19 @@ function scriptControlError(intent) {
 
 function isScriptControlError(error) {
   return ["SCRIPT_GENERATION_PAUSED", "SCRIPT_GENERATION_STOPPED"].includes(error?.code);
+}
+
+function pipelineControlError(intent) {
+  const paused = intent === "pause";
+  return Object.assign(new Error(paused
+    ? "自动化已暂停；未提交任务已停止，已提交视频仍在后台取回"
+    : "自动化已停止；未提交任务已停止，已提交视频仍在后台取回"), {
+    code: paused ? "PIPELINE_PAUSED" : "PIPELINE_STOPPED"
+  });
+}
+
+function isPipelineControlError(error) {
+  return isScriptControlError(error) || ["PIPELINE_PAUSED", "PIPELINE_STOPPED"].includes(error?.code);
 }
 
 function agentCreativeOutputRequired(error, code, message, extra = {}) {
@@ -10330,7 +10343,7 @@ class WorkbenchWorkflow {
 
   assertOperationActive(projectId) {
     const control = this.operationControls.get(projectId);
-    if (control?.intent) throw scriptControlError(control.intent);
+    if (control?.intent) throw control.error || scriptControlError(control.intent);
   }
 
   messageTextContent(content) {
@@ -10621,6 +10634,7 @@ class WorkbenchWorkflow {
     }
     if (control.intent) return project.automation;
     control.intent = intent;
+    control.error = scriptControlError(intent);
     project.automation = {
       ...(project.automation || {}),
       status: intent === "pause" ? "pausing" : "stopping",
@@ -10629,7 +10643,7 @@ class WorkbenchWorkflow {
       updatedAt: new Date().toISOString()
     };
     this.store.saveProject(project);
-    control.controller.abort(scriptControlError(intent));
+    control.controller.abort(control.error);
     return project.automation;
   }
 
@@ -11175,9 +11189,10 @@ class WorkbenchWorkflow {
       return result;
     } catch (error) {
       try { this.foundryKernel?.failOperation(foundryHandle, error); } catch (runtimeError) { console.warn("[foundry] operation failure audit skipped", runtimeError?.message || runtimeError); }
-      if (isScriptControlError(error)) {
+      if (isPipelineControlError(error)) {
         const project = this.store.getProject(projectId);
-        const paused = error.code === "SCRIPT_GENERATION_PAUSED";
+        const scriptControl = isScriptControlError(error);
+        const paused = ["SCRIPT_GENERATION_PAUSED", "PIPELINE_PAUSED"].includes(error.code);
         project.automation = {
           ...(project.automation || {}),
           status: paused ? "paused_user" : "cancelled",
@@ -11187,21 +11202,23 @@ class WorkbenchWorkflow {
           errorCode: error.code,
           updatedAt: new Date().toISOString()
         };
-        project.ideation = {
-          ...(project.ideation || {}),
-          status: paused ? "script_paused" : "script_stopped",
-          message: error.message,
-          errorCode: error.code
-        };
-        project.script = {
-          ...(project.script || {}),
-          ...(paused ? {} : { generationCheckpoint: null, analysisCheckpoint: null }),
-          generationLive: {
-            ...(project.script?.generationLive || {}),
+        if (scriptControl) {
+          project.ideation = {
+            ...(project.ideation || {}),
+            status: paused ? "script_paused" : "script_stopped",
             message: error.message,
-            updatedAt: new Date().toISOString()
-          }
-        };
+            errorCode: error.code
+          };
+          project.script = {
+            ...(project.script || {}),
+            ...(paused ? {} : { generationCheckpoint: null, analysisCheckpoint: null }),
+            generationLive: {
+              ...(project.script?.generationLive || {}),
+              message: error.message,
+              updatedAt: new Date().toISOString()
+            }
+          };
+        }
         this.store.saveProject(project);
         throw error;
       }
@@ -11399,6 +11416,34 @@ class WorkbenchWorkflow {
   }
 
   async reconcileOrphanedVideoJobs(projectId = "") {
+    const pausedVideoProjectIds = new Set();
+    for (const summary of this.store.listProjects()) {
+      if (projectId && summary.id !== projectId) continue;
+      let project;
+      try { project = this.store.getProject(summary.id); }
+      catch { continue; }
+      const automationStage = String(project.automation?.stage || "");
+      const misplacedScriptPause = ["SCRIPT_GENERATION_PAUSED", "SCRIPT_GENERATION_STOPPED", "PIPELINE_PAUSED", "PIPELINE_STOPPED"].includes(String(project.automation?.errorCode || ""))
+        && !automationStage.startsWith("script");
+      if (misplacedScriptPause) pausedVideoProjectIds.add(project.id);
+      for (const job of project.jobs || []) {
+        const legacyPausedSubmitted = ["shot_video", "character_video"].includes(job.type)
+          && Boolean(job.taskId)
+          && String(job.status || "").toLowerCase() === "failed"
+          && ["SCRIPT_GENERATION_PAUSED", "SCRIPT_GENERATION_STOPPED", "PIPELINE_PAUSED", "PIPELINE_STOPPED"].includes(String(job.errorCode || ""));
+        if (!legacyPausedSubmitted) continue;
+        this.store.updateJob(project.id, job.id, {
+          status: "remote_pending",
+          progress: Number(job.progress) >= 95 ? 95 : 10,
+          progressSource: "status-only",
+          progressDeterminate: false,
+          message: `已恢复暂停前提交的官网任务 ${job.taskId}；只查询原任务，不会重复提交`,
+          errorCode: "VIDEO_REMOTE_PENDING",
+          recoveredFromControlPause: true
+        });
+        pausedVideoProjectIds.add(project.id);
+      }
+    }
     const active = this.store.listActiveVideoJobs().filter(record => !projectId || record.projectId === projectId);
     for (const record of active) {
       if (!record.taskId) {
@@ -11504,6 +11549,36 @@ class WorkbenchWorkflow {
           message: error?.message || ""
         });
       }
+    }
+    for (const pausedProjectId of pausedVideoProjectIds) {
+      const project = this.store.getProject(pausedProjectId);
+      const submitted = (project.jobs || []).filter(job => ["shot_video", "character_video"].includes(job.type) && job.taskId);
+      const pending = submitted.filter(job => ["queued", "pending", "submitted", "running", "processing", "waiting", "remote_pending", "download_pending"].includes(String(job.status || "").toLowerCase()));
+      const completed = submitted.filter(job => String(job.status || "").toLowerCase() === "completed");
+      project.automation = {
+        ...(project.automation || {}),
+        status: "paused_user",
+        message: pending.length
+          ? `自动化已暂停；${pending.length} 个暂停前提交的视频仍在后台取回，不会重复提交`
+          : completed.length
+            ? `自动化已暂停；暂停前提交的 ${completed.length} 个视频已全部取回，可继续后续生产`
+            : "自动化已暂停；未提交任务已停止，已有结果均已保留",
+        errorCode: "PIPELINE_PAUSED",
+        recoverableFailure: true,
+        updatedAt: new Date().toISOString()
+      };
+      if (project.automation.progress && Array.isArray(project.automation.progress.items)) {
+        const completedEntityIds = new Set(completed.map(job => String(job.entityId || "")));
+        project.automation.progress = {
+          ...project.automation.progress,
+          items: project.automation.progress.items.map(item => (
+            item?.kind === "character_video" && completedEntityIds.has(String(item.entityId || ""))
+              ? { ...item, status: "completed", errorCode: "", message: "已取回", updatedAt: new Date().toISOString() }
+              : item
+          ))
+        };
+      }
+      this.store.saveProject(project);
     }
     return this.store.listActiveVideoJobs().filter(record => !projectId || record.projectId === projectId);
   }
@@ -15813,14 +15888,12 @@ ${shotAnchor}
       return job?.videoEngine === "hailuo-h3" || job?.providerKind === "puream-hailuo-h3" ? "海螺 H3" : "Seedance";
     };
     for (let attempt = 1; ; attempt += 1) {
-      this.assertOperationActive(projectId);
       await this.videoQueryPollSleep(5_000);
       let result;
       try {
         result = await this.executeAdaptiveCapability("video_query", initialJob?.providerKind || "default", {
           bridge: taskBridge,
-          taskId,
-          signal: this.operationControls.get(projectId)?.controller.signal
+          taskId
         }, { projectId, jobId, stage: "video_poll", attempt });
       } catch (error) {
         if (!error.taskId) error.taskId = taskId;
@@ -16060,7 +16133,11 @@ ${shotAnchor}
       "PUREAM_DOWNLOAD_REDIRECT_FAILED",
       "BRIDGE_TIMEOUT",
       "BRIDGE_HTTP_ERROR",
-      "SERVER_ERROR"
+      "SERVER_ERROR",
+      "SCRIPT_GENERATION_PAUSED",
+      "SCRIPT_GENERATION_STOPPED",
+      "PIPELINE_PAUSED",
+      "PIPELINE_STOPPED"
     ]);
     const equivalentJob = (project.jobs || []).find(item => (
       item.type === stage
@@ -16273,7 +16350,7 @@ ${shotAnchor}
           errorCode: error.code || "VIDEO_DOWNLOAD_PENDING",
           message: error.message
         });
-      } else if (error.remoteSubmissionUnknown === true || (taskId && error.remoteGenerationPending === true)) {
+      } else if (error.remoteSubmissionUnknown === true || (taskId && (error.remoteGenerationPending === true || isPipelineControlError(error)))) {
         this.store.updateJob(projectId, job.id, {
           status: "remote_pending",
           progress: taskId ? 10 : null,
@@ -16289,6 +16366,17 @@ ${shotAnchor}
         this.settleVideoCost(projectId, { ...savedJob, taskId, costEntryId: costEntry.id }, receipt, {
           errorCode: error.code || "VIDEO_REMOTE_PENDING",
           message: error.message
+        });
+      } else if (isPipelineControlError(error)) {
+        this.store.updateJob(projectId, job.id, {
+          status: error.code === "PIPELINE_STOPPED" || error.code === "SCRIPT_GENERATION_STOPPED" ? "cancelled" : "paused",
+          progress: null,
+          progressDeterminate: false,
+          taskId: "",
+          submissionFingerprint: fingerprint,
+          clientRequestId,
+          message: error.message,
+          errorCode: error.code
         });
       } else {
         this.store.updateJob(projectId, job.id, {
@@ -19909,6 +19997,7 @@ ${shotAnchor}
     }
     if (control.intent) return project.automation;
     control.intent = intent;
+    control.error = pipelineControlError(intent);
     project.automation = {
       ...(project.automation || {}),
       status: intent === "pause" ? "pausing" : "stopping",
@@ -19916,7 +20005,7 @@ ${shotAnchor}
       updatedAt: new Date().toISOString()
     };
     this.store.saveProject(project);
-    try { control.controller.abort(scriptControlError(intent)); } catch {}
+    try { control.controller.abort(control.error); } catch {}
     return project.automation;
   }
 

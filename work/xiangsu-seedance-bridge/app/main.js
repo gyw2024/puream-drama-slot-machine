@@ -2276,10 +2276,13 @@ ipcMain.handle("workbench:sync-video-jobs", async () => {
   videoJobSyncRequest = (async () => {
     try {
       const { store, workflow } = requireWorkbench();
-      const active = store.listActiveVideoJobs();
-      if (!active.length) return { ok: true, jobs: [] };
+      const activeBeforeReconcile = store.listActiveVideoJobs();
       const jobs = await workflow.reconcileOrphanedVideoJobs();
-      for (const projectId of new Set(active.map(item => item.projectId))) workflow.reconcileDetachedAutomations(projectId);
+      const affectedProjectIds = new Set([
+        ...activeBeforeReconcile.map(item => item.projectId),
+        ...store.listActiveVideoJobs().map(item => item.projectId)
+      ]);
+      for (const projectId of affectedProjectIds) workflow.reconcileDetachedAutomations(projectId);
       return { ok: true, jobs: publicPendingJobs(jobs) };
     } catch (error) { return publicError(error); }
     finally { videoJobSyncRequest = null; }
