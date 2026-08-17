@@ -9504,10 +9504,18 @@ function hasFoundationalScriptCorruption(project = {}, failures = []) {
   const widespreadSceneLoss = missingSceneIds.size >= Math.max(3, Math.ceil(shots.length * 0.8));
   if (!widespreadSceneLoss) return false;
 
-  const characters = Array.isArray(project?.characters) ? project.characters : [];
-  const scenes = Array.isArray(project?.scenes) ? project.scenes : [];
+  return hasPollutedStoryFoundation(project);
+}
+
+function hasPollutedStoryFoundation(project = {}, storyBible = null) {
+  const characters = Array.isArray(storyBible?.characters)
+    ? storyBible.characters
+    : (Array.isArray(project?.characters) ? project.characters : []);
+  const scenes = Array.isArray(storyBible?.scenes)
+    ? storyBible.scenes
+    : (Array.isArray(project?.scenes) ? project.scenes : []);
   const foundationText = JSON.stringify({
-    analysis: project?.script?.analysis || "",
+    story: storyBible?.story || project?.script?.analysis || "",
     characterNames: characters.map(item => item?.name || ""),
     scenes: scenes.map(item => ({ name: item?.name || "", description: item?.description || "" }))
   });
@@ -12255,6 +12263,36 @@ class WorkbenchWorkflow {
       shots: [],
       semanticReview: null
     };
+    if (canResume && projectInputMode(project) === "ai" && hasPollutedStoryFoundation(project, checkpoint.storyBible)) {
+      const pollutedCheckpoint = checkpoint;
+      checkpoint = {
+        version: 1,
+        ideaSignature: currentIdeaSignature,
+        scriptFormat: selectedScriptFormat,
+        topicId: topic.id,
+        sessionId: `script-foundation-migration-${projectId}-${Date.now()}`,
+        startedAt: new Date().toISOString(),
+        fastGeneration: true,
+        blueprintAttempt: 1,
+        storyBible: null,
+        shotPlan: [],
+        blueprint: null,
+        blueprintFailures: [],
+        blueprintRetryContext: null,
+        draftAttempt: 1,
+        shots: [],
+        semanticReview: null,
+        autonomousRepair: true,
+        foundationMigration: {
+          reason: "polluted_ai_story_foundation",
+          previousSessionId: String(pollutedCheckpoint?.sessionId || ""),
+          previousCheckpointStartedAt: String(pollutedCheckpoint?.startedAt || ""),
+          migratedAt: new Date().toISOString()
+        }
+      };
+      checkpoint = this.saveScriptCheckpoint(projectId, checkpoint, topic, "script_blueprint", "检测到旧版写作状态文本污染故事圣经，已隔离坏断点并从已选题重建人物、场景与全剧蓝图");
+      project = this.store.getProject(projectId);
+    }
     if (canResume && (checkpoint.directFastFailure?.retryRequiresExplicitResume
       || checkpoint.planContractFailure?.retryRequiresExplicitResume
       || checkpoint.unitContractFailure?.retryRequiresExplicitResume
@@ -21380,3 +21418,4 @@ module.exports.renderApprovedVideoPrompt = renderApprovedVideoPrompt;
 module.exports.assertStrictCharacterMediaBindings = assertStrictCharacterMediaBindings;
 module.exports.fastUnitCacheState = fastUnitCacheState;
 module.exports.fastPlanCacheState = fastPlanCacheState;
+module.exports.hasPollutedStoryFoundation = hasPollutedStoryFoundation;

@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { WorkbenchWorkflow, scriptPipelineEntryRoute, fastUnitCacheState, fastPlanCacheState, validateShotPlanBatch } = require("../app/workbench-workflow");
+const { WorkbenchWorkflow, scriptPipelineEntryRoute, fastUnitCacheState, fastPlanCacheState, validateShotPlanBatch, hasPollutedStoryFoundation } = require("../app/workbench-workflow");
 
 function projectFixture() {
   return {
@@ -292,6 +292,19 @@ test("AI live writing status is never parsed as an uploaded script", () => {
     shots: []
   };
   assert.equal(scriptPipelineEntryRoute(project), "missing");
+});
+
+test("legacy AI checkpoints detect polluted story foundations before resume", () => {
+  assert.equal(hasPollutedStoryFoundation({}, {
+    story: "当前阶段：模型仍在生成，8批单元规划正在并行生成",
+    characters: [{ id: "C01", name: "讲述者" }],
+    scenes: [{ id: "SC01", name: "剧情主要空间" }]
+  }), true);
+  assert.equal(hasPollutedStoryFoundation({}, {
+    story: "母亲在校门口被误解，儿子最终查明真相",
+    characters: [{ id: "C01", name: "周桂芳" }, { id: "C02", name: "林野" }],
+    scenes: [{ id: "SC01", name: "学校正门" }, { id: "SC02", name: "学校礼堂" }]
+  }), false);
 });
 
 test("widespread scene loss with polluted foundations rebuilds the story bible before rewriting shots", async () => {
