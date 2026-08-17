@@ -12725,8 +12725,17 @@ class WorkbenchWorkflow {
           message: `优先加速写作：已保存 ${unitTasks.length - pendingUnitTasks.length}/${unitTasks.length} 批，剩余 ${pendingUnitTasks.length} 批按 ${SCRIPT_FAST_CONCURRENCY} 路并行续写；不设总耗时截止线`
         });
         const unitTextStagePrompt = textStagePromptForProject(project, settings, "scriptUnitGeneration", "units");
+        let fastUnitWaveFailed = false;
         const fastUnitResults = await mapWithConcurrency(pendingUnitTasks, SCRIPT_FAST_CONCURRENCY, async task => {
           const { unitStartIndex, plannedShots, unitStartNumber, unitEndNumber, previousPlan } = task;
+          if (fastUnitWaveFailed) {
+            return {
+              ok: false,
+              ...task,
+              skipped: true,
+              error: Object.assign(new Error("本波次已在其他批次遇到上游问题，未重复提交"), { code: "SCRIPT_FAST_WAVE_FUSED" })
+            };
+          }
           const projectMode = normalizeProjectMode(project.generation?.mode);
           const hailuoAutomaticWriting = projectVideoEngine(project) === "hailuo-h3";
           const h3SpeakerAssignments = hailuoAutomaticWriting ? allocateH3ShotSpeakers(plannedShots, blueprint.characters, 2) : [];
@@ -12797,6 +12806,7 @@ class WorkbenchWorkflow {
             }, topic, "script_units", `已安全保存 ${unitTasks.length - fastCacheState.pending.length}/${unitTasks.length} 批正式分镜；只会续写缺失批次`);
             return { ok: true, ...task, batch, rawText, receipt, unitValidationOptions, unitResult };
           } catch (error) {
+            fastUnitWaveFailed = true;
             return { ok: false, ...task, error, rawText: rawText || String(error?.rawText || ""), receipt, unitValidationOptions, unitResult };
           }
         });
