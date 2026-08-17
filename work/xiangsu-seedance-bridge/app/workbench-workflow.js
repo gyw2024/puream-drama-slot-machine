@@ -12821,8 +12821,9 @@ class WorkbenchWorkflow {
         fastUnitResultCache = fastCacheState.cache;
         shots = fastCacheState.prefix;
         const failedTask = unitTasks.find(task => !validFastUnitCacheEntry(fastUnitResultCache[fastUnitCacheKey(task)], task)) || null;
-        const failed = failedTask ? resultByStart.get(fastUnitCacheKey(failedTask)) || { ...failedTask, error: new Error("并行正式分镜批次未返回可用结果") } : null;
+        let failed = failedTask ? resultByStart.get(fastUnitCacheKey(failedTask)) || { ...failedTask, error: new Error("并行正式分镜批次未返回可用结果") } : null;
         let unitContractFailure = null;
+        let unitContractRecovery = null;
         if (failed) {
           if (paidUnitValidationMustStop(failed.error, failed.receipt)) {
             unitContractFailure = paidUnitValidationEvidence(
@@ -12841,6 +12842,34 @@ class WorkbenchWorkflow {
                 generationMode: normalizeProjectMode(project.generation?.mode)
               }
             );
+            const localRecovery = recoverPaidUnitContractFailure({
+              ...checkpoint,
+              unitContractFailure
+            }, {
+              ideaSignature: currentIdeaSignature,
+              startNumber: failed.unitStartNumber,
+              draftAttempt,
+              generationMode: normalizeProjectMode(project.generation?.mode),
+              plannedShots: failed.plannedShots,
+              productName: project.product.name,
+              videoEngine: projectVideoEngine(project),
+              validationOptions: failed.unitValidationOptions
+            });
+            if (localRecovery.status === "recovered") {
+              fastUnitResultCache[fastUnitCacheKey(failed)] = {
+                unitStartNumber: failed.unitStartNumber,
+                unitEndNumber: failed.unitEndNumber,
+                batch: localRecovery.batch
+              };
+              fastCacheState = fastUnitCacheState(unitTasks, fastUnitResultCache);
+              fastUnitResultCache = fastCacheState.cache;
+              shots = fastCacheState.prefix;
+              unitContractRecovery = localRecovery.recovery;
+              unitContractFailure = null;
+              failed = null;
+            } else if (localRecovery.status !== "none") {
+              failed.error = localRecovery.error;
+            }
           }
         }
         checkpoint = this.saveScriptCheckpoint(projectId, {
@@ -12850,6 +12879,7 @@ class WorkbenchWorkflow {
           shots,
           semanticReview: null,
           unitContractFailure,
+          unitContractRecovery,
           fastGeneration: true,
           fastUnitResultCache: failed ? fastUnitResultCache : null,
           fastUnitBatches: { total: unitTasks.length, completed: unitTasks.length - fastCacheState.pending.length, failed: Boolean(failed) }
