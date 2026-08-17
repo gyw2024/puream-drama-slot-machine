@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { WorkbenchWorkflow, scriptPipelineEntryRoute } = require("../app/workbench-workflow");
+const { WorkbenchWorkflow, scriptPipelineEntryRoute, fastUnitCacheState } = require("../app/workbench-workflow");
 
 function projectFixture() {
   return {
@@ -92,4 +92,27 @@ test("autonomous AI repair checkpoints outrank stale rejected shots and never en
     shots: [{ id: "S01", duration: 10 }]
   };
   assert.equal(scriptPipelineEntryRoute(project), "resume_generation");
+});
+
+test("fast script resume preserves successful non-contiguous batches and retries only gaps", () => {
+  const shot = id => ({ id });
+  const tasks = [
+    { unitStartIndex: 0, unitStartNumber: 1, unitEndNumber: 2, plannedShots: [shot("S01"), shot("S02")] },
+    { unitStartIndex: 2, unitStartNumber: 3, unitEndNumber: 4, plannedShots: [shot("S03"), shot("S04")] },
+    { unitStartIndex: 4, unitStartNumber: 5, unitEndNumber: 6, plannedShots: [shot("S05"), shot("S06")] }
+  ];
+  const state = fastUnitCacheState(tasks, {
+    1: { batch: [shot("S01"), shot("S02")] },
+    5: { batch: [shot("S05"), shot("S06")] }
+  });
+  assert.deepEqual(state.prefix.map(item => item.id), ["S01", "S02"]);
+  assert.deepEqual(state.pending.map(item => item.unitStartNumber), [3]);
+  assert.deepEqual(Object.keys(state.cache), ["1", "5"]);
+
+  const resumed = fastUnitCacheState(tasks, {
+    ...state.cache,
+    3: { batch: [shot("S03"), shot("S04")] }
+  });
+  assert.deepEqual(resumed.prefix.map(item => item.id), ["S01", "S02", "S03", "S04", "S05", "S06"]);
+  assert.equal(resumed.pending.length, 0);
 });

@@ -175,10 +175,10 @@ const STRUCTURED_TEXT_MAX_CHARS = 7500;
 const UPLOADED_ANALYSIS_MAX_SOURCE_CHARS = 5000;
 const UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST = 5;
 const UPLOADED_ANALYSIS_MAX_CONCURRENCY = 2;
-// Keep the official relay below its per-account saturation point. Eight-way
-// planning fills one wave; unit writing uses two bounded waves instead of
-// flooding the relay with sixteen simultaneous long JSON streams.
-const SCRIPT_FAST_CONCURRENCY = 8;
+// Keep the official relay below its measured two-stream saturation point.
+// Each request has a bounded attempt timeout, while the overall goal has none.
+const SCRIPT_FAST_CONCURRENCY = 2;
+const SCRIPT_FAST_ATTEMPT_TIMEOUT_MS = 100_000;
 const SCRIPT_FAST_TARGET_SECONDS = 600;
 const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol";
 const SCRIPT_DIRECT_SEGMENT_UNITS = 5;
@@ -6176,6 +6176,54 @@ async function mapWithConcurrency(items, concurrency, worker) {
   const failed = settled.find(item => item.status === "rejected");
   if (failed) throw failed.reason;
   return results;
+}
+
+function fastUnitCacheKey(task) {
+  return String(Math.max(1, Number(task?.unitStartNumber) || 1));
+}
+
+function validFastUnitCacheEntry(entry, task) {
+  const batch = Array.isArray(entry?.batch) ? entry.batch : [];
+  const plannedShots = Array.isArray(task?.plannedShots) ? task.plannedShots : [];
+  return batch.length === plannedShots.length
+    && batch.every((shot, index) => String(shot?.id || "") === String(plannedShots[index]?.id || ""));
+}
+
+function fastUnitCacheState(unitTasks, storedCache = {}, existingShots = []) {
+  const tasks = Array.isArray(unitTasks) ? unitTasks : [];
+  const source = storedCache && typeof storedCache === "object" && !Array.isArray(storedCache) ? storedCache : {};
+  const cache = {};
+  for (const task of tasks) {
+    const key = fastUnitCacheKey(task);
+    if (validFastUnitCacheEntry(source[key], task)) {
+      cache[key] = {
+        unitStartNumber: task.unitStartNumber,
+        unitEndNumber: task.unitEndNumber,
+        batch: source[key].batch
+      };
+      continue;
+    }
+    const prefixBatch = existingShots.slice(task.unitStartIndex, task.unitStartIndex + task.plannedShots.length);
+    const prefixEntry = { batch: prefixBatch };
+    if (validFastUnitCacheEntry(prefixEntry, task)) {
+      cache[key] = {
+        unitStartNumber: task.unitStartNumber,
+        unitEndNumber: task.unitEndNumber,
+        batch: prefixBatch
+      };
+    }
+  }
+  const prefix = [];
+  for (const task of tasks) {
+    const entry = cache[fastUnitCacheKey(task)];
+    if (!validFastUnitCacheEntry(entry, task)) break;
+    prefix.push(...entry.batch);
+  }
+  return {
+    cache,
+    prefix,
+    pending: tasks.filter(task => !validFastUnitCacheEntry(cache[fastUnitCacheKey(task)], task))
+  };
 }
 
 function scriptControlError(intent) {
@@ -12221,6 +12269,7 @@ class WorkbenchWorkflow {
                 requiredKeys: ["shotPlan"],
                 unwrapKeys: ["data", "result", "payload", "content"],
                 maxTokens: 4_096,
+                timeoutMs: SCRIPT_FAST_ATTEMPT_TIMEOUT_MS,
                 sessionId: `${sessionId}-fast-plan-${attempt}-S${String(startNumber).padStart(2, "0")}-S${String(endNumber).padStart(2, "0")}`,
                 onDelta: text => { rawText = String(text || ""); },
                 onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) receipt = { ...(usage || {}) }; }
@@ -12655,7 +12704,7 @@ class WorkbenchWorkflow {
     let semanticReview = checkpoint.semanticReview || null;
     for (let draftAttempt = Math.max(1, Number(checkpoint.draftAttempt) || 1); !semanticReview?.ok && draftAttempt <= 2; draftAttempt += 1) {
       if (checkpoint.draftAttempt !== draftAttempt) shots = [];
-      if (useFastScriptPath && draftAttempt === 1 && shots.length === 0 && !checkpoint.unitContractFailure) {
+      if (useFastScriptPath && draftAttempt === 1 && !checkpoint.unitContractFailure) {
         const unitTasks = [];
         for (let unitStartIndex = 0; unitStartIndex < blueprint.shotPlan.length; unitStartIndex += SCRIPT_UNIT_BATCH_SIZE) {
           const plannedShots = blueprint.shotPlan.slice(unitStartIndex, unitStartIndex + SCRIPT_UNIT_BATCH_SIZE);
@@ -12667,12 +12716,16 @@ class WorkbenchWorkflow {
             previousPlan: blueprint.shotPlan[unitStartIndex - 1] || null
           });
         }
+        let fastCacheState = fastUnitCacheState(unitTasks, checkpoint.fastUnitResultCache, shots);
+        let fastUnitResultCache = fastCacheState.cache;
+        shots = fastCacheState.prefix;
+        const pendingUnitTasks = fastCacheState.pending;
         this.setAutomation(projectId, {
           stage: "script_units",
-          message: `优先加速写作：${unitTasks.length} 批正式分镜正在并行写作；不设总耗时截止线`
+          message: `优先加速写作：已保存 ${unitTasks.length - pendingUnitTasks.length}/${unitTasks.length} 批，剩余 ${pendingUnitTasks.length} 批按 ${SCRIPT_FAST_CONCURRENCY} 路并行续写；不设总耗时截止线`
         });
         const unitTextStagePrompt = textStagePromptForProject(project, settings, "scriptUnitGeneration", "units");
-        const fastUnitResults = await mapWithConcurrency(unitTasks, SCRIPT_FAST_CONCURRENCY, async task => {
+        const fastUnitResults = await mapWithConcurrency(pendingUnitTasks, SCRIPT_FAST_CONCURRENCY, async task => {
           const { unitStartIndex, plannedShots, unitStartNumber, unitEndNumber, previousPlan } = task;
           const projectMode = normalizeProjectMode(project.generation?.mode);
           const hailuoAutomaticWriting = projectVideoEngine(project) === "hailuo-h3";
@@ -12718,22 +12771,43 @@ class WorkbenchWorkflow {
               requiredKeys: ["shots"],
               unwrapKeys: ["data", "result", "payload", "content"],
               maxTokens: 6_144,
+              timeoutMs: SCRIPT_FAST_ATTEMPT_TIMEOUT_MS,
               sessionId: `${sessionId}-fast-draft-${plannedShots[0]?.id || unitStartIndex + 1}-${plannedShots.at(-1)?.id || unitStartIndex + plannedShots.length}`,
               onDelta: text => { rawText = String(text || ""); },
               onUsage: usage => { if (isCompletedUpstreamTextReceipt(usage)) receipt = { ...(usage || {}) }; }
             }));
             const batch = validateShotBatch(unitResult, plannedShots, project.product.name, projectVideoEngine(project), unitValidationOptions);
+            fastUnitResultCache[fastUnitCacheKey(task)] = { unitStartNumber, unitEndNumber, batch };
+            fastCacheState = fastUnitCacheState(unitTasks, fastUnitResultCache);
+            fastUnitResultCache = fastCacheState.cache;
+            shots = fastCacheState.prefix;
+            checkpoint = this.saveScriptCheckpoint(projectId, {
+              ...checkpoint,
+              blueprint,
+              draftAttempt,
+              shots,
+              semanticReview: null,
+              fastGeneration: true,
+              fastUnitResultCache,
+              fastUnitBatches: {
+                total: unitTasks.length,
+                completed: unitTasks.length - fastCacheState.pending.length,
+                failed: false
+              }
+            }, topic, "script_units", `已安全保存 ${unitTasks.length - fastCacheState.pending.length}/${unitTasks.length} 批正式分镜；只会续写缺失批次`);
             return { ok: true, ...task, batch, rawText, receipt, unitValidationOptions, unitResult };
           } catch (error) {
             return { ok: false, ...task, error, rawText: rawText || String(error?.rawText || ""), receipt, unitValidationOptions, unitResult };
           }
         });
-        const firstFailureIndex = fastUnitResults.findIndex(result => !result.ok);
-        const acceptedResults = firstFailureIndex < 0 ? fastUnitResults : fastUnitResults.slice(0, firstFailureIndex);
-        shots = acceptedResults.flatMap(result => result.batch || []);
+        const resultByStart = new Map(fastUnitResults.map(result => [fastUnitCacheKey(result), result]));
+        fastCacheState = fastUnitCacheState(unitTasks, fastUnitResultCache);
+        fastUnitResultCache = fastCacheState.cache;
+        shots = fastCacheState.prefix;
+        const failedTask = unitTasks.find(task => !validFastUnitCacheEntry(fastUnitResultCache[fastUnitCacheKey(task)], task)) || null;
+        const failed = failedTask ? resultByStart.get(fastUnitCacheKey(failedTask)) || { ...failedTask, error: new Error("并行正式分镜批次未返回可用结果") } : null;
         let unitContractFailure = null;
-        if (firstFailureIndex >= 0) {
-          const failed = fastUnitResults[firstFailureIndex];
+        if (failed) {
           if (paidUnitValidationMustStop(failed.error, failed.receipt)) {
             unitContractFailure = paidUnitValidationEvidence(
               failed.error,
@@ -12761,12 +12835,12 @@ class WorkbenchWorkflow {
           semanticReview: null,
           unitContractFailure,
           fastGeneration: true,
-          fastUnitBatches: { total: unitTasks.length, completed: acceptedResults.length, failed: firstFailureIndex >= 0 }
-        }, topic, "script_units", firstFailureIndex < 0
+          fastUnitResultCache: failed ? fastUnitResultCache : null,
+          fastUnitBatches: { total: unitTasks.length, completed: unitTasks.length - fastCacheState.pending.length, failed: Boolean(failed) }
+        }, topic, "script_units", !failed
           ? `并行完成 ${shots.length}/${blueprint.shotPlan.length} 个正式生成单元`
-          : `并行写作在 S${String(fastUnitResults[firstFailureIndex].unitStartNumber).padStart(2, "0")} 批次停止；前 ${shots.length} 个合格单元已保存`);
-        if (firstFailureIndex >= 0) {
-          const failed = fastUnitResults[firstFailureIndex];
+          : `并行写作在 S${String(failed.unitStartNumber).padStart(2, "0")} 批次遇到问题；已保存 ${unitTasks.length - fastCacheState.pending.length}/${unitTasks.length} 批，下次只重试缺失批次`);
+        if (failed) {
           throw Object.assign(failed.error || new Error("并行正式分镜写作失败"), {
             noAutomaticRetry: true,
             retryRequiresExplicitResume: true,
@@ -20719,3 +20793,4 @@ module.exports.candidateHasHailuoDialogueMode = candidateHasHailuoDialogueMode;
 module.exports.assertShotReferenceBundle = assertShotReferenceBundle;
 module.exports.renderApprovedVideoPrompt = renderApprovedVideoPrompt;
 module.exports.assertStrictCharacterMediaBindings = assertStrictCharacterMediaBindings;
+module.exports.fastUnitCacheState = fastUnitCacheState;

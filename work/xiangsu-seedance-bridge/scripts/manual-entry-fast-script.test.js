@@ -280,7 +280,8 @@ test("replacing a product image retires product-dependent storyboard and video a
 test("five to ten minute script path matches relay slots and preserves failed segments locally", () => {
   const workflow = source("app/workbench-workflow.js");
   assert.match(workflow, /const SCRIPT_FAST_TARGET_SECONDS = 600/);
-  assert.match(workflow, /const SCRIPT_FAST_CONCURRENCY = 8/);
+  assert.match(workflow, /const SCRIPT_FAST_CONCURRENCY = 2/);
+  assert.match(workflow, /const SCRIPT_FAST_ATTEMPT_TIMEOUT_MS = 100_000/);
   assert.match(workflow, /const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol"/);
   assert.match(workflow, /const SCRIPT_DIRECT_SEGMENT_UNITS = 5/);
   assert.match(workflow, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 2/);
@@ -298,7 +299,8 @@ test("five to ten minute script path matches relay slots and preserves failed se
   assert.match(workflow, /buildDirectFastFallbackSegment/);
   assert.match(workflow, /buildDirectFastFallbackSpine/);
   assert.match(workflow, /mapWithConcurrency\(planTasks, SCRIPT_FAST_CONCURRENCY/);
-  assert.match(workflow, /mapWithConcurrency\(unitTasks, SCRIPT_FAST_CONCURRENCY/);
+  assert.match(workflow, /mapWithConcurrency\(pendingUnitTasks, SCRIPT_FAST_CONCURRENCY/);
+  assert.match(workflow, /fastUnitResultCache/);
   assert.match(workflow, /useFastScriptPath\s*\?\s*\{/);
   assert.match(workflow, /path: useFastScriptPath \? "parallel-fast-v2"/);
   assert.match(workflow, /metTarget: scriptElapsedSeconds !== null \? scriptElapsedSeconds <= SCRIPT_FAST_TARGET_SECONDS/);
