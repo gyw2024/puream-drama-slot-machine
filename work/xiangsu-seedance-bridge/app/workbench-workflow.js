@@ -20436,7 +20436,7 @@ ${shotAnchor}
       || /TIMEOUT|NETWORK|EMPTY_RESPONSE|REMOTE_PENDING|QUARANTINED|BUSY/.test(code));
     if (transientFailure) {
       supervisor.transientRetries += 1;
-      if (!supervisor.textProviderOverride && supervisor.transientRetries >= 2) {
+      if (!supervisor.textProviderOverride && supervisor.transientRetries >= 1) {
         const configuredProfiles = this.store.getSettings?.()?.textProviderProfiles;
         const fallback = configuredProfiles && typeof configuredProfiles === "object"
           ? Object.values(configuredProfiles).find(profile => profile
