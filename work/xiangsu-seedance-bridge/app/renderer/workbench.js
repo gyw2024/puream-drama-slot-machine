@@ -4341,7 +4341,11 @@ async function runLong(label, action, candidateScope = null) {
       switchStage("settings");
       await refreshAccountSwitch(false).catch(() => {});
     }
+    if (state.project?.id === projectId) {
+      await loadProject(projectId, false).catch(refreshError => console.error("failed operation state refresh failed", refreshError));
+    }
     showToast(state.project?.id === projectId ? (error.message || String(error)) : `项目《${projectTitle}》后台任务失败：${error.message || String(error)}`, "error");
+    return { ok: false, code: error.code || "OPERATION_FAILED", message: error.message || String(error) };
   } finally {
     state.activeJobs.delete(jobKey);
     if (scopeKey) state.drawingScopes.delete(scopeKey);
@@ -4858,11 +4862,20 @@ $("#productImage").addEventListener("click", async () => {
 $("#selectProductLibrary")?.addEventListener("click", () => openIndependentAssetLibrary({ entityType: "product", entityId: "product", stage: "product_asset" }));
 $("#editGenerationMode").addEventListener("click", () => openProjectStrategyDialog(false));
 $("#editProjectStrategy").addEventListener("click", () => openProjectStrategyDialog(false));
-$("#generateAllVideos").addEventListener("click", () => {
+$("#generateAllVideos").addEventListener("click", async event => {
   if (!videoProviderMatchesProject(state.settings?.videoProvider?.kind || "local-xiangsu")) {
     return showToast(`项目是${currentVideoEngineName()}，请先在系统设置切换到同引擎视频供应商`, "error");
   }
-  runLong("正在生产全部分镜视频…", () => api.workbench.generateAllShotVideos(state.project.id));
+  const button = event.currentTarget;
+  const idleLabel = button.textContent;
+  button.setAttribute("aria-busy", "true");
+  button.textContent = "正在启动全部分镜视频…";
+  try {
+    await runLong("已接收全部分镜视频任务，正在执行提交前检查…", () => api.workbench.generateAllShotVideos(state.project.id));
+  } finally {
+    button.removeAttribute("aria-busy");
+    button.textContent = idleLabel;
+  }
 });
 $("#importScriptFile")?.addEventListener("click", async () => {
   if (!state.project) return;

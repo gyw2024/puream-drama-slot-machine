@@ -4325,6 +4325,13 @@ const ADVISORY_LEGACY_ERROR_CODES = new Set([
   "SCRIPT_GENERATION_STOPPED"
 ]);
 
+const RETIRED_PRODUCTION_ONLY_VIDEO_ERROR_CODES = new Set([
+  "AGENT_TAKE_SHEET_REQUIRED",
+  "AGENT_TAKE_SHEET_GRID_UNSAFE",
+  "AGENT_TAKE_PANEL_REQUIRED",
+  "AGENT_TAKE_SHEET_CROP_FAILED"
+]);
+
 function legacyAutomationIsAdvisory(automation = {}) {
   const directCode = String(automation.errorCode || "").trim();
   if (ADVISORY_LEGACY_ERROR_CODES.has(directCode)) return true;
@@ -4339,6 +4346,13 @@ function legacyAutomationIsAdvisory(automation = {}) {
   const childCodes = [...nested, ...messageCodes];
   if (!["SHOT_VIDEO_BATCH_PARTIAL_FAILED", "STORYBOARD_BATCH_PARTIAL_FAILED"].includes(directCode)) return false;
   return childCodes.length > 0 && childCodes.every(code => ADVISORY_LEGACY_ERROR_CODES.has(code));
+}
+
+function productionOnlyLegacyVideoFailureCanResume(automation = {}, settings = {}) {
+  if (settings?.generation?.qualityGatesEnabled === true) return false;
+  if (String(automation.status || "") !== "failed") return false;
+  if (!["shot_video", "shot_videos", "full_pipeline", "idea_to_full_pipeline", "pipeline_from_stage"].includes(String(automation.operation || ""))) return false;
+  return RETIRED_PRODUCTION_ONLY_VIDEO_ERROR_CODES.has(String(automation.errorCode || "").trim());
 }
 
 function characterVideoStageProvider(settings = {}) {
@@ -11548,6 +11562,28 @@ class WorkbenchWorkflow {
         automation = project.automation;
         reconciled.push({ projectId: project.id, status: automation.status, operation: automation.operation, migratedAdvisory: true });
       }
+      // Production-only mode no longer crops or audits storyboard sheets before
+      // video submission. Heal persisted failures from builds that still ran
+      // that retired quality gate, while preserving every asset and submitting
+      // no paid task during startup reconciliation.
+      const settings = this.store.getSettings();
+      if (productionOnlyLegacyVideoFailureCanResume(automation, settings)) {
+        const updatedAt = new Date().toISOString();
+        project.automation = {
+          ...automation,
+          status: "interrupted",
+          stage: "videos",
+          errorCode: "",
+          recoverableFailure: true,
+          retiredVideoGateRecovered: true,
+          message: "旧版分镜裁图门禁已停用；未提交付费视频，现有资产已保留，可直接生成全部分镜视频。",
+          progress: sanitizeBatchProgress(automation.progress, "interrupted"),
+          updatedAt
+        };
+        this.store.saveProject(project);
+        automation = project.automation;
+        reconciled.push({ projectId: project.id, status: automation.status, operation: automation.operation, migratedRetiredVideoGate: true });
+      }
       if (automation.status !== "running" || this.hasActiveOperation(project.id) || activeProjectIds.has(project.id)) {
         // Clear ghost “running” chips left by killed processes even when status is already failed/interrupted.
         const cleaned = sanitizeBatchProgress(automation.progress, automation.status);
@@ -11560,7 +11596,6 @@ class WorkbenchWorkflow {
 
       const targetStage = automation.operation === "character_video" ? "character_video" : "shot_video";
       const targetType = automation.operation === "character_video" ? "character" : "shot";
-      const settings = this.store.getSettings();
       const targetCandidate = ["shot_video", "character_video"].includes(automation.operation) && automation.targetId
         ? candidateReady(project, targetType, automation.targetId, targetStage, settings)
         : null;
@@ -21536,6 +21571,7 @@ module.exports.qualityWarningCanBeIgnored = qualityWarningCanBeIgnored;
 module.exports.productionContractRepairShotIds = productionContractRepairShotIds;
 module.exports.executeShotVideoBatch = executeShotVideoBatch;
 module.exports.legacyAutomationIsAdvisory = legacyAutomationIsAdvisory;
+module.exports.productionOnlyLegacyVideoFailureCanResume = productionOnlyLegacyVideoFailureCanResume;
 module.exports.imageGenerationOptions = imageGenerationOptions;
 module.exports.buildLocalTopicOptions = buildLocalTopicOptions;
 module.exports.splitUploadedScriptSections = splitUploadedScriptSections;

@@ -82,3 +82,44 @@ test("startup reconciliation clears a persisted ghost-running state but keeps a 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("production-only startup retires historical storyboard crop failures without submitting video", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-retired-video-gate-"));
+  try {
+    const store = new WorkbenchStore(root);
+    const created = store.createProject("历史裁图失败项目");
+    const project = store.getProject(created.id);
+    project.script = { ...(project.script || {}), generatedAt: new Date().toISOString(), raw: "A：继续。" };
+    project.shots = Array.from({ length: 30 }, (_item, index) => ({ id: `S${String(index + 1).padStart(2, "0")}`, number: index + 1, duration: 10 }));
+    project.automation = {
+      ...(project.automation || {}),
+      operation: "shot_videos",
+      status: "failed",
+      stage: "shot_videos",
+      errorCode: "AGENT_TAKE_SHEET_GRID_UNSAFE",
+      message: "S27-B01 的父分镜合图无法可靠识别真实画格"
+    };
+    store.saveProject(project);
+    const settings = store.getSettings();
+    settings.generation.qualityGatesEnabled = false;
+    store.saveSettings(settings);
+    let paidSubmissions = 0;
+    const workflow = new WorkbenchWorkflow({
+      store,
+      bridge: { generateVideo: async () => { paidSubmissions += 1; } },
+      locateFfmpeg: () => "",
+      stagingRoot: root
+    });
+    const result = workflow.reconcileDetachedAutomations(created.id);
+    const healed = store.getProject(created.id);
+    assert.equal(result.some(item => item.migratedRetiredVideoGate === true), true);
+    assert.equal(healed.automation.status, "interrupted");
+    assert.equal(healed.automation.stage, "videos");
+    assert.equal(healed.automation.errorCode, "");
+    assert.equal(healed.automation.recoverableFailure, true);
+    assert.match(healed.automation.message, /未提交付费视频/);
+    assert.equal(paidSubmissions, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
