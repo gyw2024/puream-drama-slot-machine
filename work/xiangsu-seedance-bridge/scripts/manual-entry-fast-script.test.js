@@ -282,7 +282,7 @@ test("five to ten minute script path matches relay slots and preserves failed se
   assert.match(workflow, /const SCRIPT_FAST_TARGET_SECONDS = 600/);
   assert.match(workflow, /const SCRIPT_FAST_CONCURRENCY = 2/);
   assert.match(workflow, /const SCRIPT_UNIT_BATCH_SIZE = 5/);
-  assert.match(workflow, /const SCRIPT_FAST_ATTEMPT_TIMEOUT_MS = 180_000/);
+  assert.match(workflow, /const SCRIPT_FAST_ATTEMPT_TIMEOUT_MS = 300_000/);
   assert.match(workflow, /const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol"/);
   assert.match(workflow, /const SCRIPT_DIRECT_SEGMENT_UNITS = 5/);
   assert.match(workflow, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 2/);
