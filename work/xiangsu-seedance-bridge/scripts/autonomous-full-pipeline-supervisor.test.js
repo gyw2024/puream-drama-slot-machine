@@ -159,6 +159,32 @@ test("a billed malformed unit is archived and only that missing batch is regener
   assert.equal(project.automation.repairJournal[0].status, "paid_unit_targeted_replacement");
 });
 
+test("a malformed custom-provider response retries only missing batches instead of stopping", async () => {
+  const project = projectFixture();
+  project.script.generationCheckpoint = {
+    fastGeneration: true,
+    fastUnitResultCache: { 1: { batch: [{ id: "S01" }] }, 16: { batch: [{ id: "S16" }] } },
+    unitContractFailure: null
+  };
+  const workflow = Object.create(WorkbenchWorkflow.prototype);
+  workflow.store = {
+    getProject: () => structuredClone(project),
+    getSettings: () => ({}),
+    saveProject: next => { Object.assign(project, structuredClone(next)); return project; }
+  };
+  workflow.operationControls = new Map();
+  workflow.appendAutonomousRepairJournal = (_id, entry) => { project.automation.repairJournal.unshift(entry); };
+  workflow.setAutomation = (_id, patch) => { project.automation = { ...project.automation, ...patch }; };
+  const supervisor = { repairs: 0, scriptRewrites: 0, transientRetries: 0, textProviderOverride: { kind: "openai-compatible" }, failuresByCode: new Map() };
+  const recovered = await workflow.recoverAutonomousPipelineFailure("P01", Object.assign(new Error("missing shots root"), { code: "MODEL_JSON_INVALID" }), supervisor);
+  assert.equal(recovered, true);
+  assert.equal(project.script.generationCheckpoint.fastUnitResultCache[1].batch[0].id, "S01");
+  assert.equal(project.script.generationCheckpoint.fastUnitResultCache[16].batch[0].id, "S16");
+  assert.equal(supervisor.transientRetries, 1);
+  assert.equal(project.automation.stage, "agent_json_structure_repair");
+  assert.equal(project.automation.repairJournal[0].status, "json_structure_retry");
+});
+
 test("script repair archives provenance outside the production-media category allowlist", t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-agent-script-history-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

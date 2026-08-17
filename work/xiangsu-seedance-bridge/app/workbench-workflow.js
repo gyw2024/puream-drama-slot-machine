@@ -20523,6 +20523,20 @@ ${shotAnchor}
         });
         return true;
       }
+      supervisor.transientRetries += 1;
+      this.appendAutonomousRepairJournal(projectId, {
+        attempt: supervisor.transientRetries,
+        code,
+        message: String(error?.message || ""),
+        status: "json_structure_retry"
+      });
+      this.setAutomation(projectId, {
+        status: "running",
+        stage: "agent_json_structure_repair",
+        message: `文本模型返回结构不完整，Agent 已保留全部成功批次并将在 2 秒后仅重试缺失批次（第 ${supervisor.transientRetries} 次）`
+      });
+      await abortableDelay(2000, this.operationControls.get(projectId)?.controller?.signal);
+      return true;
     }
     if (transientFailure) {
       supervisor.transientRetries += 1;
