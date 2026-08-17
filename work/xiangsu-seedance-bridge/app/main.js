@@ -499,6 +499,12 @@ function createWindow() {
     ...(captureScenario ? { captureScenario } : {})
   };
   const captureFragment = new URLSearchParams(captureQuery).toString();
+  if (!capturePath) {
+    mainWindow.webContents.once("did-finish-load", () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.setZoomFactor(1);
+    });
+  }
   if (captureScenario === "hailuoquick") {
     const settings = workbenchStore.getSettings();
     settings.videoProvider = {

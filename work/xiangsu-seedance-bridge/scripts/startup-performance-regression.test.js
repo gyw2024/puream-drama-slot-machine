@@ -60,6 +60,12 @@ test("project selection is read-only and cannot interrupt background work", () =
   assert.match(projection, /store\.listActiveVideoJobs\(projectId\)/);
 });
 
+test("normal startup resets leaked renderer zoom without weakening capture audits", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "app", "main.js"), "utf8");
+  assert.match(source, /if \(!capturePath\)\s*\{[\s\S]*?webContents\.once\("did-finish-load"[\s\S]*?webContents\.setZoomFactor\(1\)/);
+  assert.match(source, /if \(capturePath\)[\s\S]*?webContents\.setZoomFactor\(captureZoom\)/);
+});
+
 test("startup reconciliation clears a persisted ghost-running state but keeps a real operation active", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-runtime-authority-"));
   try {
