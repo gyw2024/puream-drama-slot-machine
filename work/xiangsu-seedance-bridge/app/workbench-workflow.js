@@ -12128,14 +12128,15 @@ class WorkbenchWorkflow {
     }
     const sessionId = checkpoint.sessionId;
     const useFastScriptPath = checkpoint.fastGeneration === true && options.fast !== false;
-    const scriptTextProvider = useFastScriptPath && settings.textProvider?.kind === "puream-relay"
+    const configuredTextProvider = options.textProviderOverride || settings.textProvider;
+    const scriptTextProvider = useFastScriptPath && configuredTextProvider?.kind === "puream-relay"
       ? {
-          ...settings.textProvider,
+          ...configuredTextProvider,
           model: SCRIPT_FAST_PUREAM_MODEL,
           modelStrategy: "explicit",
-          temperature: Math.min(0.2, Number(settings.textProvider.temperature) || 0.2)
+          temperature: Math.min(0.2, Number(configuredTextProvider.temperature) || 0.2)
         }
-      : settings.textProvider;
+      : configuredTextProvider;
     const topicPayload = JSON.stringify(topic);
     const productFacts = `商品名称：${project.product.name}\n用户提供卖点：${productSellingPoints(project)}\n商品外观只由用户上传图片锁定；禁止虚构价格、规格、赠品、品牌承诺或功效；禁止 AI 凭空生成商品图。`;
     const requestedFilmSeconds = Math.max(30, Math.round(Number(project.generation?.targetDurationSeconds) || 300));
@@ -19596,7 +19597,10 @@ ${shotAnchor}
           : 0;
         this.setAutomation(projectId, { stage: "script", message: `检测到未完成写作断点，正在从 S${String(planCount + 1).padStart(2, "0")} 继续生成完整剧本` });
         this.assertOperationActive(projectId);
-        await this.generateCompleteScript(projectId, { track: false });
+        await this.generateCompleteScript(projectId, {
+          track: false,
+          textProviderOverride: options.textProviderOverride || null
+        });
         project = this.store.getProject(projectId);
       } else if (["analyze_imported", "reanalyze_duration", "reanalyze_source", "reanalyze_dialogue"].includes(route)) {
         this.setAutomation(projectId, { stage: "script", message: route === "reanalyze_duration"
@@ -19621,7 +19625,10 @@ ${shotAnchor}
             : "新项目尚无剧本，正在按已选题材自动生成完整剧本并继续生产"
         });
         this.assertOperationActive(projectId);
-        await this.generateCompleteScript(projectId, { track: false });
+        await this.generateCompleteScript(projectId, {
+          track: false,
+          textProviderOverride: options.textProviderOverride || null
+        });
         project = this.store.getProject(projectId);
       }
       assertScriptMaterializedForPipeline(project);
@@ -20299,12 +20306,18 @@ ${shotAnchor}
       repairs: 0,
       scriptRewrites: 0,
       transientRetries: 0,
+      textProviderOverride: null,
       failuresByCode: new Map()
     };
     while (true) {
       this.assertOperationActive(projectId);
       try {
-        return await this.runPipelineFromStage(projectId, "script", { ...options, track: false, allowCrossStage: true });
+        return await this.runPipelineFromStage(projectId, "script", {
+          ...options,
+          track: false,
+          allowCrossStage: true,
+          textProviderOverride: supervisor.textProviderOverride || options.textProviderOverride || null
+        });
       } catch (error) {
         this.assertOperationActive(projectId);
         const recovered = await this.recoverAutonomousPipelineFailure(projectId, error, supervisor);
@@ -20423,6 +20436,31 @@ ${shotAnchor}
       || /TIMEOUT|NETWORK|EMPTY_RESPONSE|REMOTE_PENDING|QUARANTINED|BUSY/.test(code));
     if (transientFailure) {
       supervisor.transientRetries += 1;
+      if (!supervisor.textProviderOverride && supervisor.transientRetries >= 2) {
+        const configuredProfiles = this.store.getSettings?.()?.textProviderProfiles;
+        const fallback = configuredProfiles && typeof configuredProfiles === "object"
+          ? Object.values(configuredProfiles).find(profile => profile
+            && profile.kind !== "puream-relay"
+            && String(profile.baseUrl || "").trim()
+            && String(profile.model || "").trim()
+            && String(profile.apiKey || "").trim())
+          : null;
+        if (fallback) {
+          supervisor.textProviderOverride = { ...fallback, authSource: "user" };
+          this.appendAutonomousRepairJournal(projectId, {
+            attempt: supervisor.transientRetries,
+            code,
+            status: "provider_failover",
+            providerKind: String(fallback.kind || "")
+          });
+          this.setAutomation(projectId, {
+            status: "running",
+            stage: "agent_provider_failover",
+            message: "PUREAM 文本中转连续超时，Agent 已切换到已配置的备用文本模型，并从当前剧本断点继续"
+          });
+          return true;
+        }
+      }
       this.appendAutonomousRepairJournal(projectId, {
         attempt: supervisor.transientRetries,
         code,
