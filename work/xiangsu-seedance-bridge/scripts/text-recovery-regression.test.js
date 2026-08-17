@@ -148,3 +148,33 @@ test("PUREAM settled outputTokens zero is checkpointable failure and never repla
     global.fetch = originalFetch;
   }
 });
+
+test("PUREAM timeout covers a stalled SSE body after response headers", async () => {
+  const originalFetch = global.fetch;
+  let calls = 0;
+  global.fetch = async () => {
+    calls += 1;
+    return new Response(new ReadableStream({ start() {} }), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    });
+  };
+  const startedAt = Date.now();
+  try {
+    await assert.rejects(generateText({
+      kind: "puream-relay",
+      baseUrl: "https://puream.cn",
+      apiKey: "TEST-AUTH-CODE",
+      model: "gpt-5-6-sol",
+      maxTokens: 512
+    }, [{ role: "user", content: "test" }], {
+      sessionId: "logical-stalled-sse",
+      timeoutMs: 30,
+      maxReconnectAttempts: 1
+    }), error => error?.code === "PROVIDER_TIMEOUT");
+    assert.equal(calls, 1);
+    assert.ok(Date.now() - startedAt < 500);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});

@@ -743,7 +743,13 @@ async function generatePureamTextOnce(config, messages, options = {}) {
         status: response.status
       });
     }
-    const { raw, parsed } = await readPureamSse(response, options.onDelta);
+    // A relay may send response headers and then leave the SSE body open
+    // forever. Racing only fetch() does not bound that state, and some
+    // Electron streams also ignore AbortSignal after headers have arrived.
+    const { raw, parsed } = await Promise.race([
+      readPureamSse(response, options.onDelta),
+      timeoutPromise
+    ]);
     const { text, streamError, streamErrorCode, events } = parsed;
     // Upstream settles before local prose/JSON validation. Record the trusted
     // receipt first so an empty body, malformed JSON or retry cannot hide it.
