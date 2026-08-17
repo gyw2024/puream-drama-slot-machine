@@ -15,10 +15,10 @@ const {
   contractPromptBlock
 } = require("../app/foundry/production-contract");
 const { evaluateProject } = require("../app/foundry/quality-lab");
-const { FoundryRuntimeStore } = require("../app/foundry/runtime-store");
+const { FoundryRuntimeStore, PROJECT_SAVED_REVISION_LIMIT } = require("../app/foundry/runtime-store");
 const { SCRIPT_UNDERSTANDING_VERSION, buildScriptUnderstanding } = require("../app/foundry/script-understanding");
 const { AdaptiveDramaKernel } = require("../app/foundry/kernel");
-const { WorkbenchStore, atomicWriteJson } = require("../app/workbench-store");
+const { WorkbenchStore, atomicWriteJson, defaultProject } = require("../app/workbench-store");
 const { relocateCopiedWorkbenchData } = require("../app/foundry/storage-relocation");
 const { assetUrlForPath, pathFromAssetUrl, realPathWithinRoot } = require("../app/secure-asset-protocol");
 const {
@@ -260,6 +260,43 @@ test("transactional runtime preserves revisions, audit history, and retryable op
   assert.ok(runtime.listAuditEvents(first.id).length >= 6);
 });
 
+test("ordinary project snapshots are bounded while important revisions remain loadable", t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "puream-foundry-retention-"));
+  const runtime = new FoundryRuntimeStore(temp);
+  t.after(() => {
+    runtime.close();
+    fs.rmSync(temp, { recursive: true, force: true });
+  });
+  const project = projectFixture({ id: "revision-retention-fixture" });
+  runtime.commitProject(project, { eventType: "project.created" });
+  for (let index = 1; index <= PROJECT_SAVED_REVISION_LIMIT + 7; index += 1) {
+    project.status = `saved-${index}`;
+    runtime.commitProject(project);
+  }
+
+  const savedCount = runtime.db.prepare("SELECT COUNT(*) AS count FROM project_revisions WHERE project_id=? AND event_type='project.saved'").get(project.id).count;
+  const importantCount = runtime.db.prepare("SELECT COUNT(*) AS count FROM project_revisions WHERE project_id=? AND event_type<>'project.saved'").get(project.id).count;
+  assert.equal(savedCount, PROJECT_SAVED_REVISION_LIMIT);
+  assert.equal(importantCount, 1);
+  assert.equal(runtime.loadRevision(project.id, 1).title, project.title);
+  assert.equal(runtime.loadProject(project.id).status, `saved-${PROJECT_SAVED_REVISION_LIMIT + 7}`);
+});
+
+test("workspace project names stay visible when the generated story title changes", t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "puream-workspace-title-"));
+  const store = new WorkbenchStore(temp);
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const initial = defaultProject("新的带货漫剧 19");
+  assert.equal(initial.workspaceTitle, "新的带货漫剧 19");
+  const created = store.createProject("新的带货漫剧 19");
+  const generated = store.getProject(created.id);
+  generated.title = "校门口扇耳光";
+  store.saveProject(generated);
+
+  assert.equal(store.getProject(created.id).title, "校门口扇耳光");
+  assert.equal(store.listProjects().find(item => item.id === created.id)?.title, "新的带货漫剧 19");
+});
+
 test("SQLite current state wins over a stale or missing JSON mirror without losing concurrent changes", t => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "puream-foundry-authority-"));
   const kernel = new AdaptiveDramaKernel({ rootDir: temp });
@@ -286,7 +323,8 @@ test("SQLite current state wins over a stale or missing JSON mirror without losi
   assert.equal(healedMirror.currentStage, "shots");
 
   fs.rmSync(store.projectPath(created.id));
-  assert.ok(store.listProjects().some(item => item.id === created.id && item.title === "SQLite 权威标题"));
+  assert.ok(store.listProjects().some(item => item.id === created.id && item.title === "初始标题"));
+  assert.equal(store.getProject(created.id).title, "SQLite 权威标题");
   assert.equal(store.getProject(created.id).currentStage, "shots");
 });
 

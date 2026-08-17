@@ -841,6 +841,7 @@ function defaultProject(title = "未命名漫剧", options = {}) {
   return {
     version: PROJECT_VERSION,
     id: makeId("project"),
+    workspaceTitle: title,
     title,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -1910,7 +1911,7 @@ class WorkbenchStore {
   projectSummary(project = {}, fallbackUpdatedAt = now()) {
     return {
       id: project.id,
-      title: project.title || project.id,
+      title: project.workspaceTitle || project.title || project.id,
       status: project.status || "draft",
       updatedAt: project.updatedAt || project.createdAt || fallbackUpdatedAt,
       automationStatus: project.automation?.status || "idle",

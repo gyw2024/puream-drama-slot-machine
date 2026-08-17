@@ -11557,40 +11557,52 @@ class WorkbenchWorkflow {
       const completed = submitted.filter(job => String(job.status || "").toLowerCase() === "completed");
       const completedGenerationBlocks = completed.filter(job => job.internalGenerationBlock === true || job.internalTake === true);
       const completedFinalVideos = completed.filter(job => job.internalGenerationBlock !== true && job.internalTake !== true);
-      const recoveredVideoSummary = {
+      const summaryCounts = {
         submitted: submitted.length,
         pending: pending.length,
         completed: completed.length,
         finalVideos: completedFinalVideos.length,
-        generationBlocks: completedGenerationBlocks.length,
-        updatedAt: new Date().toISOString()
+        generationBlocks: completedGenerationBlocks.length
       };
+      const message = pending.length
+        ? `自动化已暂停；${pending.length} 个暂停前提交的上游任务仍在取回；已保存 ${completedFinalVideos.length} 个成品视频和 ${completedGenerationBlocks.length} 个分镜生成片段，不会重复提交原 taskId`
+        : completedGenerationBlocks.length
+          ? `自动化已暂停；暂停前提交的 ${completed.length} 个上游视频文件已全部取回：${completedFinalVideos.length} 个成品视频已入库，${completedGenerationBlocks.length} 个分镜生成片段已保存；继续任务时只补齐未完成片段并在本地合成，不会重复提交已完成 taskId`
+          : completed.length
+            ? `自动化已暂停；暂停前提交的 ${completed.length} 个视频已全部取回，可继续后续生产`
+            : "自动化已暂停；未提交任务已停止，已有结果均已保留";
+      const automation = project.automation || {};
+      const previousSummary = automation.recoveredVideoSummary || {};
+      const summaryChanged = Object.entries(summaryCounts).some(([key, value]) => Number(previousSummary[key]) !== value);
+      let progressChanged = false;
+      let progress = automation.progress;
+      if (progress && Array.isArray(progress.items)) {
+        const completedEntityIds = new Set(completed.map(job => String(job.entityId || "")));
+        const items = progress.items.map(item => {
+          const shouldComplete = item?.kind === "character_video" && completedEntityIds.has(String(item.entityId || ""));
+          const alreadyComplete = item?.status === "completed" && !item?.errorCode && item?.message === "已取回";
+          if (!shouldComplete || alreadyComplete) return item;
+          progressChanged = true;
+          return { ...item, status: "completed", errorCode: "", message: "已取回", updatedAt: new Date().toISOString() };
+        });
+        if (progressChanged) progress = { ...progress, items };
+      }
+      const automationChanged = automation.status !== "paused_user"
+        || automation.message !== message
+        || automation.errorCode !== "PIPELINE_PAUSED"
+        || automation.recoverableFailure !== true;
+      if (!summaryChanged && !progressChanged && !automationChanged) continue;
+      const updatedAt = new Date().toISOString();
       project.automation = {
-        ...(project.automation || {}),
+        ...automation,
         status: "paused_user",
-        message: pending.length
-          ? `自动化已暂停；${pending.length} 个暂停前提交的上游任务仍在取回；已保存 ${completedFinalVideos.length} 个成品视频和 ${completedGenerationBlocks.length} 个分镜生成片段，不会重复提交原 taskId`
-          : completedGenerationBlocks.length
-            ? `自动化已暂停；暂停前提交的 ${completed.length} 个上游视频文件已全部取回：${completedFinalVideos.length} 个成品视频已入库，${completedGenerationBlocks.length} 个分镜生成片段已保存；继续任务时只补齐未完成片段并在本地合成，不会重复提交已完成 taskId`
-            : completed.length
-              ? `自动化已暂停；暂停前提交的 ${completed.length} 个视频已全部取回，可继续后续生产`
-            : "自动化已暂停；未提交任务已停止，已有结果均已保留",
+        message,
         errorCode: "PIPELINE_PAUSED",
         recoverableFailure: true,
-        recoveredVideoSummary,
-        updatedAt: new Date().toISOString()
+        recoveredVideoSummary: summaryChanged ? { ...summaryCounts, updatedAt } : previousSummary,
+        ...(progressChanged ? { progress } : {}),
+        updatedAt
       };
-      if (project.automation.progress && Array.isArray(project.automation.progress.items)) {
-        const completedEntityIds = new Set(completed.map(job => String(job.entityId || "")));
-        project.automation.progress = {
-          ...project.automation.progress,
-          items: project.automation.progress.items.map(item => (
-            item?.kind === "character_video" && completedEntityIds.has(String(item.entityId || ""))
-              ? { ...item, status: "completed", errorCode: "", message: "已取回", updatedAt: new Date().toISOString() }
-              : item
-          ))
-        };
-      }
       this.store.saveProject(project);
     }
     return this.store.listActiveVideoJobs().filter(record => !projectId || record.projectId === projectId);
@@ -12260,6 +12272,7 @@ class WorkbenchWorkflow {
       project = this.store.getProject(projectId);
       const raw = renderScriptForProject(blueprint, normalized, project, topic);
       beginProductionRevision(project);
+      project.workspaceTitle = project.workspaceTitle || project.title || topic.title;
       project.title = blueprint.title || topic.title;
       project.characters = normalized.characters;
       project.scenes = normalized.scenes;
@@ -13626,6 +13639,7 @@ class WorkbenchWorkflow {
     project = this.store.getProject(projectId);
     const raw = renderScriptForProject(blueprint, normalized, project, topic);
     beginProductionRevision(project);
+    project.workspaceTitle = project.workspaceTitle || project.title || topic.title;
     project.title = blueprint.title || topic.title;
     project.characters = normalized.characters;
     project.scenes = normalized.scenes;

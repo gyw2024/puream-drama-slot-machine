@@ -8,6 +8,7 @@ const { canonicalJson, fingerprint } = require("./canonical");
 const { ERROR_KINDS, FoundryError, classifyError } = require("./errors");
 
 const RUNTIME_SCHEMA_VERSION = 1;
+const PROJECT_SAVED_REVISION_LIMIT = 200;
 
 function now() {
   return new Date().toISOString();
@@ -239,6 +240,15 @@ class FoundryRuntimeStore {
     return eventId;
   }
 
+  pruneProjectSavedRevisions(projectId, limit = PROJECT_SAVED_REVISION_LIMIT) {
+    return this.db.prepare(`DELETE FROM project_revisions
+      WHERE project_id=? AND event_type='project.saved' AND revision NOT IN (
+        SELECT revision FROM project_revisions
+        WHERE project_id=? AND event_type='project.saved'
+        ORDER BY revision DESC LIMIT ?
+      )`).run(String(projectId), String(projectId), Math.max(1, Number(limit) || PROJECT_SAVED_REVISION_LIMIT)).changes;
+  }
+
   commitProject(project, context = {}) {
     if (!project?.id) throw new FoundryError("缺少项目编号，无法提交 V2 快照", { code: "FOUNDRY_PROJECT_ID_REQUIRED", kind: ERROR_KINDS.INTERNAL_INVARIANT });
     const snapshotJson = canonicalJson(project);
@@ -282,6 +292,7 @@ class FoundryRuntimeStore {
           ...(context.payload || {})
         }
       });
+      this.pruneProjectSavedRevisions(projectId);
       return { changed: true, revision, snapshotSha256, eventId };
     });
   }
@@ -407,4 +418,4 @@ class FoundryRuntimeStore {
   }
 }
 
-module.exports = { FoundryRuntimeStore, RUNTIME_SCHEMA_VERSION };
+module.exports = { FoundryRuntimeStore, RUNTIME_SCHEMA_VERSION, PROJECT_SAVED_REVISION_LIMIT };

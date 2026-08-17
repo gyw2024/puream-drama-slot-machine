@@ -163,6 +163,25 @@ test("paused recovery distinguishes final videos from internal generation blocks
   assert.match(state.detail, /不会重复提交已完成 taskId/);
 });
 
+test("unchanged paused recovery polling does not rewrite the project snapshot", async t => {
+  const sample = fixture("暂停轮询幂等测试");
+  t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
+  const current = sample.store.getProject(sample.project.id);
+  current.automation = { status: "paused_user", stage: "shot_videos", errorCode: "PIPELINE_PAUSED" };
+  sample.store.saveProject(current);
+  sample.store.addJob(sample.project.id, {
+    type: "shot_video", entityType: "shot", entityId: "S01", taskId: "completed-task", status: "completed"
+  });
+
+  await sample.workflow.reconcileOrphanedVideoJobs(sample.project.id);
+  const first = fs.readFileSync(sample.store.projectPath(sample.project.id));
+  await sample.workflow.reconcileOrphanedVideoJobs(sample.project.id);
+  const second = fs.readFileSync(sample.store.projectPath(sample.project.id));
+
+  assert.deepEqual(second, first);
+  assert.equal(sample.submitCalls(), 0);
+});
+
 test("pipeline pause reports the actual stage and leaves script state untouched", async t => {
   const sample = fixture("暂停文案测试");
   t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
