@@ -6187,6 +6187,44 @@ function fastUnitCacheKey(task) {
   return String(Math.max(1, Number(task?.unitStartNumber) || 1));
 }
 
+function fastPlanCacheKey(task) {
+  return String(Math.max(1, Number(task?.startNumber) || 1));
+}
+
+function validFastPlanCacheEntry(entry, task) {
+  const batch = Array.isArray(entry?.batch) ? entry.batch : [];
+  const expectedCount = Math.max(1, Number(task?.batchSize) || 1);
+  const startNumber = Math.max(1, Number(task?.startNumber) || 1);
+  return batch.length === expectedCount
+    && batch.every((item, index) => String(item?.id || "") === `S${String(startNumber + index).padStart(2, "0")}`);
+}
+
+function fastPlanCacheState(planTasks, storedCache = {}) {
+  const tasks = Array.isArray(planTasks) ? planTasks : [];
+  const source = storedCache && typeof storedCache === "object" && !Array.isArray(storedCache) ? storedCache : {};
+  const cache = {};
+  for (const task of tasks) {
+    const key = fastPlanCacheKey(task);
+    if (!validFastPlanCacheEntry(source[key], task)) continue;
+    cache[key] = {
+      startNumber: task.startNumber,
+      endNumber: task.endNumber,
+      batch: source[key].batch
+    };
+  }
+  const prefix = [];
+  for (const task of tasks) {
+    const entry = cache[fastPlanCacheKey(task)];
+    if (!validFastPlanCacheEntry(entry, task)) break;
+    prefix.push(...entry.batch);
+  }
+  return {
+    cache,
+    prefix,
+    pending: tasks.filter(task => !validFastPlanCacheEntry(cache[fastPlanCacheKey(task)], task))
+  };
+}
+
 function validFastUnitCacheEntry(entry, task) {
   const batch = Array.isArray(entry?.batch) ? entry.batch : [];
   const plannedShots = Array.isArray(task?.plannedShots) ? task.plannedShots : [];
@@ -12182,6 +12220,9 @@ class WorkbenchWorkflow {
           temperature: Math.min(0.2, Number(configuredTextProvider.temperature) || 0.2)
         }
       : configuredTextProvider;
+    const scriptFastConcurrency = scriptTextProvider?.kind === "puream-relay"
+      ? SCRIPT_FAST_CONCURRENCY
+      : Math.max(SCRIPT_FAST_CONCURRENCY, 4);
     const topicPayload = JSON.stringify(topic);
     const productFacts = `商品名称：${project.product.name}\n用户提供卖点：${productSellingPoints(project)}\n商品外观只由用户上传图片锁定；禁止虚构价格、规格、赠品、品牌承诺或功效；禁止 AI 凭空生成商品图。`;
     const requestedFilmSeconds = Math.max(30, Math.round(Number(project.generation?.targetDurationSeconds) || 300));
@@ -12283,11 +12324,15 @@ class WorkbenchWorkflow {
             const endNumber = Math.min(unitCount, startNumber + SCRIPT_PLAN_BATCH_SIZE - 1);
             planTasks.push({ startNumber, endNumber, batchSize: endNumber - startNumber + 1 });
           }
+          let fastPlanState = fastPlanCacheState(planTasks, checkpoint.fastPlanResultCache);
+          let fastPlanResultCache = fastPlanState.cache;
+          shotPlan = fastPlanState.prefix;
+          const pendingPlanTasks = fastPlanState.pending;
           this.setAutomation(projectId, {
             stage: "script_plan",
-            message: `优先加速写作：${planTasks.length} 批单元规划正在并行生成；超过目标时间仍继续同一任务`
+            message: `优先加速写作：已保存 ${planTasks.length - pendingPlanTasks.length}/${planTasks.length} 批规划，剩余 ${pendingPlanTasks.length} 批按 ${scriptFastConcurrency} 路并行生成`
           });
-          const planResults = await mapWithConcurrency(planTasks, SCRIPT_FAST_CONCURRENCY, async task => {
+          const planResults = await mapWithConcurrency(pendingPlanTasks, scriptFastConcurrency, async task => {
             const { startNumber, endNumber, batchSize } = task;
             let rawText = "";
             let receipt = null;
@@ -12346,14 +12391,36 @@ class WorkbenchWorkflow {
                   subshotTarget: Math.max(3, Number(item.subshotTarget) || 3)
                 };
               });
+              fastPlanResultCache[fastPlanCacheKey(task)] = { startNumber, endNumber, batch };
+              fastPlanState = fastPlanCacheState(planTasks, fastPlanResultCache);
+              fastPlanResultCache = fastPlanState.cache;
+              shotPlan = fastPlanState.prefix;
+              checkpoint = this.saveScriptCheckpoint(projectId, {
+                ...checkpoint,
+                blueprintAttempt: attempt,
+                storyBible,
+                shotPlan,
+                blueprint: null,
+                fastGeneration: true,
+                fastPlanResultCache,
+                fastPlanBatches: {
+                  total: planTasks.length,
+                  completed: planTasks.length - fastPlanState.pending.length,
+                  failed: false
+                }
+              }, topic, "script_plan", `已保存 ${planTasks.length - fastPlanState.pending.length}/${planTasks.length} 批规划；仅继续缺失批次`);
               return { ok: true, ...task, batch, rawText, receipt };
             } catch (error) {
               return { ok: false, ...task, error, rawText: rawText || String(error?.rawText || ""), receipt };
             }
           });
-          const firstFailureIndex = planResults.findIndex(result => !result.ok);
-          const acceptedResults = firstFailureIndex < 0 ? planResults : planResults.slice(0, firstFailureIndex);
-          shotPlan = acceptedResults.flatMap(result => result.batch || []);
+          fastPlanState = fastPlanCacheState(planTasks, fastPlanResultCache);
+          fastPlanResultCache = fastPlanState.cache;
+          shotPlan = fastPlanState.prefix;
+          const failedTask = planTasks.find(task => !validFastPlanCacheEntry(fastPlanResultCache[fastPlanCacheKey(task)], task)) || null;
+          const failed = failedTask
+            ? planResults.find(result => fastPlanCacheKey(result) === fastPlanCacheKey(failedTask)) || { ...failedTask, error: new Error("并行规划批次没有返回可用结果") }
+            : null;
           checkpoint = this.saveScriptCheckpoint(projectId, {
             ...checkpoint,
             blueprintAttempt: attempt,
@@ -12361,12 +12428,12 @@ class WorkbenchWorkflow {
             shotPlan,
             blueprint: null,
             fastGeneration: true,
-            fastPlanBatches: { total: planTasks.length, completed: acceptedResults.length, failed: firstFailureIndex >= 0 }
-          }, topic, "script_plan", firstFailureIndex < 0
+            fastPlanResultCache,
+            fastPlanBatches: { total: planTasks.length, completed: planTasks.length - fastPlanState.pending.length, failed: Boolean(failed) }
+          }, topic, "script_plan", !failed
             ? `并行完成 ${shotPlan.length}/${unitCount} 个生成单元规划`
-            : `并行规划在 S${String(planResults[firstFailureIndex].startNumber).padStart(2, "0")} 批次停止；前 ${shotPlan.length} 个合格单元已保存`);
-          if (firstFailureIndex >= 0) {
-            const failed = planResults[firstFailureIndex];
+            : `并行规划在 S${String(failed.startNumber).padStart(2, "0")} 批次停止；其他合格批次均已保存`);
+          if (failed) {
             const error = failed.error || new Error("并行单元规划失败");
             throw Object.assign(error, {
               noAutomaticRetry: true,
@@ -12771,7 +12838,7 @@ class WorkbenchWorkflow {
         });
         const unitTextStagePrompt = textStagePromptForProject(project, settings, "scriptUnitGeneration", "units");
         let fastUnitWaveFailed = false;
-        const fastUnitResults = await mapWithConcurrency(pendingUnitTasks, SCRIPT_FAST_CONCURRENCY, async task => {
+        const fastUnitResults = await mapWithConcurrency(pendingUnitTasks, scriptFastConcurrency, async task => {
           const { unitStartIndex, plannedShots, unitStartNumber, unitEndNumber, previousPlan } = task;
           if (fastUnitWaveFailed) {
             return {
@@ -21087,3 +21154,4 @@ module.exports.assertShotReferenceBundle = assertShotReferenceBundle;
 module.exports.renderApprovedVideoPrompt = renderApprovedVideoPrompt;
 module.exports.assertStrictCharacterMediaBindings = assertStrictCharacterMediaBindings;
 module.exports.fastUnitCacheState = fastUnitCacheState;
+module.exports.fastPlanCacheState = fastPlanCacheState;

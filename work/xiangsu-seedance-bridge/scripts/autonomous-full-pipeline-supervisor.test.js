@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { WorkbenchWorkflow, scriptPipelineEntryRoute, fastUnitCacheState } = require("../app/workbench-workflow");
+const { WorkbenchWorkflow, scriptPipelineEntryRoute, fastUnitCacheState, fastPlanCacheState } = require("../app/workbench-workflow");
 
 function projectFixture() {
   return {
@@ -303,4 +303,20 @@ test("fast script resume preserves successful non-contiguous batches and retries
   });
   assert.deepEqual(resumed.prefix.map(item => item.id), ["S01", "S02", "S03", "S04", "S05", "S06"]);
   assert.equal(resumed.pending.length, 0);
+});
+
+test("fast plan resume preserves non-contiguous completed batches", () => {
+  const tasks = [
+    { startNumber: 1, endNumber: 4, batchSize: 4 },
+    { startNumber: 5, endNumber: 8, batchSize: 4 },
+    { startNumber: 9, endNumber: 12, batchSize: 4 }
+  ];
+  const batch = start => Array.from({ length: 4 }, (_, index) => ({ id: `S${String(start + index).padStart(2, "0")}` }));
+  const state = fastPlanCacheState(tasks, {
+    1: { batch: batch(1) },
+    9: { batch: batch(9) }
+  });
+  assert.deepEqual(state.prefix.map(item => item.id), ["S01", "S02", "S03", "S04"]);
+  assert.deepEqual(state.pending.map(item => item.startNumber), [5]);
+  assert.deepEqual(Object.keys(state.cache), ["1", "9"]);
 });

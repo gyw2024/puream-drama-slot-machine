@@ -299,8 +299,9 @@ test("five to ten minute script path matches relay slots and preserves failed se
   assert.match(workflow, /agentCreativeOutputRequired/);
   assert.match(workflow, /buildDirectFastFallbackSegment/);
   assert.match(workflow, /buildDirectFastFallbackSpine/);
-  assert.match(workflow, /mapWithConcurrency\(planTasks, SCRIPT_FAST_CONCURRENCY/);
-  assert.match(workflow, /mapWithConcurrency\(pendingUnitTasks, SCRIPT_FAST_CONCURRENCY/);
+  assert.match(workflow, /mapWithConcurrency\(pendingPlanTasks, scriptFastConcurrency/);
+  assert.match(workflow, /mapWithConcurrency\(pendingUnitTasks, scriptFastConcurrency/);
+  assert.match(workflow, /fastPlanResultCache/);
   assert.match(workflow, /fastUnitResultCache/);
   assert.match(workflow, /let fastUnitWaveFailed = false/);
   assert.match(workflow, /code: "SCRIPT_FAST_WAVE_FUSED"/);
