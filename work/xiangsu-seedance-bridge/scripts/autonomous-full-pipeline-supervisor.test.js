@@ -58,6 +58,27 @@ test("one-click supervisor rewrites a rejected script and continues the same goa
   assert.equal(project.automation.repairJournal[0].code, "FOUNDRY_FORMAL_QUALITY_GATE_FAILED");
 });
 
+test("the supervisor also repairs failures thrown by its own repair actions", async () => {
+  const workflow = Object.create(WorkbenchWorkflow.prototype);
+  workflow.assertOperationActive = () => {};
+  let pipelineCalls = 0;
+  workflow.runPipelineFromStage = async () => {
+    pipelineCalls += 1;
+    if (pipelineCalls === 1) throw Object.assign(new Error("quality"), { code: "FOUNDRY_FORMAL_QUALITY_GATE_FAILED" });
+    return { delivered: true };
+  };
+  const recoveryCodes = [];
+  workflow.recoverAutonomousPipelineFailure = async (_projectId, error) => {
+    recoveryCodes.push(error.code);
+    if (recoveryCodes.length === 1) throw Object.assign(new Error("repair returned malformed json"), { code: "MODEL_JSON_INVALID" });
+    return true;
+  };
+  const result = await workflow.runFullPipeline("P01", { track: false });
+  assert.deepEqual(result, { delivered: true });
+  assert.deepEqual(recoveryCodes, ["FOUNDRY_FORMAL_QUALITY_GATE_FAILED", "MODEL_JSON_INVALID"]);
+  assert.equal(pipelineCalls, 2);
+});
+
 test("external account and billing blockers are never hidden by automatic retries", () => {
   const workflow = Object.create(WorkbenchWorkflow.prototype);
   assert.equal(workflow.autonomousPipelineExternalBlocker({ code: "PUREAM_AUTH_REQUIRED" }), true);

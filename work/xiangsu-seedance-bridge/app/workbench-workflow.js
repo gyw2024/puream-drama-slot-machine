@@ -20356,8 +20356,19 @@ ${shotAnchor}
         });
       } catch (error) {
         this.assertOperationActive(projectId);
-        const recovered = await this.recoverAutonomousPipelineFailure(projectId, error, supervisor);
-        if (!recovered) throw error;
+        let activeError = error;
+        while (true) {
+          this.assertOperationActive(projectId);
+          let recovered;
+          try {
+            recovered = await this.recoverAutonomousPipelineFailure(projectId, activeError, supervisor);
+          } catch (repairError) {
+            activeError = repairError;
+            continue;
+          }
+          if (!recovered) throw activeError;
+          break;
+        }
       }
     }
   }
