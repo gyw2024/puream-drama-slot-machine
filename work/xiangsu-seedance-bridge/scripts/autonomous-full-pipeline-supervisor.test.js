@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { WorkbenchWorkflow, scriptPipelineEntryRoute, fastUnitCacheState, fastPlanCacheState, validateShotPlanBatch, hasPollutedStoryFoundation } = require("../app/workbench-workflow");
+const { WorkbenchWorkflow, scriptPipelineEntryRoute, fastUnitCacheState, fastPlanCacheState, validateShotPlanBatch, hasPollutedStoryFoundation, resumedTextProvider, directorCompileConcurrency } = require("../app/workbench-workflow");
 
 function projectFixture() {
   return {
@@ -305,6 +305,59 @@ test("legacy AI checkpoints detect polluted story foundations before resume", ()
     characters: [{ id: "C01", name: "周桂芳" }, { id: "C02", name: "林野" }],
     scenes: [{ id: "SC01", name: "学校正门" }, { id: "SC02", name: "学校礼堂" }]
   }), false);
+});
+
+test("the persisted failover provider accelerates later director stages in the same goal", () => {
+  const project = {
+    automation: { repairJournal: [{ status: "provider_failover", providerKind: "openai-compatible" }] },
+    license: { imageConcurrency: 32 }
+  };
+  const settings = {
+    textProvider: { kind: "puream-relay", model: "gpt-5-6-sol", baseUrl: "https://relay.example", apiKey: "relay" },
+    textProviderProfiles: {
+      "openai-compatible": { kind: "openai-compatible", model: "deepseek-v4-flash", baseUrl: "https://custom.example", apiKey: "custom" }
+    }
+  };
+  assert.equal(resumedTextProvider(project, settings).kind, "openai-compatible");
+  assert.equal(directorCompileConcurrency(project, settings), 8);
+  assert.equal(directorCompileConcurrency({ license: { imageConcurrency: 32 } }, settings), 4);
+});
+
+test("an orphaned director dialogue turn recompiles only the affected shot and preserves completed plans", async () => {
+  const project = projectFixture();
+  project.shots = Array.from({ length: 30 }, (_, index) => ({
+    id: `S${String(index + 1).padStart(2, "0")}`,
+    number: index + 1,
+    systemVideoPrompt: index < 16 ? `compiled-${index + 1}` : "",
+    agentCameraTakePlan: index < 16 ? { version: 4, sourceFingerprint: `fingerprint-${index + 1}` } : null
+  }));
+  project.shots[16].agentCameraTakePlan = { version: 4, sourceFingerprint: "invalid-s17" };
+  project.shots[16].systemVideoPrompt = "invalid-s17-prompt";
+  const workflow = Object.create(WorkbenchWorkflow.prototype);
+  workflow.store = {
+    getProject: () => structuredClone(project),
+    saveProject: next => { Object.assign(project, structuredClone(next)); return structuredClone(project); }
+  };
+  workflow.appendAutonomousRepairJournal = (_id, entry) => { project.automation.repairJournal.unshift(entry); };
+  const supervisor = { repairs: 0, scriptRewrites: 0, transientRetries: 0, textProviderOverride: null, failuresByCode: new Map() };
+  const error = Object.assign(new Error("镜头 17 导演 Agent 提示词编排失败：Camera-take plan lost 1 dialogue turn(s)"), {
+    code: "AGENT_TAKE_DIALOGUE_ORPHANED",
+    shotId: "S17",
+    turns: [{ sourceIndex: 3, text: "必须保留的对白" }]
+  });
+
+  const recovered = await workflow.recoverAutonomousPipelineFailure(project.id, error, supervisor);
+
+  assert.equal(recovered, true);
+  assert.deepEqual(project.shots.slice(0, 16).map(shot => shot.agentCameraTakePlan?.sourceFingerprint),
+    Array.from({ length: 16 }, (_, index) => `fingerprint-${index + 1}`));
+  assert.equal(project.shots[16].agentCameraTakePlan, null);
+  assert.equal(project.shots[16].systemVideoPrompt, "invalid-s17-prompt");
+  assert.equal(project.shots[17].agentCameraTakePlan, null);
+  assert.equal(project.automation.status, "running");
+  assert.equal(project.automation.stage, "agent_director_shot_repair");
+  assert.equal(project.automation.repairJournal[0].shotId, "S17");
+  assert.equal(project.automation.repairJournal[0].preservedPlanCount, 16);
 });
 
 test("widespread scene loss with polluted foundations rebuilds the story bible before rewriting shots", async () => {

@@ -6418,6 +6418,24 @@ function projectInputMode(project = {}) {
   return String(project?.productionPlan?.inputMode || "ai").trim() === "manual" ? "manual" : "ai";
 }
 
+function resumedTextProvider(project = {}, settings = {}) {
+  const failoverKind = String((project?.automation?.repairJournal || [])
+    .find(entry => entry?.status === "provider_failover")?.providerKind || "").trim();
+  const profile = failoverKind ? settings?.textProviderProfiles?.[failoverKind] : null;
+  if (profile
+    && String(profile.baseUrl || "").trim()
+    && String(profile.model || "").trim()
+    && String(profile.apiKey || "").trim()) {
+    return { ...profile, authSource: "user" };
+  }
+  return settings?.textProvider || {};
+}
+
+function directorCompileConcurrency(project = {}, settings = {}) {
+  const provider = resumedTextProvider(project, settings);
+  return provider?.kind === "puream-relay" ? 4 : 8;
+}
+
 function ideaScriptBootstrapGaps(project = {}) {
   const gaps = [];
   const topics = Array.isArray(project?.ideation?.topics) ? project.ideation.topics : [];
@@ -14566,7 +14584,7 @@ ${shotAnchor}
     const overwriteManual = options.overwriteManual === true;
     const agentH3 = projectVideoEngine(project) === "hailuo-h3";
     if (agentH3) {
-      const compileConcurrency = Math.max(1, Math.min(4, imageBatchConcurrency(project)));
+      const compileConcurrency = directorCompileConcurrency(project, settings);
       this.setAutomation(projectId, {
         stage: "agent_continuity_plan",
         message: `导演 Agent 正在并发编排整部对白、机位段与连续生成块（并发 ${compileConcurrency}，共 ${project.shots.length} 镜）`
@@ -14586,7 +14604,13 @@ ${shotAnchor}
           await this.prepareHailuoAgentShotTakes(projectId, currentProject, currentShot, settings, mode, references);
         } catch (error) {
           throw Object.assign(new Error(`镜头 ${shot.number} 导演 Agent 提示词编排失败：${error.message}`), {
-            code: error.code || "AGENT_CAMERA_TAKE_COMPILE_FAILED"
+            code: error.code || "AGENT_CAMERA_TAKE_COMPILE_FAILED",
+            shotId: error.shotId || shot.id,
+            shotNumber: Number(shot.number) || 0,
+            cause: error,
+            failures: Array.isArray(error.failures) ? error.failures : [],
+            turns: Array.isArray(error.turns) ? error.turns : [],
+            trace: Array.isArray(error.trace) ? error.trace : []
           });
         }
       });
@@ -17526,6 +17550,7 @@ ${shotAnchor}
       stage: "agent_continuity_plan",
       message: `导演 Agent 正在编排 S${String(shot.number).padStart(2, "0")} 的对白轮次、机位段与连续生成块`
     });
+    const directorTextProvider = resumedTextProvider(project, settings);
     let plan;
     try {
       plan = await this.runAgentSkill("director.continuity_plan", {
@@ -17533,7 +17558,7 @@ ${shotAnchor}
         project,
         shot,
         basePlan,
-        textProvider: settings.textProvider,
+        textProvider: directorTextProvider,
         messages: cameraTakeCompilerMessages(project, shot, basePlan),
         textOptions: this.productionTextOptions(projectId, `director_continuity_${shotId}`, {
           json: true,
@@ -19256,7 +19281,7 @@ ${shotAnchor}
       // provider block, crop each block timeline, and compile every final H3
       // prompt before the first paid video submission. A late-shot defect must
       // never be discovered only after earlier shots consumed credits.
-      const compileConcurrency = Math.max(1, Math.min(4, imageBatchConcurrency(project)));
+      const compileConcurrency = directorCompileConcurrency(project, settings);
       this.setAutomation(projectId, {
         stage: "shot_videos",
         message: `导演 Agent 正在预编排整部对白、机位段与连续 H3 生成块（并发 ${compileConcurrency}，共 ${shots.length} 镜）`
@@ -20851,6 +20876,41 @@ ${shotAnchor}
     const count = (supervisor.failuresByCode.get(code) || 0) + 1;
     supervisor.failuresByCode.set(code, count);
     if (this.autonomousPipelineExternalBlocker(error)) return false;
+    const directorStructureFailure = /^AGENT_.*(?:CONTINUITY|CAMERA_TAKE|TAKE_DIALOGUE)/.test(code);
+    if (directorStructureFailure) {
+      const project = this.store.getProject(projectId);
+      const nestedShotId = String(error?.shotId || error?.cause?.shotId || error?.cause?.cause?.shotId || "").trim();
+      const messageShotNumber = Number(String(error?.message || "").match(/(?:镜头|S)\s*0*(\d+)/i)?.[1]) || 0;
+      const affectedShot = (project.shots || []).find(shot => String(shot.id || "") === nestedShotId)
+        || (project.shots || []).find(shot => Number(shot.number) === messageShotNumber);
+      if (affectedShot) {
+        project.shots = project.shots.map(shot => shot.id === affectedShot.id
+          ? {
+              ...shot,
+              agentCameraTakePlan: null
+            }
+          : shot);
+        project.automation = {
+          ...(project.automation || {}),
+          status: "running",
+          stage: "agent_director_shot_repair",
+          message: `S${String(affectedShot.number).padStart(2, "0")} 导演结构未保留全部对白，Agent 已保留其他镜头并只重新编排本镜`,
+          errorCode: "",
+          recoverableFailure: false,
+          updatedAt: new Date().toISOString()
+        };
+        this.store.saveProject(project);
+        this.appendAutonomousRepairJournal(projectId, {
+          attempt: count,
+          code,
+          status: "director_shot_recompile",
+          shotId: affectedShot.id,
+          shotNumber: Number(affectedShot.number) || 0,
+          preservedPlanCount: (project.shots || []).filter(shot => shot.id !== affectedShot.id && shot.agentCameraTakePlan).length
+        });
+        return true;
+      }
+    }
     if (code === "SCRIPT_PLAN_CHECKPOINT_CONTRACT_FAILED") {
       const project = this.store.getProject(projectId);
       const checkpoint = project.script?.generationCheckpoint;
@@ -21424,3 +21484,5 @@ module.exports.assertStrictCharacterMediaBindings = assertStrictCharacterMediaBi
 module.exports.fastUnitCacheState = fastUnitCacheState;
 module.exports.fastPlanCacheState = fastPlanCacheState;
 module.exports.hasPollutedStoryFoundation = hasPollutedStoryFoundation;
+module.exports.resumedTextProvider = resumedTextProvider;
+module.exports.directorCompileConcurrency = directorCompileConcurrency;
