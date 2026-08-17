@@ -19,7 +19,7 @@ function createIntegrityGuard({
   fileSystem = fs,
   physicalFileSystem = physicalFs
 } = {}) {
-  const state = { checkedAt: "", tampered: false, reasons: [], files: new Map(), manualReasons: new Set(), timer: null };
+  const state = { checkedAt: "", tampered: false, reasons: [], files: new Map(), metadata: new Map(), fileReasons: new Map(), manualReasons: new Set(), timer: null };
   const isPackagedAsar = root => /app\.asar$/i.test(String(root || ""));
   const isPhysicalFile = filePath => {
     try {
@@ -49,10 +49,21 @@ function createIntegrityGuard({
     const reasons = [...state.manualReasons];
     for (const filePath of current) {
       try {
+        const stat = (isPackagedAsar(filePath) ? physicalFileSystem : fileSystem).statSync(filePath);
+        const metadata = `${stat.size}:${stat.mtimeMs}`;
+        if (state.files.has(filePath) && state.metadata.get(filePath) === metadata) {
+          if (state.fileReasons.has(filePath)) reasons.push(state.fileReasons.get(filePath));
+          continue;
+        }
         const digest = sha256(filePath, isPackagedAsar(filePath) ? physicalFileSystem : fileSystem);
         const previous = state.files.get(filePath);
-        if (previous && previous !== digest) reasons.push(`core file changed: ${path.basename(filePath)}`);
+        if (previous && previous !== digest) {
+          const reason = `core file changed: ${path.basename(filePath)}`;
+          state.fileReasons.set(filePath, reason);
+          reasons.push(reason);
+        }
         if (!previous) state.files.set(filePath, digest);
+        state.metadata.set(filePath, metadata);
       } catch { reasons.push(`core file unavailable: ${path.basename(filePath)}`); }
     }
     if (app?.isPackaged) {

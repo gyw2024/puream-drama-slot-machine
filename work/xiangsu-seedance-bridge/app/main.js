@@ -23,6 +23,7 @@ const { DramaLicenseClient, licenseBypassAllowed, DEFAULT_LICENSE_BASE_URL } = r
 const { createIntegrityGuard } = require("./integrity-guard");
 const { isActiveVideoJob } = require("./workbench-status");
 const { installAssetProtocol, registerAssetScheme } = require("./secure-asset-protocol");
+const { clearGpuFallback, configureRendererAcceleration, recordGpuCrash } = require("./rendering-policy");
 const { AdaptiveDramaKernel } = require("./foundry/kernel");
 const { relocateCopiedWorkbenchData } = require("./foundry/storage-relocation");
 const { McpAppController } = require("./mcp/app-controller");
@@ -44,10 +45,22 @@ registerAssetScheme(protocol);
 // Keep the Windows taskbar identity aligned with the packaged app and desktop shortcut.
 if (process.platform === "win32") app.setAppUserModelId(APP_USER_MODEL_ID);
 
-// Windows GPU process crashes (exit_code=34) leave only the title-bar overlay on a black client area.
-// Disable hardware acceleration before ready so the workbench stays software-composited.
-app.disableHardwareAcceleration();
-app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+// Prefer hardware composition for image-heavy workbenches. If Chromium reports
+// a real GPU crash, the next launch automatically uses a time-bounded software
+// fallback instead of leaving the user on a black client area.
+const rendererAcceleration = configureRendererAcceleration(app);
+let gpuRecoveryTriggered = false;
+app.on("child-process-gone", (_event, details = {}) => {
+  const processType = String(details.type || details.processType || "").toLowerCase();
+  const reason = String(details.reason || "").toLowerCase();
+  if (processType !== "gpu" || !["crashed", "abnormal-exit", "oom"].includes(reason)) return;
+  if (rendererAcceleration.mode !== "hardware" || rendererAcceleration.forced || gpuRecoveryTriggered) return;
+  gpuRecoveryTriggered = true;
+  try { recordGpuCrash(rendererAcceleration, details); }
+  catch (error) { console.error("[workbench] failed to persist GPU fallback", error); }
+  app.relaunch();
+  app.exit(0);
+});
 
 const bridge = new BridgeClient();
 const simpleBridge = new BridgeClient();
@@ -503,6 +516,10 @@ function createWindow() {
     mainWindow.webContents.once("did-finish-load", () => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
       mainWindow.webContents.setZoomFactor(1);
+      if (rendererAcceleration.mode === "hardware") {
+        const stableTimer = setTimeout(() => clearGpuFallback(rendererAcceleration), 30_000);
+        stableTimer.unref?.();
+      }
     });
   }
   if (captureScenario === "hailuoquick") {
@@ -1942,6 +1959,8 @@ ipcMain.handle("app:defaults", () => {
     appVersion: app.getVersion(),
     captureMode: Boolean(!app.isPackaged && process.env.DRAMA_SLOT_CAPTURE_PATH),
     isPackaged: Boolean(app.isPackaged),
+    renderingMode: rendererAcceleration.mode,
+    renderingReason: rendererAcceleration.reason,
     outputDir: path.join(app.getPath("videos"), "纯梦短剧老虎机"),
     providerKind,
     providerName: providerDisplayName(providerKind),
@@ -2277,7 +2296,7 @@ ipcMain.handle("workbench:account-switch-status", () => {
   } catch (error) { return publicError(error); }
 });
 
-ipcMain.handle("workbench:sync-video-jobs", async () => {
+ipcMain.handle("workbench:sync-video-jobs", async (_event, options = {}) => {
   if (videoJobSyncRequest) return videoJobSyncRequest;
   videoJobSyncRequest = (async () => {
     try {
@@ -2579,8 +2598,7 @@ ipcMain.handle("simple:call", async (_event, method, args = []) => {
 
 ipcMain.handle("workbench:list-projects", () => {
   try {
-    const { store, workflow } = requireWorkbench();
-    workflow.reconcileDetachedAutomations();
+    const { store } = requireWorkbench();
     return { ok: true, projects: store.listProjects() };
   }
   catch (error) { return publicError(error); }

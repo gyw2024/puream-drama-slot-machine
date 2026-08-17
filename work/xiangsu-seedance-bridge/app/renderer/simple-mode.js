@@ -21,6 +21,7 @@ const state = {
   busy: false,
   busyHidden: false,
   pollTimer: null,
+  projectRenderSignature: "",
   libraryAssets: [],
   toastTimer: null,
   confirmResolve: null
@@ -485,13 +486,32 @@ function renderAll() {
   renderFinal();
   renderTasks();
   renderSettings();
+  state.projectRenderSignature = simpleProjectRenderSignature(state.project);
   document.body.dataset.simpleModeReady = "true";
+}
+
+function simpleProjectRenderSignature(project) {
+  if (!project) return "";
+  const jobs = Array.isArray(project.jobs) ? project.jobs : [];
+  return [
+    project.id,
+    project.updatedAt,
+    project.status,
+    project.automation?.status,
+    project.automation?.updatedAt,
+    jobs.length,
+    jobs[0]?.updatedAt,
+    project.candidates?.length,
+    project.finalVideoPath
+  ].join("|");
 }
 
 async function refreshCurrent({ quiet = false } = {}) {
   if (!state.project?.id) return;
   try {
     const result = resultOrThrow(await api("getProject", state.project.id));
+    const nextSignature = simpleProjectRenderSignature(result.project);
+    if (nextSignature === state.projectRenderSignature) return;
     state.project = result.project;
     if (!quiet || !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) renderAll();
     else {
@@ -630,7 +650,11 @@ async function initialize() {
     refreshLicenseStatus();
     refreshWallet();
     window.dramaSlot.checkUpdate().catch(() => {});
-    state.pollTimer = setInterval(() => refreshCurrent({ quiet: true }), 2500);
+    const poll = async () => {
+      await refreshCurrent({ quiet: true });
+      state.pollTimer = setTimeout(poll, isActive() ? 2500 : document.hidden ? 30_000 : 15_000);
+    };
+    state.pollTimer = setTimeout(poll, isActive() ? 2500 : 15_000);
   } catch (error) {
     showToast(`简易模式初始化失败：${error.message}`, "error");
     document.body.dataset.simpleModeReady = "error";

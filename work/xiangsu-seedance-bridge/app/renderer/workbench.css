@@ -131,9 +131,9 @@ button { color: inherit; }
 .danger-button:disabled { opacity: .4; cursor: wait; transform: none; }
 .topbar .danger-button { border-color:rgba(255,173,41,.55); background:linear-gradient(180deg,rgba(92,54,10,.9),rgba(43,27,8,.94)); color:#ffd58f; box-shadow:inset 0 0 0 1px rgba(255,199,91,.08); }
 .topbar .danger-button:hover:not(:disabled) { border-color:#ffb42b; color:#fff0ca; box-shadow:0 0 18px rgba(255,157,24,.18); }
-.draw-button { position: relative; isolation: isolate; overflow: hidden; border-color: #b66d10 !important; background: linear-gradient(135deg,#5a3106,#f39a14 54%,#8a4a08) !important; color: #fff0ca !important; box-shadow: 0 0 0 1px rgba(255,181,43,.22),0 0 18px rgba(255,145,15,.24),inset 0 1px 0 rgba(255,255,255,.16) !important; animation: drawButtonPulse 1.65s ease-in-out infinite; }
-.draw-button::before { content: ""; width: 16px; height: 16px; flex: 0 0 16px; background: url("../assets/icons/slot.png") center/contain no-repeat; filter: drop-shadow(0 0 5px rgba(255,220,142,.75)); animation: drawIconBounce 1.15s ease-in-out infinite; }
-.draw-button::after { content: ""; position: absolute; z-index: -1; inset: -40% auto -40% -45%; width: 32%; transform: rotate(16deg); background: linear-gradient(90deg,transparent,rgba(255,255,255,.36),transparent); animation: drawShimmer 2.15s ease-in-out infinite; }
+.draw-button { position: relative; isolation: isolate; overflow: hidden; border-color: #b66d10 !important; background: linear-gradient(135deg,#5a3106,#f39a14 54%,#8a4a08) !important; color: #fff0ca !important; box-shadow: 0 0 0 1px rgba(255,181,43,.22),0 0 18px rgba(255,145,15,.24),inset 0 1px 0 rgba(255,255,255,.16) !important; }
+.draw-button::before { content: ""; width: 16px; height: 16px; flex: 0 0 16px; background: url("../assets/icons/slot.png") center/contain no-repeat; filter: drop-shadow(0 0 5px rgba(255,220,142,.75)); }
+.draw-button::after { content: none; }
 .draw-button:hover { transform: translateY(-2px) scale(1.015); filter: brightness(1.15); box-shadow: 0 0 0 1px rgba(255,199,91,.38),0 0 26px rgba(255,153,17,.4) !important; }
 .draw-button:disabled { animation: none; filter: grayscale(.6); box-shadow: none !important; }
 .draw-button:disabled::before, .draw-button:disabled::after { animation: none; }
@@ -243,7 +243,7 @@ button { color: inherit; }
 .next-action-guide b { display:block; color:#dff9e6; font-size:12px; }
 .next-action-guide p { margin:3px 0 0; color:#8ea697; font-size:10px; line-height:1.45; }
 .next-action-guide button { min-height:36px; padding:0 12px; border:1px solid rgba(72,244,138,.42); border-radius:8px; background:#102218; color:#95efb4; font-size:10px; cursor:pointer; }
-.guided-next-action { position:relative; z-index:3; border-color:#48f48a !important; box-shadow:0 0 0 2px rgba(72,244,138,.18),0 0 20px rgba(72,244,138,.28) !important; animation:guidedActionPulse 1.8s ease-in-out infinite; }
+.guided-next-action { position:relative; z-index:3; border-color:#48f48a !important; box-shadow:0 0 0 2px rgba(72,244,138,.18),0 0 20px rgba(72,244,138,.28) !important; }
 @keyframes guidedActionPulse { 0%,100% { filter:none; } 50% { filter:brightness(1.16); } }
 @media (prefers-reduced-motion:reduce) { .guided-next-action { animation:none; } }
 .project-strategy-bar { position: relative; z-index: 1; min-height: 56px; margin-bottom: 16px; padding: 10px 12px; display: grid; grid-template-columns: minmax(140px,.78fr) repeat(4,minmax(96px,.52fr)) minmax(210px,1.25fr) auto; gap: 12px; align-items: center; border-color: #4a3a24; background: linear-gradient(90deg,rgba(31,24,14,.98),rgba(13,13,11,.98)); backdrop-filter: blur(9px); }
@@ -654,7 +654,7 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
 .project-cost-bar { position: relative; z-index: 1; margin: 0 0 12px; padding: 10px 12px; display: grid; grid-template-columns: minmax(180px,.9fr) minmax(280px,1.4fr) auto; align-items: center; gap: 12px; border: 1px solid rgba(255,173,41,.32); border-radius: 10px; background: linear-gradient(135deg,rgba(52,34,12,.96),rgba(14,12,9,.98)); backdrop-filter: blur(8px); }
 .asset-card { position: relative; }
 .asset-card .drawing-banner, .candidate-card .drawing-banner, .shot-card .drawing-banner, .video-card .drawing-banner { display: none; }
-.asset-card.is-drawing, .candidate-card.is-drawing, .shot-card.is-drawing, .video-card.is-drawing, .video-card.has-active-task { outline: 2px solid rgba(255,173,41,.85); box-shadow: 0 0 0 1px rgba(255,173,41,.35), 0 0 28px rgba(255,145,15,.28); animation: drawingPulse 1.4s ease-in-out infinite; }
+.asset-card.is-drawing, .candidate-card.is-drawing, .shot-card.is-drawing, .video-card.is-drawing, .video-card.has-active-task { outline: 2px solid rgba(255,173,41,.85); box-shadow: 0 0 0 1px rgba(255,173,41,.35), 0 0 28px rgba(255,145,15,.28); }
 .asset-card.is-drawing .drawing-banner, .candidate-card.is-drawing .drawing-banner, .shot-card.is-drawing .drawing-banner, .video-card.is-drawing .drawing-banner, .video-card.has-active-task .drawing-banner { display: inline-flex; align-items: center; gap: 7px; position: absolute; top: 10px; right: 10px; z-index: 2; padding: 4px 9px; border-radius: 999px; background: linear-gradient(135deg,#7a3f05,#ffb42b); color: #1a1005; font-size: 10px; font-weight: 800; }
 .asset-card.is-drawing .drawing-banner i, .candidate-card.is-drawing .drawing-banner i, .shot-card.is-drawing .drawing-banner i, .video-card.is-drawing .drawing-banner i, .video-card.has-active-task .drawing-banner i { width: 8px; height: 8px; border-radius: 50%; background: #fff; box-shadow: 0 0 8px #fff; animation: drawingDot 0.9s ease-in-out infinite; }
 .drawing-status-bar { display: none; position: sticky; top: 0; z-index: 8; margin: 0 0 10px; padding: 8px 12px; align-items: center; gap: 8px; border: 1px solid rgba(255,173,41,.55); border-radius: 10px; background: linear-gradient(90deg,rgba(122,63,5,.92),rgba(20,14,6,.96)); color: #ffe0a8; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
@@ -975,6 +975,9 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
   .stage-panel.active, .project-dialog[open], .asset-viewer-dialog[open], .draw-button, .draw-button::before, .draw-button::after, .job-progress.indeterminate i, .asset-avatar-work i, .asset-tile-spinner, .frame-loading-spinner, .asset-card.is-drawing, .candidate-card.is-drawing, .shot-card.is-drawing, .video-card.is-drawing, .drawing-banner i, .drawing-status-bar i { animation: none !important; }
   .outline-button, .primary-button, .icon-button, .text-button, .topic-card, .toast { transition: none !important; }
 }
+
+/* Dense project pages must remain cheap even on the automatic software fallback. */
+.project-strategy-bar, .project-cost-bar, .candidate-stage-head, .sidebar-library-panel { backdrop-filter: none; }
 
 .license-gate {
   position: fixed;

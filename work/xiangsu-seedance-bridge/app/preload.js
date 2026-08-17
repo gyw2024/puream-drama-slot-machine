@@ -49,7 +49,7 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     createRechargeOrder: amountYuan => ipcRenderer.invoke("license:payment-create", amountYuan),
     rechargeOrderStatus: orderNo => ipcRenderer.invoke("license:payment-status", orderNo),
     openExternal: url => ipcRenderer.invoke("shell:open-external", url),
-    syncVideoJobs: () => ipcRenderer.invoke("workbench:sync-video-jobs"),
+    syncVideoJobs: options => ipcRenderer.invoke("workbench:sync-video-jobs", options || {}),
     accountSwitchStatus: () => ipcRenderer.invoke("workbench:account-switch-status"),
     beginAccountSwitch: projectId => ipcRenderer.invoke("workbench:begin-account-switch", projectId),
     verifyAccountSwitch: () => ipcRenderer.invoke("workbench:verify-account-switch"),

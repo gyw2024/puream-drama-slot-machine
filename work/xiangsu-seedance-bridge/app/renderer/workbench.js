@@ -18,6 +18,11 @@ const state = {
   drawingStages: new Set(),
   pollTimer: null,
   polling: false,
+  backgroundVideoJobs: [],
+  backgroundLastHealthAt: 0,
+  backgroundLastWalletAt: 0,
+  backgroundLastVideoSyncAt: 0,
+  backgroundLastAccountAt: 0,
   lastPollErrorToastAt: 0,
   scriptPollTimer: null,
   scriptPolling: false,
@@ -6130,8 +6135,13 @@ async function startBackgroundServices() {
   await loadVoiceLibrary(false).catch(error => console.error("voice library preload failed", error));
   await refreshAccountSwitch(false).catch(error => console.error("account state preload failed", error));
   await refreshHealth(!state.appDefaults?.captureMode).catch(error => console.error("health preload failed", error));
+  state.backgroundLastHealthAt = Date.now();
+  state.backgroundLastWalletAt = Date.now();
+  state.backgroundLastAccountAt = Date.now();
   if (!state.appDefaults?.captureMode) {
-    const syncResult = await api.workbench.syncVideoJobs().catch(error => ({ ok: false, message: error?.message || String(error) }));
+    const syncResult = await api.workbench.syncVideoJobs({ force: true }).catch(error => ({ ok: false, message: error?.message || String(error) }));
+    state.backgroundLastVideoSyncAt = Date.now();
+    state.backgroundVideoJobs = Array.isArray(syncResult?.jobs) ? syncResult.jobs : [];
     const currentHasActiveJob = Array.isArray(syncResult?.jobs) && syncResult.jobs.some(job => job.projectId === state.project?.id);
     if (currentHasActiveJob && state.project) await loadProject(state.project.id, false).catch(() => {});
   }
@@ -6139,16 +6149,34 @@ async function startBackgroundServices() {
     if (state.polling) return;
     state.polling = true;
     try {
-      await refreshHealth(false);
-      await refreshWallet(false);
-      const syncResult = await api.workbench.syncVideoJobs();
-      if (state.accountSwitch?.status === "draining") await refreshAccountSwitch(true);
-      else {
-        await refreshAccountSwitch(false);
-        if (state.accountSwitch?.status === "awaiting_login") await verifyCurrentAccountSwitch(true);
+      const now = Date.now();
+      const automationActive = automationIsActive(state.project);
+      const accountActive = state.accountSwitch && state.accountSwitch.status !== "idle";
+      const queryableVideo = state.backgroundVideoJobs.some(job => Boolean(job.taskId) || job.status === "download_pending");
+      if (now - state.backgroundLastHealthAt >= (automationActive ? 12_000 : 30_000)) {
+        await refreshHealth(false);
+        state.backgroundLastHealthAt = now;
+      }
+      if (now - state.backgroundLastWalletAt >= 60_000) {
+        await refreshWallet(false);
+        state.backgroundLastWalletAt = now;
+      }
+      let syncResult = { ok: true, jobs: state.backgroundVideoJobs, cached: true };
+      if (now - state.backgroundLastVideoSyncAt >= (queryableVideo ? 6_000 : 45_000)) {
+        syncResult = await api.workbench.syncVideoJobs();
+        state.backgroundLastVideoSyncAt = now;
+        if (Array.isArray(syncResult?.jobs)) state.backgroundVideoJobs = syncResult.jobs;
+      }
+      if (accountActive || now - state.backgroundLastAccountAt >= 60_000) {
+        if (state.accountSwitch?.status === "draining") await refreshAccountSwitch(true);
+        else {
+          await refreshAccountSwitch(false);
+          if (state.accountSwitch?.status === "awaiting_login") await verifyCurrentAccountSwitch(true);
+        }
+        state.backgroundLastAccountAt = now;
       }
       const projectRunning = automationIsActive(state.project) || ["paused_account", "paused_remote"].includes(state.project?.automation?.status);
-      const currentHasActiveJob = Array.isArray(syncResult?.jobs) && syncResult.jobs.some(job => job.projectId === state.project?.id);
+      const currentHasActiveJob = state.backgroundVideoJobs.some(job => job.projectId === state.project?.id);
       if (state.project && (projectRunning || currentHasActiveJob)) {
         const previousOperationStatus = state.project.automation?.status;
         const projectChanged = await loadProject(state.project.id, false);
