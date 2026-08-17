@@ -20245,7 +20245,10 @@ ${shotAnchor}
 
   archiveAutonomousScriptRepair(projectId, error, rewriteNumber) {
     const project = this.store.getProject(projectId);
-    const dir = this.store.assetDir(projectId, "script-history");
+    // Script history is provenance, not a production-media category. Keep it
+    // under the project boundary without routing it through the media allowlist.
+    const dir = path.join(this.store.projectDir(projectId), "script-history");
+    fs.mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const base = `${stamp}-agent-repair-${rewriteNumber}`;
     const scriptPath = path.join(dir, `${base}.md`);
