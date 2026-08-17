@@ -295,11 +295,11 @@ label { display: grid; gap: 7px; color: #aaa99f; font-size: 11px; }
 
 @media (max-width: 900px) {
   .app-shell { grid-template: 64px minmax(0,1fr) / 72px minmax(0,1fr); }
-  .topbar { grid-template-columns: 46px minmax(150px,1fr) auto; gap:7px; padding:6px 46px 6px 8px; }
-  .brand > span:nth-child(2), .brand em, .project-tools label, .top-actions #pauseRun, .top-actions .wallet-button, .top-actions .top-mode-switch { display:none; }
+  .topbar { grid-template-columns: 46px minmax(150px,1fr) auto; gap:7px; padding:6px 158px 6px 8px; }
+  .brand > span:nth-child(2), .brand em, .project-tools label, .top-actions #pauseRun, .top-actions .wallet-button { display:none; }
   .brand-icon { width:42px; height:42px; }
   .project-tools { gap:5px; }
-  .project-tools select { width:100%; min-width:0; }
+  .project-tools select { flex:1 1 0; width:0; min-width:0; }
   .project-tools .icon-button { width:34px; min-width:34px; padding:0; }
   .project-tools #deleteProject, .project-tools #restoreProject { display:none; }
   .top-actions #runAll { width:38px; min-width:38px; padding:0; overflow:hidden; font-size:0; }
