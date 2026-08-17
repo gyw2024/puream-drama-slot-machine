@@ -890,9 +890,11 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
 @media (max-width: 1450px) {
   .app { grid-template-columns: 205px minmax(720px,1fr) 280px; }
   .topbar { gap: 14px; padding-right: 150px; }
-  .brand { min-width: 280px; }
+  .brand { min-width: 250px; flex-basis:250px; }
   .brand p { letter-spacing: 1px; }
-  .project-switcher { max-width: 330px; }
+  .project-switcher { flex-basis:240px; min-width:220px; max-width:330px; }
+  .project-switcher label { display:none; }
+  .project-switcher select { min-width:220px; }
   .top-status .outline-button { padding: 0 9px; font-size: 10px; }
   .top-status #accountSwitchShortcut,.top-status #startBridge { display:none; }
   .top-status .bridge-badge { display:none; }
