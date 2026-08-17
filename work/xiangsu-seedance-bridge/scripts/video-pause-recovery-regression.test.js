@@ -8,6 +8,7 @@ const test = require("node:test");
 
 const { WorkbenchStore } = require("../app/workbench-store");
 const { WorkbenchWorkflow } = require("../app/workbench-workflow");
+const videoStatus = require("../app/workbench-status");
 
 function fixture(title = "视频暂停恢复测试") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-video-pause-recovery-"));
@@ -122,6 +123,44 @@ test("restart recovery migrates legacy paused failures and only queries their or
   assert.match(saved.automation.message, /3 个视频已全部取回/);
   assert.doesNotMatch(saved.automation.message, /剧本写作/);
   assert.ok(saved.automation.progress.items.every(item => item.status === "completed" && item.message === "已取回"));
+});
+
+test("paused recovery distinguishes final videos from internal generation blocks", async t => {
+  const sample = fixture("新漫剧19恢复统计");
+  t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
+  const current = sample.store.getProject(sample.project.id);
+  current.productionRevision = "revision-current";
+  current.shots = [{ id: "S01", number: 1, duration: 8 }];
+  current.automation = { status: "paused_user", stage: "shot_videos", errorCode: "PIPELINE_PAUSED" };
+  sample.store.saveProject(current);
+  const finalJob = sample.store.addJob(sample.project.id, {
+    type: "character_video", entityType: "character", entityId: "C01", taskId: "character-final", status: "completed"
+  });
+  const blockPath = path.join(sample.root, "shot-block.mp4");
+  fs.writeFileSync(blockPath, "video");
+  const blockJob = sample.store.addJob(sample.project.id, {
+    type: "shot_video", entityType: "shot", entityId: "S01", taskId: "shot-block", status: "completed",
+    productionRevision: "revision-current", internalGenerationBlock: true, internalGenerationBlockFilePath: blockPath
+  });
+
+  await sample.workflow.reconcileOrphanedVideoJobs(sample.project.id);
+
+  const saved = sample.store.getProject(sample.project.id);
+  assert.deepEqual(saved.automation.recoveredVideoSummary, {
+    submitted: 2,
+    pending: 0,
+    completed: 2,
+    finalVideos: 1,
+    generationBlocks: 1,
+    updatedAt: saved.automation.recoveredVideoSummary.updatedAt
+  });
+  assert.match(saved.automation.message, /1 个成品视频已入库，1 个分镜生成片段已保存/);
+  assert.equal(saved.jobs.find(item => item.id === finalJob.id)?.taskId, "character-final");
+  assert.equal(saved.jobs.find(item => item.id === blockJob.id)?.taskId, "shot-block");
+  const state = videoStatus.shotVideoState(saved, saved.shots[0]);
+  assert.equal(state.key, "partial");
+  assert.equal(state.recoveredBlocks.length, 1);
+  assert.match(state.detail, /不会重复提交已完成 taskId/);
 });
 
 test("pipeline pause reports the actual stage and leaves script state untouched", async t => {

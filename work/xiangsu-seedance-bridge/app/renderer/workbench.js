@@ -1223,7 +1223,7 @@ function renderPipelineVideoStatus(summary = videoStatusApi.summarizeShotVideos(
 
   const videoDescription = summary.allReady
     ? `${summary.ready}/${summary.total} 已全部就绪`
-    : `${summary.ready}/${summary.total} 已就绪${summary.generating ? ` · ${summary.generating} 生成中` : ""}${summary.failed ? ` · ${summary.failed} 失败` : ""}`;
+    : `${summary.ready}/${summary.total} 已就绪${summary.partial ? ` · ${summary.partial} 镜已有源片段` : ""}${summary.generating ? ` · ${summary.generating} 生成中` : ""}${summary.failed ? ` · ${summary.failed} 失败` : ""}`;
   const videoState = summary.allReady ? "ready" : summary.failed ? "blocked" : summary.generating ? "processing" : "pending";
   setPipelineStepStatus("videos", videoState, videoDescription);
 
@@ -2244,8 +2244,8 @@ function videoCardView(project, shot) {
     aspectStyle: ratio.replace(":", " / "),
     emptyText: videoState.key === "generating"
       ? videoStatusApi.videoJobStage(videoState.job)
-      : videoState.key === "failed" ? videoState.label : `镜头 ${shot.number} 等待抽卡`,
-    drawLabel: video?.filePath ? "再抽一次" : videoState.key === "failed" ? "失败后重抽" : "抽卡：本镜视频",
+      : videoState.key === "failed" || videoState.key === "partial" ? videoState.label : `镜头 ${shot.number} 等待抽卡`,
+    drawLabel: video?.filePath ? "再抽一次" : videoState.key === "failed" ? "失败后重抽" : videoState.key === "partial" ? "继续本镜制作" : "抽卡：本镜视频",
     candidateCount,
     qualityLabel,
     drawing: isEntityDrawing("shot", shot.id) || (taskJob && videoStatusApi.isActiveVideoJob(taskJob)),
@@ -3145,7 +3145,7 @@ function renderOverview() {
   })[project.status] || "生产中";
   $("#progressOverview").innerHTML = [
     ["人物", `${project.characters.length}`, ""], ["场景", `${project.scenes.length}`, ""],
-    ["分镜", `${project.shots.length}`, ""], ["视频", `${videoSummary.ready}/${project.shots.length}`, ""],
+    ["分镜", `${project.shots.length}`, ""], ["视频", `${videoSummary.ready}/${project.shots.length}${videoSummary.partial ? ` · 源片${videoSummary.partial}` : ""}`, ""],
     ["文案费", costCategoryLabel(summary.byCategory?.text, "text"), costCategoryTitle(summary.byCategory?.text, "文案")],
     ["图片费", costCategoryLabel(summary.byCategory?.image, "image"), costCategoryTitle(summary.byCategory?.image, "图片")],
     ["视频费", costCategoryLabel(summary.byCategory?.video, "video"), costCategoryTitle(summary.byCategory?.video, "视频")],

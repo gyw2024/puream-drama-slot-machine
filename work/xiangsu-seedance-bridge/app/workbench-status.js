@@ -149,11 +149,25 @@ function isActiveVideoJob(job) {
     ));
   }
 
+  function recoveredShotVideoBlocks(project, shot) {
+    const activeRevision = project?.productionRevision || "";
+    return (project?.jobs || []).filter(item =>
+      item.entityType === "shot"
+      && item.entityId === shot?.id
+      && item.type === "shot_video"
+      && (item.productionRevision || "") === activeRevision
+      && (item.internalGenerationBlock === true || item.internalTake === true)
+      && String(item.status || "").toLowerCase() === "completed"
+      && Boolean(item.internalGenerationBlockFilePath || item.internalTakeFilePath)
+    ).sort((a, b) => String(a.updatedAt || a.createdAt || "").localeCompare(String(b.updatedAt || b.createdAt || "")));
+  }
+
   function shotVideoState(project, shot, settings = null) {
     const candidate = shotVideoCandidate(project, shot, settings);
     const failedCandidate = failedShotVideoCandidate(project, shot, settings);
     const unverifiedCandidate = unverifiedShotVideoCandidate(project, shot, settings);
     const job = shotVideoJob(project, shot);
+    const recoveredBlocks = recoveredShotVideoBlocks(project, shot);
     const activeJob = isActiveVideoJob(job) ? job : null;
     if (candidate) {
       return {
@@ -191,6 +205,20 @@ function isActiveVideoJob(job) {
       };
     }
 
+    if (recoveredBlocks.length) {
+      const rejectedCount = recoveredBlocks.filter(item => item.localQualityRejected === true).length;
+      return {
+        key: "partial",
+        label: `已取回 ${recoveredBlocks.length} 段`,
+        candidate: null,
+        job,
+        activeJob: null,
+        recoveredBlocks,
+        progress: videoJobProgress({ status: "completed" }),
+        detail: `上游源片段已经保存在本机${rejectedCount ? `，其中 ${rejectedCount} 段保留为失败历史` : ""}；继续任务时只补齐缺失片段并本地合成，不会重复提交已完成 taskId`
+      };
+    }
+
     const status = String(job?.status || "").toLowerCase();
     const progress = videoJobProgress(job);
     if (isActiveVideoJob(job)) {
@@ -224,6 +252,7 @@ function isActiveVideoJob(job) {
       total: states.length,
       ready: 0,
       generating: 0,
+      partial: 0,
       failed: 0,
       missing: 0,
       states
@@ -250,6 +279,7 @@ function isActiveVideoJob(job) {
     failedShotVideoCandidate,
     unverifiedShotVideoCandidate,
     shotVideoJob,
+    recoveredShotVideoBlocks,
     shotVideoState,
     summarizeShotVideos
   };

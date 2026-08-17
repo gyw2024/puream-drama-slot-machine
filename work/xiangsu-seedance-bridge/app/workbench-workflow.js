@@ -11555,16 +11555,29 @@ class WorkbenchWorkflow {
       const submitted = (project.jobs || []).filter(job => ["shot_video", "character_video"].includes(job.type) && job.taskId);
       const pending = submitted.filter(job => ["queued", "pending", "submitted", "running", "processing", "waiting", "remote_pending", "download_pending"].includes(String(job.status || "").toLowerCase()));
       const completed = submitted.filter(job => String(job.status || "").toLowerCase() === "completed");
+      const completedGenerationBlocks = completed.filter(job => job.internalGenerationBlock === true || job.internalTake === true);
+      const completedFinalVideos = completed.filter(job => job.internalGenerationBlock !== true && job.internalTake !== true);
+      const recoveredVideoSummary = {
+        submitted: submitted.length,
+        pending: pending.length,
+        completed: completed.length,
+        finalVideos: completedFinalVideos.length,
+        generationBlocks: completedGenerationBlocks.length,
+        updatedAt: new Date().toISOString()
+      };
       project.automation = {
         ...(project.automation || {}),
         status: "paused_user",
         message: pending.length
-          ? `自动化已暂停；${pending.length} 个暂停前提交的视频仍在后台取回，不会重复提交`
-          : completed.length
-            ? `自动化已暂停；暂停前提交的 ${completed.length} 个视频已全部取回，可继续后续生产`
+          ? `自动化已暂停；${pending.length} 个暂停前提交的上游任务仍在取回；已保存 ${completedFinalVideos.length} 个成品视频和 ${completedGenerationBlocks.length} 个分镜生成片段，不会重复提交原 taskId`
+          : completedGenerationBlocks.length
+            ? `自动化已暂停；暂停前提交的 ${completed.length} 个上游视频文件已全部取回：${completedFinalVideos.length} 个成品视频已入库，${completedGenerationBlocks.length} 个分镜生成片段已保存；继续任务时只补齐未完成片段并在本地合成，不会重复提交已完成 taskId`
+            : completed.length
+              ? `自动化已暂停；暂停前提交的 ${completed.length} 个视频已全部取回，可继续后续生产`
             : "自动化已暂停；未提交任务已停止，已有结果均已保留",
         errorCode: "PIPELINE_PAUSED",
         recoverableFailure: true,
+        recoveredVideoSummary,
         updatedAt: new Date().toISOString()
       };
       if (project.automation.progress && Array.isArray(project.automation.progress.items)) {
