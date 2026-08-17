@@ -86,7 +86,7 @@ test("stable thin table highlights are not mistaken for subtitle glyphs", async 
   assert.equal(decision.failures.some(item => item.code === "VIDEO_BAKED_TEXT_OR_SUBTITLE"), false);
 });
 
-test("a stale candidate rejected only by an older technical gate is revalidated before regeneration", async () => {
+test("production-only mode reuses a paid stale candidate without audit or regeneration", async () => {
   const candidate = {
     id: "candidate-old-gate",
     entityType: "shot",
@@ -117,7 +117,7 @@ test("a stale candidate rejected only by an older technical gate is revalidated 
     }
   };
   const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => ffmpeg, stagingRoot: "", textGenerator: async () => ({}) });
-  workflow.auditTechnicalShotCandidate = async () => ({ ok: true, mandatory: true, version: QUALITY_LIMITS.technicalVisual.version, failures: [] });
+  workflow.auditTechnicalShotCandidate = async () => { throw new Error("production-only mode must not audit"); };
   workflow.generateShotVideo = async () => { throw new Error("a paid regeneration must not run"); };
   const recovered = await workflow.generateQualityShotVideo("P01", { id: "S02", number: 2 }, "keyframe");
   assert.equal(recovered.id, candidate.id);

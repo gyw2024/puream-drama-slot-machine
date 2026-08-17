@@ -139,6 +139,38 @@ test("multi-frame storyboard is cropped into a take-only timeline before video s
   run(["-i", result, "-frames:v", "1", "-f", "null", process.platform === "win32" ? "NUL" : "/dev/null"]);
 });
 
+test("regular 3x3 storyboard gutters use the verified uniform-grid fallback", async t => {
+  assert.equal(fs.existsSync(ffmpeg), true, "bundled FFmpeg is required");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-agent-sheet-3x3-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "storyboard-sheet-3x3.png");
+  run([
+    "-f", "lavfi", "-i", "color=c=0x31506b:s=900x1600",
+    "-vf", [
+      "drawbox=x=0:y=0:w=300:h=533:color=0x713a35:t=fill",
+      "drawbox=x=300:y=0:w=300:h=533:color=0x355b71:t=fill",
+      "drawbox=x=600:y=0:w=300:h=533:color=0x4e7135:t=fill",
+      "drawbox=x=0:y=533:w=300:h=533:color=0x6f3571:t=fill",
+      "drawbox=x=300:y=533:w=300:h=533:color=0x35716b:t=fill",
+      "drawbox=x=600:y=533:w=300:h=533:color=0x716535:t=fill",
+      "drawbox=x=0:y=1066:w=300:h=534:color=0x3f4f71:t=fill",
+      "drawbox=x=300:y=1066:w=300:h=534:color=0x713f58:t=fill",
+      "drawbox=x=600:y=1066:w=300:h=534:color=0x447135:t=fill",
+      "drawbox=x=297:y=0:w=6:h=1600:color=white:t=fill",
+      "drawbox=x=597:y=0:w=6:h=1600:color=white:t=fill",
+      "drawbox=x=0:y=530:w=900:h=6:color=white:t=fill",
+      "drawbox=x=0:y=1063:w=900:h=6:color=white:t=fill"
+    ].join(","),
+    "-frames:v", "1", source
+  ]);
+  const detected = await analyzeStoryboardSheetGrid(ffmpeg, source, 9);
+  assert.equal(detected.ok, true);
+  assert.equal(detected.columns, 3);
+  assert.equal(detected.rows, 3);
+  assert.equal(detected.cells.length, 9);
+  assert.ok(["adaptive-lines", "verified-uniform-grid"].includes(detected.detectionMethod));
+});
+
 test("timed hard-cut audit distinguishes a real edit from an unchanged clip", async t => {
   assert.equal(fs.existsSync(ffmpeg), true, "bundled FFmpeg is required");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-agent-cut-audit-"));

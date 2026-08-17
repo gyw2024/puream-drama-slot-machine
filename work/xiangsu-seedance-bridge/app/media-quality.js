@@ -684,23 +684,64 @@ async function analyzeStoryboardSheetGrid(ffmpeg, filePath, panelCount = 10) {
         }
       }
     }
+    // Some image models render a perfectly regular contact sheet with white
+    // gutters and corner labels. The per-row detector above can reject those
+    // gutters because the labels/content dilute a row sample. If every
+    // expected full-canvas separator is still present at the mathematically
+    // expected position, use that deterministic grid as a verified fallback.
+    const expectedColumns = requested >= 13 ? 5 : (requested >= 7 && requested <= 8) || (requested >= 10 && requested <= 12) ? 4 : 3;
+    const expectedRows = Math.max(1, Math.ceil(requested / expectedColumns));
+    const nearestSeparator = (records, position, extent) => records
+      .filter(item => item.strength >= 0.58)
+      .map(item => ({ item, distance: Math.abs(item.position - position) / Math.max(1, extent) }))
+      .filter(item => item.distance <= 0.08)
+      .sort((left, right) => left.distance - right.distance)[0]?.item || null;
+    const expectedVertical = Array.from({ length: expectedColumns - 1 }, (_item, index) =>
+      nearestSeparator(verticalCandidates, (index + 1) * width / expectedColumns, width));
+    const expectedHorizontal = Array.from({ length: expectedRows - 1 }, (_item, index) =>
+      nearestSeparator(horizontalCandidates, (index + 1) * height / expectedRows, height));
+    const uniformGridVerified = requested >= 4
+      && expectedVertical.every(Boolean)
+      && expectedHorizontal.every(Boolean);
+    const verifiedCells = [];
+    if (uniformGridVerified) {
+      const xBounds = [0, ...expectedVertical.map(item => item.position), width];
+      const yBounds = [0, ...expectedHorizontal.map(item => item.position), height];
+      for (let row = 0; row < expectedRows; row += 1) {
+        for (let column = 0; column < expectedColumns; column += 1) {
+          if (verifiedCells.length >= requested) break;
+          verifiedCells.push({
+            index: verifiedCells.length,
+            column,
+            row,
+            x: round(xBounds[column] / width, 6),
+            y: round(yBounds[row] / height, 6),
+            width: round((xBounds[column + 1] - xBounds[column]) / width, 6),
+            height: round((yBounds[row + 1] - yBounds[row]) / height, 6)
+          });
+        }
+      }
+    }
+    const acceptedCells = plausible && cells.length >= requested ? cells : verifiedCells;
+    const acceptedBy = plausible && cells.length >= requested ? "adaptive-lines" : uniformGridVerified ? "verified-uniform-grid" : "";
     return {
-      ok: plausible && cells.length >= requested,
+      ok: acceptedCells.length >= requested,
       dimensions,
       sampledWidth: width,
       sampledHeight: height,
       requestedPanelCount: requested,
-      columns,
-      rows,
-      detectedCells,
+      columns: acceptedBy === "verified-uniform-grid" ? expectedColumns : columns,
+      rows: acceptedBy === "verified-uniform-grid" ? expectedRows : rows,
+      detectedCells: acceptedBy === "verified-uniform-grid" ? verifiedCells.length : detectedCells,
       verticalLines,
       horizontalLines,
       verticalCandidates,
       horizontalCandidates,
       layoutScore: layout ? round(layout.score, 4) : 0,
       rowColumns: layout?.rowChoices?.map(item => item.columns) || [],
-      cells,
-      error: plausible ? "" : `无法从合图安全识别 ${requested} 个分镜画格`
+      cells: acceptedCells,
+      detectionMethod: acceptedBy,
+      error: acceptedCells.length >= requested ? "" : `无法从合图安全识别 ${requested} 个分镜画格`
     };
   } catch (error) {
     return { ok: false, dimensions, columns: 0, rows: 0, cells: [], error: error.message };

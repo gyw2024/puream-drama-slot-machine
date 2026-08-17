@@ -11357,6 +11357,7 @@ class WorkbenchWorkflow {
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
     if (candidate.stage === "character_video" && !this.qualityGatesEnabled(settings, "assets")) return candidate;
+    if (candidate.stage === "shot_video" && !this.qualityGatesEnabled(settings, "videos")) return candidate;
     if ((candidate.productionRevision || "") !== (project.productionRevision || "")) return candidate;
     try {
       if (candidate.stage === "shot_video") {
@@ -17546,6 +17547,23 @@ ${shotAnchor}
       }
     }
     const basePlan = buildCameraTakePlan(project, shot, { mode });
+    // One-click production is a generation workflow. When subjective quality
+    // gates are disabled, the deterministic plan already contains the locked
+    // dialogue, speaker, mouth and camera ownership; do not spend a paid text
+    // request asking a second Director Agent to restate it.
+    if (!this.qualityGatesEnabled(settings, "videos")) {
+      const localPlan = {
+        ...basePlan,
+        authoredBy: "deterministic-local-production-plan",
+        authoredAt: new Date().toISOString(),
+        sourceFingerprint: fingerprint,
+        version: AGENT_DIRECTOR_VERSION
+      };
+      validateCameraTakePlan(localPlan, project, shot);
+      project.shots = project.shots.map(item => item.id === shotId ? { ...item, agentCameraTakePlan: localPlan } : item);
+      this.store.saveProject(project);
+      return localPlan;
+    }
     this.setAutomation(projectId, {
       stage: "agent_continuity_plan",
       message: `导演 Agent 正在编排 S${String(shot.number).padStart(2, "0")} 的对白轮次、机位段与连续生成块`
@@ -17683,6 +17701,7 @@ ${shotAnchor}
     const sheetTypes = new Set(["storyboard_sheet", "storyboard_take_sheet", "storyboard_generation_block_sheet"]);
     const sourceRoles = Array.isArray(references.imageRoles) ? references.imageRoles : [];
     if (!sourceRoles.some(role => sheetTypes.has(String(role?.type || "")))) return references;
+    if (!this.qualityGatesEnabled(this.store.getSettings(), "videos")) return references;
     const panelCount = storyboardSheetGrid(shot.duration || 10).panelCount;
     const sanitizedPath = await this.cropStoryboardTakeSheet(projectId, shot, {
       id: `${shot.id}-provider-sheet`,
@@ -17727,7 +17746,8 @@ ${shotAnchor}
       const hasStoryboardSheet = (references.imageRoles || []).some(role => ["storyboard_sheet", "storyboard_take_sheet"].includes(String(role?.type || "")));
       const repairNeedsSinglePanel = /完全无字|时间码|分镜序号|资产板|参考图|展示画面/.test(String(options.qualityRepair || ""));
       const singlePanel = prepareOptions.atomicFallback === true || repairNeedsSinglePanel;
-      const needsCrop = hasStoryboardSheet || prepareOptions.forceCrop === true || multiBlock || block.takes.length > 1;
+      const needsCrop = this.qualityGatesEnabled(settings, "videos")
+        && (hasStoryboardSheet || prepareOptions.forceCrop === true || multiBlock || block.takes.length > 1);
       const blockSheetPath = needsCrop ? await this.cropStoryboardTakeSheet(projectId, shot, block, references, {
         singlePanel
       }) : "";
@@ -19004,6 +19024,20 @@ ${shotAnchor}
     let project = this.store.getProject(projectId);
     let existing = force ? null : (candidateReady(project, "shot", shot.id, "shot_video", settings)
       || selectedOrLatest(project, "shot", shot.id, "shot_video"));
+    if (!qualityEnabled) {
+      existing = existing || (project.candidates || [])
+        .filter(item => item.entityType === "shot" && item.entityId === shot.id && item.stage === "shot_video")
+        .filter(item => (item.productionRevision || "") === (project.productionRevision || ""))
+        .filter(item => item.filePath && fs.existsSync(item.filePath))
+        .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))[0] || null;
+      if (existing?.filePath && fs.existsSync(existing.filePath)) {
+        if (existing.selected !== true) this.store.confirmCandidate(projectId, existing.id, false);
+        return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
+      }
+      const candidate = await this.generateShotVideo(projectId, shot.id, mode, { track: false, audit: false });
+      this.store.confirmCandidate(projectId, candidate.id, false);
+      return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+    }
     const evaluate = async candidate => {
       const technicalIntegrity = await this.auditTechnicalShotCandidate(projectId, shot.id, candidate.id);
       if (!technicalIntegrity.ok) {
@@ -19369,10 +19403,10 @@ ${shotAnchor}
         const existing = candidateReady(current, "shot", shot.id, "shot_video", settings);
         let existingReady = false;
         if (existing && !chainDirty) {
-          const technicalIntegrity = await this.auditTechnicalShotCandidate(projectId, shot.id, existing.id);
-          if (!technicalIntegrity.ok) chainDirty = true;
-          else if (!videoQualityEnabled) existingReady = true;
+          if (!videoQualityEnabled) existingReady = Boolean(existing.filePath && fs.existsSync(existing.filePath));
           else {
+            const technicalIntegrity = await this.auditTechnicalShotCandidate(projectId, shot.id, existing.id);
+            if (!technicalIntegrity.ok) chainDirty = true;
             const audit = existing.qualityAudit || await this.auditShotCandidate(projectId, shot.id, existing.id);
             existingReady = audit.ok;
             if (!audit.ok) chainDirty = true;
@@ -21191,6 +21225,7 @@ ${shotAnchor}
     await this.ensureStageDependencies(projectId, "final");
     let project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
+    const deliveryQualityEnabled = this.qualityGatesEnabled(settings, "delivery");
     if (this.qualityGatesEnabled(settings, "videos")) this.reconcileHailuoVoiceLineage(projectId);
     project = this.store.getProject(projectId);
     if (productionStructureGateEnabled(settings, project) && (project.shots || []).length > 0) {
@@ -21226,6 +21261,7 @@ ${shotAnchor}
     }
     const ffmpeg = this.locateFfmpeg();
     if (!ffmpeg) throw Object.assign(new Error("未找到本地媒体处理组件 FFmpeg，请检查像塑安装或重新安装纯梦短剧老虎机"), { code: "FFMPEG_NOT_FOUND" });
+    if (deliveryQualityEnabled) {
     const orderedShotsForIntegrity = project.shots.slice().sort((a, b) => a.number - b.number);
     const technicalShotAudits = await mapWithConcurrency(videos.map((candidate, index) => ({
       candidate,
@@ -21250,6 +21286,7 @@ ${shotAnchor}
         code: "SHOT_VIDEO_TECHNICAL_INTEGRITY_FAILED",
         failures: technicalShotFailures
       });
+    }
     }
     const mediaAudit = this.qualityGatesEnabled(settings, "videos")
       ? await this.auditProjectMediaQuality(projectId)
@@ -21336,6 +21373,33 @@ ${shotAnchor}
         fs.rmSync(listPath, { force: true });
         fs.rmSync(rawPath, { force: true });
       }
+    }
+    if (!deliveryQualityEnabled) {
+      if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size <= 0) {
+        throw Object.assign(new Error("成片文件未成功写入"), { code: "FINAL_VIDEO_FILE_MISSING", outputPath });
+      }
+      try { project = verifyInputsStillCurrent(); }
+      catch (error) { throw Object.assign(error, { outputPath }); }
+      project.finalAudioAudit = { skipped: true, ok: true, mode: "production_only" };
+      project.finalVisualAudit = { skipped: true, ok: true, mode: "production_only" };
+      project.finalQualityAudit = {
+        checkedAt: new Date().toISOString(),
+        ok: true,
+        skipped: true,
+        mode: "production_only",
+        failures: [],
+        note: "一键生产模式不执行音画质检或自动重抽"
+      };
+      archiveCurrentFinalVideo(project, "new-generated-final");
+      project.finalVideoPath = outputPath;
+      project.finalVideoSource = "generated";
+      project.finalVideoStale = false;
+      project.finalVideoStaleAt = "";
+      project.finalVideoStaleReason = "";
+      project.status = "completed";
+      project.currentStage = "final";
+      this.store.saveProject(project);
+      return { path: outputPath, fileUrl: pathToFileURL(outputPath).href };
     }
     let finalDurationAudit = null;
     if (exactDurationRequired) {

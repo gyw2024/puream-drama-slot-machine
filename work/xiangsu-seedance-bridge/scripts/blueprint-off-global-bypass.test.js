@@ -54,7 +54,7 @@ test("blueprint master off accepts old failed assets, videos and local Hailuo pr
   assert.equal(spec.subshots.length, 1);
 });
 
-test("blueprint master off skips subjective audits but keeps mandatory video integrity checks", async t => {
+test("blueprint master off runs production without video audits or audit-triggered rerolls", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-blueprint-zero-audit-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -105,6 +105,8 @@ test("blueprint master off skips subjective audits but keeps mandatory video int
   };
   workflow.technicalVideoAuditIsCurrent = () => false;
 
+  const localPlan = await workflow.ensureAgentCameraTakePlan(created.id, "S01", "storyboard_sheet", store.getSettings());
+  assert.equal(localPlan.authoredBy, "deterministic-local-production-plan");
   await workflow.ensureSceneAssetCandidate(created.id, "SC01");
   await workflow.ensureCharacterIntroCandidate(created.id, "C01");
   await workflow.ensureStoryboardCandidate(created.id, "storyboard_sheet", "S01");
@@ -116,5 +118,5 @@ test("blueprint master off skips subjective audits but keeps mandatory video int
   await workflow.auditRecoveredVideoCandidate(created.id, recovered);
 
   assert.equal(auditCalls, 0, "master off must prevent audit invocation, not merely return a skipped result from inside the auditor");
-  assert.equal(technicalAuditCalls, 2, "generated and recovered shot videos must still receive objective integrity checks");
+  assert.equal(technicalAuditCalls, 0, "production-only mode must not invoke video audits after the master switch is off");
 });
