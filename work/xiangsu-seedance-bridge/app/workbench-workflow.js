@@ -1801,6 +1801,28 @@ function h3DialogueBudgetPrompt(plannedShots = [], speakerAssignments = []) {
   ].join("\n");
 }
 
+function normalizeLegacyCheckpointMainReversal(shotPlan = []) {
+  const plans = Array.isArray(shotPlan) ? shotPlan.map(item => ({ ...item })) : [];
+  if (!plans.length) return plans;
+  const window = mainReversalWindow(plans.length);
+  const existing = plans
+    .map((item, index) => String(item?.mainlineStage || "").trim() === "main_reversal" ? index : -1)
+    .filter(index => index >= 0);
+  const keep = existing.find(index => index >= window.startIndex && index <= window.endIndex) ?? window.preferredIndex;
+  for (const index of existing) {
+    if (index === keep) continue;
+    plans[index] = { ...plans[index], mainlineStage: index < keep ? "evidence" : "payoff", mainlineStageNormalizedFrom: "legacy_checkpoint" };
+  }
+  plans[keep] = {
+    ...plans[keep],
+    mainlineStage: "main_reversal",
+    reversalRole: String(plans[keep]?.reversalRole || "").trim() || "全片唯一主反转在本镜落地",
+    mainlineBeat: String(plans[keep]?.mainlineBeat || "").trim() || String(plans[keep]?.action || plans[keep]?.visualBeat || "主反转事实落地"),
+    mainlineStageNormalizedFrom: existing.includes(keep) ? plans[keep]?.mainlineStageNormalizedFrom : "legacy_checkpoint"
+  };
+  return plans;
+}
+
 function h3ContinuityWritingDirective(plannedShots = [], speakerAssignments = []) {
   const assignmentByShot = new Map((speakerAssignments || []).map(item => [String(item?.shotId || "").toUpperCase(), item]));
   const lines = (plannedShots || []).map((shot, index) => {
@@ -20546,7 +20568,7 @@ ${shotAnchor}
       for (let number = route.startNumber; number <= route.reportedEndNumber; number += 1) affected.add(number);
     }
 
-    const shotPlan = shots.map(shot => ({ ...shot }));
+    const shotPlan = normalizeLegacyCheckpointMainReversal(shots);
     const fastUnitResultCache = {};
     for (let index = 0; index < shots.length; index += SCRIPT_UNIT_BATCH_SIZE) {
       const batch = shots.slice(index, index + SCRIPT_UNIT_BATCH_SIZE);
@@ -20658,6 +20680,34 @@ ${shotAnchor}
     const count = (supervisor.failuresByCode.get(code) || 0) + 1;
     supervisor.failuresByCode.set(code, count);
     if (this.autonomousPipelineExternalBlocker(error)) return false;
+    if (code === "SCRIPT_PLAN_CHECKPOINT_CONTRACT_FAILED") {
+      const project = this.store.getProject(projectId);
+      const checkpoint = project.script?.generationCheckpoint;
+      if (Array.isArray(checkpoint?.shotPlan) && checkpoint.shotPlan.length) {
+        const shotPlan = normalizeLegacyCheckpointMainReversal(checkpoint.shotPlan);
+        project.script = {
+          ...(project.script || {}),
+          generationCheckpoint: {
+            ...checkpoint,
+            shotPlan,
+            blueprint: checkpoint.blueprint ? { ...checkpoint.blueprint, shotPlan } : checkpoint.blueprint,
+            checkpointContractRepair: {
+              code,
+              repairedAt: new Date().toISOString(),
+              localMetadataOnly: true
+            }
+          }
+        };
+        this.store.saveProject(project);
+        this.appendAutonomousRepairJournal(projectId, { attempt: count, code, status: "checkpoint_metadata_repaired" });
+        this.setAutomation(projectId, {
+          status: "running",
+          stage: "agent_checkpoint_repair",
+          message: "旧稿缺少主反转阶段标签，Agent 已在本地补齐元数据并继续；对白与剧情内容未改写"
+        });
+        return true;
+      }
+    }
     const scriptQualityFailure = code === "FOUNDRY_FORMAL_QUALITY_GATE_FAILED"
       || code === "PRODUCTION_HARD_CONTRACT_FAILED"
       || code === "SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED"

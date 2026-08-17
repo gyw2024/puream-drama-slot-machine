@@ -320,3 +320,23 @@ test("fast plan resume preserves non-contiguous completed batches", () => {
   assert.deepEqual(state.pending.map(item => item.startNumber), [5]);
   assert.deepEqual(Object.keys(state.cache), ["1", "9"]);
 });
+
+test("legacy targeted repair checkpoints heal missing reversal metadata locally", async () => {
+  const project = projectFixture();
+  const shotPlan = Array.from({ length: 30 }, (_, index) => ({ id: `S${String(index + 1).padStart(2, "0")}`, duration: 10, action: `beat-${index + 1}` }));
+  project.script.generationCheckpoint = { shotPlan, blueprint: { shotPlan } };
+  const workflow = Object.create(WorkbenchWorkflow.prototype);
+  workflow.store = {
+    getProject: () => structuredClone(project),
+    saveProject: next => { Object.assign(project, structuredClone(next)); return project; }
+  };
+  workflow.appendAutonomousRepairJournal = (_id, entry) => { project.automation.repairJournal.unshift(entry); };
+  workflow.setAutomation = (_id, patch) => { project.automation = { ...project.automation, ...patch }; };
+  workflow.autonomousPipelineExternalBlocker = () => false;
+  const supervisor = { failuresByCode: new Map() };
+  const recovered = await workflow.recoverAutonomousPipelineFailure("P01", Object.assign(new Error("missing reversal"), { code: "SCRIPT_PLAN_CHECKPOINT_CONTRACT_FAILED" }), supervisor);
+  assert.equal(recovered, true);
+  assert.equal(project.script.generationCheckpoint.shotPlan.filter(item => item.mainlineStage === "main_reversal").length, 1);
+  assert.equal(project.script.generationCheckpoint.shotPlan[21].mainlineStage, "main_reversal");
+  assert.equal(project.automation.stage, "agent_checkpoint_repair");
+});
