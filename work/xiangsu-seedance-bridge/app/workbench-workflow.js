@@ -6242,6 +6242,11 @@ function scriptPipelineEntryRoute(project = {}) {
   const duration = projectDurationContract(project);
   const raw = String(project?.script?.raw || "");
   const sourceFingerprint = String(project?.script?.sourceFingerprint || "");
+  const generationCheckpoint = project?.script?.generationCheckpoint;
+  // During autonomous repair the visible shots/raw still belong to the rejected
+  // revision. The active AI checkpoint is authoritative until the replacement
+  // script is fully materialized; never route its live draft into upload analysis.
+  if (projectInputMode(project) === "ai" && generationCheckpoint?.autonomousRepair === true) return "resume_generation";
   if (duration.hasShots && sourceFingerprint
     && crypto.createHash("sha256").update(raw).digest("hex") !== sourceFingerprint) return "reanalyze_source";
   if (duration.hasShots && !duration.ok) return "reanalyze_duration";
@@ -6253,7 +6258,7 @@ function scriptPipelineEntryRoute(project = {}) {
     }
   }
   if (duration.hasShots) return "ready";
-  if (project?.script?.generationCheckpoint) return "resume_generation";
+  if (generationCheckpoint) return "resume_generation";
   if (String(project?.script?.raw || "").trim()) return "analyze_imported";
   return "missing";
 }

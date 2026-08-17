@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { WorkbenchWorkflow } = require("../app/workbench-workflow");
+const { WorkbenchWorkflow, scriptPipelineEntryRoute } = require("../app/workbench-workflow");
 
 function projectFixture() {
   return {
@@ -78,4 +78,18 @@ test("script repair archives provenance outside the production-media category al
   const archived = workflow.archiveAutonomousScriptRepair("P01", Object.assign(new Error("bad script"), { code: "SCRIPT_BAD" }), 1);
   assert.equal(fs.readFileSync(archived.scriptPath, "utf8"), "旧的不合格剧本");
   assert.equal(JSON.parse(fs.readFileSync(archived.reportPath, "utf8")).errorCode, "SCRIPT_BAD");
+});
+
+test("autonomous AI repair checkpoints outrank stale rejected shots and never enter upload analysis", () => {
+  const project = {
+    productionPlan: { inputMode: "ai" },
+    generation: { targetDurationSeconds: 300, durationLocked: true },
+    script: {
+      raw: "live replacement draft",
+      sourceFingerprint: "old-rejected-source",
+      generationCheckpoint: { autonomousRepair: true, storyBible: { title: "replacement" }, shotPlan: [] }
+    },
+    shots: [{ id: "S01", duration: 10 }]
+  };
+  assert.equal(scriptPipelineEntryRoute(project), "resume_generation");
 });
