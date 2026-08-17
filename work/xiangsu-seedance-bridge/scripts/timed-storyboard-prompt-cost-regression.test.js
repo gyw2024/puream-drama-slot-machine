@@ -119,6 +119,13 @@ test("real uploaded timed-storyboard analysis reaches assets without any paid te
   assert.equal(analyzed.shots.length, 4);
   assert.equal(analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0), 30);
   assert.equal(analyzed.script.sourceDialogueLedger.length, 4);
+  assert.equal(analyzed.script.assetExtractionNormalization.version, 3);
+  assert.match(analyzed.script.assetExtractionNormalization.normalizedScript, /上传剧本标准制作稿/);
+  assert.equal(analyzed.script.assetExtractionNormalization.validation.dialogueParity, true);
+  assert.deepEqual(analyzed.script.assetExtractionNormalization.assetManifest.coreProps.map(item => item.name), ["协议书"]);
+  assert.deepEqual(analyzed.assetLibraries.props.map(item => item.name), ["协议书"]);
+  assert.deepEqual(analyzed.assetLibraries.wardrobes, []);
+  assert.ok(analyzed.characters.every(item => Array.isArray(item.outfits) && item.outfits.length === 0));
 });
 
 test("three script formats and every-stage prompt intake remain durable before entities exist", () => {

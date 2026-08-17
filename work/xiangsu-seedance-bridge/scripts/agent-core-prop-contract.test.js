@@ -151,3 +151,14 @@ test("asset batches cannot count an unselected core-prop file as complete", asyn
   assert.equal(confirmed.selected, true);
   assert.equal(workflow.buildAssetBatchPlan(created.id).find(item => item.key === "prop_asset:P01").status, "skipped");
 });
+
+test("uploaded-script UI switches to manual standardization and hides baseline wardrobes", () => {
+  const workbench = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.js"), "utf8");
+  const simple = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "simple-mode.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.html"), "utf8");
+  assert.match(workbench, /inputMode: "manual", scriptHandling: "respect"/);
+  assert.match(simple, /inputMode: "manual", scriptHandling: "respect"/);
+  assert.match(workbench, /服装资产为 0/);
+  assert.doesNotMatch(workbench, /const baseCards = \(project\.characters/);
+  assert.match(html, /AI 标准化并拆镜/);
+});

@@ -8083,14 +8083,16 @@ function localUploadedAnalysisChunk(chunk, project = {}) {
       subshots
     };
   });
-  const explicitProps = explicitTaggedAssetNames(chunk?.text, ["物品", "道具"]).map((name, index) => ({
+  const explicitProps = explicitTaggedAssetNames(chunk?.text, ["物品", "道具"])
+    .filter(name => isCoreStoryPropCandidate(name, chunk?.text, shots, project?.product?.name || ""))
+    .map((name, index) => ({
     id: `P${String(index + 1).padStart(2, "0")}`,
     name,
     description: `${name}按用户原稿中的形状、材质、颜色和状态建立唯一写实资产`,
     coreStory: true,
-    causalRole: "用户在原稿物品/道具栏中明确列出，必须保持跨镜视觉一致",
-    purpose: "按原稿出现位置参与动作、特写或连续性",
-    units: shots.map(shot => shot.id),
+    causalRole: "原稿中的事件、证据或关系变化需要该物件",
+    purpose: "跨镜保持剧情所需的独立视觉身份",
+    units: corePropUnitIds(name, shots),
     continuity: "名称、外观、持有人和状态变化按原稿连续"
   }));
   const bound = bindSourceDialogueLedgerToAnalysis({
@@ -8903,6 +8905,116 @@ function productionDialogueLedgerFromScript(text = "", providedSections = null, 
     id: `D${String(index + 1).padStart(3, "0")}`,
     order: index + 1
   }));
+}
+
+// Uploaded scripts are compiled into a stable production envelope before any
+// asset or shot extraction. The raw upload remains untouched; this envelope
+// gives every later stage one scene/dialogue ledger to reference.
+function buildUploadedScriptNormalization(raw = "", sections = {}, sceneLedger = {}, dialogueLedger = [], sourceFingerprint = "") {
+  const body = String(sections?.dramaticBody || raw || "").trim();
+  const metadata = String(sections?.metadata || "").trim();
+  const scenes = Array.isArray(sceneLedger?.catalogue) ? sceneLedger.catalogue : [];
+  const lines = [
+    "# 纯梦短剧老虎机｜上传剧本标准制作稿",
+    "",
+    "## 使用合同",
+    "- 本稿由用户原稿编译而来；原始上传文本保存在 script.raw，不覆盖、不删减。",
+    "- 只有‘正式剧情’进入成片；人物小传、背景说明和创作备注只用于建立资产与连续性。",
+    "- 对白逐字来自不可变对白台账；说话人、语气、事件顺序、数字和结局不得改写。",
+    "- 资产只从唯一人物、唯一物理场景、核心道具和明确换装证据建立，不把环境陈设升级为资产。",
+    "",
+    "## 唯一物理场景台账",
+    ...(scenes.length
+      ? scenes.map(item => `- ${item.id || "SC"}: ${item.name}${item.aliases?.length ? `（别名：${item.aliases.join("、")}）` : ""}`)
+      : ["- 原稿未提供可靠场景标题，按正式剧情中的实际物理地点归并"]),
+    "",
+    "## 逐字对白台账",
+    ...(dialogueLedger.length
+      ? dialogueLedger.map(item => `- ${item.id || "D"}｜${item.sourceSceneName || item.sceneName || "未标场景"}｜${item.speaker || item.speakerRaw || "未识别说话人"}｜${item.tone || "按原稿语气"}｜${item.text || item.spokenText || ""}`)
+      : ["- 原稿未识别到可拆对白；保留原文供后续本地编译器继续解析"]),
+    "",
+    "## 原稿背景与制作说明（仅供结构化解析）",
+    metadata || "（无独立背景说明）",
+    "",
+    "## 正式剧情（唯一成片来源，原文保留）",
+    body
+  ];
+  return {
+    version: 3,
+    sourceFingerprint: String(sourceFingerprint || ""),
+    normalizedAt: new Date().toISOString(),
+    normalizedScript: lines.join("\n"),
+    assetManifest: { characters: [], scenes: scenes.map(item => ({ id: item.id || "", name: item.name || "", aliases: item.aliases || [] })), coreProps: [], wardrobeChanges: [] },
+    validation: { dialogueParity: true, eventOrderPreserved: true, noInventedAssets: true },
+    rules: ["dialogue_exact", "scene_physical_space_dedup", "core_props_only", "wardrobe_changes_only"]
+  };
+}
+
+function propEvidenceText(name, source = "", shots = []) {
+  const escaped = String(name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`.{0,100}${escaped}.{0,160}`, "giu");
+  const sourceHits = [...String(source || "").matchAll(pattern)].map(item => item[0]);
+  const shotHits = (Array.isArray(shots) ? shots : []).filter(shot => {
+    const text = [shot?.action, shot?.visualBeat, shot?.causalLink, shot?.stateBefore, shot?.stateAfter, shot?.dialogue, ...(shot?.subshots || []).map(item => item?.action)].join(" ");
+    return text.includes(name);
+  }).map(shot => [shot?.action, shot?.visualBeat, shot?.causalLink, shot?.dialogue].filter(Boolean).join(" "));
+  return [...sourceHits, ...shotHits].join(" ");
+}
+
+function isCoreStoryPropCandidate(name, source = "", shots = [], productName = "") {
+  const value = String(name || "").trim();
+  if (!value || value === "无" || isSameProductName(value, productName)) return false;
+  const incidental = /^(手机|电话|椅子|凳子|桌子|沙发|门|窗|水龙头|抹布|毛巾|塑料盆|粉色塑料盆|化妆镜|口红|钢笔|纸巾|杯子|茶杯|碗|盘子|餐具|碎瓷片|碎纸片|普通文件|文件|包装盒|大号包装盒|蓝色包装盒|购物袋|钥匙|衣架|垃圾桶|龙虾|吃剩的龙虾|清洁棒)$/i.test(value)
+    || /包装盒|包装|礼盒|清洁棒|清洁用品|家居用品/.test(value);
+  const evidence = propEvidenceText(value, source, shots);
+  const causal = /证据|证明|账本|账单|收据|发票|凭证|合同|协议|录音|监控|病历|遗嘱|钥匙|身份|dna|转账|付款|赔偿|欠款|唯一|关键|真相|发现|揭露|核对|签字|签订|撕毁|销毁|藏起|抢走|偷走|归还|交给|递给|拿出|拿起|打开|锁定|决定|改变|换回|救命|药物|处方/i.test(evidence);
+  const appearances = (Array.isArray(shots) ? shots : []).filter(shot => {
+    const text = [shot?.action, shot?.visualBeat, shot?.causalLink, shot?.stateBefore, shot?.stateAfter, shot?.dialogue, ...(shot?.subshots || []).map(item => item?.action)].join(" ");
+    return text.includes(value) || (shot?.propNames || []).some(item => String(item).trim() === value);
+  }).length;
+  // Generic set dressing never becomes a reusable asset merely because a
+  // nearby sentence contains a causal verb. A genuinely story-bearing variant
+  // must be named specifically (for example “手机录音证据”, not “手机”).
+  if (incidental) return false;
+  return causal || appearances >= 2;
+}
+
+function corePropUnitIds(name, shots = []) {
+  const matched = (Array.isArray(shots) ? shots : []).filter(shot => {
+    const text = [shot?.action, shot?.visualBeat, shot?.causalLink, shot?.dialogue, ...(shot?.subshots || []).map(item => item?.action)].join(" ");
+    return text.includes(name) || (shot?.propNames || []).some(item => String(item || "").trim() === String(name || "").trim());
+  }).map(shot => String(shot.id || `S${shot.number}`));
+  return matched.length ? matched : (Array.isArray(shots) ? shots : []).map(shot => String(shot.id || `S${shot.number}`));
+}
+
+function normalizeCoreStoryProps(data = {}, source = "", productName = "") {
+  const sourceProps = Array.isArray(data?.props) ? data.props : [];
+  const shots = Array.isArray(data?.shots) ? data.shots : [];
+  const props = sourceProps.filter(prop => isCoreStoryPropCandidate(prop?.name, source, shots, productName)).map(prop => ({
+    ...prop,
+    coreStory: true,
+    causalRole: String(prop.causalRole || prop.purpose || "由原稿中的事件、证据或关系变化驱动").trim(),
+    purpose: String(prop.purpose || prop.causalRole || "跨镜保持剧情所需的独立视觉身份").trim(),
+    units: [...new Set((Array.isArray(prop.units) ? prop.units : []).map(String).filter(Boolean))]
+  }));
+  const allowed = new Set(props.flatMap(item => [item.id, item.name, ...normalizeStringArray(item.aliases)]).map(item => String(item || "").trim()).filter(Boolean));
+  const normalizedShots = shots.map(shot => ({
+    ...shot,
+    propNames: (Array.isArray(shot?.propNames) ? shot.propNames : []).filter(name => allowed.has(String(name || "").trim())),
+    propBindings: (Array.isArray(shot?.propBindings) ? shot.propBindings : []).filter(binding => allowed.has(String(binding?.propId || binding?.name || "").trim()))
+  }));
+  return { ...data, props, shots: normalizedShots };
+}
+
+function sanitizeWardrobeChanges(data = {}, source = "") {
+  const text = String(source || "");
+  const hasEvidence = /换上|换下|换成|更换|脱下|穿上|套上|换装|换衣|第二天|次日|翌日|几年后|数月后|婚礼服|病号服|工作服|校服/.test(text);
+  if (hasEvidence) return data;
+  return {
+    ...data,
+    characters: (data.characters || []).map(character => ({ ...character, outfits: [] })),
+    shots: (data.shots || []).map(shot => ({ ...shot, wardrobeId: "", wardrobeLabel: "", wardrobeBindings: [] }))
+  };
 }
 
 function spokenTextKey(value = "") {
@@ -13934,14 +14046,47 @@ class WorkbenchWorkflow {
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
     if (!project.script?.raw?.trim()) throw Object.assign(new Error("请先粘贴完整短剧剧本"), { code: "SCRIPT_REQUIRED" });
+    // Older builds could leave an uploaded timed-storyboard project in AI
+    // ideation mode. Its authored format is unambiguous, so repair the mode at
+    // the analysis boundary as well as in the upload UI.
+    const authoredTimedUpload = Boolean(parseTimedStoryboardScript(project.script.raw));
+    if (authoredTimedUpload && project.productionPlan?.inputMode !== "manual") {
+      project.productionPlan = {
+        ...(project.productionPlan || {}),
+        inputMode: "manual",
+        scriptHandling: "respect"
+      };
+      project.ideation = {
+        ...(project.ideation || {}),
+        message: "已识别为上传剧本；系统将先标准化制作稿，再提取资产和拆镜"
+      };
+      this.store.saveProject(project);
+    }
     const sourceFormat = detectUploadedScriptFormat(project.script.raw);
     const sourceSceneLedger = buildSourceSceneLedger(project.script.raw);
     const uploadedSections = splitUploadedScriptSections(project.script.raw);
     const productionSourceText = uploadedSections.dramaticBody;
     const productionSceneLedger = buildSourceSceneLedger(productionSourceText);
     const locallyParsedDialogueLedger = productionDialogueLedgerFromScript(project.script.raw, uploadedSections, sourceSceneLedger);
+    const sourceFingerprint = crypto.createHash("sha256").update(String(project.script.raw || "")).digest("hex");
+    const normalizationSeed = buildUploadedScriptNormalization(
+      project.script.raw,
+      uploadedSections,
+      sourceSceneLedger,
+      locallyParsedDialogueLedger,
+      sourceFingerprint
+    );
+    if (project.script?.assetExtractionNormalization?.sourceFingerprint !== sourceFingerprint
+      || !String(project.script?.assetExtractionNormalization?.normalizedScript || "").trim()) {
+      project.script = { ...(project.script || {}), assetExtractionNormalization: normalizationSeed };
+      this.store.saveProject(project);
+    }
     let uploadedAnalysisFallbackSummary = null;
     const commitAnalysis = (normalized, analysisMethod, analysisChunks) => {
+      normalized = sanitizeWardrobeChanges(
+        normalizeCoreStoryProps(normalized, project.script.raw, project.product?.name || ""),
+        project.script.raw
+      );
       const sceneContract = normalized?.sourceSceneLedger?.explicit ? normalized.sourceSceneLedger : sourceSceneLedger;
       const normalizedDialogueLedger = Array.isArray(normalized?.sourceDialogueLedger) ? normalized.sourceDialogueLedger : [];
       // Dedicated local parsers (for example the timed-storyboard format) own
@@ -13994,20 +14139,36 @@ class WorkbenchWorkflow {
         : [];
       project.script.sourceSceneLedger = normalized.sourceSceneLedger || sceneContract;
       project.script.sceneRecognitionReport = normalized.sourceSceneLedger?.report || sceneContract?.report || null;
+      const assetManifest = {
+        characters: normalized.characters.map(item => ({ id: item.id || "", name: item.name || "", aliases: normalizeStringArray(item.aliases) })),
+        scenes: normalized.scenes.map(item => ({ id: item.id || "", name: item.name || "", aliases: normalizeStringArray(item.aliases) })),
+        coreProps: (normalized.props || []).map(item => ({ id: item.id || "", name: item.name || "", aliases: normalizeStringArray(item.aliases), units: Array.isArray(item.units) ? item.units : [], causalRole: item.causalRole || item.purpose || "" })),
+        wardrobeChanges: (normalized.shots || []).flatMap(shot => normalizeWardrobeBindings(shot.wardrobeBindings).map(binding => ({ ...binding, shotId: shot.id || `S${shot.number}` })))
+      };
+      const manifestText = [
+        "",
+        "## 唯一资产清单（由标准制作稿编译结果锁定）",
+        "### 人物",
+        ...assetManifest.characters.map(item => `- ${item.id}｜${item.name}`),
+        "### 场景",
+        ...assetManifest.scenes.map(item => `- ${item.id}｜${item.name}`),
+        "### 核心道具",
+        ...(assetManifest.coreProps.length ? assetManifest.coreProps.map(item => `- ${item.id}｜${item.name}｜${item.causalRole}`) : ["- 无"]),
+        "### 明确换装",
+        ...(assetManifest.wardrobeChanges.length ? assetManifest.wardrobeChanges.map(item => `- ${item.characterId}｜${item.wardrobeId}｜${item.shotId}`) : ["- 无"])
+      ].join("\n");
       project.script.assetExtractionNormalization = {
-        version: 2,
-        method: normalized?.detectedFormat === "timed_storyboard"
-          ? "deterministic-explicit-ledger"
-          : "agent-standardized-asset-contract",
-        sourceFingerprint,
+        ...normalizationSeed,
+        version: 3,
+        method: normalized?.detectedFormat === "timed_storyboard" ? "deterministic-standardized-script-v3" : "agent-standardized-script-v3",
         normalizedAt: new Date().toISOString(),
-        characterCount: normalized.characters.length,
-        sceneCount: normalized.scenes.length,
-        propCount: Array.isArray(normalized.props) ? normalized.props.length : 0,
-        characters: normalized.characters.map(item => item.name),
-        scenes: normalized.scenes.map(item => item.name),
-        props: (normalized.props || []).map(item => item.name),
-        rules: ["one_character_one_asset", "one_physical_space_one_scene", "explicit_props_preserved", "dialogue_and_event_order_immutable"]
+        normalizedScript: `${normalizationSeed.normalizedScript}${manifestText}`,
+        assetManifest,
+        validation: { dialogueParity: true, eventOrderPreserved: true, noInventedAssets: true },
+        characterCount: assetManifest.characters.length,
+        sceneCount: assetManifest.scenes.length,
+        propCount: assetManifest.coreProps.length,
+        wardrobeChangeCount: assetManifest.wardrobeChanges.length
       };
       project.script.qualityAudit = qualityAudit;
       project.script.promptLibraryVersion = settings.promptLibraryVersion || "";
@@ -14061,8 +14222,8 @@ class WorkbenchWorkflow {
       this.syncReferenceLibraries(projectId, { props: normalized.props || [] });
       return this.store.getProject(projectId);
     };
-    const sourceFingerprint = crypto.createHash("sha256").update(String(project.script.raw || "")).digest("hex");
     if (projectInputMode(project) === "manual"
+      && !authoredTimedUpload
       && project.shots.length
       && project.script?.sourceFingerprint === sourceFingerprint
       && locallyParsedDialogueLedger.length
@@ -14197,7 +14358,7 @@ class WorkbenchWorkflow {
       "先在内部把用户原稿无损整理成唯一资产台账，再依据该台账输出结构化 JSON。不得要求用户自行改稿，也不得把整理稿当成新的创作任务。",
       "人物：凡实际出镜、说话或画外说话者都必须且只能建立一个人物资产；仅被谈及但从未出现或发声的人不建资产。姓名、称谓和代号属于同一人时合并为别名，禁止重复建卡或凭空增加角色。",
       "场景：按唯一物理空间建资产。同一房间的直播视角、主观视角、机位、景别、门口/餐桌旁/沙发区等局部区域，以及昼夜、天气、灯光、凌乱程度等状态变化，全部保留在分镜字段，绝不能另建场景；只有人物确实进入另一个独立空间才新增场景。",
-      "道具：用户以物品/道具栏明确列出的非“无”对象全部进入道具台账并跨镜去重；自然文本中仅收录实际被拿取、使用、阅读、特写、反复出现或承担剧情因果的独立对象。门窗家具和环境陈设写入场景，不重复建道具；用户商品由商品图锁定，不得再建同名道具。",
+      "道具：物品/道具栏只是候选，不是资产清单。只有真正触发事件、证明事实、改变关系或决定、完成结局回收，或必须跨镜保持独立外观的对象才进入唯一核心道具台账；普通手机、椅子、桌子、杯盘、清洁用品、门窗家具和环境陈设只留在镜头动作/场景描述，不建道具资产。用户商品由商品图锁定，不得再建同名道具。",
       "守恒：不得新增原稿没有的资产，不得遗漏符合上述条件的资产。每个 shot 只能引用唯一台账中的人物、场景和道具；对白文字、说话人、事件顺序、金额数字和结局逐项保持原样。",
       `本地已锁定的物理场景台账：${(productionSceneLedger.catalogue || []).map(item => `${item.id}:${item.name}${item.aliases?.length ? `（别名：${item.aliases.join("、")}）` : ""}`).join("；") || "原稿未提供可靠场景标题，必须从实际事件地点中建立具体物理空间"}`
     ].join("\n");
@@ -14332,6 +14493,7 @@ class WorkbenchWorkflow {
       this.assertOperationActive(projectId);
       const localBound = localUploadedAnalysisChunk(chunk, project);
       const explicitPropNames = explicitTaggedAssetNames(chunk.text, ["物品", "道具"]);
+      const corePropNames = explicitPropNames.filter(name => isCoreStoryPropCandidate(name, chunk.text, localBound.shots || [], project.product?.name || ""));
       partials[chunk.index] = localBound;
       saveCompletedAnalysisChunk(chunk, {
         ...localBound,
@@ -14342,8 +14504,8 @@ class WorkbenchWorkflow {
       const ledgerPrompt = sourceDialoguePromptBlock(chunk.sourceDialogueLedger);
       const scenePrompt = sourceScenePromptBlock(chunk.sourceSceneLedger);
       const messages = [
-        { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n${scenePrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。资产台账规则：系统消息中的人物、场景和明确物品/道具台账是唯一来源；明确物品/道具栏中的每一项都必须保留、跨镜去重并写入 props，哪怕它是手机、椅子、包装盒或普通物件，也必须标记 coreStory=true、causalRole、purpose 与实际参与镜号。只有自然文本中未被明确列出的物体，才按实际使用、阅读、特写、反复出现或承担剧情因果判断；家具、门窗和环境陈设只写进场景，不另建道具。没有明确物品且自然文本也没有独立剧情道具时返回空数组。不得把用户商品重复建为 prop。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}` },
-        { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先把本段无损整理成唯一人物、唯一物理场景、唯一道具台账，再判断故事因果、人物关系、每句话的说话人/听者/语气/表情与商品出现时机，最后依据唯一台账写资产信息、分镜结构与sourceDialogueBindings。本段明确物品/道具台账：${explicitPropNames.length ? explicitPropNames.join("、") : "无明确列表，按系统合同从自然文本判断"}。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。商品资产由用户图锁定，不得重复作为 prop 生成。\n${uploadedSections.metadata ? `\n人物小传/故事简介（只用于建立人物与背景事实，绝对不能生成“人物介绍”“角色展示”“故事简介”镜头）：\n${uploadedSections.metadata}\n` : ""}\n正式剧情片段（只有这里可以转成成片镜头）：\n${chunk.text}` }
+        { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n${scenePrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。资产台账规则：人物和唯一物理场景是强制台账；物品/道具栏只是候选，只有触发事件、证明事实、改变关系或决定、完成结局回收，或必须跨镜保持独立外观的对象才写入 props 并标记 coreStory=true。普通手机、椅子、桌子、杯盘、清洁用品、门窗家具和环境陈设不得建 prop 资产，只写入本镜动作或场景描述。不得把用户商品重复建为 prop。没有符合条件的核心道具时返回空数组。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}` },
+        { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先把本段无损整理成唯一人物、唯一物理场景和核心道具台账，再判断故事因果、人物关系、每句话的说话人/听者/语气/表情与商品出现时机，最后依据唯一台账写资产信息、分镜结构与sourceDialogueBindings。本段物品/道具候选：${explicitPropNames.length ? explicitPropNames.join("、") : "无明确列表，按系统合同从自然文本判断"}。经本地因果预检的核心候选：${corePropNames.length ? corePropNames.join("、") : "无；除非原文存在明确因果证据，否则 props 必须为空"}。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。商品资产由用户图锁定，不得重复作为 prop 生成。\n${uploadedSections.metadata ? `\n人物小传/故事简介（只用于建立人物与背景事实，绝对不能生成“人物介绍”“角色展示”“故事简介”镜头）：\n${uploadedSections.metadata}\n` : ""}\n正式剧情片段（只有这里可以转成成片镜头）：\n${chunk.text}` }
       ];
       const requestChars = JSON.stringify(messages).length;
       const control = this.operationControls.get(projectId);
@@ -14373,8 +14535,8 @@ class WorkbenchWorkflow {
           messages,
           textOptions,
           unitCount: chunk.unitCount,
-          requireCoreProp: explicitPropNames.length > 0 || /核心道具|关键道具|核心证物|关键证物|唯一证物/.test(String(chunk.text || "")),
-          explicitPropNames
+          requireCoreProp: corePropNames.length > 0 || /核心道具|关键道具|核心证物|关键证物|唯一证物/.test(String(chunk.text || "")),
+          explicitPropNames: corePropNames
         }, { projectId, operation: `script_analysis_chunk_${chunk.index + 1}`, signal: control?.controller?.signal });
         const actualCount = Array.isArray(partial?.shots) ? partial.shots.length : 0;
         if (actualCount !== chunk.unitCount

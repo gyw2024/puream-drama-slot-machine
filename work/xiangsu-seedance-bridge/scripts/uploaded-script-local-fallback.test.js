@@ -45,7 +45,7 @@ test("uploaded dialogue local-first compiler preserves source truth and is used 
   assert.match(workflowSource, /local-first-agent-enhanced/);
 });
 
-test("local fallback preserves explicitly listed characters and props when the model is unavailable", () => {
+test("local fallback preserves explicit characters but promotes only causal props", () => {
   const raw = [
     "【场景】旧宅客厅",
     "人物：@林梅 @周兰 @沉默保镖",
@@ -61,6 +61,6 @@ test("local fallback preserves explicitly listed characters and props when the m
     sourceDialogueLedger: parseSourceDialogueLedger(raw)
   });
   assert.deepEqual(data.characters.map(item => item.name), ["林梅", "周兰", "沉默保镖"]);
-  assert.deepEqual(data.props.map(item => item.name), ["离婚协议书", "手机"]);
+  assert.deepEqual(data.props.map(item => item.name), ["离婚协议书"]);
   assert.ok(data.props.every(item => item.coreStory === true && item.units.length === 2));
 });

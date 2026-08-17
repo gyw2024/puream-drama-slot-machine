@@ -274,7 +274,7 @@ function renderScript() {
   $("#scriptCount").textContent = `${String($("#scriptText").value || "").length.toLocaleString("zh-CN")} 字`;
   const analyzed = Boolean(project.script?.analyzedAt && project.shots?.length);
   $("#scriptAnalysis").className = `analysis-bar${analyzed ? " ready" : ""}`;
-  $("#scriptAnalysis").textContent = analyzed ? `AI 已识别：${project.characters.length} 个人物 · ${project.scenes.length} 个场景 · ${project.shots.length} 个分镜` : "尚未拆镜；保存原稿后点击“保存并 AI 拆镜”";
+  $("#scriptAnalysis").textContent = analyzed ? `标准制作稿已锁定：${project.characters.length} 个人物 · ${project.scenes.length} 个场景 · ${project.shots.length} 个分镜` : "尚未拆镜；系统会先标准化原稿并校验对白，再提取资产和分镜";
   const hasProduct = Boolean(project.product?.imagePath || project.product?.name);
   $("#productState").textContent = hasProduct ? "已设置" : "不带货";
   const preview = $("#productPreview");
@@ -757,7 +757,17 @@ $("#uploadScript").addEventListener("click", async () => {
     resultOrThrow(result);
     $("#scriptText").value = result.text || "";
     $("#scriptCount").textContent = `${$("#scriptText").value.length.toLocaleString("zh-CN")} 字`;
-    showToast(`已读取 ${result.fileName || "剧本文件"}，保存后可让 AI 识别`);
+    const sellingPoints = $("#productSellingPoints").value.trim();
+    const patched = resultOrThrow(await api("patchProject", state.project.id, {
+      script: { ...state.project.script, raw: result.text || "", importedFileName: result.fileName || "", importedAt: new Date().toISOString() },
+      product: { ...state.project.product, name: $("#productName").value.trim(), description: sellingPoints, sellingPoints },
+      productionPlan: { ...state.project.productionPlan, inputMode: "manual", scriptHandling: "respect" },
+      ideation: { ...state.project.ideation, message: "已上传剧本；系统将先标准化制作稿，再提取资产和拆镜" },
+      activitySummary: "上传剧本并切换为标准化拆镜流程"
+    }));
+    state.project = patched.project;
+    renderAll();
+    showToast(`已上传 ${result.fileName || "剧本文件"}；下一步将先标准化再拆镜`);
   } catch (error) { showToast(error.message, "error"); }
 });
 $("#productPreview").addEventListener("click", async () => {
@@ -773,7 +783,7 @@ $("#productPreview").addEventListener("click", async () => {
 $("#aiAnalyze").addEventListener("click", async () => {
   if (!state.project) return;
   await saveScriptFields({ toast: false });
-  runLong("AI 正在识别并拆镜", "保留原剧情、人物和对白，整理成稳定生产结构", () => api("analyzeScript", state.project.id));
+  runLong("AI 正在标准化并拆镜", "保留原稿，逐字校验对白后再建立唯一资产清单与分镜", () => api("analyzeScript", state.project.id));
 });
 $("#generateAssets").addEventListener("click", async () => {
   if (!state.project) return;

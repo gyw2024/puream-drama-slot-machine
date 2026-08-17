@@ -1726,7 +1726,10 @@ function renderIdeation() {
   const topics = Array.isArray(ideation.topics) ? ideation.topics : [];
   const selectedId = ideation.selectedTopicId || "";
   const selected = topics.find(item => item.id === selectedId);
-  const statusText = ideation.message || (topics.length ? "请选择一个题材" : "点击按钮开始寻找爆款题材");
+  const manualUpload = project.productionPlan?.inputMode === "manual";
+  const statusText = manualUpload
+    ? (String(project.script?.raw || "").trim() ? "已接收上传剧本；下一步先标准化制作稿，再提取资产和拆镜" : "请上传或粘贴完整剧本")
+    : (ideation.message || (topics.length ? "请选择一个题材" : "点击按钮开始寻找爆款题材"));
   $("#ideationStatus").textContent = selected ? `${statusText} · 当前已选《${selected.title}》` : statusText;
   $("#topicGrid").innerHTML = topics.length ? topics.map((topic, index) => `
     <button class="topic-card ${topic.id === selectedId ? "selected" : ""}" data-action="select-topic" data-id="${escapeHtml(topic.id)}" aria-pressed="${topic.id === selectedId}">
@@ -2032,23 +2035,14 @@ function renderAssets(force = false) {
   const props = project.assetLibraries?.props || [];
   if ($("#propCount")) $("#propCount").textContent = props.length;
   if ($("#wardrobeGrid")) {
-    const baseCards = (project.characters || []).map(character => {
-      const sheet = chosenCharacterIdentity(character.id);
-      const outfitText = String(character.description || character.identitySignature || "基础服装已由人物合板锁定").trim();
-      return `<article class="asset-card">
-        <div class="asset-card-head">${assetPreview(sheet, "image")}<div><h4>${escapeHtml(character.name || character.id)} · 基础服装</h4><p>${escapeHtml(outfitText)}</p></div></div>
-        <div class="asset-tags"><span>基础服装·已由人物合板锁定</span><span>${sheet ? "合板已就绪" : "等待人物合板"}</span></div>
-        <div class="asset-stage-grid single">${assetStageTile(sheet, `${character.name || character.id} · 人物合板`, "image")}</div>
-      </article>`;
-    }).join("");
     const changeCards = wardrobes.map(item => {
       const candidate = chosenCandidate("library", item.id, "wardrobe_asset");
       const drawing = isEntityDrawing("library", item.id, ["wardrobe_asset"]) || isStageDrawing("wardrobe_asset", item.id);
       const work = assetBatchWorkState("wardrobe_asset", item.id, drawing);
       return `<article class="asset-card${work?.active ? " is-drawing" : ""}${work?.status === "failed" ? " has-work-failure" : ""}"><div class="drawing-banner" role="status" aria-live="polite"><i aria-hidden="true"></i><span>${escapeHtml(work?.label || "正在抽卡")}</span></div><div class="asset-card-head">${assetPreview(candidate, "image", work)}<div><h4>${escapeHtml(item.name)}</h4><p>${escapeHtml(item.description || "剧情服装参考")}</p></div></div><div class="asset-tags"><span>${escapeHtml(item.characterName || "未绑定角色")}</span><span>${escapeHtml(item.changeReason || "剧情换装")}</span><span>${(item.units || []).length ? `出现 ${(item.units || []).join("、")}` : "换装镜头"}</span><span>候选 ${candidates("library", item.id, "wardrobe_asset").length}</span></div><div class="asset-stage-grid single">${assetStageTile(candidate, `${item.name} · 换装图`, "image", "", work)}</div><div class="card-actions"><button class="mini-button draw-button${work?.active ? " is-loading" : ""}" data-long-action data-action="generate-library" data-library-type="wardrobes" data-id="${item.id}" ${work?.active ? "disabled" : ""}>${work?.active ? "生成中…" : "抽卡：换装图"}</button><button class="mini-button" data-action="import-candidate" data-entity-type="library" data-stage="wardrobe_asset" data-id="${item.id}">上传服装图</button><button class="mini-button" data-action="select-independent-asset" data-entity-type="library" data-stage="wardrobe_asset" data-id="${item.id}">从独立库选择</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="library" data-id="${item.id}">打开换装库</button></div></article>`;
     }).join("");
-    $("#wardrobeCount").textContent = String((project.characters || []).length + wardrobes.length);
-    $("#wardrobeGrid").innerHTML = (baseCards + changeCards) || `<div class="empty-hint">先完成人物合板后，这里会显示每个人的基础服装锁定状态；只有真实换装才会出现独立换装卡。</div>`;
+    $("#wardrobeCount").textContent = String(wardrobes.length);
+    $("#wardrobeGrid").innerHTML = changeCards || `<div class="empty-hint">剧本没有明确换装，服装资产为 0。人物首次出场的基础服装已归入人物定妆，不会重复建立服装资产。</div>`;
   }
   const productPath = String(project.product?.imagePath || "").trim();
   const productReady = Boolean(productPath);
@@ -3864,7 +3858,7 @@ function nextActionForProject(project = state.project) {
     if (!project.ideation?.selectedTopicId) return { title: "下一步：选择一个题材", detail: "在选题卡中选中一个故事方向，系统才会按该题材写剧本。", stage: "script", selector: '[data-action="select-topic"]' };
     return { title: "下一步：生成完整剧本", detail: "将按制作策略里的剧本模式、商品信息和目标时长写作。", stage: "script", selector: "#generateCompleteScript" };
   }
-  if (!hasShots) return { title: "下一步：解析并拆镜", detail: "原剧本会保留；系统提取人物、场景、逐句对白、语气和镜头。", stage: "script", selector: "#analyzeScript" };
+  if (!hasShots) return { title: "下一步：标准化剧本并拆镜", detail: "原稿会保留；系统先生成标准制作稿并校验对白，再提取唯一人物、物理场景、核心道具和真实换装。", stage: "script", selector: "#analyzeScript" };
   const missingAssets = [
     ...(project.characters || []).filter(item => !["character_sheet", "character_three_view", "character_intro"].some(stage => chosenCandidate("character", item.id, stage))),
     ...(project.scenes || []).filter(item => !chosenCandidate("scene", item.id, "scene_asset")),
@@ -4887,10 +4881,18 @@ $("#importScriptFile")?.addEventListener("click", async () => {
   const result = await api.workbench.importTextFile("script");
   if (!result?.ok) return showToast(result?.message || "读取剧本失败", "error");
   if (result.canceled || !String(result.text || "").trim()) return;
-  $("#scriptText").value = String(result.text || "");
-  state.scriptEditorDirty = true;
-  await saveScriptFields();
-  showToast(`已导入剧本文件${result.fileName ? `：${result.fileName}` : ""}`);
+  const raw = String(result.text || "");
+  $("#scriptText").value = raw;
+  const sellingPoints = $("#productDescription").value.trim();
+  await patchProject({
+    script: { ...state.project.script, raw, importedFileName: result.fileName || "", importedAt: new Date().toISOString() },
+    product: { ...state.project.product, name: $("#productName").value.trim(), description: sellingPoints, sellingPoints },
+    productionPlan: { ...state.project.productionPlan, inputMode: "manual", scriptHandling: "respect" },
+    ideation: { ...state.project.ideation, message: "已上传剧本；系统将先标准化制作稿，再提取资产和拆镜" }
+  }, "上传剧本并切换为标准化拆镜流程", false);
+  state.scriptEditorDirty = false;
+  renderAll();
+  showToast(`已导入剧本文件${result.fileName ? `：${result.fileName}` : ""}；下一步将先标准化再拆镜`, "success");
 });
 
 const sevenMinuteExampleSections = Object.freeze([

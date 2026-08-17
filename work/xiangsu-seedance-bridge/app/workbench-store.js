@@ -990,7 +990,7 @@ function invalidateProjectProductionPlan(project, reasons = []) {
   project.scenes = [];
   project.shots = [];
   project.script = { ...(project.script || {}) };
-  for (const key of ["analysis", "analysisChunks", "analysisMethod", "modeSynopsis", "detectedFormat", "qualityAudit", "promptLibraryVersion", "analyzedAt", "sourceFingerprint", "durationContract", "generationCheckpoint", "analysisCheckpoint", "generationLive"]) {
+  for (const key of ["analysis", "analysisChunks", "analysisMethod", "modeSynopsis", "detectedFormat", "qualityAudit", "promptLibraryVersion", "analyzedAt", "sourceFingerprint", "sourceDialogueLedger", "sourceSceneLedger", "sceneRecognitionReport", "assetExtractionNormalization", "analysisEnhancement", "durationContract", "generationCheckpoint", "analysisCheckpoint", "generationLive"]) {
     delete project.script[key];
   }
   project.generation = { ...(project.generation || {}), durationLocked: false, durationContract: null };
