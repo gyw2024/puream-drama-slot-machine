@@ -6,8 +6,8 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { detectUploadedScriptFormat, parseSourceDialogueLedger } = require("../app/dialogue-parser");
-const { WorkbenchStore } = require("../app/workbench-store");
-const { WorkbenchWorkflow } = require("../app/workbench-workflow");
+const { LEGACY_DEFAULT_PROMPT_HASHES, WorkbenchStore } = require("../app/workbench-store");
+const { WorkbenchWorkflow, parseTimedStoryboardScript } = require("../app/workbench-workflow");
 const {
   assertSourceSceneParity,
   bindDialogueLedgerToScenes,
@@ -128,6 +128,65 @@ test("compact S01 shot headers never become scenes and a fixed scene stays autho
   assert.deepEqual(ledger.catalogue.map(item => item.name), ["旧宅客厅"]);
   assert.equal(ledger.occurrences.length, 1);
   assert.equal(ledger.headingKinds.includes("fixed_scene"), true);
+});
+
+test("timed storyboard metadata collapses camera variants and preserves explicit assets exactly once", () => {
+  const source = `第1幕：【豪门冲突】分镜 1（2个镜头·中等节奏）※ 夜 @陈家豪华别墅客厅 内｜场景固定
+场景：@陈家豪华别墅客厅
+人物：@秦雪 @婆婆
+物品：@粉色塑料盆 @离婚协议书 @蓝色包装盒（清洁棒产品）
+场景：室内陈家豪华别墅客厅餐桌旁，夜间雨光。
+【0-15秒】镜头：
+0-7秒，【中景，秦雪端起粉色塑料盆，无台词】；
+7-15秒，【近景，婆婆摔下离婚协议书，@婆婆：“现在签字。”】；
+【对话汇总】
+@婆婆（音色：@婆婆，7-15秒，冷硬）：“现在签字。”
+【音效】文件摔桌声
+分镜 2（2个镜头·中等节奏）※ 夜 @陈家客厅直播视角 内｜场景固定
+场景：@陈家客厅直播视角
+人物：@秦雪
+物品：@离婚协议书 @蓝色包装盒
+场景：室内陈家豪华别墅客厅转为主观直播视角，夜间。
+【0-15秒】镜头：
+0-7秒，【近景，秦雪举起协议书，@秦雪：“大家看清楚。”】；
+7-15秒，【特写，协议书保持在镜头前，无台词】；
+【对话汇总】
+@秦雪（音色：@秦雪，0-7秒，坚定）：“大家看清楚。”
+【音效】室内底噪
+分镜 3（2个镜头·中等节奏）※ 夜 @陈家厨房水槽 内｜场景固定
+场景：@陈家厨房水槽
+人物：@秦雪
+物品：@清洁棒
+场景：室内陈家厨房水槽前，夜间明亮。
+【0-15秒】镜头：
+0-7秒，【中景，秦雪走到水槽前，@秦雪：“我来处理。”】；
+7-15秒，【特写，秦雪拿起清洁棒，无台词】；
+【对话汇总】
+@秦雪（音色：@秦雪，0-7秒，平静）：“我来处理。”
+【音效】流水声`;
+  const ledger = buildSourceSceneLedger(source);
+  assert.deepEqual(ledger.catalogue.map(item => item.name), ["陈家豪华别墅客厅", "陈家厨房水槽"]);
+  assert.deepEqual(ledger.occurrences.map(item => item.sceneName), ["陈家豪华别墅客厅", "陈家厨房水槽"]);
+
+  const parsed = parseTimedStoryboardScript(source);
+  assert.deepEqual(parsed.scenes.map(item => item.name), ["陈家豪华别墅客厅", "陈家厨房水槽"]);
+  assert.deepEqual(parsed.characters.map(item => item.name), ["秦雪", "婆婆"]);
+  assert.deepEqual(parsed.props.map(item => item.name), ["粉色塑料盆", "离婚协议书", "蓝色包装盒（清洁棒产品）", "清洁棒"]);
+  assert.deepEqual(parsed.props.find(item => item.name === "蓝色包装盒（清洁棒产品）").aliases, ["蓝色包装盒"]);
+  assert.deepEqual(parsed.shots[1].props, ["离婚协议书", "蓝色包装盒（清洁棒产品）"]);
+  assert.ok(parsed.props.every(item => item.coreStory === true));
+  assert.deepEqual(parsed.shots.map(item => item.scene), ["陈家豪华别墅客厅", "陈家豪华别墅客厅", "陈家厨房水槽"]);
+});
+
+test("uploaded-script analysis contains the mandatory asset standardization prompt", () => {
+  const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
+  const promptSource = fs.readFileSync(path.join(__dirname, "..", "app", "prompt-library.js"), "utf8");
+  for (const source of [workflowSource, promptSource]) {
+    assert.match(source, /资产提取前置标准化/);
+    assert.match(source, /唯一物理空间/);
+    assert.match(source, /不得新增原稿没有的资产|禁止多建、漏建/);
+  }
+  assert.ok(LEGACY_DEFAULT_PROMPT_HASHES.scriptAnalysis.includes("dd0682496427e53e31b05caab21aa420c78f673c0966b9d19ccd895ba3e5d789"));
 });
 
 test("explicit source scenes fail closed when a later stage drops them", () => {

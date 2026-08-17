@@ -12,6 +12,7 @@ function normalizeSceneName(value = "") {
     .replace(/\s*[\]】)）》>]$/, "")
     .replace(/^(?:场景|地点|内景|外景)\s*[:：-]?\s*/i, "")
     .replace(/^(?:转场|切至|切到|转至|来到)\s*[:：-]?\s*/i, "")
+    .replace(/^@+/, "")
     .replace(/[。；;，,]+$/, "")
     .trim();
   name = name.replace(/集团总裁办(?:公室)?/g, "总裁办公室").replace(/总裁办(?!公室)/g, "总裁办公室");
@@ -42,6 +43,9 @@ function splitCompoundSceneName(value = "") {
 function parseSceneHeading(line = "") {
   const text = String(line || "").trim();
   if (!text || text.length > 180) return null;
+  // Acts and shot headers describe narrative structure, camera coverage or
+  // presentation. They are never reusable physical scene assets.
+  if (/分镜\s*\d+/i.test(text)) return null;
   let match = text.match(/^(?:唯一\s*)?场景\s*(?:固定|设定|锁定)\s*[:：]\s*(.+)$/i);
   if (match) {
     const raw = clean(match[1])
@@ -53,8 +57,11 @@ function parseSceneHeading(line = "") {
   match = text.match(/^(?:#{1,6}\s*)?【\s*场景\s*】\s*(.+)$/i);
   if (match) return { raw: clean(match[1]), kind: "bracketed" };
   match = text.match(/^(?:#{1,6}\s*)?场景\s*[:：]\s*(.+)$/i);
-  if (match) return { raw: clean(match[1]), kind: "labelled" };
-  match = text.match(/^(?:#{1,6}\s*)?第[一二三四五六七八九十百千零〇\d]+(?:场|幕)\s*[:：、.-]?\s*(.+)$/i);
+  if (match) {
+    const raw = clean(match[1]);
+    return { raw, kind: raw.startsWith("@") ? "tagged" : "labelled" };
+  }
+  match = text.match(/^(?:#{1,6}\s*)?第[一二三四五六七八九十百千零〇\d]+场\s*[:：、.-]?\s*(.+)$/i);
   if (match) return { raw: clean(match[1]), kind: "numbered_chinese" };
   // SC01 is a scene identifier. S01 is a shot identifier and must never be
   // promoted into a scene asset, even when it contains time/camera/action fields.
@@ -91,6 +98,10 @@ function findScene(catalogue, value, candidates = catalogue) {
   return scored[0]?.score >= 6 ? scored[0].item : null;
 }
 
+function isPresentationSceneVariant(value = "") {
+  return /(?:直播|主观|监控|采访|航拍|跟拍)?(?:视角|机位|镜头|画面)$/i.test(normalizeSceneName(value));
+}
+
 function buildSourceSceneLedger(value = "") {
   const source = String(value || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   const catalogue = [];
@@ -102,15 +113,16 @@ function buildSourceSceneLedger(value = "") {
     lines.push({ text, start: cursor, end: cursor + text.length });
     cursor += text.length + 1;
   }
-  const addScene = (rawName, sourceStart, declared = true) => {
+  const addScene = (rawName, sourceStart, declared = true, kind = "") => {
     const name = normalizeSceneName(rawName);
     if (!name || PLACEHOLDER_SCENE.test(name)) return null;
     const semanticKey = sceneSemanticKey(name);
     // A declared heading is authoritative. Similar broad words such as
     // "公寓" must never merge 客厅、走廊 and 门口 into one asset.
-    let scene = declared
-      ? catalogue.find(item => item.semanticKey === semanticKey)
-      : findScene(catalogue, name);
+    const exact = catalogue.find(item => item.semanticKey === semanticKey);
+    const descriptiveLabel = kind === "labelled" && (/^(?:室内|室外)/.test(clean(rawName)) || /[，,。；;]/.test(clean(rawName)));
+    const presentationVariant = kind === "tagged" && isPresentationSceneVariant(name);
+    let scene = exact || ((descriptiveLabel || presentationVariant || !declared) ? findScene(catalogue, name) : null);
     if (!scene) {
       scene = {
         id: `SRC_SC${String(catalogue.length + 1).padStart(3, "0")}`,
@@ -121,7 +133,7 @@ function buildSourceSceneLedger(value = "") {
         sourceStarts: []
       };
       catalogue.push(scene);
-    } else if (name !== scene.name && !scene.aliases.includes(name)) {
+    } else if (name !== scene.name && name.length <= 60 && !scene.aliases.includes(name)) {
       scene.aliases.push(name);
     }
     if (declared && !scene.sourceStarts.includes(sourceStart)) scene.sourceStarts.push(sourceStart);
@@ -150,7 +162,7 @@ function buildSourceSceneLedger(value = "") {
     if (heading) {
       headingKinds.add(heading.kind);
       const parts = splitCompoundSceneName(heading.raw);
-      const declared = parts.map(part => addScene(part, line.start, true)).filter(Boolean);
+      const declared = parts.map(part => addScene(part, line.start, true, heading.kind)).filter(Boolean);
       pending = declared.slice(1);
       pushOccurrence(declared[0], line.start, null, "heading", parts[0]);
       continue;

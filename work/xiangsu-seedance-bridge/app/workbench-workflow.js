@@ -16,6 +16,7 @@ const {
   bindDialogueLedgerToScenes,
   buildSourceSceneLedger,
   enforceSourceSceneLedger,
+  sceneAtSourceOffset,
   sceneContextForRange,
   sourceScenePromptBlock
 } = require("./script-scene-ledger");
@@ -7845,6 +7846,71 @@ function uploadedAnalysisConcurrency(chunkSchedules = []) {
   return Math.max(1, Math.min(UPLOADED_ANALYSIS_MAX_CONCURRENCY, list.length));
 }
 
+function explicitTaggedAssetNames(text = "", labels = []) {
+  const labelPattern = labels
+    .map(label => String(label || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .filter(Boolean)
+    .join("|");
+  if (!labelPattern) return [];
+  const names = [];
+  const seen = new Set();
+  const add = value => {
+    const name = String(value || "").trim().replace(/^@+/, "").replace(/[；;，,。]+$/, "").trim();
+    if (!name || name === "无" || seen.has(name)) return;
+    seen.add(name);
+    names.push(name);
+  };
+  const linePattern = new RegExp(`(?:^|\\n)(?:${labelPattern})\\s*[：:]\\s*([^\\n]+)`, "gi");
+  for (const match of String(text || "").replace(/\r\n?/g, "\n").matchAll(linePattern)) {
+    const value = String(match[1] || "").trim();
+    const tagged = [...value.matchAll(/@([^\s@，、；;]+)/g)].map(item => item[1]);
+    if (tagged.length) {
+      tagged.forEach(add);
+      continue;
+    }
+    value.split(/[，、；;]+/).forEach(add);
+  }
+  return names;
+}
+
+function canonicalizeExplicitTimedProps(shots = []) {
+  const ordered = [];
+  const seen = new Set();
+  for (const shot of shots) {
+    for (const value of Array.isArray(shot?.props) ? shot.props : []) {
+      const name = String(value || "").trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      ordered.push(name);
+    }
+  }
+  const parentheticalBase = name => String(name || "").replace(/\s*[（(][^（）()]{1,80}[）)]\s*$/, "").trim();
+  const decoratedByBase = new Map();
+  for (const name of ordered) {
+    const base = parentheticalBase(name);
+    if (!base || base === name) continue;
+    const variants = decoratedByBase.get(base) || [];
+    variants.push(name);
+    decoratedByBase.set(base, variants);
+  }
+  const canonicalFor = new Map();
+  for (const name of ordered) {
+    const variants = decoratedByBase.get(name) || [];
+    canonicalFor.set(name, variants.length === 1 ? variants[0] : name);
+  }
+  const records = new Map();
+  for (const name of ordered) {
+    const canonicalName = canonicalFor.get(name) || name;
+    const record = records.get(canonicalName) || { name: canonicalName, aliases: [] };
+    if (name !== canonicalName && !record.aliases.includes(name)) record.aliases.push(name);
+    records.set(canonicalName, record);
+  }
+  for (const shot of shots) {
+    shot.props = [...new Set((Array.isArray(shot?.props) ? shot.props : []).map(name => canonicalFor.get(name) || name))];
+  }
+  return [...records.values()];
+}
+
 function validateScriptAnalysisChunkResult(result = {}, payload = {}) {
   const failures = [];
   if (!result?.story || typeof result.story !== "object" || Array.isArray(result.story)) failures.push("story 必须是完整故事对象");
@@ -7856,8 +7922,14 @@ function validateScriptAnalysisChunkResult(result = {}, payload = {}) {
   if (shots.length !== expectedUnits) failures.push(`shots 必须恰好 ${expectedUnits} 个，实际 ${shots.length} 个`);
   if (!characters.length) failures.push("characters 不能为空");
   if (!scenes.length) failures.push("scenes 不能为空");
-  if (!Array.isArray(result?.props)) failures.push("props 必须是数组；没有核心道具时返回空数组");
+  if (!Array.isArray(result?.props)) failures.push("props 必须是数组；原稿没有明确物品且自然文本没有独立剧情道具时返回空数组");
   if (payload?.requireCoreProp === true && !props.length) failures.push("原稿明确存在核心道具/证物，props 不能留空");
+  const explicitPropNames = normalizeStringArray(payload?.explicitPropNames);
+  for (const expectedName of explicitPropNames) {
+    const found = props.some(prop => String(prop?.name || "").trim() === expectedName
+      || normalizeStringArray(prop?.aliases).includes(expectedName));
+    if (!found) failures.push(`原稿物品/道具栏明确列出的“${expectedName}”未进入唯一道具台账`);
+  }
   for (const prop of props) {
     if (prop?.coreStory !== true) failures.push(`道具“${prop?.name || "未命名"}”没有证明其参与核心因果，不得进入资产库`);
     if (!String(prop?.purpose || prop?.causalRole || "").trim()) failures.push(`核心道具“${prop?.name || "未命名"}”缺少剧情用途`);
@@ -7898,7 +7970,11 @@ function analysisChunkSchedules(chunks, filmSchedule) {
 
 function localUploadedAnalysisChunk(chunk, project = {}) {
   const ledger = (Array.isArray(chunk?.sourceDialogueLedger) ? chunk.sourceDialogueLedger : []).map(item => ({ ...item }));
-  const names = [...new Set(ledger.map(item => String(item?.speaker || item?.speakerRaw || "").trim()).filter(Boolean))];
+  const explicitlyListedNames = explicitTaggedAssetNames(chunk?.text, ["人物", "角色"]);
+  const names = [...new Set([
+    ...explicitlyListedNames,
+    ...ledger.map(item => String(item?.speaker || item?.speakerRaw || "").trim()).filter(Boolean)
+  ])];
   if (!names.length) names.push("讲述者");
   const characters = names.map((name, index) => ({
     id: `C${String(index + 1).padStart(2, "0")}`,
@@ -8007,6 +8083,16 @@ function localUploadedAnalysisChunk(chunk, project = {}) {
       subshots
     };
   });
+  const explicitProps = explicitTaggedAssetNames(chunk?.text, ["物品", "道具"]).map((name, index) => ({
+    id: `P${String(index + 1).padStart(2, "0")}`,
+    name,
+    description: `${name}按用户原稿中的形状、材质、颜色和状态建立唯一写实资产`,
+    coreStory: true,
+    causalRole: "用户在原稿物品/道具栏中明确列出，必须保持跨镜视觉一致",
+    purpose: "按原稿出现位置参与动作、特写或连续性",
+    units: shots.map(shot => shot.id),
+    continuity: "名称、外观、持有人和状态变化按原稿连续"
+  }));
   const bound = bindSourceDialogueLedgerToAnalysis({
     story: {
       synopsis: String(chunk?.text || "").replace(/\s+/g, " ").slice(0, 500),
@@ -8017,6 +8103,7 @@ function localUploadedAnalysisChunk(chunk, project = {}) {
     },
     characters,
     scenes,
+    props: explicitProps,
     shots
   }, ledger);
   return enforceSourceSceneLedger(bound, chunk?.sourceSceneLedger, ledger);
@@ -8275,8 +8362,8 @@ function parseTimedStoryboardScript(text) {
   const drafts = [];
   const globalLedger = [];
   const allNames = new Set();
-  const propNames = new Set();
   const sceneRecords = new Map();
+  const normalizedSceneLedger = buildSourceSceneLedger(source);
   for (let shotIndex = 0; shotIndex < markers.length; shotIndex += 1) {
     const marker = markers[shotIndex];
     const blockStart = Number(marker.index);
@@ -8286,11 +8373,13 @@ function parseTimedStoryboardScript(text) {
     const act = actAt(blockStart);
     const duration = Math.max(1, Number(block.match(/【0-(\d+(?:\.\d+)?)秒】镜头/)?.[1]) || 15);
     const pace = String(marker[2] || "").split("·").at(-1)?.trim() || "中等节奏";
-    const sceneName = String(field(block, "场景").replace(/^@/, "").trim() || header.match(/@([^｜\n]+)/)?.[1] || `场景${shotIndex + 1}`).trim();
+    const sceneFieldOffsets = [block.indexOf("场景：@"), block.indexOf("场景:@")].filter(value => value >= 0);
+    const sceneFieldOffset = sceneFieldOffsets.length ? Math.min(...sceneFieldOffsets) : 0;
+    const sceneOccurrence = sceneAtSourceOffset(normalizedSceneLedger, blockStart + Math.max(0, sceneFieldOffset));
+    const sceneName = String(sceneOccurrence?.sceneName || field(block, "场景").replace(/^@/, "").trim() || header.match(/@([^｜\n]+)/)?.[1] || `场景${shotIndex + 1}`).trim();
     const cast = atNames(field(block, "人物"));
     const objects = atNames(field(block, "物品")).filter(name => name !== "无");
     cast.forEach(name => allNames.add(name));
-    objects.forEach(name => propNames.add(name));
     const weather = field(block, "天气/灯光/氛围") || "按剧情连续呈现光线、色温与情绪";
     const sceneDetails = [...block.matchAll(/(?:^|\n)场景[：:]([^@\n][^\n]*)/g)].map(item => String(item[1] || "").trim()).filter(Boolean);
     if (!sceneRecords.has(sceneName)) {
@@ -8494,12 +8583,16 @@ function parseTimedStoryboardScript(text) {
   const actTitles = actMarkers.map(item => item[2]);
   const synopsis = timedStoryboardSynopsis(actTitles, drafts, globalLedger);
   const scenes = [...sceneRecords.values()].map((scene, index) => ({ id: `SC${String(index + 1).padStart(2, "0")}`, ...scene }));
-  const props = [...propNames].map((name, index) => ({
+  const propRecords = canonicalizeExplicitTimedProps(drafts);
+  const props = propRecords.map((record, index) => ({
     id: `P${String(index + 1).padStart(2, "0")}`,
-    name,
-    description: `${name}按用户原稿状态生成写实资产，形状、材质、颜色、磨损和持有人状态跨镜固定`,
-    purpose: drafts.filter(shot => shot.props.includes(name)).map(shot => shot.authoredContinuity).slice(0, 3).join("；"),
-    units: drafts.filter(shot => shot.props.includes(name)).map(shot => shot.id),
+    name: record.name,
+    aliases: record.aliases,
+    description: `${record.name}按用户原稿状态生成写实资产，形状、材质、颜色、磨损和持有人状态跨镜固定`,
+    coreStory: true,
+    causalRole: "用户在原稿物品栏中明确列为需要跨镜保持一致的独立视觉资产",
+    purpose: drafts.filter(shot => shot.props.includes(record.name)).map(shot => shot.authoredContinuity).slice(0, 3).join("；"),
+    units: drafts.filter(shot => shot.props.includes(record.name)).map(shot => shot.id),
     continuity: "出现、持有、位置和状态变化必须按秒级分镜连续"
   }));
   return {
@@ -9056,6 +9149,7 @@ function normalizeAnalysis(data, project) {
   const props = (Array.isArray(data?.props) ? data.props : []).map((item, index) => ({
     id: item.id || makeId("prop"),
     name: String(item.name || `道具${index + 1}`).trim(),
+    aliases: normalizeStringArray(item.aliases),
     description: String(item.description || item.appearance || "").trim(),
     holder: String(item.holder || "").trim(),
     units: Array.isArray(item.units) ? item.units.map(String) : [],
@@ -10111,7 +10205,7 @@ class WorkbenchWorkflow {
               ...payload.messages,
               {
                 role: "user",
-                content: `上一次 JSON 未通过剧本理解合同。请重新输出完整 JSON，保留原稿事实、逐字对白、镜数和时长；props 只允许收录参与核心因果的道具，家具、餐具、手机、杯子、普通门窗及环境装饰不得进入。修复项：${Array.isArray(error?.details) ? error.details.join("；") : error?.message || error}`
+                content: `上一次 JSON 未通过剧本理解合同。请重新输出完整 JSON，保留原稿事实、逐字对白、镜数和时长。用户在物品/道具栏明确列出的每一项必须完整进入唯一 props 台账并跨镜去重，不得因为它是手机、椅子、包装盒或普通物件而删除；自然文本中未明确列出的家具、门窗和环境陈设仍只属于场景。修复项：${Array.isArray(error?.details) ? error.details.join("；") : error?.message || error}`
               }
             ],
             textOptions: {
@@ -13900,6 +13994,21 @@ class WorkbenchWorkflow {
         : [];
       project.script.sourceSceneLedger = normalized.sourceSceneLedger || sceneContract;
       project.script.sceneRecognitionReport = normalized.sourceSceneLedger?.report || sceneContract?.report || null;
+      project.script.assetExtractionNormalization = {
+        version: 2,
+        method: normalized?.detectedFormat === "timed_storyboard"
+          ? "deterministic-explicit-ledger"
+          : "agent-standardized-asset-contract",
+        sourceFingerprint,
+        normalizedAt: new Date().toISOString(),
+        characterCount: normalized.characters.length,
+        sceneCount: normalized.scenes.length,
+        propCount: Array.isArray(normalized.props) ? normalized.props.length : 0,
+        characters: normalized.characters.map(item => item.name),
+        scenes: normalized.scenes.map(item => item.name),
+        props: (normalized.props || []).map(item => item.name),
+        rules: ["one_character_one_asset", "one_physical_space_one_scene", "explicit_props_preserved", "dialogue_and_event_order_immutable"]
+      };
       project.script.qualityAudit = qualityAudit;
       project.script.promptLibraryVersion = settings.promptLibraryVersion || "";
       project.script.analyzedAt = new Date().toISOString();
@@ -14083,11 +14192,20 @@ class WorkbenchWorkflow {
       const target = chunkSchedules.find(chunk => item.sourceStart < chunk.end) || chunkSchedules.at(-1);
       if (target) target.sourceDialogueLedger.push(item);
     }
-    const analysisPromptBase = appendDocxPromptFusion(
+    const assetNormalizationDirective = [
+      "【上传剧本资产提取前置标准化合同｜必须先执行再拆解】",
+      "先在内部把用户原稿无损整理成唯一资产台账，再依据该台账输出结构化 JSON。不得要求用户自行改稿，也不得把整理稿当成新的创作任务。",
+      "人物：凡实际出镜、说话或画外说话者都必须且只能建立一个人物资产；仅被谈及但从未出现或发声的人不建资产。姓名、称谓和代号属于同一人时合并为别名，禁止重复建卡或凭空增加角色。",
+      "场景：按唯一物理空间建资产。同一房间的直播视角、主观视角、机位、景别、门口/餐桌旁/沙发区等局部区域，以及昼夜、天气、灯光、凌乱程度等状态变化，全部保留在分镜字段，绝不能另建场景；只有人物确实进入另一个独立空间才新增场景。",
+      "道具：用户以物品/道具栏明确列出的非“无”对象全部进入道具台账并跨镜去重；自然文本中仅收录实际被拿取、使用、阅读、特写、反复出现或承担剧情因果的独立对象。门窗家具和环境陈设写入场景，不重复建道具；用户商品由商品图锁定，不得再建同名道具。",
+      "守恒：不得新增原稿没有的资产，不得遗漏符合上述条件的资产。每个 shot 只能引用唯一台账中的人物、场景和道具；对白文字、说话人、事件顺序、金额数字和结局逐项保持原样。",
+      `本地已锁定的物理场景台账：${(productionSceneLedger.catalogue || []).map(item => `${item.id}:${item.name}${item.aliases?.length ? `（别名：${item.aliases.join("、")}）` : ""}`).join("；") || "原稿未提供可靠场景标题，必须从实际事件地点中建立具体物理空间"}`
+    ].join("\n");
+    const analysisPromptBase = `${appendDocxPromptFusion(
       textStagePromptForProject(project, settings, "scriptAnalysis", "script_analysis"),
       settings.prompts,
       "script_analysis"
-    );
+    )}\n${assetNormalizationDirective}`;
     const modeDirective = generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project));
     const schemaJson = JSON.stringify(schema);
     const chunkFingerprint = chunk => crypto.createHash("sha256").update(JSON.stringify({
@@ -14100,7 +14218,7 @@ class WorkbenchWorkflow {
       scenes: (chunk.sourceSceneLedger?.catalogue || []).map(item => [item.id, item.name, item.aliases])
     })).digest("hex");
     const analysisSignature = crypto.createHash("sha256").update(JSON.stringify({
-      version: 4,
+      version: 5,
       sourceFingerprint,
       targetSeconds: filmSchedule.totalSeconds,
       unitDurations: filmSchedule.unitDurations,
@@ -14213,6 +14331,7 @@ class WorkbenchWorkflow {
     await mapWithConcurrency(pendingChunks, analysisConcurrency, async chunk => {
       this.assertOperationActive(projectId);
       const localBound = localUploadedAnalysisChunk(chunk, project);
+      const explicitPropNames = explicitTaggedAssetNames(chunk.text, ["物品", "道具"]);
       partials[chunk.index] = localBound;
       saveCompletedAnalysisChunk(chunk, {
         ...localBound,
@@ -14223,8 +14342,8 @@ class WorkbenchWorkflow {
       const ledgerPrompt = sourceDialoguePromptBlock(chunk.sourceDialogueLedger);
       const scenePrompt = sourceScenePromptBlock(chunk.sourceSceneLedger);
       const messages = [
-        { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n${scenePrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。props 必须由你依据故事因果判断：只收录会触发事件、证明真相、改变关系或完成结局的核心道具，并写 coreStory=true、causalRole、purpose 与实际参与镜号；家具、门窗、杯盘、普通手机、随手杂物和环境装饰一律不收录；没有核心道具时必须返回空数组。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}` },
-        { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先判断本段故事因果、人物关系、每句话的说话人/听者/语气/表情、核心道具与商品出现时机，再写人物、场景、核心道具资产信息、分镜结构与sourceDialogueBindings。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。商品资产由用户图锁定，不得重复作为 prop 生成。\n${uploadedSections.metadata ? `\n人物小传/故事简介（只用于建立人物与背景事实，绝对不能生成“人物介绍”“角色展示”“故事简介”镜头）：\n${uploadedSections.metadata}\n` : ""}\n正式剧情片段（只有这里可以转成成片镜头）：\n${chunk.text}` }
+        { role: "system", content: `${analysisPromptBase}\n${modeDirective}\n${ledgerPrompt}\n${scenePrompt}\n全剧时长合同为 ${filmSchedule.totalSeconds} 秒、共 ${filmSchedule.unitCount} 个生成单元。当前片段必须恰好输出 ${chunk.unitCount} 个 shots，duration 依次严格写为 ${chunk.durations.join("、")} 秒，不得增删。资产台账规则：系统消息中的人物、场景和明确物品/道具台账是唯一来源；明确物品/道具栏中的每一项都必须保留、跨镜去重并写入 props，哪怕它是手机、椅子、包装盒或普通物件，也必须标记 coreStory=true、causalRole、purpose 与实际参与镜号。只有自然文本中未被明确列出的物体，才按实际使用、阅读、特写、反复出现或承担剧情因果判断；家具、门窗和环境陈设只写进场景，不另建道具。没有明确物品且自然文本也没有独立剧情道具时返回空数组。不得把用户商品重复建为 prop。只输出 JSON，不要解释。JSON 结构必须匹配：${schemaJson}` },
+        { role: "user", content: `这是完整剧本的第 ${chunk.index + 1}/${chunks.length} 段。先把本段无损整理成唯一人物、唯一物理场景、唯一道具台账，再判断故事因果、人物关系、每句话的说话人/听者/语气/表情与商品出现时机，最后依据唯一台账写资产信息、分镜结构与sourceDialogueBindings。本段明确物品/道具台账：${explicitPropNames.length ? explicitPropNames.join("、") : "无明确列表，按系统合同从自然文本判断"}。原稿可以是“说话人（语气/动作）：说话内容”的极简台本，也可以是分场剧本、梗概或混合自然文本。必须保留原稿事实、人物关系、事件顺序和本段结尾；不得改写、合并、遗漏系统消息中逐句事实账本的任何台词，不得新增台词。当前片段严格拆成 ${chunk.unitCount} 个生成单元，时长依次为 ${chunk.durations.join("、")} 秒。每个生成单元必须区分 scenePresenceCharacterIds（场内连续性）与 visibleCharacterIds（本镜真正入画，严格0–2人），并写满恰好3个有动作/视线/声音切换动机的subshots；第三人另开相邻单人镜。\n当前图像/视频策略：${normalizeProjectMode(project.generation?.mode)}（${generationModeLabel(project.generation?.mode)}）。\n${generationModeSourceDirective(normalizeProjectMode(project.generation?.mode), projectVideoEngine(project))}\n用户上传商品名称：${project.product?.name || "未填写"}\n用户上传商品说明：${project.product?.description || "未填写"}\n用户上传商品卖点：${project.product?.sellingPoints || "未填写"}\n只在剧本提到该商品、同品类物件或剧情确实需要解决问题的单元设置productMention=true；必须绑定用户上传商品，禁止虚构另一个品牌/包装/功效，也禁止提前或硬塞。商品资产由用户图锁定，不得重复作为 prop 生成。\n${uploadedSections.metadata ? `\n人物小传/故事简介（只用于建立人物与背景事实，绝对不能生成“人物介绍”“角色展示”“故事简介”镜头）：\n${uploadedSections.metadata}\n` : ""}\n正式剧情片段（只有这里可以转成成片镜头）：\n${chunk.text}` }
       ];
       const requestChars = JSON.stringify(messages).length;
       const control = this.operationControls.get(projectId);
@@ -14254,7 +14373,8 @@ class WorkbenchWorkflow {
           messages,
           textOptions,
           unitCount: chunk.unitCount,
-          requireCoreProp: /核心道具|关键道具|核心证物|关键证物|唯一证物/.test(String(chunk.text || ""))
+          requireCoreProp: explicitPropNames.length > 0 || /核心道具|关键道具|核心证物|关键证物|唯一证物/.test(String(chunk.text || "")),
+          explicitPropNames
         }, { projectId, operation: `script_analysis_chunk_${chunk.index + 1}`, signal: control?.controller?.signal });
         const actualCount = Array.isArray(partial?.shots) ? partial.shots.length : 0;
         if (actualCount !== chunk.unitCount
@@ -19933,10 +20053,9 @@ ${shotAnchor}
       shot.wardrobeId = (shot.characterIds || []).length === 1 ? (shot.wardrobeBindings[0]?.wardrobeId || "") : "";
     }
     const productName = String(project.product?.name || "").trim();
-    // Prop cards are an AI-authoritative allow-list. A shot may mention furniture,
-    // cups or other continuity details, but those details are never promoted to
-    // reusable assets by local parsing. The sellable product also stays bound to
-    // the user's uploaded product image instead of being redrawn as a prop.
+    // Prop cards follow the normalized source ledger. Explicit user-authored
+    // item fields are authoritative; incidental furniture and continuity prose
+    // are not promoted. The sellable product remains bound to the uploaded image.
     const previousProps = [...project.assetLibraries.props];
     const hasFreshAgentProps = Object.prototype.hasOwnProperty.call(options, "props");
     const propSources = [
@@ -19950,15 +20069,24 @@ ${shotAnchor}
     const byName = new Map();
     for (const prop of propSources) {
       const name = String(prop?.name || "").trim();
-      if (!name || prop?.coreStory !== true || isSameProductName(name, productName)) continue;
+      const aliases = normalizeStringArray(prop?.aliases).filter(alias => alias !== name);
+      if (!name || prop?.coreStory !== true || isSameProductName(name, productName)
+        || aliases.some(alias => isSameProductName(alias, productName))) continue;
       const nameKey = name.toLocaleLowerCase();
-      const existingByName = previousProps.find(item => String(item?.name || "").trim().toLocaleLowerCase() === nameKey);
+      const aliasKeys = aliases.map(alias => alias.toLocaleLowerCase());
+      const existingByName = previousProps.find(item => {
+        const priorNames = [item?.name, ...normalizeStringArray(item?.aliases)]
+          .map(value => String(value || "").trim().toLocaleLowerCase())
+          .filter(Boolean);
+        return priorNames.includes(nameKey) || aliasKeys.some(key => priorNames.includes(key));
+      });
       const existingById = previousProps.find(item => item?.id && prop?.id && String(item.id) === String(prop.id));
-      const prior = byName.get(nameKey) || existingById || existingByName || {};
+      const prior = byName.get(nameKey) || aliasKeys.map(key => byName.get(key)).find(Boolean) || existingById || existingByName || {};
       const normalized = {
         ...prior,
         id: String(prop.id || prior.id || `prop_${slug(name)}`),
-        name,
+        name: String(prior.name || name),
+        aliases: [...new Set([...normalizeStringArray(prior.aliases), ...aliases, ...(prior.name && prior.name !== name ? [name] : [])])],
         description: String(prop.description || prop.appearance || prior.description || "").trim(),
         holder: String(prop.holder || prior.holder || "").trim(),
         units: [...new Set([...(prior.units || []), ...((Array.isArray(prop.units) ? prop.units : []).map(String))])],
@@ -19967,14 +20095,16 @@ ${shotAnchor}
         causalRole: String(prop.causalRole || prior.causalRole || prop.purpose || "").trim(),
         continuity: String(prop.continuity || prior.continuity || "").trim()
       };
-      if (!byName.has(nameKey)) {
+      if (!byName.has(nameKey) && !aliasKeys.some(key => byName.has(key))) {
         nextProps.push(normalized);
-        byName.set(nameKey, normalized);
       } else {
-        const target = byName.get(nameKey);
+        const target = byName.get(nameKey) || aliasKeys.map(key => byName.get(key)).find(Boolean);
         Object.assign(target, normalized);
-        byName.set(nameKey, target);
       }
+      const target = byName.get(nameKey) || aliasKeys.map(key => byName.get(key)).find(Boolean) || normalized;
+      byName.set(String(target.name || name).toLocaleLowerCase(), target);
+      byName.set(nameKey, target);
+      for (const alias of normalizeStringArray(target.aliases)) byName.set(alias.toLocaleLowerCase(), target);
     }
     project.assetLibraries.props = nextProps;
     const propIds = new Set(nextProps.map(item => item.id));

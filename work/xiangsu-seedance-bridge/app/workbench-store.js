@@ -117,7 +117,8 @@ const LEGACY_DEFAULT_PROMPT_HASHES = Object.freeze({
   scriptAnalysis: Object.freeze([
     "c4818545e562d5a879ab6dad52cf757c9aec8832fe562a5c6decee9a3650d812",
     "42cb6c17c458f3a1d0b5df1fcf0a0d9d2e5561d6bbff7efad48086c57197a86e",
-    "3308315ca3b3300c6dc6f33199024a2aa8ed5d70074fec3791845a2caa2347d1"
+    "3308315ca3b3300c6dc6f33199024a2aa8ed5d70074fec3791845a2caa2347d1",
+    "dd0682496427e53e31b05caab21aa420c78f673c0966b9d19ccd895ba3e5d789"
   ]),
   scriptSemanticReview: Object.freeze([
     "91bd83d58bc0b08efedfaf5f58a9f34a526361ae4ed66a2253f3b9e591f49942",

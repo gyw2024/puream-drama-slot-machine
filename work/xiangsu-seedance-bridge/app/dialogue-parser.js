@@ -5,7 +5,7 @@ function clean(value) {
 }
 
 const NON_SPEAKER_LABELS = new Set([
-  "场景", "镜头", "地点", "时间", "动作", "画面", "景别", "运镜", "声音", "音效", "情绪", "产品", "商品", "说明", "备注",
+  "场景", "镜头", "地点", "时间", "人物", "角色", "物品", "道具", "动作", "画面", "景别", "运镜", "声音", "音效", "情绪", "产品", "商品", "说明", "备注",
   "计划", "原因", "结果", "重点", "注意", "描述", "信息", "状态", "目标", "步骤", "问题", "答案", "对白", "无对白",
   "背景/动作", "背景动作", "商品动作", "商品说明", "制作说明", "分镜说明", "表演说明", "连续性"
 ]);
@@ -102,7 +102,7 @@ function parseSpeakerLabel(value, knownNames = []) {
   const parenthetical = raw.match(/^(.{1,24}?)\s*[（(]([^）)]{1,120})[）)]\s*$/);
   const speakerRaw = clean(parenthetical?.[1] || raw);
   const tone = clean(parenthetical?.[2] || "");
-  if (/^(?:唯一)?(?:角色|人物|演员|场景|地点|时间|核心道具|道具|商品|产品)(?:固定|设定|列表|清单)?$/.test(speakerRaw)) return null;
+  if (/^(?:唯一)?(?:角色|人物|演员|场景|地点|时间|核心道具|道具|物品|商品|产品)(?:固定|设定|列表|清单)?$/.test(speakerRaw)) return null;
   if (!speakerRaw || NON_SPEAKER_LABELS.has(speakerRaw) || /[，。！？；;：:]/.test(speakerRaw)) return null;
   const cue = normalizeSpeakerCue(speakerRaw);
   const speaker = canonicalSpeaker(cue.speaker, knownNames);
@@ -163,7 +163,7 @@ function stripDialogueLinePrefix(value = "") {
 function isSceneOrActionLine(value = "") {
   const line = clean(value);
   if (!line) return true;
-  return /^(?:#{1,6}\s*)?(?:S\d{1,4}\b|SC\d{1,4}\b|第[一二三四五六七八九十百千\d]+(?:场|幕|镜)|场景\s*[:：]?|INT\.|EXT\.|内景|外景|时间\s*[:：]|地点\s*[:：]|人物\s*[:：]|角色\s*[:：]|FADE\s+(?:IN|OUT)|CUT\s+TO)/i.test(line)
+  return /^(?:#{1,6}\s*)?(?:S\d{1,4}\b|SC\d{1,4}\b|第[一二三四五六七八九十百千\d]+(?:场|幕|镜)|场景\s*[:：]?|INT\.|EXT\.|内景|外景|时间\s*[:：]|地点\s*[:：]|人物\s*[:：]|角色\s*[:：]|物品\s*[:：]|道具\s*[:：]|音效\s*[:：]|FADE\s+(?:IN|OUT)|CUT\s+TO)/i.test(line)
     || /^【[^】]+】$/.test(line)
     || /^\[[^\]]+\]$/.test(line)
     || /^(?:△|▲|●|○|画面[:：]|动作[:：]|镜头[:：])/.test(line);
