@@ -640,7 +640,8 @@ async function main() {
         }
       });
       if (!firstPatch.ok) throw new Error(firstPatch.message || "failed to seed running project");
-      const created = await api.createProject("packaged concurrent audit", {
+      const hostileMarkup = '<img id="audit-xss" src="x" onerror="window.__auditXss=1">';
+      const created = await api.createProject(`packaged concurrent audit ${hostileMarkup}`, {
         videoProviderKind: "puream-hailuo-h3",
         generationMode: "storyboard_sheet",
         executionMode: "step",
@@ -649,7 +650,6 @@ async function main() {
       });
       if (!created.ok) throw new Error(created.message || "failed to create concurrent project");
       const manualPrompt = "USER-H3-Hailuo-海螺 literal must remain exact";
-      const hostileMarkup = '<img id="audit-xss" src="x" onerror="window.__auditXss=1">';
       const secondPatch = await api.patchProject(created.project.id, {
         title: `packaged concurrent audit ${hostileMarkup}`,
         generation: {
