@@ -461,7 +461,7 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
 .video-task-progress.compact { margin-top: 6px; }
 .job-history-card.active { border-color: #75501d; }
 .job-history-card.failed { border-color: #62303a; }
-.video-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(420px,1fr)); gap: 12px; margin-top: 8px; }
+.video-grid { display: grid; grid-template-columns: minmax(0,1fr); gap: 12px; margin-top: 8px; }
 .video-card { position: relative; display: grid; grid-template-columns: minmax(180px,230px) minmax(0,1fr); gap: 12px; align-items: start; padding: 11px; border: 1px solid #312b22; border-radius: 11px; background: #11100e; }
 .video-card.has-active-task, .video-card.is-drawing { border-color: #80541b; box-shadow: 0 0 0 1px rgba(255,168,44,.08),0 12px 30px rgba(0,0,0,.22); }
 .video-card.status-failed { border-color: #5d3037; }
@@ -873,7 +873,7 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
 .shot-card { grid-template-columns: 62px 184px minmax(260px, 1fr); align-items: start; }
 .shot-card > .creator-panel { grid-column: 1 / -1; }
 .shot-brief-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.video-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(420px,1fr)); gap: 12px; margin-top: 8px; }
+.video-grid { display: grid; grid-template-columns: minmax(0,1fr); gap: 12px; margin-top: 8px; }
 .video-card { display: grid; grid-template-columns: minmax(180px,230px) minmax(0,1fr); gap: 12px; align-items: start; padding: 11px; border: 1px solid #312b22; border-radius: 11px; background: #11100e; }
 .video-card .video-preview-shell { width: 100%; }
 .video-card-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -1120,6 +1120,9 @@ input:not([type="radio"]):not([type="checkbox"]),select { min-height:44px; heigh
 button:focus-visible,[role="button"]:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible { outline:2px solid #ffd08a; outline-offset:2px; }
 
 @media (max-width: 700px) {
+  .video-card { grid-template-columns: minmax(0,1fr); }
+  .video-card-footer { align-items:flex-start; flex-direction:column; gap:8px; }
+  .video-card-actions { justify-content:flex-start; max-width:none; }
   .script-example-library-actions { grid-template-columns:1fr; }
   .app { grid-template-rows:132px minmax(0,1fr); }
   .topbar { flex-wrap:wrap; align-content:center; overflow:visible; padding:8px 78px 8px 10px; gap:8px; }

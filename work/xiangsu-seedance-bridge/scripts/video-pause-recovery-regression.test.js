@@ -216,6 +216,7 @@ test("video settlement remains idempotent by upstream task id", t => {
 test("source keeps legacy pause codes in equivalent-job recovery and never aborts paid polling", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
   const mainSource = fs.readFileSync(path.join(__dirname, "..", "app", "main.js"), "utf8");
+  const cssSource = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.css"), "utf8");
   assert.match(source, /"SCRIPT_GENERATION_PAUSED",\s*\n\s*"SCRIPT_GENERATION_STOPPED",\s*\n\s*"PIPELINE_PAUSED"/);
   const polling = source.slice(source.indexOf("async waitForSeedance"), source.indexOf("async submitVideo", source.indexOf("async waitForSeedance")));
   assert.doesNotMatch(polling, /assertOperationActive/);
@@ -223,4 +224,6 @@ test("source keeps legacy pause codes in equivalent-job recovery and never abort
   const syncHandler = mainSource.slice(mainSource.indexOf('ipcMain.handle("workbench:sync-video-jobs"'), mainSource.indexOf('ipcMain.handle("workbench:begin-account-switch"'));
   assert.ok(syncHandler.indexOf("reconcileOrphanedVideoJobs") < syncHandler.indexOf("return { ok: true, jobs:"));
   assert.doesNotMatch(syncHandler, /if \(!active\.length\) return/);
+  assert.match(cssSource, /\.video-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\)/);
+  assert.match(cssSource, /@media \(max-width:\s*700px\)[\s\S]*?\.video-card\s*\{\s*grid-template-columns:\s*minmax\(0,1fr\)/);
 });
