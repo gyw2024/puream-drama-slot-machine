@@ -20296,7 +20296,9 @@ ${shotAnchor}
     this.store.saveProject(project);
     await this.generateCompleteScript(projectId, {
       track: false,
-      fast: false,
+      // Keep the full story-bible and semantic-review path, but fan out the
+      // bounded plan/unit batches so a 5-10 minute script meets the SLA.
+      fast: true,
       directFast: false,
       autonomousRepair: true
     });

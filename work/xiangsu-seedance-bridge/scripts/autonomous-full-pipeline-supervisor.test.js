@@ -22,6 +22,7 @@ test("one-click supervisor rewrites a rejected script and continues the same goa
   let project = projectFixture();
   let pipelineCalls = 0;
   let rewriteCalls = 0;
+  let rewriteOptions = null;
   const workflow = Object.create(WorkbenchWorkflow.prototype);
   workflow.store = {
     getProject: () => structuredClone(project),
@@ -30,8 +31,9 @@ test("one-click supervisor rewrites a rejected script and continues the same goa
   workflow.operationControls = new Map();
   workflow.assertOperationActive = () => {};
   workflow.archiveAutonomousScriptRepair = () => ({ scriptPath: "old.md", reportPath: "old.json" });
-  workflow.generateCompleteScript = async () => {
+  workflow.generateCompleteScript = async (_projectId, options) => {
     rewriteCalls += 1;
+    rewriteOptions = options;
     project.script.raw = "通过质检的新剧本";
     return project;
   };
@@ -50,6 +52,8 @@ test("one-click supervisor rewrites a rejected script and continues the same goa
   assert.deepEqual(result, { delivered: true });
   assert.equal(pipelineCalls, 2);
   assert.equal(rewriteCalls, 1);
+  assert.equal(rewriteOptions.fast, true);
+  assert.equal(rewriteOptions.directFast, false);
   assert.equal(project.script.raw, "通过质检的新剧本");
   assert.equal(project.automation.repairJournal[0].code, "FOUNDRY_FORMAL_QUALITY_GATE_FAILED");
 });
