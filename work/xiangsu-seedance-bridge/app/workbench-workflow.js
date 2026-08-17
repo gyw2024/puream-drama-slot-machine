@@ -165,7 +165,7 @@ const {
 // output ceiling. Planning needs breadth while production units need detail,
 // so they deliberately use different small batch sizes.
 const SCRIPT_PLAN_BATCH_SIZE = 4;
-const SCRIPT_UNIT_BATCH_SIZE = 2;
+const SCRIPT_UNIT_BATCH_SIZE = 5;
 const STRUCTURED_TEXT_MAX_CHARS = 7500;
 // Uploaded prose is analyzed in smaller units than an AI-authored blueprint.
 // A single request has to carry the source excerpt, its immutable dialogue
@@ -178,7 +178,7 @@ const UPLOADED_ANALYSIS_MAX_CONCURRENCY = 2;
 // Keep the official relay below its measured two-stream saturation point.
 // Each request has a bounded attempt timeout, while the overall goal has none.
 const SCRIPT_FAST_CONCURRENCY = 2;
-const SCRIPT_FAST_ATTEMPT_TIMEOUT_MS = 100_000;
+const SCRIPT_FAST_ATTEMPT_TIMEOUT_MS = 180_000;
 const SCRIPT_FAST_TARGET_SECONDS = 600;
 const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol";
 const SCRIPT_DIRECT_SEGMENT_UNITS = 5;
