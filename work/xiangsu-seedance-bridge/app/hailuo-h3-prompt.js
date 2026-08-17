@@ -2,19 +2,21 @@
 
 const crypto = require("node:crypto");
 const { parseCompiledDialogueSegments } = require("./dialogue-parser");
+const { buildApprovedHailuoPrompt } = require("./hailuo-h3-natural-prompt");
 
-const HAILUO_PROMPT_SPEC_VERSION = "minimax-h3-official-reference-director-2026-08-v28.0-all-modes-sfx-only";
+const HAILUO_PROMPT_SPEC_VERSION = "minimax-h3-dialogue-first-natural-language-2026-08-v29.0";
 const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
 const REQUIRED_SECTIONS = [
-  "subject_definitions:",
-  "summary:",
-  "retention_analysis:",
-  "detailed_description:",
-  "overall_soundscape:",
-  "non_diegetic_music:"
+  "【生成规格】",
+  "【素材绑定】",
+  "【核心表演】",
+  "【逐秒镜头与对白】",
+  "【连续性】",
+  "【声音】",
+  "【禁止项】"
 ];
 const HAILUO_PROMPT_MAX_LENGTH = 1900;
-const HAILUO_FINAL_OUTPUT_LOCK_EN = "FINAL OUTPUT LOCK: story dialogue, location ambience, visible-action SFX only; no BGM/music/song. No subtitles/captions/titles/dialogue/narration text, labels/prices/names/logos/watermarks/UI/readable text. No character intro/biography/synopsis/identity anchor/multi-view sheet/asset board in story footage.";
+const HAILUO_FINAL_OUTPUT_LOCK_EN = "最终输出锁：只生成连续剧情画面、完整对白、现场环境声和可见动作同步音效；禁止字幕、标题、旁白文字、人物介绍、角色卡、分镜网格、参考素材展示、Logo、水印、UI、BGM、配乐和歌曲。";
 
 function clean(value) {
   return String(value || "").replace(/\r/g, "").trim();
@@ -1145,6 +1147,16 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
     // sound scoring must not turn itself back on inside the final compiler.
     spec.fingerprint = fingerprint;
   }
+  return buildApprovedHailuoPrompt({
+    project,
+    shot,
+    references,
+    dialogueTurns: collectDialogue(project, shot),
+    qualityRepair,
+    parityInstruction
+  });
+
+  /* Legacy assembler retained temporarily for loading historical prompt specs. */
   const dialogueTurns = collectDialogue(project, shot);
   const context = referenceContext(project, shot, references, compilerMode, dialogueTurns, spec);
   const duration = Number(shot?.duration) || 10;
@@ -1277,12 +1289,13 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
 
 function hasHailuoFinalOutputLock(prompt = "") {
   const text = clean(prompt);
-  return /FINAL (?:VIDEO )?OUTPUT LOCK:/i.test(text)
-    && /no BGM|no background music/i.test(text)
-    && /no subtitles|no captions/i.test(text)
-    && /no character intro|never render a character introduction/i.test(text)
-    && /multi-view sheet|four-view sheet/i.test(text)
-    && /asset board/i.test(text);
+  return /最终输出锁/.test(text)
+    && /禁止字幕/.test(text)
+    && /人物介绍/.test(text)
+    && /角色卡/.test(text)
+    && /分镜网格/.test(text)
+    && /参考素材展示/.test(text)
+    && /BGM/.test(text);
 }
 
 function assertHailuoFinalPromptIntegrity(prompt = "", maxLength = HAILUO_PROMPT_MAX_LENGTH) {
@@ -1292,10 +1305,13 @@ function assertHailuoFinalPromptIntegrity(prompt = "", maxLength = HAILUO_PROMPT
   if (!text) failures.push("prompt is empty");
   if (text.length > limit) failures.push(`prompt length ${text.length} exceeds ${limit}`);
   for (const sectionName of REQUIRED_SECTIONS) {
-    if (!text.toLowerCase().includes(sectionName)) failures.push(`missing ${sectionName}`);
+    if (!text.includes(sectionName)) failures.push(`missing ${sectionName}`);
   }
   if (!hasHailuoFinalOutputLock(text)) failures.push("final output lock is incomplete");
-  if (!/non_diegetic_music:\s*N\/A\s*$/i.test(text)) failures.push("non_diegetic_music must be N/A");
+  if (!text.includes("对白内容＞语气＞情绪＞场景＞运镜＞其他")) failures.push("dialogue priority is missing");
+  if (/subject_definitions:|retention_analysis:|detailed_description:|<Subject\s+\d+>|<d>\[Chinese\]/i.test(text)) {
+    failures.push("legacy internal prompt syntax leaked into final prompt");
+  }
   if (failures.length) {
     throw Object.assign(new Error(`Hailuo H3 final prompt integrity failed: ${failures.join("; ")}`), {
       code: "HAILUO_PROMPT_FINAL_INTEGRITY_FAILED",
@@ -1333,79 +1349,42 @@ function compactFullReferencePrompt(prompt, maxLength = HAILUO_PROMPT_MAX_LENGTH
     assertHailuoFinalPromptIntegrity(original, limit);
     return original;
   }
-
   const section = name => {
-    const start = original.toLowerCase().indexOf(name);
+    const start = original.indexOf(name);
     if (start < 0) return "";
     const bodyStart = start + name.length;
-    const later = REQUIRED_SECTIONS
-      .map(item => original.toLowerCase().indexOf(item, bodyStart))
-      .filter(index => index >= 0);
-    const end = later.length ? Math.min(...later) : original.length;
-    return original.slice(bodyStart, end).trim();
+    const later = REQUIRED_SECTIONS.map(item => original.indexOf(item, bodyStart)).filter(index => index >= 0);
+    return original.slice(bodyStart, later.length ? Math.min(...later) : original.length).trim();
   };
-  const shorten = (value, size) => String(value || "").replace(/\s+/g, " ").trim().slice(0, Math.max(0, size)).trim();
-  const subjectLines = section("subject_definitions:").split("\n").map(item => shorten(item, 150)).filter(Boolean).slice(0, 8);
-  const summary = shorten(section("summary:"), 220);
-  const retentionLines = section("retention_analysis:").split("\n").map(item => shorten(item, 120)).filter(Boolean).slice(0, 6);
-  const detailed = section("detailed_description:")
-    .replace(/FINAL VIDEO OUTPUT LOCK:[^\n]*/gi, "")
-    .replace(/FINAL OUTPUT LOCK:[^\n]*/gi, "")
-    .trim();
-  const dialogueMatches = [...detailed.matchAll(/(?:From\s+\d+(?:\.\d+)?s\s+to\s+\d+(?:\.\d+)?s,\s*)?Speaker:\s*[\s\S]{0,900}?listener reaction:\s*[^.\n]*\./gi)];
-  const dialogueContracts = dialogueMatches.map(match => compactHailuoDialogueContract(match[0]));
-  const dialogueRanges = dialogueMatches
-    .map(match => [match.index, match.index + match[0].length]);
-  const withoutDialogue = dialogueRanges.length
-    ? [...detailed].filter((_char, index) => !dialogueRanges.some(([start, end]) => index >= start && index < end)).join("")
-    : detailed;
-  const shotBeats = withoutDialogue.split("\n")
-    .map(item => shorten(item, /^\[Shot\s+\d+\]/i.test(item.trim()) ? 230 : 150))
-    .filter(Boolean)
-    .slice(0, 8);
-  const soundscape = shorten(section("overall_soundscape:"), 180) || "Continuous location ambience, exact dialogue, and synchronized visible-action SFX only.";
-
-  const render = (subjects, summaryText, retention, beats, dialogues, sound) => [
-    "subject_definitions:",
-    subjects.join("\n") || "Use the supplied reference subjects exactly.",
-    "summary:",
-    summaryText || "Execute this short-drama beat and end on a visible changed state.",
-    "retention_analysis:",
-    retention.join("\n") || "Retain supplied identity, scene, product, frame, video and voice references only.",
-    "detailed_description:",
-    [HAILUO_FINAL_OUTPUT_LOCK_EN, ...beats, ...dialogues].join("\n") || HAILUO_FINAL_OUTPUT_LOCK_EN,
-    "overall_soundscape:",
-    sound,
-    "non_diegetic_music:",
-    "N/A"
+  const specification = section("【生成规格】");
+  const binding = section("【素材绑定】");
+  const timeline = section("【逐秒镜头与对白】");
+  const compactBinding = binding
+    .replace(/，只采用与本镜相关的身份、场景或构图信息/g, "")
+    .replace(/，其他角色禁止借用/g, "，禁止串用")
+    .replace(/，只参考音色、音质和说话质感，不复制原音频台词/g, "，只锁声线不复制原词")
+    .replace(/本镜剧情/g, "剧情")
+    .replace(/人物状态/g, "状态");
+  const render = (bindingText, timelineText) => [
+    "【生成规格】",
+    specification,
+    "【素材绑定】",
+    bindingText,
+    "【核心表演】",
+    "每句对白逐字完整且只说一次；对白内容＞语气＞情绪＞场景＞运镜＞其他。当前说话人开口时其他人闭口反应；换说话人时按视线轴切镜；禁止抢话、串台、复读、平声念稿和声线互换。",
+    "【逐秒镜头与对白】",
+    timelineText,
+    "【连续性】",
+    "人物脸、年龄、发型、体型、服装、站位、持物手、视线轴、场景布局和主光连续；不新增人物、不换场、不冻结尾帧。参考视频只参考动作/运镜/节奏，不参考脸、服装、场景、原声、字幕。",
+    "【声音】",
+    "对白清晰；声线按音频编号一一对应；连续现场底噪和可见动作同步音效；禁止BGM、配乐、歌曲、旁白和随机装饰音。",
+    "【禁止项】",
+    HAILUO_FINAL_OUTPUT_LOCK_EN
   ].join("\n").trim();
-
-  let compact = render(subjectLines, summary, retentionLines, shotBeats, dialogueContracts, soundscape);
-  if (compact.length > limit) compact = render(
-    subjectLines.map(item => shorten(item, 95)),
-    shorten(summary, 130),
-    retentionLines.map(item => shorten(item, 75)).slice(0, 4),
-    shotBeats.map(item => shorten(item, 120)).slice(0, 5),
-    dialogueContracts,
-    shorten(soundscape, 100)
-  );
-  if (compact.length > limit) compact = render(
-    subjectLines.map(item => shorten(item, 70)).slice(0, 6),
-    shorten(summary, 90),
-    ["Keep all supplied references bound to their matching subjects."],
-    shotBeats.map(item => shorten(item, 80)).slice(0, 3),
-    dialogueContracts,
-    "Continuous location bed and synchronized visible-action SFX only."
-  );
+  let compact = render(compactBinding, timeline);
   if (compact.length > limit) {
-    compact = render(
-      [],
-      "Execute the authored beat.",
-      ["Bind supplied identity, scene, frame, product and voice references."],
-      [],
-      dialogueContracts.map(item => compactHailuoDialogueContract(item, true)),
-      "Continuous location bed; synchronized SFX only."
-    );
+    const withoutTail = timeline.split("\n").filter(line => !/对白结束，所有人物闭口/.test(line)).join("\n");
+    compact = render(compactBinding, withoutTail);
   }
   if (compact.length > limit) {
     throw Object.assign(new Error(`Hailuo H3 dialogue contracts require ${compact.length} characters but the provider limit is ${limit}; refusing to truncate dialogue or output policy`), {

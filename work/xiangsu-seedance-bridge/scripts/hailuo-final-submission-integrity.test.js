@@ -81,25 +81,26 @@ function fixture(t) {
     ]
   };
   const contracts = turns.map((turn, index) => {
-    const subject = index % 2 === 0 ? 1 : 2;
-    const listener = subject === 1 ? 2 : 1;
-    const audio = subject;
-    return `Speaker: <Subject ${subject}> (S${subject}); voice timbre referenced by <Audio ${audio}>; delivery: ${turn.sourceTone}, preserve authored stress and breath; addresses: <Subject ${listener}> directly, never the camera; exact line, say once: <d>[Chinese] ${turn.text}</d>; lip sync: exact and once-only, then lips closed; listener reaction: <Subject ${listener}> stays silent and reacts visibly.`;
+    const speaker = index % 2 === 0 ? "林梅" : "周强";
+    const listener = speaker === "林梅" ? "周强" : "林梅";
+    const audio = speaker === "林梅" ? 1 : 2;
+    return `${index * 2.0}-${(index + 1) * 2.0}秒：角色“${speaker}”使用音频${audio}，面向“${listener}”，语气“${turn.sourceTone}”，情绪“逐步加压”，只说一次：“${turn.text}”；说话时仅“${speaker}”动嘴，眉眼、呼吸和手部随重音变化；${listener}闭口并同步反应。`;
   });
   const overlong = [
-    "subject_definitions:",
-    "<Subject 1> and <Subject 2> retain supplied identity, wardrobe and blocking. ".repeat(12),
-    "summary:",
-    "Execute one continuous confrontation with a visible changed state. ".repeat(8),
-    "retention_analysis:",
-    "Keep every supplied reference bound to the matching subject and role. ".repeat(8),
-    "detailed_description:",
-    "Maintain screen direction, eyelines, hand continuity and motivated camera movement. ".repeat(20),
+    "【生成规格】",
+    "S01；9:16竖屏；写实真人短剧；严格8.0秒；图片+音频多模态参考。",
+    "【素材绑定】",
+    "音频1=角色“林梅”的唯一音色参考，只参考音色、音质和说话质感，不复制原音频台词；“林梅”只使用音频1，其他角色禁止借用；音频2=角色“周强”的唯一音色参考，只参考音色、音质和说话质感，不复制原音频台词；“周强”只使用音频2，其他角色禁止借用；素材冲突时按：完整对白与表演＞人物图片＞音频声线＞场景图片＞参考视频。",
+    "【核心表演】",
+    `每句对白逐字完整，只说一次；对白内容＞语气＞情绪＞场景＞运镜＞其他。${"保持视线、手部、呼吸与情绪递进。".repeat(80)}`,
+    "【逐秒镜头与对白】",
     ...contracts,
-    "overall_soundscape:",
-    "Continuous room tone, exact dialogue and visible-action SFX only.",
-    "non_diegetic_music:",
-    "N/A"
+    "【连续性】",
+    "人物身份、服装、站位、持物手、视线轴、场景布局和主光连续。",
+    "【声音】",
+    "对白清晰；声线按音频编号一一对应；连续现场底噪和同步动作音效。",
+    "【禁止项】",
+    HAILUO_FINAL_OUTPUT_LOCK_EN
   ].join("\n");
   return { project, shot, references, lines, overlong };
 }

@@ -135,18 +135,20 @@ test("cloud video final prompt hard-binds speaker, listener, delivery, exact lin
     template: TEMPLATE,
     parityInstruction: matrixRuntimeVideoPromptForProject(project, null, "storyboard_sheet")
   });
-  assert.match(prompt, /Speaker: <Subject 1> \(S1\)/);
-  assert.match(prompt, /voice timbre referenced by <Audio 1>/);
-  assert.match(prompt, /delivery: low opening, hard key stress/);
-  assert.match(prompt, /addresses: <Subject 2> directly/);
-  assert.match(prompt, /exact line, say once: <d>\[Chinese\] 你到底瞒了我多久？<\/d>/);
-  assert.match(prompt, /listener reaction: <Subject 2> stays silent and/);
-  assert.match(prompt, /cloud\/storyboard-sheet/);
-  assert.equal(containsCjkOutsideDialogue(prompt), false);
+  assert.match(prompt, /【生成规格】/);
+  assert.match(prompt, /音频1=角色“林青山”的唯一音色参考/);
+  assert.match(prompt, /角色“林青山”使用音频1/);
+  assert.match(prompt, /面向“林宇义”/);
+  assert.match(prompt, /语气“压着怒气，低声起句，在多久上加重音”/);
+  assert.match(prompt, /情绪“压着怒气质问”/);
+  assert.match(prompt, /只说一次：“你到底瞒了我多久？”/);
+  assert.match(prompt, /林宇义闭口，愣住并后退半步/);
+  assert.match(prompt, /对白内容＞语气＞情绪＞场景＞运镜＞其他/);
+  assert.doesNotMatch(prompt, /subject_definitions|retention_analysis|<Subject|<Audio|<d>\[Chinese\]/);
   assert.equal(assertHailuoPromptVoiceBindings(project, shot, references, prompt), true);
   assert.equal(assertSystemPromptDialogueParity(project, shot, prompt, "hailuo-h3"), true);
 
-  const broken = prompt.replace(/addresses: <Subject 2> directly, never the camera; /, "");
+  const broken = prompt.replace(/面向“林宇义”，/, "");
   assert.throws(
     () => assertHailuoPromptVoiceBindings(project, shot, references, broken),
     error => error?.code === "HAILUO_PROMPT_DIALOGUE_PERFORMANCE_MISSING"
@@ -164,7 +166,7 @@ test("cloud and local video prompts remain separate compiler branches", () => {
   assert.match(compiler, /【Seedance本镜约束】/);
 });
 
-test("historical Chinese metadata is auto-repaired without changing exact dialogue", t => {
+test("historical Chinese metadata compiles into the approved Chinese natural-language contract", t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "puream-prompt-cjk-repair-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const audioPath = path.join(dir, "voice.wav");
@@ -173,8 +175,9 @@ test("historical Chinese metadata is auto-repaired without changing exact dialog
   shot.mainlineStage = "开场钩子";
   spec.fingerprint = promptFingerprint(project, shot, "storyboard_sheet");
   const prompt = buildFullReferencePrompt({ project, shot, mode: "storyboard_sheet", references, spec, template: TEMPLATE });
-  assert.equal(containsCjkOutsideDialogue(prompt), false);
-  assert.match(prompt, /<d>\[Chinese\] 你到底瞒了我多久？<\/d>/);
+  assert.equal(containsCjkOutsideDialogue(prompt), true);
+  assert.match(prompt, /只说一次：“你到底瞒了我多久？”/);
+  assert.doesNotMatch(prompt, /subject_definitions|retention_analysis|<Subject|<Audio|<d>\[Chinese\]/);
   assert.equal((prompt.match(/你到底瞒了我多久？/g) || []).length, 1);
   assert.equal(sanitizeCjkOutsideDialogue("English 中文 <d>[Chinese] 原句不变！</d> 尾注"), "English <d>[Chinese] 原句不变！</d>");
 });

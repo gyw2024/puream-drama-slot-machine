@@ -5442,7 +5442,12 @@ function assertSystemPromptDialogueParity(project, shot, prompt, engine = projec
   }
   if (engine === "hailuo-h3") {
     for (const turn of turns) {
-      if (!text.includes(`<d>[Chinese] ${turn.text}</d>`)) failures.push(`海螺提示词缺少原文块：${turn.sourceDialogueId || turn.text}`);
+      const marker = `只说一次：“${turn.text}”`;
+      const dialogueLine = text.split("\n").find(line => line.includes(marker)) || "";
+      if (!dialogueLine) failures.push(`海螺提示词缺少逐字原话：${turn.sourceDialogueId || turn.text}`);
+      if (turn.speaker && !dialogueLine.includes(`角色“${turn.speaker}”`)) {
+        failures.push(`海螺提示词未把“${turn.text}”绑定给说话人“${turn.speaker}”`);
+      }
     }
   } else {
     for (const turn of turns) {
@@ -6113,11 +6118,16 @@ function assertHailuoPromptVoiceBindings(project, shot, references = {}, prompt 
   if (!speakerIds.length) return true;
   const text = String(prompt || "");
   const audios = Array.isArray(references.audios) ? references.audios : [];
+  const escapeForRegExp = value => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const missingTokens = [];
   for (const id of speakerIds) {
     const index = audios.findIndex(item => item.characterId === id);
-    const token = `<Audio ${index + 1}>`;
-    if (index < 0 || !text.includes(token)) missingTokens.push(token);
+    const token = `音频${index + 1}`;
+    const character = (project.characters || []).find(item => item.id === id);
+    const manifest = index >= 0
+      ? new RegExp(`${token}=角色[“\"]${escapeForRegExp(character?.name || id)}[”\"]的唯一音色参考`)
+      : null;
+    if (index < 0 || !text.includes(token) || !manifest?.test(text)) missingTokens.push(token);
   }
   if (missingTokens.length) {
     throw Object.assign(new Error(`${shot.id}海螺提示词缺少说话人音色绑定：${missingTokens.join("、")}`), {
@@ -6128,39 +6138,35 @@ function assertHailuoPromptVoiceBindings(project, shot, references = {}, prompt 
   }
   const lineFailures = [];
   const performanceFailures = [];
-  let searchFrom = 0;
   for (const turn of uniqueDialogueTurns(project, shot)) {
     const character = (project.characters || []).find(item => item.name === turn.speaker || item.id === turn.speaker);
     const index = audios.findIndex(item => item.characterId === character?.id);
-    const token = `<Audio ${index + 1}>`;
+    const token = `音频${index + 1}`;
     const spokenText = String(turn.text || "").replace(/<\/?d>/gi, "");
-    const marker = `<d>[Chinese] ${spokenText}</d>`;
-    const markerIndex = text.indexOf(marker, searchFrom);
-    if (markerIndex < 0 || index < 0) {
+    const marker = `只说一次：“${spokenText}”`;
+    const dialogueLine = text.split("\n").find(line => line.includes(marker)) || "";
+    if (!dialogueLine || index < 0 || text.split(spokenText).length - 1 !== 1) {
       lineFailures.push(`${turn.speaker}:${spokenText}`);
       continue;
     }
-    const lead = text.slice(Math.max(searchFrom, markerIndex - 500), markerIndex);
-    const tail = text.slice(markerIndex + marker.length, markerIndex + marker.length + 500);
-    const tokenPattern = new RegExp(`voice\\s+timbre\\s+referenced\\s+by\\s+${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i");
-    if (!tokenPattern.test(lead)) lineFailures.push(`${turn.speaker}:${spokenText}`);
-    const contractComplete = /Speaker:\s*<Subject\s+\d+>/i.test(lead)
-      && /delivery:\s*[^;]+/i.test(lead)
-      && /addresses:\s*[^;]+/i.test(lead)
-      && /exact line,\s*say once:\s*$/i.test(lead)
-      && /listener reaction:\s*[^.]+/i.test(tail);
+    const speakerPattern = new RegExp(`角色[“\"]${escapeForRegExp(character?.name || turn.speaker)}[”\"]使用${token}`);
+    if (!speakerPattern.test(dialogueLine)) lineFailures.push(`${turn.speaker}:${spokenText}`);
+    const contractComplete = /面向[“\"][^”\"]+[”\"]/.test(dialogueLine)
+      && /语气[“\"][^”\"]+[”\"]/.test(dialogueLine)
+      && /情绪[“\"][^”\"]+[”\"]/.test(dialogueLine)
+      && /说话时仅[“\"][^”\"]+[”\"]动嘴/.test(dialogueLine)
+      && /闭口(?:并|，)/.test(dialogueLine);
     if (!contractComplete) performanceFailures.push(`${turn.speaker}:${spokenText}`);
-    searchFrom = markerIndex + marker.length;
   }
   if (lineFailures.length) {
-    throw Object.assign(new Error(`${shot.id}海螺提示词的具体对白句未绑定对应 Audio N：${lineFailures.join("；")}`), {
+    throw Object.assign(new Error(`${shot.id}海螺提示词的具体对白句未绑定对应音频编号：${lineFailures.join("；")}`), {
       code: "HAILUO_PROMPT_DIALOGUE_AUDIO_BINDING_MISSING",
       shotId: shot.id,
       dialogue: lineFailures
     });
   }
   if (performanceFailures.length) {
-    throw Object.assign(new Error(`${shot.id}云端视频提示词缺少逐句表演合同（说话人、对象、语气、原话或听者反应）：${performanceFailures.join("；")}`), {
+    throw Object.assign(new Error(`${shot.id}云端视频提示词缺少逐句表演合同（说话人、对象、语气、情绪、原话或听者反应）：${performanceFailures.join("；")}`), {
       code: "HAILUO_PROMPT_DIALOGUE_PERFORMANCE_MISSING",
       shotId: shot.id,
       dialogue: performanceFailures
@@ -18523,9 +18529,7 @@ ${shotAnchor}
         skipValidation: !isQualityGatesEnabled(settings, "videos"),
         parityInstruction: [viewerComprehensionPriorityDirective(), matrixRuntimePrompt, referenceParityFor(settings.prompts, "hailuo_video")].filter(Boolean).join(" ")
       });
-      const rawCompiledPrompt = !isSheet ? hailuoPrompt : `${hailuoPrompt}
-
-[storyboard_sheet] <Picture 1> is a chronological contact sheet made from complete portrait 9:16 panels. Animate every panel left-to-right, top-to-bottom in time order. Do not render panel borders, index strips, or storyboard UI in the final video.`.trim();
+      const rawCompiledPrompt = hailuoPrompt;
       const compiledPrompt = compactFullReferencePrompt(rawCompiledPrompt);
       if (this.qualityGatesEnabled(settings, "script")) assertSystemPromptDialogueParity(project, shot, compiledPrompt, engine);
       return compiledPrompt;
