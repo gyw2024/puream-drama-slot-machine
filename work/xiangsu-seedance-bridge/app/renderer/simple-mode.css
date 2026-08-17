@@ -26,7 +26,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 button:disabled { cursor: not-allowed; opacity: .48; filter: saturate(.5); }
 
 .app-shell { height: 100%; display: grid; grid-template: 72px minmax(0, 1fr) / 220px minmax(0, 1fr); }
-.topbar { grid-column: 1 / -1; position: relative; z-index: 20; display: grid; grid-template-columns: minmax(290px, .72fr) minmax(330px, .88fr) auto; align-items: center; gap: 16px; padding: 8px 42px 8px 18px; border-bottom: 1px solid rgba(255,255,255,.07); background: rgba(6,7,5,.97); box-shadow: 0 9px 35px rgba(0,0,0,.22); -webkit-app-region: drag; }
+.topbar { grid-column: 1 / -1; position: relative; z-index: 20; display: grid; grid-template-columns: minmax(250px, .72fr) minmax(280px, .88fr) minmax(300px, auto); align-items: center; gap: 16px; padding: 8px 158px 8px 18px; border-bottom: 1px solid rgba(255,255,255,.07); background: rgba(6,7,5,.97); box-shadow: 0 9px 35px rgba(0,0,0,.22); -webkit-app-region: drag; }
 .topbar button, .topbar select, .topbar label { -webkit-app-region: no-drag; }
 .brand { display: flex; align-items: center; min-width: 0; gap: 10px; }
 .brand-icon { flex: 0 0 auto; display: grid; place-items: center; width: 43px; height: 43px; border-radius: 12px; background: #151a13; border: 1px solid rgba(240,165,28,.3); }
@@ -39,6 +39,7 @@ button:disabled { cursor: not-allowed; opacity: .48; filter: saturate(.5); }
 .project-tools label { color: #85847b; font-size: 11px; white-space: nowrap; }
 .project-tools select { width: min(260px, 25vw); min-width: 150px; }
 .top-actions { justify-content: flex-end; }
+.top-mode-switch { min-width: 92px; padding: 0 10px; font-size: 10px; }
 
 button, select, input, textarea { border: 1px solid rgba(225,195,133,.18); border-radius: 9px; background: #11120e; color: var(--text); }
 button { min-height: 36px; padding: 0 13px; cursor: pointer; transition: border-color .16s ease, background .16s ease, transform .16s ease; }
@@ -295,7 +296,7 @@ label { display: grid; gap: 7px; color: #aaa99f; font-size: 11px; }
 @media (max-width: 900px) {
   .app-shell { grid-template: 64px minmax(0,1fr) / 72px minmax(0,1fr); }
   .topbar { grid-template-columns: 46px minmax(150px,1fr) auto; gap:7px; padding:6px 46px 6px 8px; }
-  .brand > span:nth-child(2), .brand em, .project-tools label, .top-actions #pauseRun, .top-actions .wallet-button, .top-actions .mode-switch { display:none; }
+  .brand > span:nth-child(2), .brand em, .project-tools label, .top-actions #pauseRun, .top-actions .wallet-button, .top-actions .top-mode-switch { display:none; }
   .brand-icon { width:42px; height:42px; }
   .project-tools { gap:5px; }
   .project-tools select { width:100%; min-width:0; }
@@ -334,6 +335,10 @@ label { display: grid; gap: 7px; color: #aaa99f; font-size: 11px; }
   .busy-overlay { inset:64px 0 0 72px; }
   .modal { max-height:calc(100vh - 30px); overflow:auto; }
   .form-columns { grid-template-columns:1fr; }
+}
+
+@media (max-width: 1340px) {
+  .brand em, .project-tools label, .project-tools #deleteProject, .project-tools #restoreProject, .top-actions .wallet-button { display:none; }
 }
 
 @media (max-width: 560px) {

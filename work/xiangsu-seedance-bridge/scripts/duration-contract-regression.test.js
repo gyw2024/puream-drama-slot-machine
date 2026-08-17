@@ -163,16 +163,16 @@ test("the local uploaded-script workflow reaches assets with one persisted exact
     store.saveSettings(settings);
     const created = store.createProject("本地上传剧本", { targetDurationSeconds: 45, inputMode: "manual" });
     store.patchProject(created.id, { script: { raw: JSON.stringify(importedAnalysis(3)) } });
-    let paidTextCalls = 0;
+     let paidTextCalls = 0;
     const workflow = new WorkbenchWorkflow({
       store,
       bridge: {},
       locateFfmpeg: () => "",
       stagingRoot: root,
-      textGenerator: async () => { paidTextCalls += 1; throw new Error("structured local path must not call text generation"); }
+      textGenerator: async () => { paidTextCalls += 1; return { ...importedAnalysis(3), props: [] }; }
     });
     const analyzed = await workflow.analyzeScript(created.id);
-    assert.equal(paidTextCalls, 0);
+     assert.equal(paidTextCalls, 1);
     assert.equal(analyzed.currentStage, "assets");
     assert.equal(analyzed.generation.durationLocked, true);
     assert.equal(analyzed.generation.durationContract.targetSeconds, 30);

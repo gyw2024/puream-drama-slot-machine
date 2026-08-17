@@ -1189,3 +1189,13 @@ button:focus-visible,[role="button"]:focus-visible,input:focus-visible,textarea:
   .library-nav-button::before { position:static; width:24px; height:24px; transform:none; }
   .library-nav-button > span,.library-nav-button small { display:none; }
 }
+
+@media (max-width: 1340px) {
+  .brand p, .project-switcher label, .project-switcher #deleteProject, .project-switcher #restoreProject,
+  .top-status > .wallet-chip, .top-status > .bridge-badge { display:none; }
+  .topbar { gap:9px; padding-right:158px; }
+  .brand { flex-basis:220px; }
+  .project-switcher { min-width:230px; }
+  .top-status { gap:6px; }
+  .mode-switch-button { min-width:76px; padding:0 9px; }
+}

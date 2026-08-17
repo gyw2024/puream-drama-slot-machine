@@ -14253,25 +14253,25 @@ class WorkbenchWorkflow {
       });
     }
     const timedStoryboard = parseTimedStoryboardScript(project.script.raw);
+    let authoredAnalysisSeed = null;
+    let authoredDurationEstimate = null;
     if (timedStoryboard) {
       const providerKind = projectVideoProviderKind(project, settings);
       const adapted = expandTimedStoryboardForProvider(timedStoryboard, providerKind, { engine: projectVideoEngine(project) });
       const targetSeconds = adapted.shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
-      const durationEstimate = {
+      authoredDurationEstimate = {
         mode: "uploaded-timed-storyboard-authored",
         targetSeconds,
         dialogueTurns: adapted.sourceDialogueLedger.length,
         authoredShotCount: timedStoryboard.shots.length,
         providerUnitCount: adapted.shots.length,
-        providerKind
+        providerKind,
+        authoredShotDurationsLocked: true,
+        normalizedDurations: adapted.shots.map(shot => Number(shot.duration) || 10)
       };
-      return commitAnalysis(conformImportedAnalysisToDurationContract(
-        adapted,
-        project,
-        { adaptiveTargetSeconds: targetSeconds, durationEstimate }
-      ), "uploaded-timed-storyboard-local-v1", 0);
+      authoredAnalysisSeed = adapted;
     }
-    const structured = parseStructuredProductionScript(project.script.raw);
+    const structured = timedStoryboard ? null : parseStructuredProductionScript(project.script.raw);
     if (structured) {
       try {
         const knownNames = (structured.characters || []).map(item => item?.name).filter(Boolean);
@@ -14285,14 +14285,10 @@ class WorkbenchWorkflow {
         const durationLedger = sourceDialogueLedger.length ? sourceDialogueLedger : safeParsedLedger;
         const providerKind = projectVideoProviderKind(project, settings);
         const explicit = explicitShotDurationTarget(structured.shots, providerKind, { engine: projectVideoEngine(project) });
-        const durationEstimate = explicit
+        authoredDurationEstimate = explicit
           ? { mode: "uploaded-structured-authored", targetSeconds: explicit.targetSeconds, dialogueTurns: durationLedger.length, normalizedDurations: explicit.normalizedDurations }
           : estimateUploadedScriptDuration(project.script.raw, durationLedger, providerKind, { engine: projectVideoEngine(project) });
-        return commitAnalysis(conformImportedAnalysisToDurationContract(
-          { ...structured, sourceDialogueLedger },
-          project,
-          { adaptiveTargetSeconds: durationEstimate.targetSeconds, durationEstimate }
-        ), "structured-local-adaptive-duration", 0);
+        authoredAnalysisSeed = { ...structured, sourceDialogueLedger };
       } catch (error) {
         if (error?.code !== "DURATION_TOTAL_UNREPRESENTABLE") throw error;
         // The authored shot count cannot represent the requested total. Keep the
@@ -14309,11 +14305,17 @@ class WorkbenchWorkflow {
       shots: [authoredShotSchema]
     };
     const providerKind = projectVideoProviderKind(project, settings);
-    const sourceDialogueLedger = locallyParsedDialogueLedger.length
-      ? locallyParsedDialogueLedger
-      : bindDialogueLedgerToScenes(parseSourceDialogueLedger(productionSourceText), productionSceneLedger);
+    const authoredDialogueLedger = Array.isArray(authoredAnalysisSeed?.sourceDialogueLedger)
+      ? authoredAnalysisSeed.sourceDialogueLedger
+      : [];
+    const sourceDialogueLedger = authoredAnalysisSeed
+      ? authoredDialogueLedger
+      : (locallyParsedDialogueLedger.length
+        ? locallyParsedDialogueLedger
+        : bindDialogueLedgerToScenes(parseSourceDialogueLedger(productionSourceText), productionSceneLedger));
     const durationEstimate = projectInputMode(project) === "manual"
-      ? estimateUploadedScriptDuration(productionSourceText, sourceDialogueLedger, providerKind, { engine: projectVideoEngine(project) })
+      ? (authoredDurationEstimate
+        || estimateUploadedScriptDuration(productionSourceText, sourceDialogueLedger, providerKind, { engine: projectVideoEngine(project) }))
       : null;
     const targetSeconds = durationEstimate?.targetSeconds
       || Math.max(30, Math.round(Number(project.generation?.targetDurationSeconds) || 300));
@@ -14333,10 +14335,43 @@ class WorkbenchWorkflow {
       } : {}),
       commerceShotCount: normalizeCommerceShotCount(project.productionPlan?.commerceShotCount, 3)
     };
-    const chunks = analysisChunksForSchedule(productionSourceText, filmSchedule.unitCount);
+    const analysisSourceText = authoredAnalysisSeed ? "" : productionSourceText;
+    const authoredShotGroups = authoredAnalysisSeed
+      ? Array.from({ length: Math.ceil((authoredAnalysisSeed.shots || []).length / UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST) }, (_, index) =>
+        (authoredAnalysisSeed.shots || []).slice(index * UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST, (index + 1) * UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST))
+      : [];
+    const chunks = authoredAnalysisSeed
+      ? authoredShotGroups.map((shots, index) => ({
+        index,
+        start: 0,
+        end: 0,
+        text: JSON.stringify({
+          story: authoredAnalysisSeed.story || {},
+          characters: authoredAnalysisSeed.characters || [],
+          scenes: authoredAnalysisSeed.scenes || [],
+          props: authoredAnalysisSeed.props || [],
+          shots
+        }, null, 2),
+        authoredShots: shots,
+        sourceDialogueIds: [...new Set(shots.flatMap(shot => [
+          ...(Array.isArray(shot?.dialogueTurns) ? shot.dialogueTurns.map(turn => turn?.sourceDialogueId) : []),
+          ...(Array.isArray(shot?.sourceDialogueBindings) ? shot.sourceDialogueBindings.map(binding => binding?.sourceDialogueId) : []),
+          ...normalizeStringArray(shot?.sourceDialogueIds)
+        ]).filter(Boolean))]
+      }))
+      : analysisChunksForSchedule(analysisSourceText, filmSchedule.unitCount);
     const assignedDialogueIds = new Set();
-    const chunkSchedules = analysisChunkSchedules(chunks, filmSchedule).map(chunk => {
-      let chunkLedger = sourceDialogueLedger.filter(item => item.sourceStart >= chunk.start && item.sourceStart < chunk.end);
+    const scheduledChunks = authoredAnalysisSeed
+      ? chunks.map(chunk => ({
+        ...chunk,
+        unitCount: chunk.authoredShots.length,
+        durations: chunk.authoredShots.map(shot => Number(shot.duration) || 10)
+      }))
+      : analysisChunkSchedules(chunks, filmSchedule);
+    const chunkSchedules = scheduledChunks.map(chunk => {
+      let chunkLedger = authoredAnalysisSeed
+        ? sourceDialogueLedger.filter(item => chunk.sourceDialogueIds.includes(item.id))
+        : sourceDialogueLedger.filter(item => item.sourceStart >= chunk.start && item.sourceStart < chunk.end);
       for (const item of chunkLedger) assignedDialogueIds.add(item.id);
       for (const item of sourceDialogueLedger) {
         if (assignedDialogueIds.has(item.id)) continue;
@@ -14427,7 +14462,9 @@ class WorkbenchWorkflow {
       if (!saved
         || saved.fingerprint !== chunkFingerprint(chunk)
         || !Array.isArray(saved.data?.shots)
-        || saved.data.shots.length !== chunk.unitCount) continue;
+        || saved.data.shots.length !== chunk.unitCount
+        || saved.data?.localFallback === true
+        || saved.data?.authoredBy !== "script-understanding-agent") continue;
       partials[chunk.index] = saved.data;
       reusableIndices.add(chunk.index);
     }
@@ -14486,9 +14523,8 @@ class WorkbenchWorkflow {
       this.store.saveProject(latest);
     };
     const pendingChunks = chunkSchedules.filter(chunk => !reusableIndices.has(chunk.index));
-    const localFallbackIndices = new Set(
-      [...reusableIndices].filter(index => priorByIndex.get(index)?.data?.localFallback === true)
-    );
+    const completedAgentIndices = new Set(reusableIndices);
+    const upstreamReceipts = [];
     await mapWithConcurrency(pendingChunks, analysisConcurrency, async chunk => {
       this.assertOperationActive(projectId);
       const localBound = localUploadedAnalysisChunk(chunk, project);
@@ -14510,6 +14546,7 @@ class WorkbenchWorkflow {
       const requestChars = JSON.stringify(messages).length;
       const control = this.operationControls.get(projectId);
       let bound;
+      let receipt = null;
       try {
         const textOptions = this.productionTextOptions(projectId, `script_analysis_chunk_${chunk.index + 1}`, {
           json: true,
@@ -14526,6 +14563,9 @@ class WorkbenchWorkflow {
           maxTokens: Math.min(16384, 4096 + chunk.unitCount * 2400),
           timeoutMs: UPLOADED_ANALYSIS_TIMEOUT_MS,
           maxReconnectAttempts: 1,
+          onUsage: usage => {
+            if (isCompletedUpstreamTextReceipt(usage)) receipt = { ...(usage || {}) };
+          },
           costOperation: `script_analysis_chunk_${chunk.index + 1}`
         });
         const partial = await this.runAgentSkill("script.analyze_chunk", {
@@ -14549,37 +14589,50 @@ class WorkbenchWorkflow {
         bound = enforceSourceSceneLedger(bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger), chunk.sourceSceneLedger, chunk.sourceDialogueLedger);
       } catch (error) {
         if (isScriptControlError(error)) throw error;
-        bound = localBound;
-        localFallbackIndices.add(chunk.index);
         saveCompletedAnalysisChunk(chunk, {
           ...localBound,
           authoredBy: "local-uploaded-script-compiler",
           localFallback: true,
-          enhancementStatus: "unavailable",
+          enhancementStatus: "agent-required",
           enhancementCauseCode: error?.code || "TEXT_PROVIDER_FAILED"
         }, requestChars);
+        throw agentCreativeOutputRequired(
+          error,
+          "SCRIPT_ANALYSIS_AGENT_RESULT_REQUIRED",
+          `AI 拆镜第 ${chunk.index + 1}/${chunks.length} 段未返回合格结构化结果；已保留本地预解析断点，但不会冒充 AI 拆镜成功`,
+          { chunkIndex: chunk.index + 1, totalChunks: chunks.length }
+        );
       }
       partials[chunk.index] = bound;
-      if (!localFallbackIndices.has(chunk.index)) {
-        saveCompletedAnalysisChunk(chunk, { ...bound, authoredBy: "script-understanding-agent", localFallback: false, enhancementStatus: "completed" }, requestChars);
-      }
+      completedAgentIndices.add(chunk.index);
+      if (receipt) upstreamReceipts.push(planReceiptEvidence(receipt));
+      saveCompletedAnalysisChunk(chunk, { ...bound, authoredBy: "script-understanding-agent", localFallback: false, enhancementStatus: "completed" }, requestChars);
       return bound;
     });
     uploadedAnalysisFallbackSummary = {
-      source: "local-first-agent-enhanced",
+      source: "agent-structured-result-required",
       totalChunks: chunkSchedules.length,
-      localFallbackCount: localFallbackIndices.size,
-      localFallbackChunks: [...localFallbackIndices].sort((left, right) => left - right).map(index => index + 1),
+      agentCompletedChunks: completedAgentIndices.size,
+      localFallbackCount: 0,
+      localFallbackChunks: [],
+      providerKind: settings.textProvider?.kind || "",
+      model: settings.textProvider?.model || "",
+      requestSessions: chunkSchedules.map(chunk => `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-agent-v4`),
+      upstreamReceipts,
       promptSlaMs: TEXT_STAGE_SLA_MS,
       noTotalDeadline: true,
       completedAt: new Date().toISOString()
     };
     const data = enforceSourceSceneLedger(mergeAnalysisChunks(partials), productionSceneLedger, sourceDialogueLedger);
+    if (authoredAnalysisSeed) {
+      data.detectedFormat = authoredAnalysisSeed.detectedFormat || sourceFormat;
+      data.modeSynopsis = authoredAnalysisSeed.modeSynopsis || authoredAnalysisSeed.story?.synopsis || authoredAnalysisSeed.story?.premise || "";
+    }
     return commitAnalysis(conformImportedAnalysisToDurationContract(
       data,
       project,
       { adaptiveTargetSeconds: filmSchedule.totalSeconds, durationEstimate }
-    ), projectInputMode(project) === "manual" ? "uploaded-script-local-first-agent-enhanced-v4" : "ai-duration-contract-dialogue-ledger-v2", chunks.length);
+    ), projectInputMode(project) === "manual" ? "uploaded-script-agent-structured-v5" : "ai-duration-contract-dialogue-ledger-v2", chunks.length);
   }
 
   importAsset(projectId, category, sourcePath, name = "") {

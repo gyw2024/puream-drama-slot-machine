@@ -89,7 +89,7 @@ test("timed storyboard upload is parsed locally with synopsis, exact dialogue an
   }
 });
 
-test("real uploaded timed-storyboard analysis reaches assets without any paid text call", async t => {
+test("real uploaded timed-storyboard analysis requires a real text-model response", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-timed-storyboard-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -100,18 +100,19 @@ test("real uploaded timed-storyboard analysis reaches assets without any paid te
   project.product = { name: "商品礼盒", description: "用户上传的礼盒", sellingPoints: "只按真实信息", imagePath: "", publicUrl: "" };
   store.saveProject(project);
   let paidCalls = 0;
+  const modelSeed = expandTimedStoryboardForProvider(parseTimedStoryboardScript(miniTimedStoryboard), "local-xiangsu", { engine: "seedance" });
   const workflow = new WorkbenchWorkflow({
     store,
     bridge: {},
     locateFfmpeg: () => "",
     stagingRoot: root,
-    textGenerator: async () => {
+    textGenerator: async (_config, messages) => {
       paidCalls += 1;
-      throw new Error("timed storyboard must not invoke a text model");
+      return { ...modelSeed };
     }
   });
   const analyzed = await workflow.analyzeScript(project.id);
-  assert.equal(paidCalls, 0);
+  assert.ok(paidCalls >= 1);
   assert.equal(analyzed.currentStage, "assets");
   assert.equal(analyzed.productionPlan.scriptFormat, "timed_storyboard");
   assert.equal(analyzed.script.detectedFormat, "timed_storyboard");

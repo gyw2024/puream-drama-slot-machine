@@ -274,11 +274,15 @@ async function auditSimple(root, runDir, workbenchDir) {
           });
         });
         const currentStatus = document.querySelector("#currentStatus")?.textContent || "";
+        const rightmostTopControl = controls.reduce((maximum, node) => Math.max(maximum, node.getBoundingClientRect().right), 0);
         return {
           viewport: { width: innerWidth, height: innerHeight },
           horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
           workspaceHorizontalOverflow: document.querySelector(".workspace").scrollWidth > document.querySelector(".workspace").clientWidth + 1,
           topControlOverlaps: overlaps,
+          topControlMaxRight: Math.round(rightmostTopControl),
+          windowControlSafeLeft: innerWidth - 144,
+          topModeSwitchVisible: visible(document.querySelector("#switchAgentTop")),
           visibleNavCount: [...document.querySelectorAll(".nav-button")].filter(visible).length,
           visibleCoreNavCount: [...document.querySelectorAll(".sidebar > nav > .nav-button")].filter(visible).length,
           visibleSecondaryNavCount: [...document.querySelectorAll(".sidebar-more-menu .nav-button")].filter(visible).length,
@@ -360,6 +364,8 @@ async function auditSimple(root, runDir, workbenchDir) {
     assert.ok(layouts.every(item => !item.horizontalOverflow), "Simple mode has page-level horizontal overflow");
     assert.ok(layouts.every(item => !item.workspaceHorizontalOverflow), "Simple workspace has horizontal overflow");
     assert.ok(layouts.every(item => item.topControlOverlaps.length === 0), "Simple top controls overlap");
+    assert.ok(layouts.filter(item => item.zoom === 1).every(item => item.topControlMaxRight <= item.windowControlSafeLeft), "Simple top controls enter the Windows title-bar control area");
+    assert.ok(layouts.filter(item => item.zoom === 1).every(item => item.topModeSwitchVisible), "Simple mode switch must stay visible in the normal desktop matrix");
     assert.ok(layouts.every(item => item.visibleCoreNavCount === 6), "Simple mode must show exactly six core production steps");
     assert.ok(layouts.every(item => item.visibleSecondaryNavCount === 0 && item.moreOpen === false), "Secondary tools must stay collapsed on the main workflow");
     assert.ok(imageAudit.every(item => item.complete && item.naturalWidth > 0), "Visible Simple mode images must load");

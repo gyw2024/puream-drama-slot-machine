@@ -738,6 +738,7 @@ $("#newProject").addEventListener("click", showNewProjectDialog);
 $("#deleteProject").addEventListener("click", deleteProject);
 $("#restoreProject").addEventListener("click", restoreDeletedProject);
 $("#switchAgent").addEventListener("click", () => window.dramaSlot.appMode.select("agent"));
+$("#switchAgentTop").addEventListener("click", () => window.dramaSlot.appMode.select("agent"));
 $("#runAll").addEventListener("click", runAll);
 $("#pauseRun").addEventListener("click", async () => {
   if (!state.project) return;

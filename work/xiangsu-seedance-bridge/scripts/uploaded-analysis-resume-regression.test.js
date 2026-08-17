@@ -102,15 +102,14 @@ test("uploaded-script analysis checkpoints locally first and keeps only the fail
     }
   });
 
-  const analyzed = await workflow.analyzeScript(project.id);
+  await assert.rejects(() => workflow.analyzeScript(project.id), error => error?.code === "SCRIPT_ANALYSIS_AGENT_RESULT_REQUIRED");
   assert.equal(calls.get(2), 1, "failed chunk must not trigger an automatic second billable request");
   assert.equal(sessions.get(2).length, 1);
   assert.equal(calls.get(1), 1, "completed chunk 1 must be reused");
   assert.equal(calls.get(3), 1, "completed chunk 3 must be reused");
-  assert.equal(analyzed.script.analysisCheckpoint, null);
-  assert.equal(analyzed.currentStage, "assets");
-  assert.equal(analyzed.script.sourceDialogueLedger.length, 24);
-  assert.equal(analyzed.script.analysisEnhancement.localFallbackCount, 1);
-  assert.deepEqual(analyzed.script.analysisEnhancement.localFallbackChunks, [2]);
-  assert.equal(analyzed.script.analysisEnhancement.source, "local-first-agent-enhanced");
+  const failed = store.getProject(project.id);
+  assert.notEqual(failed.currentStage, "assets");
+  assert.ok(failed.script.analysisCheckpoint);
+  assert.equal(failed.script.analysisCheckpoint.chunks.length, 3);
+  assert.equal(failed.script.analysisCheckpoint.chunks.filter(item => item.data?.localFallback === true).length, 1);
 });
