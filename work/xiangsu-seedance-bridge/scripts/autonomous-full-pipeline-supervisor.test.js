@@ -340,3 +340,31 @@ test("legacy targeted repair checkpoints heal missing reversal metadata locally"
   assert.equal(project.script.generationCheckpoint.shotPlan[21].mainlineStage, "main_reversal");
   assert.equal(project.automation.stage, "agent_checkpoint_repair");
 });
+
+test("legacy unit plans locally admit an existing omitted character and retry only the batch", async () => {
+  const project = projectFixture();
+  const shotPlan = Array.from({ length: 10 }, (_, index) => ({
+    id: `S${String(index + 1).padStart(2, "0")}`,
+    scenePresenceCharacterIds: ["C01"],
+    characterIds: ["C01"]
+  }));
+  project.script.generationCheckpoint = { shotPlan, blueprint: { shotPlan }, fastUnitResultCache: { 1: { batch: shotPlan.slice(0, 5) } } };
+  const workflow = Object.create(WorkbenchWorkflow.prototype);
+  workflow.store = {
+    getProject: () => structuredClone(project),
+    saveProject: next => { Object.assign(project, structuredClone(next)); return project; }
+  };
+  workflow.appendAutonomousRepairJournal = (_id, entry) => { project.automation.repairJournal.unshift(entry); };
+  workflow.setAutomation = (_id, patch) => { project.automation = { ...project.automation, ...patch }; };
+  workflow.autonomousPipelineExternalBlocker = () => false;
+  const supervisor = { failuresByCode: new Map() };
+  const error = Object.assign(new Error("C02 omitted"), {
+    code: "SCRIPT_UNIT_CHARACTER_REFERENCE_INVALID",
+    failures: [{ shotId: "S08", unknownIds: ["C02"] }, { shotId: "S09", unknownIds: ["C02"] }]
+  });
+  const recovered = await workflow.recoverAutonomousPipelineFailure("P01", error, supervisor);
+  assert.equal(recovered, true);
+  assert.deepEqual(project.script.generationCheckpoint.shotPlan[7].scenePresenceCharacterIds, ["C01", "C02"]);
+  assert.deepEqual(Object.keys(project.script.generationCheckpoint.fastUnitResultCache), ["1"]);
+  assert.equal(project.automation.stage, "agent_unit_character_plan_repair");
+});

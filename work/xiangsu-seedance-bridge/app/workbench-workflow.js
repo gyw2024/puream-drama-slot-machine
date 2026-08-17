@@ -20708,6 +20708,53 @@ ${shotAnchor}
         return true;
       }
     }
+    if (code === "SCRIPT_UNIT_CHARACTER_REFERENCE_INVALID") {
+      const project = this.store.getProject(projectId);
+      const checkpoint = project.script?.generationCheckpoint;
+      const failures = Array.isArray(error?.failures) ? error.failures : [];
+      if (Array.isArray(checkpoint?.shotPlan) && checkpoint.shotPlan.length && failures.length) {
+        const allowedByShot = new Map(failures.map(failure => [
+          String(failure?.shotId || "").toUpperCase(),
+          normalizeStringArray(failure?.unknownIds).filter(id => /^C\d+$/i.test(id)).map(id => id.toUpperCase())
+        ]));
+        const shotPlan = checkpoint.shotPlan.map(plan => {
+          const addedIds = allowedByShot.get(String(plan?.id || "").toUpperCase()) || [];
+          if (!addedIds.length) return plan;
+          return {
+            ...plan,
+            scenePresenceCharacterIds: normalizeStringArray([...(plan.scenePresenceCharacterIds || []), ...addedIds]),
+            characterIds: normalizeStringArray([...(plan.characterIds || []), ...addedIds]),
+            characterReferenceNormalizedFrom: "legacy_checkpoint"
+          };
+        });
+        project.script = {
+          ...(project.script || {}),
+          generationCheckpoint: {
+            ...checkpoint,
+            shotPlan,
+            blueprint: checkpoint.blueprint ? { ...checkpoint.blueprint, shotPlan } : checkpoint.blueprint,
+            unitCharacterPlanRepair: {
+              shotIds: [...allowedByShot.keys()],
+              repairedAt: new Date().toISOString(),
+              localMetadataOnly: true
+            }
+          }
+        };
+        this.store.saveProject(project);
+        this.appendAutonomousRepairJournal(projectId, {
+          attempt: count,
+          code,
+          status: "unit_character_plan_repaired",
+          shotIds: [...allowedByShot.keys()]
+        });
+        this.setAutomation(projectId, {
+          status: "running",
+          stage: "agent_unit_character_plan_repair",
+          message: `旧蓝图漏登记人物，Agent 已本地补齐 ${[...allowedByShot.keys()].join("、")} 的人物允许清单并只重试缺失批次`
+        });
+        return true;
+      }
+    }
     const scriptQualityFailure = code === "FOUNDRY_FORMAL_QUALITY_GATE_FAILED"
       || code === "PRODUCTION_HARD_CONTRACT_FAILED"
       || code === "SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED"
