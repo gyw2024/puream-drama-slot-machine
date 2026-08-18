@@ -109,12 +109,14 @@ test("four speaker changes stay four camera segments but one continuous H3 provi
   assert.deepEqual(blockReferences.audios.map(item => item.characterId), ["C01", "C02"]);
   const prompt = buildHailuoGenerationBlockPrompt(project, shot, block, blockReferences);
   assert.ok(prompt.length <= HAILUO_BLOCK_PROMPT_LIMIT, `${block.id} prompt is ${prompt.length} chars`);
-  for (const section of REQUIRED_HAILUO_SECTIONS) assert.match(prompt, new RegExp(section));
-  assert.equal((prompt.match(/\[Shot \d+\|/g) || []).length, 4);
-  assert.match(prompt, /HARD_CUT@/);
-  assert.match(prompt, /One continuous generated clip/);
-  assert.match(prompt, /MOUTH=<Subject/);
-  assert.match(prompt, /non_diegetic_music: N\/A/);
+  for (const section of REQUIRED_HAILUO_SECTIONS) assert.match(prompt, new RegExp(section.replace(/[【】]/g, "\\$&")));
+  assert.match(prompt, /图1=/);
+  assert.match(prompt, /音频1=/);
+  assert.match(prompt, /音频2=/);
+  assert.match(prompt, /对白内容＞语气＞情绪/);
+  assert.match(prompt, /凭什么只给他一万？/);
+  assert.match(prompt, /我陪他吃苦三十年。/);
+  assert.doesNotMatch(prompt, /subject_definitions:/);
   assert.ok(prompt.includes(FINAL_OUTPUT_LOCK));
   assert.equal(assertAgentGenerationBlockPrompt(project, shot, block, blockReferences, prompt), true);
 });
@@ -129,7 +131,7 @@ test("a full five-turn 15-second exchange still compiles to one bounded H3 clip"
   const blockReferences = filterReferencesForGenerationBlock(references, block, { blockCount: 1 });
   const prompt = buildHailuoGenerationBlockPrompt(project, shot, block, blockReferences);
   assert.ok(prompt.length <= HAILUO_BLOCK_PROMPT_LIMIT, `${block.id} prompt is ${prompt.length} chars`);
-  assert.equal((prompt.match(/\[Shot \d+\|/g) || []).length, 5);
+  assert.match(prompt, /你现在就告诉我。/);
   assert.equal(assertAgentGenerationBlockPrompt(project, shot, block, blockReferences, prompt), true);
 });
 
@@ -198,7 +200,7 @@ test("director-agent creativity cannot inject unsafe transitions or invalid came
     repaired.takes.map(take => [take.id, take.speakerId, take.cameraOwnerId, take.mouthOwnerId]),
     base.takes.map(take => [take.id, take.speakerId, take.cameraOwnerId, take.mouthOwnerId])
   );
-  assert.equal(repaired.takes.some(take => /\[Shot 2\]|background music|[\u3400-\u9fff]/i.test(JSON.stringify(take.direction))), false);
+  assert.equal(repaired.takes.some(take => /\[Shot 2\]|background music|字幕|人物介绍/i.test(JSON.stringify(take.direction))), false);
 });
 
 test("director-agent performance and generation-block continuity must be fully authored", () => {

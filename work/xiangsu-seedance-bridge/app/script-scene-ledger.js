@@ -30,14 +30,27 @@ function sceneSemanticKey(value = "") {
     .toLowerCase();
 }
 
+const SCENE_TIME_TOKEN = /^(?:傍晚|白天|夜晚|夜里|夜间|日间|清晨|黄昏|深夜|凌晨|上午|下午|中午|晚上|晨|晚|夜|日|DAY|NIGHT|DAWN|DUSK|EVENING|MORNING)$/i;
+
+function isSceneTimeToken(value = "") {
+  const name = normalizeSceneName(value);
+  if (!name) return true;
+  if (SCENE_TIME_TOKEN.test(name)) return true;
+  if (/^(?:夜间|白天|日间|夜里|清晨|黄昏|深夜|凌晨|傍晚)?(?:雨光|明亮|阴天|晴天|灯光|暖光|冷光|日光|月光|路灯|室内光|室外光)$/i.test(name)) return true;
+  if (/^(?:夜间|白天|日间|夜里|清晨|黄昏|深夜|凌晨|傍晚).{0,8}$/.test(name)
+    && !/(厅|房|室|廊|街|院|店|馆|楼|口|厨|车|会|办|诊|屋|柜|场|站|区|园)/.test(name)) return true;
+  return false;
+}
+
 function splitCompoundSceneName(value = "") {
   const normalized = normalizeSceneName(value);
   if (!normalized) return [];
   // A compound heading declares an ordered location transition. Fountain's
   // INT/EXT slash belongs to its syntax and is removed before this function.
-  return normalized.split(/\s*(?:-{1,2}>|→|⇒|➜|\/|／|\||｜|转场至|转至|切至|切到|再到|然后到)\s*/i)
+  // Chinese lists use顿号; "地点｜傍晚" uses a pipe as a time suffix, not a second place.
+  return normalized.split(/\s*(?:-{1,2}>|→|⇒|➜|\/|／|\||｜|、|，|,|；|;|转场至|转至|切至|切到|再到|然后到)\s*/i)
     .map(normalizeSceneName)
-    .filter(Boolean);
+    .filter(part => part && !isSceneTimeToken(part));
 }
 
 function parseSceneHeading(line = "") {
@@ -56,10 +69,13 @@ function parseSceneHeading(line = "") {
   }
   match = text.match(/^(?:#{1,6}\s*)?【\s*场景\s*】\s*(.+)$/i);
   if (match) return { raw: clean(match[1]), kind: "bracketed" };
-  match = text.match(/^(?:#{1,6}\s*)?场景\s*[:：]\s*(.+)$/i);
+  match = text.match(/^(?:#{1,6}\s*)?(?:[-*•]\s*)?场景\s*[:：]\s*(.+)$/i);
   if (match) {
-    const raw = clean(match[1]);
-    return { raw, kind: raw.startsWith("@") ? "tagged" : "labelled" };
+    const raw = clean(match[1])
+      .replace(/^SC\s*0*\d+\s*/i, "")
+      .split(/[，,；;。]/, 1)[0]
+      .trim();
+    return raw ? { raw, kind: raw.startsWith("@") ? "tagged" : "labelled" } : null;
   }
   match = text.match(/^(?:#{1,6}\s*)?第[一二三四五六七八九十百千零〇\d]+场\s*[:：、.-]?\s*(.+)$/i);
   if (match) return { raw: clean(match[1]), kind: "numbered_chinese" };
@@ -76,8 +92,9 @@ function parseSceneHeading(line = "") {
 
 function transitionTarget(line = "") {
   const text = String(line || "").trim();
-  const match = text.match(/^[（(\[]?\s*(?:转场|切至|切到|转至|来到)\s*[:：-]?\s*([^）)\]\n]{2,80})[）)\]]?\s*$/i);
-  return match ? normalizeSceneName(match[1]) : "";
+  const match = text.match(/^(?:[-*•]\s*)?[（(\[]?\s*(?:转场|切至|切到|转至|来到)\s*[:：-]?\s*([^）)\]\n]{2,80})[）)\]]?\s*$/i);
+  const name = match ? normalizeSceneName(match[1]) : "";
+  return name && !isSceneTimeToken(name) ? name : "";
 }
 
 function findScene(catalogue, value, candidates = catalogue) {
@@ -288,8 +305,8 @@ function enforceSourceSceneLedger(analysis = {}, sceneLedger = {}, dialogueLedge
       ...(Array.isArray(shot?.dialogueTurns) ? shot.dialogueTurns.map(item => item?.sourceDialogueId) : [])
     ].map(String).filter(Boolean);
     const dialogueSceneIds = [...new Set(bindingIds.map(id => dialogueById.get(id)?.sourceSceneId).filter(Boolean))];
-    let scene = dialogueSceneIds.length === 1 ? catalogue.find(item => item.id === dialogueSceneIds[0]) : null;
-    if (!scene) scene = sceneFromToken(shot?.scene || shot?.sceneName || shot?.sceneId);
+    let scene = sceneFromToken(shot?.scene || shot?.sceneName || shot?.sceneId);
+    if (!scene && dialogueSceneIds.length === 1) scene = catalogue.find(item => item.id === dialogueSceneIds[0]);
     if (!scene) {
       const slot = Math.min(orderedIds.length - 1, Math.floor(index * orderedIds.length / Math.max(1, all.length)));
       scene = catalogue.find(item => item.id === orderedIds[Math.max(0, slot)]) || catalogue[0];

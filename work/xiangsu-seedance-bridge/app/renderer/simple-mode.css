@@ -267,7 +267,7 @@ label { display: grid; gap: 7px; color: #aaa99f; font-size: 11px; }
 .modal header span { display: grid; gap: 5px; }
 .modal header small { color: var(--amber); font: 700 9px/1 ui-monospace, Consolas, monospace; letter-spacing: .18em; }
 .modal header b { font-size: 20px; }
-.modal header button { width: 32px; min-height: 32px; padding: 0; border-color: transparent; background: transparent; font-size: 20px; }
+.modal header button { width: 32px; min-height: 32px; padding: 0; border-color: transparent; background: transparent; font-size: 20px; -webkit-app-region: no-drag; pointer-events: auto; position: relative; z-index: 5; margin-right: max(8px, calc(148px - (100vw - 100%) / 2)); }
 .modal footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 6px; }
 .modal p { margin: 0; color: #96978f; line-height: 1.7; }
 .form-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }

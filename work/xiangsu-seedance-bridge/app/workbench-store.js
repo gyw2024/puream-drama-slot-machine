@@ -2054,11 +2054,24 @@ class WorkbenchStore {
     if (!fs.existsSync(this.projectDir(projectId))) throw Object.assign(new Error("漫剧项目不存在"), { code: "PROJECT_NOT_FOUND" });
     const runtimeProject = this.foundryKernel?.loadProject(projectId) || null;
     if (!runtimeProject && !fs.existsSync(filePath)) throw Object.assign(new Error("漫剧项目不存在"), { code: "PROJECT_NOT_FOUND" });
-    const project = runtimeProject || readJsonFile(filePath, {
+    let diskProject = null;
+    if (fs.existsSync(filePath)) {
+      try {
+        diskProject = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      } catch {
+        diskProject = null;
+      }
+    }
+    const runtimeTime = Date.parse(String(runtimeProject?.updatedAt || ""));
+    const diskTime = Date.parse(String(diskProject?.updatedAt || ""));
+    const preferDisk = diskProject?.id === String(projectId || "")
+      && Number.isFinite(diskTime)
+      && (!Number.isFinite(runtimeTime) || diskTime > runtimeTime);
+    const project = preferDisk ? diskProject : (runtimeProject || readJsonFile(filePath, {
         validate: value => value?.id === String(projectId || ""),
         errorCode: "PROJECT_FILE_CORRUPTED",
         errorMessage: "项目文件已损坏，且没有可用备份"
-      });
+      }));
     const storeBaseline = deepCloneJson(project);
     project.version = PROJECT_VERSION;
     project.productionRevision = project.productionRevision || "";
@@ -2454,7 +2467,13 @@ class WorkbenchStore {
         catch { continue; }
       }
     }
-    return this.activeVideoJobsCache.filter(item => !projectId || item.projectId === projectId).map(item => ({ ...item }));
+    return this.activeVideoJobsCache
+      .filter(item => !projectId || item.projectId === projectId)
+      .filter(item => isActiveVideoJob({
+        ...item,
+        type: item.type || item.jobType || "shot_video"
+      }))
+      .map(item => ({ ...item }));
   }
 
   getAccountSwitchState() {

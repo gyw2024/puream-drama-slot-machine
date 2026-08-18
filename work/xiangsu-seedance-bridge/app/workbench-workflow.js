@@ -6,6 +6,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
+const { isActiveVideoJob, isPhantomVideoJob } = require("./workbench-status");
 const { compactProviderVideoPrompt, generateImage, generateText, generateVideo, parseStructuredJson } = require("./ai-provider");
 const { hailuoMediaCategories, resolvePureamMediaUploadConfig, resolveReferenceUrl } = require("./puream-video-adapters");
 const { processFaceGrid } = require("./face-grid-processor");
@@ -39,7 +40,6 @@ const {
   AGENT_DIRECTOR_VERSION,
   assertAgentGenerationBlockPrompt,
   assertAgentTakePrompt,
-  atomicFallbackBlocks,
   buildCameraTakePlan,
   buildHailuoGenerationBlockPrompt,
   buildHailuoTakePrompt,
@@ -117,6 +117,7 @@ const {
   attemptLimitLabel,
   resolveAttemptLimit
 } = require("./production-liveness");
+const { buildApprovedHailuoPrompt } = require("./hailuo-h3-natural-prompt");
 const {
   buildFullReferencePrompt,
   buildFallbackHailuoPromptSpec,
@@ -142,7 +143,6 @@ const {
   audibleIntervalsFromSilence,
   selectVoiceExtractPlan,
   analyzeVisualFile,
-  analyzeTimedHardCuts,
   analyzeImageFile,
   analyzeSceneFourViewLayout,
   analyzeImageDimensions,
@@ -1217,10 +1217,10 @@ function productTailRole(index = 0, count = 4) {
   const position = Math.max(0, Math.min(Math.max(0, count - 1), Number(index) || 0));
   if (count <= 2) {
     return position === 0
-      ? "situationNeed+whyNow+product_packshot/product_detail：建立真实使用情境并给干净商品整体与关键细节，不出现无关人脸"
+      ? "situationNeed+whyNow+product_packshot/product_detail：在当前剧情场景里给商品整体与关键细节，禁止电商白底棚拍，不出现无关人脸"
       : "action+observableOutcome+product_reaction+relationOrDecisionShift：完成真实品类动作、客观结果、受益者反应与剧情决定";
   }
-  if (position === 0) return "situationNeed+whyNow+product_packshot：从商品事实建立真实需求，并给无脸干净整体镜";
+  if (position === 0) return "situationNeed+whyNow+product_packshot：从商品事实建立真实需求，并在当前剧情场景里给无脸整体镜，禁止电商白底";
   if (position === 1) return "product_detail+action：给关键材质/内容细节，再由唯一操作者完成符合品类的自然动作";
   if (position === count - 1) return "product_reaction+relationOrDecisionShift：受益者单人反应推动行动、关系或生活方式变化并回到剧情收束";
   if (position === count - 2) return "product_result+observableOutcome：先拍可观察且合规的客观结果，再给简短人物反应";
@@ -3736,7 +3736,7 @@ function imageSafetyStageContract(stage = "", language = "zh") {
     scene_asset: "Create one 16:9 image containing an exact 2-by-2 four-angle empty-scene reference board: front master, reverse axis, left 45-degree and right 45-degree views of the same coherent fictional space. Preserve identical doors, windows, walls, furniture topology, entrances, time of day and light direction across all four panels; no people, labels, text, brand or sensitive content.",
     storyboard_start: "Create one fictional live-action opening frame for the current shot. Preserve supplied identities, complete wardrobes, scene topology, screen axis and prop states; show the action before it happens; no collage, reference board, text, brand or sensitive content.",
     storyboard_end: "Create one fictional live-action ending frame for the current shot. Preserve supplied identities, complete wardrobes, scene topology, screen axis and prop states; show the stable result after the action; no collage, reference board, text, brand or sensitive content.",
-    storyboard_sheet: "Create one fictional chronological contact sheet for the current shot. Every individual panel is a complete portrait 9:16 frame; tile the exact requested panel count left-to-right, top-to-bottom with narrow gutters. Preserve supplied identities, wardrobes, scene topology, prop continuity and panel order; no design-board layout, extra person, text, brand or sensitive content.",
+    storyboard_sheet: "Create one fictional chronological contact sheet for the current shot. Every individual panel is a complete portrait 9:16 live-action frame inside the locked drama location; tile the exact requested panel count left-to-right, top-to-bottom with narrow gutters. If a product appears, place it in that same room, never a white studio, catalog backdrop, e-commerce model shot or packaging still-life. Preserve supplied identities, wardrobes, scene topology, prop continuity and panel order; no design-board layout, extra person, text, brand or sensitive content.",
     wardrobe_asset: "Create one fictional wardrobe reference board for the assigned adult character. Preserve that character identity and show the complete requested garment clearly; no unrelated person, brand, text or sensitive content.",
     prop_asset: "Create one fictional single-prop reference image showing the requested shape, material, quantity and state clearly; no person, brand, text or sensitive content."
   };
@@ -3747,7 +3747,7 @@ function imageSafetyStageContract(stage = "", language = "zh") {
     scene_asset: "只生成一张16:9、严格2×2分割的无人场景四视图：左上主入口正向、右上反向轴、左下左侧45度、右下右侧45度；四格必须是同一空间、同一门窗家具拓扑、同一时段和光向。禁止人物、标签、文字、品牌和敏感内容。",
     storyboard_start: "只生成本镜一张动作发生前的电影首帧：严格保留参考人物身份、整套服装、场景拓扑、轴线和道具状态；禁止拼贴、设定板、文字、品牌和敏感内容。",
     storyboard_end: "只生成本镜一张动作完成后的电影尾帧：严格保留参考人物身份、整套服装、场景拓扑、轴线和道具状态；禁止拼贴、设定板、文字、品牌和敏感内容。",
-    storyboard_sheet: "只生成本镜一张逐时接触印合图：每个独立小格必须是完整9:16竖屏画面，按从左到右、从上到下拼接；格数与时间顺序必须准确，人物、服装、场景和道具连续；禁止设定板、额外人物、文字、品牌和敏感内容。",
+    storyboard_sheet: "只生成本镜一张逐时接触印合图：每个独立小格必须是完整9:16竖屏剧情画面，发生在已锁定的戏剧场景里，按从左到右、从上到下拼接；若有商品，必须放在该场景中使用，禁止电商白底、棚拍、模特展示图或包装静物；格数与时间顺序必须准确，人物、服装、场景和道具连续；禁止设定板、额外人物、文字、品牌和敏感内容。",
     wardrobe_asset: "只生成指定成年角色的一张服装资产图：锁定该角色身份并清楚展示整套指定服装；禁止无关人物、品牌、文字和敏感内容。",
     prop_asset: "只生成一张单一道具资产图：准确展示指定外形、材质、数量和状态；禁止人物、品牌、文字和敏感内容。"
   };
@@ -3816,18 +3816,6 @@ function qualityAccepted(candidate, settings = null) {
     || candidate.qualityAudit?.accepted === true
     || candidate.qualityAudit?.overridden === true
     || ["manual", "human_override", "advisory_continue"].includes(String(candidate.qualityAudit?.mode || ""));
-}
-
-function shouldUseAtomicGenerationFallback(error) {
-  const code = String(error?.code || "");
-  const text = `${code} ${error?.message || ""} ${(error?.failures || []).join(" ")}`;
-  return [
-    "PROMPT_TOO_LONG",
-    "HAILUO_AGENT_GENERATION_BLOCK_PROMPT_INVALID",
-    "HAILUO_PROMPT_DIALOGUE_PERFORMANCE_MISSING",
-    "HAILUO_PROMPT_DIALOGUE_AUDIO_BINDING_MISSING",
-    "AGENT_GENERATION_BLOCK_TECHNICAL_INTEGRITY_FAILED"
-  ].includes(code) || /PROMPT_TOO_LONG|prompt length .* exceeds|dialogue performance missing/i.test(text);
 }
 
 const QUALITY_ADVISORY_ERROR_CODES = new Set([
@@ -4774,10 +4762,13 @@ function applyUploadedProductBindings(normalized, project = {}) {
   const tokens = productSemanticTokens(project);
   const shots = (Array.isArray(normalized?.shots) ? normalized.shots : []).map(shot => {
     const sourceDialogue = (Array.isArray(shot?.dialogueTurns) ? shot.dialogueTurns : [])
-      .map(turn => String(turn?.text || "").trim()).filter(Boolean);
+      .map(turn => String(turn?.text || turn?.spokenText || "").trim()).filter(Boolean);
     const narrativeText = [shot.action, shot.visualBeat, shot.startFrame, shot.endFrame, ...sourceDialogue].map(value => String(value || "")).join("\n");
     const matchedTokens = tokens.filter(token => narrativeText.includes(token));
-    const productMention = Boolean(shot.productMention || matchedTokens.length);
+    const authoredHidden = /(?:不直接出现|不出现|不直接操作|暂不展示)/.test(String(shot.productNote || shot.productInstruction || ""));
+    const productMention = authoredHidden
+      ? false
+      : Boolean(shot.productMention || matchedTokens.length);
     if (!productMention) return { ...shot, productBinding: null };
     const sourceDialogueIds = (Array.isArray(shot?.dialogueTurns) ? shot.dialogueTurns : [])
       .filter(turn => tokens.some(token => String(turn?.text || "").includes(token)))
@@ -5123,7 +5114,42 @@ function uniqueDialogueTurns(project, shot) {
   return items;
 }
 
-function renderApprovedVideoPrompt(project = {}, shot = {}) {
+function renderApprovedVideoPrompt(project = {}, shot = {}, references = {}) {
+  const turns = uniqueDialogueTurns(project, shot);
+  const imageRoles = Array.isArray(references?.imageRoles) && references.imageRoles.length
+    ? references.imageRoles
+    : [
+      { type: "storyboard_sheet", entityId: shot?.id },
+      ...(shot?.sceneId ? [{ type: "scene", entityId: shot.sceneId }] : []),
+      ...list(shot?.characterIds).map(id => ({ type: "character", entityId: id }))
+    ];
+  const images = Array.isArray(references?.images) && references.images.length
+    ? references.images
+    : imageRoles.map((_item, index) => `bound-image-${index + 1}`);
+  const audios = Array.isArray(references?.audios) && references.audios.length
+    ? references.audios
+    : list(shot?.characterIds).map(id => ({
+      characterId: id,
+      characterName: (project?.characters || []).find(item => item.id === id)?.name || id
+    }));
+  try {
+    return compactFullReferencePrompt(buildApprovedHailuoPrompt({
+      project,
+      shot,
+      references: { ...references, images, imageRoles, audios },
+      dialogueTurns: turns
+    }));
+  } catch {
+    return compactFullReferencePrompt(buildApprovedHailuoPrompt({
+      project,
+      shot,
+      references: { images: [], imageRoles: [], audios: [] },
+      dialogueTurns: turns
+    }));
+  }
+}
+
+function renderApprovedVideoPromptLegacyUnused(project = {}, shot = {}) {
   const duration = Math.max(5, Number(shot?.duration) || 10);
   const characters = new Map((Array.isArray(project?.characters) ? project.characters : [])
     .map(item => [String(item?.id || "").trim(), String(item?.name || item?.id || "").trim()]));
@@ -7860,7 +7886,7 @@ function explicitTaggedAssetNames(text = "", labels = []) {
     seen.add(name);
     names.push(name);
   };
-  const linePattern = new RegExp(`(?:^|\\n)(?:${labelPattern})\\s*[：:]\\s*([^\\n]+)`, "gi");
+  const linePattern = new RegExp(`(?:^|\\n)(?:【\\s*(?:${labelPattern})\\s*】|(?:${labelPattern}))\\s*[：:]?\\s*([^\\n]+)`, "gi");
   for (const match of String(text || "").replace(/\r\n?/g, "\n").matchAll(linePattern)) {
     const value = String(match[1] || "").trim();
     const tagged = [...value.matchAll(/@([^\s@，、；;]+)/g)].map(item => item[1]);
@@ -7969,13 +7995,39 @@ function analysisChunkSchedules(chunks, filmSchedule) {
 }
 
 function localUploadedAnalysisChunk(chunk, project = {}) {
+  const authoredShots = Array.isArray(chunk?.authoredShots) ? chunk.authoredShots : [];
+  if (authoredShots.length) {
+    const projectCharacters = Array.isArray(project?.characters) ? project.characters : [];
+    let parsed = null;
+    try { parsed = JSON.parse(String(chunk?.text || "")); } catch {}
+    const characters = Array.isArray(parsed?.characters) && parsed.characters.length
+      ? parsed.characters
+      : projectCharacters;
+    const scenes = Array.isArray(parsed?.scenes) && parsed.scenes.length
+      ? parsed.scenes
+      : [];
+    const props = Array.isArray(parsed?.props) ? parsed.props : [];
+    return {
+      story: parsed?.story || { premise: "从结构化制作剧本本地解析" },
+      characters,
+      scenes,
+      props,
+      shots: authoredShots
+    };
+  }
   const ledger = (Array.isArray(chunk?.sourceDialogueLedger) ? chunk.sourceDialogueLedger : []).map(item => ({ ...item }));
   const explicitlyListedNames = explicitTaggedAssetNames(chunk?.text, ["人物", "角色"]);
   const names = [...new Set([
     ...explicitlyListedNames,
     ...ledger.map(item => String(item?.speaker || item?.speakerRaw || "").trim()).filter(Boolean)
   ])];
-  if (!names.length) names.push("讲述者");
+  if (!names.length) return {
+    story: { premise: "按用户上传原稿识别人物关系、事件顺序和冲突" },
+    characters: [],
+    scenes: [],
+    props: [],
+    shots: []
+  };
   const characters = names.map((name, index) => ({
     id: `C${String(index + 1).padStart(2, "0")}`,
     name,
@@ -7988,18 +8040,31 @@ function localUploadedAnalysisChunk(chunk, project = {}) {
     importance: index === 0 ? "lead" : "supporting"
   }));
   const characterByName = new Map(characters.map(item => [item.name, item]));
-  const sceneMatch = String(chunk?.text || "").match(/(?:【场景】|场景[：:])\s*([^\n]{2,40})/);
-  const sceneName = String(sceneMatch?.[1] || "剧情主要空间").trim();
-  const scenes = [{
-    id: `SC${String(Number(chunk?.index || 0) + 1).padStart(2, "0")}`,
-    name: sceneName,
-    description: `${sceneName}的门窗、主要家具、人物走位区和正反打轴线固定；具体美术以原稿与用户资产为准`,
-    interiorExterior: "以原稿为准",
-    time: "以原稿为准",
-    lighting: "保持人物面部和动作清楚，主光方向连续",
-    atmosphere: "保留现场环境声，台词清晰",
-    scenePurpose: "完整承载用户原稿的事件、对白和人物关系"
-  }];
+  const localSceneLedger = chunk?.sourceSceneLedger?.explicit
+    ? chunk.sourceSceneLedger
+    : buildSourceSceneLedger(chunk?.text || "");
+  const scenes = (localSceneLedger.catalogue || []).length
+    ? localSceneLedger.catalogue.map((item, index) => ({
+      id: item.id || `SC${String(index + 1).padStart(2, "0")}`,
+      name: item.name,
+      description: `${item.name}的门窗、主要家具、人物走位区和正反打轴线固定；具体美术以原稿与用户资产为准`,
+      interiorExterior: "以原稿为准",
+      time: "以原稿为准",
+      lighting: "保持人物面部和动作清楚，主光方向连续",
+      atmosphere: "保留现场环境声，台词清晰",
+      scenePurpose: "完整承载用户原稿的事件、对白和人物关系"
+    }))
+    : [{
+      id: `SC${String(Number(chunk?.index || 0) + 1).padStart(2, "0")}`,
+      name: "待核对物理场景",
+      description: "原稿未给出可靠场景标题，后续按事件地点补齐具体空间",
+      interiorExterior: "以原稿为准",
+      time: "以原稿为准",
+      lighting: "保持人物面部和动作清楚，主光方向连续",
+      atmosphere: "保留现场环境声，台词清晰",
+      scenePurpose: "完整承载用户原稿的事件、对白和人物关系"
+    }];
+  const sceneName = scenes[0]?.name || "待核对物理场景";
   const unitCount = Math.max(1, Number(chunk?.unitCount) || 1);
   const groups = Array.from({ length: unitCount }, () => []);
   if (ledger.length) {
@@ -8083,7 +8148,7 @@ function localUploadedAnalysisChunk(chunk, project = {}) {
       subshots
     };
   });
-  const explicitProps = explicitTaggedAssetNames(chunk?.text, ["物品", "道具"])
+  const explicitProps = explicitTaggedAssetNames(chunk?.text, ["物品", "道具", "核心道具", "关键道具"])
     .filter(name => isCoreStoryPropCandidate(name, chunk?.text, shots, project?.product?.name || ""))
     .map((name, index) => ({
     id: `P${String(index + 1).padStart(2, "0")}`,
@@ -8737,7 +8802,8 @@ function parseStructuredProductionScript(text) {
 
   const shots = shotBlocks.map(({ match, body }, index) => {
     const characterIds = (bulletValue(body, "人物").match(/C\d{2,}/g) || []);
-    const sceneId = bulletValue(body, "场景").match(/SC\d{2,}/)?.[0] || "";
+    const sceneField = bulletValue(body, "场景");
+    const sceneId = sceneField.match(/SC\d{2,}/)?.[0] || "";
     const action = bulletValue(body, "本单元叙事任务") || bulletValue(body, "动作");
     const dialogue = bulletValue(body, "对白");
     const startFrame = bulletValue(body, "首帧");
@@ -8755,9 +8821,12 @@ function parseStructuredProductionScript(text) {
       title: action.split(/[，。；]/)[0] || `镜头 ${index + 1}`,
       duration,
       characters: characterIds.map(id => characterById.get(id)).filter(Boolean),
-      scene: sceneById.get(sceneId) || bulletValue(body, "场景").replace(/^SC\d{2,}\s*/, "").split(/[，,]/)[0].trim(),
+      characterIds,
+      sceneId,
+      scene: sceneById.get(sceneId) || sceneField.replace(/^SC\d{2,}\s*/, "").split(/[，,]/)[0].trim(),
       action,
       dialogue,
+      productNote,
       shotSize: subshots[0]?.framing || "中景",
       cameraMove: subshots.map(item => item.camera).filter(Boolean).join(" → ") || "固定镜头",
       emotion: bulletValue(body, "情绪"),
@@ -8967,7 +9036,7 @@ function isCoreStoryPropCandidate(name, source = "", shots = [], productName = "
   const incidental = /^(手机|电话|椅子|凳子|桌子|沙发|门|窗|水龙头|抹布|毛巾|塑料盆|粉色塑料盆|化妆镜|口红|钢笔|纸巾|杯子|茶杯|碗|盘子|餐具|碎瓷片|碎纸片|普通文件|文件|包装盒|大号包装盒|蓝色包装盒|购物袋|钥匙|衣架|垃圾桶|龙虾|吃剩的龙虾|清洁棒)$/i.test(value)
     || /包装盒|包装|礼盒|清洁棒|清洁用品|家居用品/.test(value);
   const evidence = propEvidenceText(value, source, shots);
-  const causal = /证据|证明|账本|账单|收据|发票|凭证|合同|协议|录音|监控|病历|遗嘱|钥匙|身份|dna|转账|付款|赔偿|欠款|唯一|关键|真相|发现|揭露|核对|签字|签订|撕毁|销毁|藏起|抢走|偷走|归还|交给|递给|拿出|拿起|打开|锁定|决定|改变|换回|救命|药物|处方/i.test(evidence);
+  const causal = /证据|证明|账本|账单|收据|发票|凭证|合同|协议|录音|监控|病历|遗嘱|钥匙|身份|dna|转账|付款|赔偿|欠款|唯一|关键|真相|发现|揭露|核对|签字|签订|撕毁|销毁|藏起|抢走|偷走|归还|交给|递给|拿出|拿起|打开|锁定|决定|改变|换回|救命|药物|处方|取证|证物|房产证|缴费单|暖手宝/i.test(evidence);
   const appearances = (Array.isArray(shots) ? shots : []).filter(shot => {
     const text = [shot?.action, shot?.visualBeat, shot?.causalLink, shot?.stateBefore, shot?.stateAfter, shot?.dialogue, ...(shot?.subshots || []).map(item => item?.action)].join(" ");
     return text.includes(value) || (shot?.propNames || []).some(item => String(item).trim() === value);
@@ -9006,14 +9075,93 @@ function normalizeCoreStoryProps(data = {}, source = "", productName = "") {
   return { ...data, props, shots: normalizedShots };
 }
 
-function sanitizeWardrobeChanges(data = {}, source = "") {
+function inferWardrobeChangesFromSource(data = {}, source = "") {
   const text = String(source || "");
-  const hasEvidence = /换上|换下|换成|更换|脱下|穿上|套上|换装|换衣|第二天|次日|翌日|几年后|数月后|婚礼服|病号服|工作服|校服/.test(text);
-  if (hasEvidence) return data;
+  const characters = Array.isArray(data.characters) ? data.characters : [];
+  const shots = Array.isArray(data.shots) ? data.shots : [];
+  if (!characters.length || !shots.length) return data;
+  const changeRe = /(?:换上|换成|更换|穿上|套上|换装成)\s*([^，。；;｜|）)：:\n]{2,16})/g;
+  const hits = [];
+  for (const match of text.matchAll(changeRe)) {
+    const garment = String(match[1] || "").replace(/[的了着过]$/, "").trim();
+    if (!garment || /衣服|服装$/.test(garment) && garment.length <= 2) continue;
+    if (/^(?:右膝|左膝|膝盖|护膝|双手|右手|左手|头部|腰部|肩膀)$/.test(garment)) continue;
+    if (/护膝|护腰|护踝|半月板/.test(garment)) continue;
+    const windowStart = Math.max(0, match.index - 16);
+    const nearby = text.slice(windowStart, match.index + match[0].length);
+    const character = characters.find(item => nearby.includes(item.name));
+    if (!character) continue;
+    hits.push({ character, garment, index: match.index });
+  }
+  if (!hits.length) return data;
+  const outfitsByCharacter = new Map();
+  const nextShots = shots.map(shot => ({ ...shot, wardrobeBindings: normalizeWardrobeBindings(shot.wardrobeBindings) }));
+  for (const hit of hits) {
+    const wardrobeId = `wardrobe_${hit.character.id}_${slug(hit.garment)}`;
+    const list = outfitsByCharacter.get(hit.character.id) || [];
+    if (!list.some(item => item.id === wardrobeId)) {
+      list.push({
+        id: wardrobeId,
+        label: hit.garment,
+        description: `${hit.character.name}换上的${hit.garment}`,
+        changeRequired: true
+      });
+      outfitsByCharacter.set(hit.character.id, list);
+    }
+    const shot = nextShots.find(item => {
+      const blob = [item.action, item.visualBeat, item.dialogue, ...(item.subshots || []).map(sub => sub.action || "")].join(" ");
+      return blob.includes(hit.garment) || blob.includes("换上") || blob.includes("穿上");
+    }) || nextShots[Math.min(nextShots.length - 1, Math.floor(hit.index / Math.max(1, text.length / nextShots.length)))];
+    if (!shot.wardrobeBindings.some(item => item.characterId === hit.character.id && item.wardrobeId === wardrobeId)) {
+      shot.wardrobeBindings.push({
+        characterId: hit.character.id,
+        wardrobeId,
+        continuity: `源文换装：${hit.garment}`
+      });
+    }
+    shot.wardrobeId = shot.wardrobeId || wardrobeId;
+    shot.wardrobeLabel = shot.wardrobeLabel || hit.garment;
+  }
   return {
     ...data,
-    characters: (data.characters || []).map(character => ({ ...character, outfits: [] })),
-    shots: (data.shots || []).map(shot => ({ ...shot, wardrobeId: "", wardrobeLabel: "", wardrobeBindings: [] }))
+    characters: characters.map(character => ({
+      ...character,
+      outfits: [
+        ...(Array.isArray(character.outfits) ? character.outfits : []),
+        ...(outfitsByCharacter.get(character.id) || [])
+      ]
+    })),
+    shots: nextShots
+  };
+}
+
+function extractCorePropsFromUploadedScript(source = "", analysis = {}, productName = "") {
+  const named = [
+    ...explicitTaggedAssetNames(source, ["物品", "道具", "核心道具", "关键道具"]),
+    ...((analysis.props || []).map(item => item?.name).filter(Boolean))
+  ];
+  const unique = [...new Set(named.map(name => String(name || "").trim()).filter(Boolean))];
+  return unique
+    .filter(name => isCoreStoryPropCandidate(name, source, analysis.shots || [], productName))
+    .map((name, index) => ({
+      id: `P${String(index + 1).padStart(2, "0")}`,
+      name,
+      coreStory: true,
+      causalRole: `${name}参与证据、决定或结局回收`,
+      purpose: `${name}推动主线`,
+      units: corePropUnitIds(name, analysis.shots || [])
+    }));
+}
+
+function sanitizeWardrobeChanges(data = {}, source = "") {
+  const inferred = inferWardrobeChangesFromSource(data, source);
+  const text = String(source || "");
+  const hasEvidence = /换上|换下|换成|更换|脱下|穿上|套上|换装|换衣|第二天|次日|翌日|几年后|数月后|婚礼服|病号服|工作服|校服/.test(text);
+  if (hasEvidence) return inferred;
+  return {
+    ...inferred,
+    characters: (inferred.characters || []).map(character => ({ ...character, outfits: [] })),
+    shots: (inferred.shots || []).map(shot => ({ ...shot, wardrobeId: "", wardrobeLabel: "", wardrobeBindings: [] }))
   };
 }
 
@@ -9370,12 +9518,20 @@ function normalizeAnalysis(data, project) {
       && requestedCounterpartCharacterId !== focusCharacterId
       ? requestedCounterpartCharacterId
       : (visibleCharacterIds.find(id => id !== focusCharacterId) || "");
+    const authoredCharacterIds = [...new Set([
+      ...normalizeStringArray(item.characterIds).map(resolveCharacterId),
+      ...names.map(name => resolveCharacterId(name))
+    ].filter(id => characters.some(character => character.id === id)))];
     const activeCharacterIds = [...new Set([
+      ...authoredCharacterIds,
       ...visibleCharacterIds,
       ...normalizedDialogueTurns.map(turn => turn.speakerId),
       ...normalizedSubshots.flatMap(subshot => subshot.dialogueTurns.map(turn => turn.speakerId)),
       ...normalizeStringArray(item.offscreenSpeakerIds).map(resolveCharacterId)
     ].filter(Boolean))];
+    const publishedCharacterIds = authoredCharacterIds.length
+      ? authoredCharacterIds
+      : (activeCharacterIds.length ? activeCharacterIds : scenePresenceCharacterIds.slice(0, 2));
     const shot = {
       id: item.id || makeId("shot"),
       number: index + 1,
@@ -9386,8 +9542,8 @@ function normalizeAnalysis(data, project) {
       weatherLightingAtmosphere: String(item.weatherLightingAtmosphere || item.weather || "").trim(),
       authoredContinuity: String(item.authoredContinuity || item.continuity || "").trim(),
       duration,
-      characterIds: activeCharacterIds.length ? activeCharacterIds : scenePresenceCharacterIds.slice(0, 2),
-      characterNames: (activeCharacterIds.length ? activeCharacterIds : scenePresenceCharacterIds.slice(0, 2)).map(id => characters.find(character => character.id === id)?.name || id),
+      characterIds: publishedCharacterIds,
+      characterNames: publishedCharacterIds.map(id => characters.find(character => character.id === id)?.name || id),
       scenePresenceCharacterIds,
       scenePresenceCharacterNames,
       sceneId: sceneByName.get(String(item.scene || "")) || "",
@@ -9437,6 +9593,7 @@ function normalizeAnalysis(data, project) {
       })),
       referencePlan: item.referencePlan && typeof item.referencePlan === "object" ? item.referencePlan : {},
       productMention: Boolean(item.productMention),
+      productNote: String(item.productNote || item.productInstruction || "").trim(),
       productShotType: String(item.productShotType || "none").trim().toLowerCase() || "none",
       productCausalBridge: normalizeProductCausalBridge(item.productCausalBridge),
       productBinding: item.productBinding && typeof item.productBinding === "object" ? { ...item.productBinding } : null,
@@ -9555,13 +9712,15 @@ function conformImportedAnalysisToDurationContract(data, project, options = {}) 
     next.secondPanels = normalizeSecondPanels(shot.secondPanels, duration, next);
     return next;
   });
-  normalized = applyUploadedProductBindings({ ...normalized, shots }, project);
-  // Agent output can expose the same dialogue ID in both shot-level and
-  // subshot-level structural views. Canonicalize those bindings before the
-  // strict parity assertion so each authored line has exactly one home.
+  // Bind dialogue to the owning Sxx first. Product matching must see the
+  // post-repair turns, otherwise a leftover line like “这是护膝。” can stamp
+  // an earlier shot and survive after the line is moved.
   if (Array.isArray(normalized.sourceDialogueLedger) && normalized.sourceDialogueLedger.length) {
-    normalized = bindSourceDialogueLedgerToAnalysis(normalized, normalized.sourceDialogueLedger);
+    normalized = bindSourceDialogueLedgerToAnalysis({ ...normalized, shots }, normalized.sourceDialogueLedger);
+  } else {
+    normalized = { ...normalized, shots };
   }
+  normalized = applyUploadedProductBindings(normalized, project);
   assertSourceDialogueParity(normalized, normalized.sourceDialogueLedger);
   const plannedSeconds = normalized.shots.reduce((sum, shot) => sum + shot.duration, 0);
   if (plannedSeconds !== targetSeconds) {
@@ -10510,6 +10669,13 @@ class WorkbenchWorkflow {
 
   hasActiveOperation(projectId) {
     return (this.activeOperations.get(projectId)?.size || 0) > 0;
+  }
+
+  hasAnyActiveOperation() {
+    for (const bucket of this.activeOperations.values()) {
+      if (bucket && bucket.size > 0) return true;
+    }
+    return false;
   }
 
   videoBridgeForProject(projectId, job = null) {
@@ -11472,6 +11638,16 @@ class WorkbenchWorkflow {
       else if (automation.operation === "repair_media_quality") promise = this.repairFailedMedia(project.id);
       else if (automation.operation === "shot_video" && automation.targetId) promise = this.generateShotVideo(project.id, automation.targetId);
       else if (automation.operation === "character_video" && automation.targetId) promise = this.generateCharacterVideo(project.id, automation.targetId);
+      else if (automation.operation === "pipeline_from_stage") {
+        const fromStage = String(automation.targetId || automation.stage || "script").replace(/_batch$|_frame$|_video$/g, "");
+        const mapped = /script|idea|blueprint|plan|unit/.test(fromStage) ? "script"
+          : /asset|creator_prompt|prompt/.test(fromStage) ? "assets"
+            : /storyboard|shot_frame/.test(fromStage) ? "shots"
+              : /shot_video|video/.test(fromStage) ? "videos"
+                : /stitch|final|delivery/.test(fromStage) ? "final"
+                  : "script";
+        promise = this.runPipelineFromStage(project.id, mapped);
+      }
       if (!promise) continue;
       resumed.push({ projectId: project.id, projectTitle: project.title, operation: automation.operation, targetId: automation.targetId || "" });
       Promise.resolve(promise).catch(() => {});
@@ -11518,7 +11694,7 @@ class WorkbenchWorkflow {
         progress: 100,
         progressSource: "terminal",
         progressDeterminate: true,
-        message: resumed ? "连续生成块断点恢复完成" : "连续生成块完成，等待切镜质检与本地精确合成",
+        message: resumed ? "连续生成块断点恢复完成" : "连续生成块完成，已写入分镜视频",
         internalGenerationBlockFilePath: result.localPath,
         internalTakeFilePath: result.localPath,
         remoteUrl: result.videoUrl || "",
@@ -11528,9 +11704,25 @@ class WorkbenchWorkflow {
         hailuoRequestedMode: job.hailuoApiMode || result.requestedMode || "",
         hailuoResolvedMode: result.mode || ""
       });
+      const shot = (this.store.getProject(projectId).shots || []).find(item => item.id === job.entityId);
+      let playable = null;
+      if (shot && result.localPath && fs.existsSync(result.localPath)) {
+        try {
+          playable = this.promoteInternalBlockToCandidate(projectId, shot, {
+            ...job,
+            status: "completed",
+            internalGenerationBlockFilePath: result.localPath,
+            internalTakeFilePath: result.localPath,
+            remoteUrl: result.videoUrl || "",
+            prompt: job.prompt || ""
+          });
+        } catch (error) {
+          console.error("[workbench] failed to promote recovered shot video", error);
+        }
+      }
       return {
-        id: `internal-generation-block-${job.id}`,
-        internalGenerationBlock: true,
+        id: playable?.id || `internal-generation-block-${job.id}`,
+        internalGenerationBlock: playable ? false : true,
         internalTake: job.internalTake === true,
         jobId: job.id,
         taskId: job.taskId,
@@ -11543,7 +11735,8 @@ class WorkbenchWorkflow {
         chargeYuan: result.chargeYuan ?? null,
         settlementStatus: result.settlementStatus || "",
         referenceManifest: job.referenceManifest || null,
-        prompt: job.prompt || ""
+        prompt: job.prompt || "",
+        ...(playable ? { candidateId: playable.id } : {})
       };
     }
     const existing = project.candidates.find(item => item.taskId && item.taskId === job.taskId);
@@ -11654,14 +11847,15 @@ class WorkbenchWorkflow {
     for (const record of active) {
       if (!record.taskId) {
         const savedJob = this.store.getProject(record.projectId).jobs.find(item => item.id === record.jobId);
-        if (record.status === "remote_pending" && savedJob?.clientRequestId && savedJob?.submissionFingerprint) {
-          // The POST may already have been accepted. Keep the stable key so an
-          // explicit retry can replay the same create request idempotently.
-          continue;
-        }
         const updatedAt = Date.parse(record.updatedAt || record.createdAt || "");
         const ageMs = Number.isFinite(updatedAt) ? Date.now() - updatedAt : Number.POSITIVE_INFINITY;
-        // No upstream task id: local prep stalled or process died before submit.
+        const inFlightIdempotent = record.status === "remote_pending"
+          && savedJob?.clientRequestId
+          && savedJob?.submissionFingerprint
+          && ageMs <= 10 * 60 * 1000;
+        // Keep a just-submitted idempotency key briefly; days-old keys with no
+        // taskId are ghosts and must not lock delete / stop / run-details.
+        if (inFlightIdempotent) continue;
         const stale = ageMs > 90_000;
         if (stale) {
           this.store.updateJob(record.projectId, record.jobId, {
@@ -11814,7 +12008,18 @@ class WorkbenchWorkflow {
     return this.store.listActiveVideoJobs().filter(record => !projectId || record.projectId === projectId);
   }
 
+  healRecoveredProjectMedia(projectId) {
+    if (!projectId) return;
+    this._lastMediaHealAt = this._lastMediaHealAt || new Map();
+    const last = Number(this._lastMediaHealAt.get(projectId) || 0);
+    if (Date.now() - last < 20_000) return;
+    this._lastMediaHealAt.set(projectId, Date.now());
+    this.abandonPhantomVideoJobs(projectId);
+    try { this.promoteRecoveredShotVideos(projectId); } catch {}
+  }
+
   reconcileDetachedAutomations(projectId = "") {
+    if (projectId) this.healRecoveredProjectMedia(projectId);
     const activeProjectIds = new Set(this.store.listActiveVideoJobs().filter(item => !projectId || item.projectId === projectId).map(item => item.projectId));
     const reconciled = [];
     for (const summary of this.store.listProjects().filter(item => !projectId || item.id === projectId)) {
@@ -14083,8 +14288,12 @@ class WorkbenchWorkflow {
     }
     let uploadedAnalysisFallbackSummary = null;
     const commitAnalysis = (normalized, analysisMethod, analysisChunks) => {
+      const extractedProps = extractCorePropsFromUploadedScript(project.script.raw, normalized, project.product?.name || "");
       normalized = sanitizeWardrobeChanges(
-        normalizeCoreStoryProps(normalized, project.script.raw, project.product?.name || ""),
+        normalizeCoreStoryProps({
+          ...normalized,
+          props: (normalized.props || []).length ? normalized.props : extractedProps
+        }, project.script.raw, project.product?.name || ""),
         project.script.raw
       );
       const sceneContract = normalized?.sourceSceneLedger?.explicit ? normalized.sourceSceneLedger : sourceSceneLedger;
@@ -14125,7 +14334,9 @@ class WorkbenchWorkflow {
             note: "用户上传剧本已按原稿执行；审核发现项作为提示词建议展示，不擅自改写或拦截原稿"
           }
         : auditedQuality;
-      qualityAudit = advisoryQualityAudit(qualityAudit, { note: "剧本质检建议已保留；当前完整剧本继续进入资产阶段" });
+      if (userAuthoredScript) {
+        qualityAudit = advisoryQualityAudit(qualityAudit, { note: "剧本质检建议已保留；当前完整剧本继续进入资产阶段" });
+      }
       project.script.analysis = normalized.story;
       project.script.modeSynopsis = String(normalized.modeSynopsis || normalized.story?.synopsis || normalized.story?.premise || "").trim();
       project.script.detectedFormat = String(normalized.detectedFormat || "").trim();
@@ -14288,7 +14499,12 @@ class WorkbenchWorkflow {
         authoredDurationEstimate = explicit
           ? { mode: "uploaded-structured-authored", targetSeconds: explicit.targetSeconds, dialogueTurns: durationLedger.length, normalizedDurations: explicit.normalizedDurations }
           : estimateUploadedScriptDuration(project.script.raw, durationLedger, providerKind, { engine: projectVideoEngine(project) });
-        authoredAnalysisSeed = { ...structured, sourceDialogueLedger };
+        const structuredProps = extractCorePropsFromUploadedScript(project.script.raw, { ...structured, sourceDialogueLedger }, project.product?.name || "");
+        authoredAnalysisSeed = {
+          ...structured,
+          props: structuredProps.length ? structuredProps : (structured.props || []),
+          sourceDialogueLedger
+        };
       } catch (error) {
         if (error?.code !== "DURATION_TOTAL_UNREPRESENTABLE") throw error;
         // The authored shot count cannot represent the requested total. Keep the
@@ -14340,11 +14556,18 @@ class WorkbenchWorkflow {
       ? Array.from({ length: Math.ceil((authoredAnalysisSeed.shots || []).length / UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST) }, (_, index) =>
         (authoredAnalysisSeed.shots || []).slice(index * UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST, (index + 1) * UPLOADED_ANALYSIS_MAX_UNITS_PER_REQUEST))
       : [];
+    const authoredSource = String(project.script?.raw || "");
+    const authoredShotStarts = new Map();
+    for (const match of authoredSource.matchAll(/^###\s+(S\d{2,})\b/gm)) {
+      authoredShotStarts.set(match[1], match.index);
+    }
     const chunks = authoredAnalysisSeed
       ? authoredShotGroups.map((shots, index) => ({
         index,
-        start: 0,
-        end: 0,
+        start: Number(authoredShotStarts.get(shots[0]?.id)) || 0,
+        end: authoredShotGroups[index + 1]?.[0]
+          ? (Number(authoredShotStarts.get(authoredShotGroups[index + 1][0]?.id)) || authoredSource.length)
+          : authoredSource.length,
         text: JSON.stringify({
           story: authoredAnalysisSeed.story || {},
           characters: authoredAnalysisSeed.characters || [],
@@ -14528,7 +14751,7 @@ class WorkbenchWorkflow {
     await mapWithConcurrency(pendingChunks, analysisConcurrency, async chunk => {
       this.assertOperationActive(projectId);
       const localBound = localUploadedAnalysisChunk(chunk, project);
-      const explicitPropNames = explicitTaggedAssetNames(chunk.text, ["物品", "道具"]);
+      const explicitPropNames = explicitTaggedAssetNames(chunk.text, ["物品", "道具", "核心道具", "关键道具"]);
       const corePropNames = explicitPropNames.filter(name => isCoreStoryPropCandidate(name, chunk.text, localBound.shots || [], project.product?.name || ""));
       partials[chunk.index] = localBound;
       saveCompletedAnalysisChunk(chunk, {
@@ -14589,6 +14812,22 @@ class WorkbenchWorkflow {
         bound = enforceSourceSceneLedger(bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger), chunk.sourceSceneLedger, chunk.sourceDialogueLedger);
       } catch (error) {
         if (isScriptControlError(error)) throw error;
+        if (projectInputMode(project) === "manual" && Array.isArray(localBound?.shots) && localBound.shots.length === chunk.unitCount) {
+          bound = enforceSourceSceneLedger(
+            bindSourceDialogueLedgerToAnalysis(localBound, chunk.sourceDialogueLedger),
+            chunk.sourceSceneLedger,
+            chunk.sourceDialogueLedger
+          );
+          saveCompletedAnalysisChunk(chunk, {
+            ...bound,
+            authoredBy: "local-uploaded-script-compiler",
+            localFallback: true,
+            enhancementStatus: "local-fallback",
+            enhancementCauseCode: error?.code || "TEXT_PROVIDER_FAILED"
+          }, requestChars);
+          partials[chunk.index] = bound;
+          return bound;
+        }
         saveCompletedAnalysisChunk(chunk, {
           ...localBound,
           authoredBy: "local-uploaded-script-compiler",
@@ -15006,7 +15245,7 @@ ${shotAnchor}
     }
     const full = shot.promptMode === "manual" && shot.manualVideoPrompt?.trim()
       ? shot.manualVideoPrompt.trim()
-      : renderApprovedVideoPrompt(project, shot);
+      : renderApprovedVideoPrompt(project, shot, references);
     if (shot.promptMode !== "manual" && String(shot.systemVideoPrompt || "") !== full) {
       const latestProject = this.store.getProject(projectId);
       latestProject.shots = latestProject.shots.map(item => item.id === shotId
@@ -15072,6 +15311,19 @@ ${shotAnchor}
       });
       await mapWithConcurrency(project.shots, compileConcurrency, async shot => {
         try {
+          const previewProject = this.store.getProject(projectId);
+          const previewShot = previewProject.shots.find(item => item.id === shot.id) || shot;
+          try {
+            this.shotReferences(previewProject, previewShot, mode);
+          } catch (error) {
+            if (error?.code === "SHOT_SCENE_REFERENCE_REQUIRED") {
+              this.setAutomation(projectId, {
+                message: `S${String(shot.number).padStart(2, "0")} 场景资产尚未齐，先跳过视频提示词，资产完成后再编`
+              });
+              return;
+            }
+            throw error;
+          }
           await this.ensureAgentCameraTakePlan(projectId, shot.id, mode, settings);
           const currentProject = this.store.getProject(projectId);
           const currentShot = currentProject.shots.find(item => item.id === shot.id);
@@ -17858,9 +18110,11 @@ ${shotAnchor}
         faceMeshApplied: candidate.faceMesh?.applied === true
       });
     }
-    if (shot.productMention && shot.videoReferenceIncludeProduct !== false && project.product?.imagePath) addImage(project.product.imagePath, {
+    const isolatedProductFrame = /product_(?:packshot|detail)/i.test(`${shot.productShotType || ""} ${shot.shotFunction || ""}`)
+      || (shot.productMention && !(shot.characterIds || []).length);
+    if (shot.productMention && shot.videoReferenceIncludeProduct !== false && project.product?.imagePath && !isolatedProductFrame) addImage(project.product.imagePath, {
       type: "product",
-      label: `商品${project.product.name ? `“${project.product.name}”` : ""}外观参考图（只锁定商品，不作为开场）`,
+      label: `商品${project.product.name ? `“${project.product.name}”` : ""}外观锁（只锁形状材质，禁止白底棚拍、电商模特图、包装静物当整镜）`,
       sourceStage: "product",
       entityType: "product",
       entityId: "product",
@@ -18243,8 +18497,7 @@ ${shotAnchor}
       const hasStoryboardSheet = (references.imageRoles || []).some(role => ["storyboard_sheet", "storyboard_take_sheet"].includes(String(role?.type || "")));
       const repairNeedsSinglePanel = /完全无字|时间码|分镜序号|资产板|参考图|展示画面/.test(String(options.qualityRepair || ""));
       const singlePanel = prepareOptions.atomicFallback === true || repairNeedsSinglePanel;
-      const needsCrop = this.qualityGatesEnabled(settings, "videos")
-        && (hasStoryboardSheet || prepareOptions.forceCrop === true || multiBlock || block.takes.length > 1);
+      const needsCrop = hasStoryboardSheet || prepareOptions.forceCrop === true || multiBlock || block.takes.length > 1;
       const blockSheetPath = needsCrop ? await this.cropStoryboardTakeSheet(projectId, shot, block, references, {
         singlePanel
       }) : "";
@@ -18292,46 +18545,15 @@ ${shotAnchor}
     };
     for (const sourceBlock of sourceBlocks) {
       const block = { ...sourceBlock, takes: generationBlockTakes(plan, sourceBlock) };
-      let primary = null;
-      let primaryError = null;
-      try {
-        primary = await prepareBlock(block);
-      } catch (error) {
-        if (!shouldUseAtomicGenerationFallback(error) || block.takes.length <= 1) throw error;
-        primaryError = error;
-      }
-      const fallbackPrepared = [];
-      if (block.takes.length > 1) {
-        const fallbackBlocks = atomicFallbackBlocks(plan, sourceBlock);
-        for (let index = 0; index < fallbackBlocks.length; index += 1) {
-          const fallbackBlock = fallbackBlocks[index];
-          fallbackPrepared.push(await prepareBlock(fallbackBlock, {
-            forceCrop: true,
-            atomicFallback: true,
-            // Every independently generated fallback clip needs a real story
-            // frame as its primary visual anchor.  Without one, H3 only sees
-            // scene/identity control assets and can replay those boards into
-            // the paid video instead of starting inside the scene.
-            includeParentStart: true,
-            includeParentEnd: sourceBlock.index === sourceBlocks.length && index === fallbackBlocks.length - 1,
-            includeVideos: sourceBlock.index === 1 && index === 0
-          }));
-        }
-      }
+      const primary = await prepareBlock(block);
       prepared.push({
-        ...(primary || {
-          block,
-          blockShot: null,
-          references: null,
-          prompt: "",
-          internalGenerationBlock: true
-        }),
-        fallbackPrepared,
-        preflightFallback: Boolean(primaryError),
-        fallbackReason: primaryError ? `${primaryError.code || "PROMPT_CONTRACT"}: ${primaryError.message}` : ""
+        ...primary,
+        fallbackPrepared: [],
+        preflightFallback: false,
+        fallbackReason: ""
       });
     }
-    const manifestItems = prepared.flatMap(item => item.preflightFallback ? item.fallbackPrepared : [item]);
+    const manifestItems = prepared.map(item => item);
     const promptManifest = manifestItems.map(item => `[${item.block.id} ${item.block.start}-${item.block.end}s strategy=${item.block.strategy} takes=${item.block.takeIds.join(",")}]\n${item.prompt}`).join("\n\n");
     const latest = this.store.getProject(projectId);
     const latestShot = (latest.shots || []).find(item => item.id === shot.id);
@@ -18349,9 +18571,9 @@ ${shotAnchor}
             generationBlocks: plan.generationBlocks.map((block, index) => ({
               ...block,
               providerPrompt: prepared[index].prompt,
-              executionStrategy: prepared[index].preflightFallback ? "atomic_fallback" : block.strategy,
-              fallbackReason: prepared[index].fallbackReason,
-              fallbackPrompts: prepared[index].fallbackPrepared.map(item => ({ id: item.block.id, prompt: item.prompt }))
+              executionStrategy: block.strategy,
+              fallbackReason: "",
+              fallbackPrompts: []
             }))
           }
         }
@@ -18622,118 +18844,41 @@ ${shotAnchor}
     );
 
     const executionUnits = [];
-    const discardedResults = [];
     const submitPrepared = async (item, label) => {
-      const technicalAttempts = item.block.strategy === "atomic_fallback" || item.block.takes.length === 1 ? 2 : 1;
-      let attemptPrompt = item.prompt;
-      let lastAudit = null;
-      let lastResult = null;
-      for (let technicalAttempt = 1; technicalAttempt <= technicalAttempts; technicalAttempt += 1) {
-        this.setAutomation(projectId, {
-          stage: technicalAttempt > 1 ? "agent_continuity_block_quality_retry" : "agent_continuity_block_video",
-          message: technicalAttempt > 1
-            ? `${item.block.id} 原子视频逐帧质检未通过，正在仅重做该镜头（${technicalAttempt}/${technicalAttempts}）`
-            : `S${String(shot.number).padStart(2, "0")} ${item.block.id}：连续生成块 ${item.block.takeIds.join("/")}（${label}）`
-        });
-        const result = await withTransientProviderRetries(
-          () => this.submitVideo(projectId, "shot", shot.id, "shot_video", attemptPrompt, item.references, item.block.providerDuration),
-          {
-            attempts: UNLIMITED_ATTEMPTS,
-            baseDelayMs: 4000,
-            label: `${item.block.id} 连续生成块`,
-            onRetry: async (error, retryAttempt, maxRetryAttempts) => {
-              this.setAutomation(projectId, {
-                stage: "agent_continuity_block_retry",
-                message: `${item.block.id} 上游抖动（${error.status || error.code || "transient"}），${4 * retryAttempt}s 后第 ${retryAttempt + 1}/${maxRetryAttempts} 次恢复同一幂等任务`
-              });
-            }
-          }
-        );
-        lastResult = result;
-        lastAudit = await this.auditAgentGenerationBlockResult(projectId, { ...item, prompt: attemptPrompt }, result);
-        if (lastAudit.ok) return { ...result, generationBlockTechnicalAudit: lastAudit };
-        discardedResults.push({
-          ...result,
-          fallbackReason: "generation_block_technical_integrity_failed",
-          generationBlockTechnicalAudit: lastAudit
-        });
-        if (technicalAttempt < technicalAttempts) {
-          attemptPrompt = withGenerationBlockTechnicalRepair(
-            item.prompt,
-            lastAudit.repairDirective || lastAudit.failures.map(failure => failure.message).join("; "),
-            `${result.taskId || result.jobId || item.block.id}:local-block-retry-${technicalAttempt + 1}`
-          );
-          assertAgentGenerationBlockPrompt(project, item.blockShot, item.block, item.references, attemptPrompt);
-        }
-      }
-      throw Object.assign(new Error(`${item.block.id} 连续出现坏帧或内部参考资产回放，已禁止进入拼接`), {
-        code: "AGENT_GENERATION_BLOCK_TECHNICAL_INTEGRITY_FAILED",
-        blockId: item.block.id,
-        result: lastResult,
-        audit: lastAudit
-      });
-    };
-    const useFallback = async (item, reason, cutAudit = null, continuitySource = null) => {
-      if (!item.fallbackPrepared.length) throw Object.assign(new Error(`${item.block.id} 没有可用的原子回退方案`), { code: "AGENT_ATOMIC_FALLBACK_UNAVAILABLE", blockId: item.block.id });
       this.setAutomation(projectId, {
-        stage: "agent_continuity_atomic_fallback",
-        message: `${item.block.id} 连续切镜未通过（${reason}），仅回退该块为 ${item.fallbackPrepared.length} 个原子任务`
+        stage: "agent_continuity_block_video",
+        message: `S${String(shot.number).padStart(2, "0")} ${item.block.id}：连续生成块 ${item.block.takeIds.join("/")}（${label}）`
       });
-      for (let index = 0; index < item.fallbackPrepared.length; index += 1) {
-        const preparedFallback = item.fallbackPrepared[index];
-        const fallback = continuitySource
-          ? await this.anchorAtomicFallbackPrepared(projectId, project, shot, item.block, preparedFallback, continuitySource, options)
-          : preparedFallback;
-        const result = await submitPrepared(fallback, `原子回退 ${index + 1}/${item.fallbackPrepared.length}`);
-        executionUnits.push({ ...fallback, result, cutAudit, fallbackReason: reason });
-      }
+      return withTransientProviderRetries(
+        () => this.submitVideo(projectId, "shot", shot.id, "shot_video", item.prompt, item.references, item.block.providerDuration),
+        {
+          attempts: UNLIMITED_ATTEMPTS,
+          baseDelayMs: 4000,
+          label: `${item.block.id} 连续生成块`,
+          onRetry: async (error, retryAttempt, maxRetryAttempts) => {
+            this.setAutomation(projectId, {
+              stage: "agent_continuity_block_retry",
+              message: `${item.block.id} 上游抖动（${error.status || error.code || "transient"}），${4 * retryAttempt}s 后第 ${retryAttempt + 1}/${maxRetryAttempts} 次恢复同一幂等任务`
+            });
+          }
+        }
+      );
     };
     for (const item of prepared) {
-      if (item.preflightFallback) {
-        await useFallback(item, item.fallbackReason || "提示词预算预检");
-        continue;
-      }
-      let result;
-      try {
-        result = await submitPrepared(item, `连续 ${item.block.takes.length} 机位段`);
-      } catch (error) {
-        if (item.fallbackPrepared.length && shouldUseAtomicGenerationFallback(error)) {
-          await useFallback(item, error.code || "上游提示词合同");
-          continue;
-        }
-        throw error;
-      }
-      let cutAudit = null;
-      if (item.block.takes.length > 1) {
-        const ffmpeg = typeof this.locateFfmpeg === "function" ? this.locateFfmpeg() : "";
-        const boundaries = item.block.takes.slice(1).map(take => Number((Number(take.start) - Number(item.block.start)).toFixed(3)));
-        cutAudit = ffmpeg
-          ? await analyzeTimedHardCuts(ffmpeg, result.filePath, boundaries, item.block.providerDuration)
-          : { ok: false, cutsPresent: false, error: "FFmpeg unavailable" };
-        if (result.jobId) {
-          try { this.store.updateJob(projectId, result.jobId, { continuityCutAudit: cutAudit }); } catch {}
-        }
-        if (!cutAudit.ok || !cutAudit.cutsPresent) {
-          const fallbackReason = cutAudit.ok ? "continuity_cut_missing" : "continuity_cut_audit_failed";
-          const fallbackMessage = cutAudit.ok ? "缺少预期说话人切镜" : "连续镜头切换质检未通过";
-          discardedResults.push({ ...result, fallbackReason, cutAudit });
-          await useFallback(item, fallbackMessage, cutAudit, result);
-          continue;
-        }
-      }
-      executionUnits.push({ ...item, result, cutAudit });
+      const result = await submitPrepared(item, `连续 ${item.block.takes.length} 机位段`);
+      executionUnits.push({ ...item, result, cutAudit: null });
     }
-    if (!internalGenerationBlock && executionUnits.length === 1 && !discardedResults.length) {
+    if (!internalGenerationBlock && executionUnits.length === 1) {
       const candidate = executionUnits[0].result;
       this.store.updateCandidate(projectId, candidate.id, {
         agentDirectorVersion: AGENT_DIRECTOR_VERSION,
         agentCameraTakePlan: plan,
-        continuityCutAudit: executionUnits[0].cutAudit || null,
+        continuityCutAudit: null,
         prompt: promptManifest
       });
       return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
-    return this.stitchAgentCameraTakes(projectId, shot, plan, prepared, executionUnits, { discardedResults });
+    return this.stitchAgentCameraTakes(projectId, shot, plan, prepared, executionUnits, { discardedResults: [] });
   }
 
   async ensureHailuoPromptSpec(projectId, shotId, mode, settings) {
@@ -19227,7 +19372,7 @@ ${shotAnchor}
     const requestedDuration = Number(activeShot.duration) || Number(project.generation.shotDuration) || 5;
     const outputDuration = this.resolveVideoDuration(refreshedProject, settings, requestedDuration);
     if (engine === "hailuo-h3" && !manualPromptActive) {
-      let candidate = await this.generateHailuoAgentShotVideo(
+      return this.generateHailuoAgentShotVideo(
         projectId,
         refreshedProject,
         activeShot,
@@ -19236,12 +19381,6 @@ ${shotAnchor}
         references,
         options
       );
-      if (options.audit !== false) {
-        if (this.qualityGatesEnabled(settings, "videos")) await this.auditShotCandidate(projectId, activeShot.id, candidate.id);
-        else await this.auditTechnicalShotCandidate(projectId, activeShot.id, candidate.id);
-        candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
-      }
-      return candidate;
     }
     const promptShot = outputDuration === requestedDuration ? activeShot : {
       ...activeShot,
@@ -19513,13 +19652,131 @@ ${shotAnchor}
     return audit;
   }
 
+  recoveredShotVideoJobs(project, shot) {
+    const activeRevision = project?.productionRevision || "";
+    return (project.jobs || []).filter(item =>
+      item.entityType === "shot"
+      && item.entityId === shot.id
+      && item.type === "shot_video"
+      && (!item.productionRevision || !activeRevision || item.productionRevision === activeRevision)
+      && (item.internalGenerationBlock === true || item.internalTake === true)
+      && String(item.status || "").toLowerCase() === "completed"
+      && fs.existsSync(item.internalGenerationBlockFilePath || item.internalTakeFilePath || "")
+    ).sort((left, right) => String(left.updatedAt || left.createdAt || "").localeCompare(String(right.updatedAt || right.createdAt || "")));
+  }
+
+  promoteInternalBlockToCandidate(projectId, shot, job) {
+    const filePath = job.internalGenerationBlockFilePath || job.internalTakeFilePath || "";
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    const project = this.store.getProject(projectId);
+    const existing = (project.candidates || []).find(item =>
+      item.entityType === "shot"
+      && item.entityId === shot.id
+      && item.stage === "shot_video"
+      && (item.taskId === job.taskId || item.filePath === filePath)
+    );
+    if (existing) {
+      if (existing.selected !== true) this.store.confirmCandidate(projectId, existing.id, false);
+      return existing;
+    }
+    const candidate = this.store.addCandidate(projectId, {
+      entityType: "shot",
+      entityId: shot.id,
+      stage: "shot_video",
+      productionRevision: project.productionRevision || "",
+      prompt: job.prompt || "",
+      filePath,
+      fileUrl: pathToFileURL(filePath).href,
+      remoteUrl: job.remoteUrl || "",
+      taskId: job.taskId,
+      sourceJobId: job.id,
+      resumedFromJob: true,
+      recoveredInternalBlock: true,
+      providerKind: job.providerKind || "puream-hailuo-h3",
+      duration: Number(shot.duration) || Number(job.duration) || 0,
+      referenceManifest: job.referenceManifest || null
+    });
+    this.store.confirmCandidate(projectId, candidate.id, false);
+    return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
+  }
+
+  promoteRecoveredShotVideos(projectId) {
+    const project = this.store.getProject(projectId);
+    const existing = new Set((project.candidates || [])
+      .filter(item => item.stage === "shot_video" && item.filePath)
+      .map(item => `${item.entityId}|${item.filePath}|${item.taskId || ""}`));
+    let promoted = 0;
+    for (const shot of project.shots || []) {
+      try {
+        const blocks = this.recoveredShotVideoJobs(project, shot);
+        if (!blocks.length) continue;
+        const latest = blocks[blocks.length - 1];
+        const filePath = latest.internalGenerationBlockFilePath || latest.internalTakeFilePath || "";
+        if (existing.has(`${shot.id}|${filePath}|${latest.taskId || ""}`)) continue;
+        const result = this.assembleRecoveredShotVideoIfNeeded(projectId, shot, { stitch: false });
+        if (result && (result.recoveredInternalBlock || result.stage === "shot_video")) promoted += 1;
+      } catch {}
+    }
+    return promoted;
+  }
+
+  assembleRecoveredShotVideoIfNeeded(projectId, shot, options = {}) {
+    const project = this.store.getProject(projectId);
+    const settings = this.store.getSettings();
+    const existing = candidateReady(project, "shot", shot.id, "shot_video", settings)
+      || (project.candidates || []).find(item => item.entityType === "shot" && item.entityId === shot.id && item.stage === "shot_video" && item.filePath && fs.existsSync(item.filePath));
+    if (existing?.filePath && fs.existsSync(existing.filePath)) return existing;
+    const blocks = this.recoveredShotVideoJobs(project, shot);
+    if (!blocks.length) return null;
+    const latestJob = blocks[blocks.length - 1];
+    const promoted = this.promoteInternalBlockToCandidate(projectId, shot, latestJob);
+    if (blocks.length === 1 || options.stitch === false) return promoted;
+    const plan = shot.agentCameraTakePlan;
+    if (!plan?.generationBlocks?.length) return null;
+    const executionUnits = blocks.map((job, index) => {
+      const block = plan.generationBlocks[index] || {
+        id: `recovered-${index + 1}`,
+        authoredDuration: Number(job.duration) || 6,
+        start: 0,
+        end: Number(job.duration) || 6,
+        strategy: "continuous",
+        takeIds: []
+      };
+      return {
+        block,
+        prompt: job.prompt || "",
+        result: {
+          filePath: job.internalGenerationBlockFilePath || job.internalTakeFilePath,
+          jobId: job.id,
+          taskId: job.taskId,
+          chargeYuan: job.chargeYuan,
+          settlementStatus: job.settlementStatus,
+          referenceManifest: job.referenceManifest
+        }
+      };
+    });
+    return this.stitchAgentCameraTakes(projectId, shot, plan, executionUnits, executionUnits);
+  }
+
   async generateQualityShotVideo(projectId, shot, mode, { force = false } = {}) {
     const settings = this.store.getSettings();
     const qualityEnabled = this.qualityGatesEnabled(settings, "videos");
     let project = this.store.getProject(projectId);
+    if (!force) {
+      try {
+        const assembled = await this.assembleRecoveredShotVideoIfNeeded(projectId, shot);
+        if (assembled?.filePath && fs.existsSync(assembled.filePath)) return assembled;
+      } catch (error) {
+        this.setAutomation(projectId, {
+          message: `S${String(shot.number).padStart(2, "0")} 已取回片段未能合成：${error.message}`
+        });
+      }
+      project = this.store.getProject(projectId);
+    }
+    const acceptFirstDownload = !qualityEnabled || projectVideoEngine(project) === "hailuo-h3";
     let existing = force ? null : (candidateReady(project, "shot", shot.id, "shot_video", settings)
       || selectedOrLatest(project, "shot", shot.id, "shot_video"));
-    if (!qualityEnabled) {
+    if (acceptFirstDownload) {
       existing = existing || (project.candidates || [])
         .filter(item => item.entityType === "shot" && item.entityId === shot.id && item.stage === "shot_video")
         .filter(item => (item.productionRevision || "") === (project.productionRevision || ""))
@@ -19530,6 +19787,9 @@ ${shotAnchor}
         return this.store.getProject(projectId).candidates.find(item => item.id === existing.id) || existing;
       }
       const candidate = await this.generateShotVideo(projectId, shot.id, mode, { track: false, audit: false });
+      if (qualityEnabled) {
+        this.store.updateCandidate(projectId, candidate.id, { qualityAudit: skippedQualityAudit("shot_video") });
+      }
       this.store.confirmCandidate(projectId, candidate.id, false);
       return this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
@@ -19772,6 +20032,9 @@ ${shotAnchor}
     await this.ensureStageDependencies(projectId, "videos");
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
+    if (this.foundryKernel && this.qualityGatesEnabled(settings, "script")) {
+      this.foundryKernel.assertPaidGenerationReady(project, "videos");
+    }
     const videoQualityEnabled = this.qualityGatesEnabled(settings, "videos");
     assertProjectGenerationMode(project);
     assertVideoProviderAligned(project, settings);
@@ -19868,9 +20131,9 @@ ${shotAnchor}
             generationBlocks: bundle.plan.generationBlocks.map((block, index) => ({
               ...block,
               providerPrompt: bundle.prepared[index].prompt,
-              executionStrategy: bundle.prepared[index].preflightFallback ? "atomic_fallback" : block.strategy,
-              fallbackReason: bundle.prepared[index].fallbackReason,
-              fallbackPrompts: bundle.prepared[index].fallbackPrepared.map(item => ({ id: item.block.id, prompt: item.prompt }))
+              executionStrategy: block.strategy,
+              fallbackReason: "",
+              fallbackPrompts: []
             }))
           }
         };
@@ -19898,7 +20161,7 @@ ${shotAnchor}
         const existing = candidateReady(current, "shot", shot.id, "shot_video", settings);
         let existingReady = false;
         if (existing && !chainDirty) {
-          if (!videoQualityEnabled) existingReady = Boolean(existing.filePath && fs.existsSync(existing.filePath));
+          if (!videoQualityEnabled || projectVideoEngine(current) === "hailuo-h3") existingReady = Boolean(existing.filePath && fs.existsSync(existing.filePath));
           else {
             const technicalIntegrity = await this.auditTechnicalShotCandidate(projectId, shot.id, existing.id);
             if (!technicalIntegrity.ok) chainDirty = true;
@@ -19909,7 +20172,7 @@ ${shotAnchor}
         } else if (!existing) chainDirty = true;
         results.push(existingReady ? existing : await this.generateQualityShotVideo(projectId, shot, mode, { force: chainDirty }));
       }
-      if (videoQualityEnabled) await this.auditProjectMediaQuality(projectId);
+      if (videoQualityEnabled && projectVideoEngine(project) !== "hailuo-h3") await this.auditProjectMediaQuality(projectId);
       return results;
     }
     // Independent shots are submitted with the exact video concurrency granted
@@ -19941,7 +20204,7 @@ ${shotAnchor}
         pending: recoverablePending
       });
     }
-    if (!videoQualityEnabled) return results;
+    if (!videoQualityEnabled || projectVideoEngine(project) === "hailuo-h3") return results;
     const mediaAudit = await this.auditProjectMediaQuality(projectId);
     if (!mediaAudit.ok) {
       // Keyframe mode can repair only the later side of duplicate/failing pairs.
@@ -19997,8 +20260,11 @@ ${shotAnchor}
     this.reconcileProductionContracts(projectId, { markScriptFailed: false });
     let contractProject = this.store.getProject(projectId);
     const settings = this.store.getSettings();
-    // Contract findings are available for targeted AI repair, but are not an
-    // execution lock. This keeps uploaded and previously authored scripts usable.
+    if (this.foundryKernel && this.qualityGatesEnabled(settings, "script")) {
+      this.foundryKernel.assertPaidGenerationReady(contractProject, "assets");
+    }
+    // Uploaded scripts stay usable when quality is advisory; AI-authored formal
+    // quality still blocks here before the first paid image/video call.
     const plan = this.buildAssetBatchPlan(projectId);
     const concurrency = await this.authoritativeGenerationConcurrency(this.store.getProject(projectId));
     const batchStartedAt = new Date().toISOString();
@@ -20360,11 +20626,51 @@ ${shotAnchor}
     return project.assetLibraries;
   }
 
+  abandonPhantomVideoJobs(projectId) {
+    const project = this.store.getProject(projectId);
+    let changed = 0;
+    const nextJobs = (project.jobs || []).map(job => {
+      if (!isPhantomVideoJob(job) && !(isActiveVideoJob(job) && !job.taskId)) return job;
+      changed += 1;
+      return {
+        ...job,
+        status: "failed",
+        errorCode: "VIDEO_JOB_ABANDONED",
+        message: "已结束：本地没有对应的上游任务，已解除幽灵占用",
+        updatedAt: new Date().toISOString()
+      };
+    });
+    if (!changed) return 0;
+    project.jobs = nextJobs;
+    project.updatedAt = new Date().toISOString();
+    this.store.saveProject(project);
+    if (Array.isArray(this.store.activeVideoJobsCache)) {
+      this.store.activeVideoJobsCache = this.store.activeVideoJobsCache.filter(item => item.projectId !== projectId);
+    }
+    return changed;
+  }
+
   pausePipeline(projectId, intent = "pause") {
     if (!["pause", "stop"].includes(intent)) throw Object.assign(new Error("自动化控制指令无效"), { code: "PIPELINE_CONTROL_INVALID" });
     const control = this.operationControls.get(projectId);
     const project = this.store.getProject(projectId);
     if (!control || !this.hasActiveOperation(projectId)) {
+      if (intent === "stop") {
+        const abandoned = this.abandonPhantomVideoJobs(projectId);
+        const latest = this.store.getProject(projectId);
+        latest.automation = {
+          ...(latest.automation || {}),
+          status: latest.automation?.status === "running" || latest.automation?.status === "pausing" || latest.automation?.status === "stopping"
+            ? "interrupted"
+            : (latest.automation?.status || "idle"),
+          message: abandoned
+            ? `已结束 ${abandoned} 个幽灵任务，可以删除项目或继续制作`
+            : "当前没有正在运行的任务",
+          updatedAt: new Date().toISOString()
+        };
+        this.store.saveProject(latest);
+        return latest.automation;
+      }
       throw Object.assign(new Error("当前项目没有正在运行的自动化任务"), { code: "PIPELINE_NOT_RUNNING" });
     }
     if (control.intent) return project.automation;
@@ -20969,6 +21275,10 @@ ${shotAnchor}
     if (options.dependenciesReady !== true) await this.ensureStageDependencies(projectId, "shots");
     else this.reconcileProjectCharacterReferences(projectId);
     const project = this.store.getProject(projectId);
+    const storyboardSettings = this.store.getSettings();
+    if (this.foundryKernel && this.qualityGatesEnabled(storyboardSettings, "script")) {
+      this.foundryKernel.assertPaidGenerationReady(project, "shots");
+    }
     assertProjectGenerationMode(project);
     const sheetMode = normalizeProjectMode(project.generation?.mode) === "storyboard_sheet";
     const plan = this.buildStoryboardBatchPlan(projectId);

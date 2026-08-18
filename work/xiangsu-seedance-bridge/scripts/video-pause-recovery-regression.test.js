@@ -209,6 +209,74 @@ test("pipeline pause reports the actual stage and leaves script state untouched"
   assert.equal(saved.ideation.status, "selected");
 });
 
+test("stale remote_pending jobs without a task id do not lock delete or stop", t => {
+  const sample = fixture("幽灵任务解锁");
+  t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
+  sample.store.addJob(sample.project.id, {
+    type: "shot_video",
+    entityType: "shot",
+    entityId: "S22",
+    status: "remote_pending",
+    taskId: "",
+    clientRequestId: "drama-video-ghost",
+    submissionFingerprint: "ghost-fingerprint",
+    createdAt: "2026-08-10T11:23:30.014Z",
+    updatedAt: "2026-08-10T11:23:30.014Z"
+  });
+  sample.store.addJob(sample.project.id, {
+    type: "shot_video",
+    entityType: "shot",
+    entityId: "S23",
+    status: "remote_pending",
+    taskId: "",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  sample.store.addJob(sample.project.id, {
+    type: "shot_video",
+    entityType: "shot",
+    entityId: "S24",
+    status: "remote_pending",
+    taskId: "paid-live-task",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  sample.store.activeVideoJobsCache = null;
+  assert.equal(sample.store.listActiveVideoJobs(sample.project.id).length, 2);
+  const automation = sample.workflow.pausePipeline(sample.project.id, "stop");
+  assert.match(String(automation.message || ""), /幽灵|结束/);
+  sample.store.activeVideoJobsCache = null;
+  const remaining = sample.store.listActiveVideoJobs(sample.project.id);
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].taskId, "paid-live-task");
+  const saved = sample.store.getProject(sample.project.id);
+  assert.equal(saved.jobs.find(item => item.entityId === "S22").status, "failed");
+  assert.equal(saved.jobs.find(item => item.entityId === "S24").status, "remote_pending");
+});
+
+test("loading a project heals days-old no-taskId ghosts so delete is not locked", t => {
+  const sample = fixture("切项目治愈幽灵任务");
+  t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
+  sample.store.addJob(sample.project.id, {
+    type: "shot_video",
+    entityType: "shot",
+    entityId: "S22",
+    status: "remote_pending",
+    taskId: "",
+    clientRequestId: "drama-video-old",
+    submissionFingerprint: "old-fingerprint",
+    createdAt: "2026-08-10T11:23:30.014Z",
+    updatedAt: "2026-08-10T11:23:30.014Z"
+  });
+  sample.store.activeVideoJobsCache = null;
+  sample.workflow.reconcileDetachedAutomations(sample.project.id);
+  sample.store.activeVideoJobsCache = null;
+  assert.equal(sample.store.listActiveVideoJobs(sample.project.id).length, 0);
+  const saved = sample.store.getProject(sample.project.id);
+  assert.equal(saved.jobs.find(item => item.entityId === "S22").status, "failed");
+  assert.equal(saved.automation.status === "running", false);
+});
+
 test("video settlement remains idempotent by upstream task id", t => {
   const sample = fixture("费用去重测试");
   t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
@@ -245,4 +313,26 @@ test("source keeps legacy pause codes in equivalent-job recovery and never abort
   assert.doesNotMatch(syncHandler, /if \(!active\.length\) return/);
   assert.match(cssSource, /\.video-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\)/);
   assert.match(cssSource, /@media \(max-width:\s*700px\)[\s\S]*?\.video-card\s*\{\s*grid-template-columns:\s*minmax\(0,1fr\)/);
+  assert.match(cssSource, /\.dialog-close[^{]*\{[^}]*148px - \(100vw - 100%\) \/ 2/);
+});
+
+test("H3 video submit always crops storyboard grids and skips catalog product stills on packshots", () => {
+  const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
+  const directorSource = fs.readFileSync(path.join(__dirname, "..", "app", "agent-director.js"), "utf8");
+  assert.match(workflowSource, /const needsCrop = hasStoryboardSheet/);
+  assert.doesNotMatch(workflowSource, /const needsCrop = this\.qualityGatesEnabled\(settings, "videos"\)/);
+  assert.match(workflowSource, /isolatedProductFrame/);
+  assert.match(workflowSource, /assembleRecoveredShotVideoIfNeeded/);
+  assert.match(workflowSource, /promoteRecoveredShotVideos/);
+  assert.match(directorSource, /never white studio, never catalog model/);
+});
+
+test("live work survives a closed window or GPU process crash", () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, "..", "app", "main.js"), "utf8");
+  const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
+  assert.match(workflowSource, /hasAnyActiveOperation\(\)/);
+  assert.match(mainSource, /workbenchHasLiveWork/);
+  assert.doesNotMatch(mainSource, /app\.on\("window-all-closed", \(\) => app\.quit\(\)\)/);
+  assert.match(mainSource, /last window closed during live work; restoring the workbench instead of quitting/);
+  assert.match(mainSource, /GPU process gone during live work; staying alive/);
 });

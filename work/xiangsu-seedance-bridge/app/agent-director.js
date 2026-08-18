@@ -2,22 +2,25 @@
 
 const crypto = require("node:crypto");
 const { parseCompiledDialogueSegments } = require("./dialogue-parser");
+const { buildApprovedHailuoPrompt, HAILUO_FINAL_OUTPUT_LOCK } = require("./hailuo-h3-natural-prompt");
+const { assertHailuoFinalPromptIntegrity, compactFullReferencePrompt } = require("./hailuo-h3-prompt");
 
-const AGENT_DIRECTOR_VERSION = "2026.08.16-narrative-frame-lock-v6";
+const AGENT_DIRECTOR_VERSION = "2026.08.18-zh-dialogue-bind-v9";
 const HAILUO_TAKE_PROMPT_LIMIT = 1900;
 const HAILUO_BLOCK_PROMPT_LIMIT = HAILUO_TAKE_PROMPT_LIMIT;
 const HAILUO_MAX_BLOCK_SECONDS = 15;
 const HAILUO_MAX_BLOCK_AUDIO_REFERENCES = 3;
 const HAILUO_MAX_CAMERA_SEGMENTS_PER_BLOCK = 5;
 const REQUIRED_HAILUO_SECTIONS = Object.freeze([
-  "subject_definitions:",
-  "summary:",
-  "retention_analysis:",
-  "detailed_description:",
-  "overall_soundscape:",
-  "non_diegetic_music:"
+  "【生成规格】",
+  "【素材绑定】",
+  "【核心表演】",
+  "【逐秒镜头与对白】",
+  "【连续性】",
+  "【声音】",
+  "【禁止项】"
 ]);
-const FINAL_OUTPUT_LOCK = "FINAL OUTPUT LOCK: live story at frame 1; refs stay offscreen. Dialogue+room tone+SFX only. NO BGM, subtitles/text/UI/logos, narration, intros, portraits or asset boards.";
+const FINAL_OUTPUT_LOCK = HAILUO_FINAL_OUTPUT_LOCK;
 const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
 
 function clean(value) {
@@ -307,20 +310,44 @@ function panelIndicesForRange(start, end, duration) {
   return [midpoint];
 }
 
+function compactPerformanceEn(turns) {
+  const meta = list(turns).map(turn => turn?.metadata).find(item => item && typeof item === "object") || {};
+  const authored = clean(meta.delivery || meta.emotion || meta.beat || meta.performance || meta.sourceTone);
+  if (authored && !CJK_RE.test(authored)) {
+    return englishField(authored, "Brows/jaw/breath shift; volume, pace and keyword stress change.", 90);
+  }
+  return "Act the authored delivery: brows, jaw and breath fully change; volume/pace/stress never stay flat.";
+}
+
 function takeDirectionFallback(shot, subshot, turns) {
-  const metadata = turns[0]?.metadata || {};
+  const speaking = list(turns).some(turn => turn?.speakerId && turn?.text);
   return {
     styleEn: "Realistic Chinese vertical short drama, natural cinematic light.",
-    visualEn: clean(shot.actionEn || subshot.actionEn) || "Perform the locked action without changing identity, wardrobe, location, props or screen direction.",
-    cameraEn: "Stable medium close-up with one subtle slow push-in.",
-    performanceEn: clean(metadata.deliveryEn) || "Visible facial tension, controlled breath, clear vocal stress, then a grounded reaction.",
-    listenerReactionEn: "Listener keeps closed lips and gives one silent reaction.",
+    visualEn: speaking
+      ? "Hold a readable MCU on the speaking face for the whole line; never cut to a prop, knee, hand or insert while the mouth is moving."
+      : (clean(shot.actionEn || subshot.actionEn) || "Perform the locked action without changing identity, wardrobe, location, props or screen direction."),
+    cameraEn: speaking
+      ? "Stable MCU on the speaker face, both eyes in frame, slight push-in; no insert."
+      : "Stable medium close-up with one subtle slow push-in.",
+    performanceEn: speaking
+      ? compactPerformanceEn(turns)
+      : "Hold a grounded silent reaction with closed lips.",
+    listenerReactionEn: "Listener keeps closed lips, eyes on the speaker, and gives one visible silent reaction.",
     soundEn: "Continuous room tone and synchronized visible-action SFX only."
   };
 }
 
 function mergeTakeText(left, right, limit = 320) {
   return unique([left, right]).join(" Then ").slice(0, limit);
+}
+
+function sameSceneContinuationLine(project = {}, shot = {}) {
+  const previous = list(project?.shots).find(item => Number(item?.number) === Number(shot?.number) - 1);
+  if (!previous) return "";
+  const sameScene = clean(previous.sceneId || previous.sceneName || previous.scene)
+    && clean(previous.sceneId || previous.sceneName || previous.scene) === clean(shot.sceneId || shot.sceneName || shot.scene);
+  if (!sameScene) return "New motivated setup; keep identities and wardrobe language locked.";
+  return "Same set/wardrobe/hand-props/eyeline as the previous shot; do not reset blocking or location.";
 }
 
 function blockDirectionFallback(takes = []) {
@@ -470,7 +497,7 @@ function buildCameraTakePlan(project = {}, shot = {}, options = {}) {
         camera: subshot.camera,
         action: subshot.action,
         sound: subshot.sound,
-        visibleCharacterIds: unique(subshot.visibleCharacterIds),
+        visibleCharacterIds: unique([cameraOwnerId, ...subshot.visibleCharacterIds]).filter(Boolean).slice(0, 2),
         direction: takeDirectionFallback(shot, subshot, [])
       });
       continue;
@@ -642,7 +669,7 @@ function validateCameraTakePlan(plan, project = {}, shot = {}) {
 
 function englishField(value, fallback, maxLength = 280) {
   const source = clean(value).replace(/\s+/g, " ");
-  if (!source || CJK_RE.test(source) || /<d>|\[Shot\s+\d+\]|subject_definitions:|non_diegetic_music:/i.test(source)) return clean(fallback).slice(0, maxLength);
+  if (!source || /<d>|\[Shot\s+\d+\]|subject_definitions:|non_diegetic_music:/i.test(source)) return clean(fallback).slice(0, maxLength);
   return source.slice(0, maxLength);
 }
 
@@ -654,12 +681,12 @@ function safeCreativeField(value, fallback, maxLength, forbidden = null) {
 function performanceDirectionFailures(value, takeId = "take") {
   const source = clean(value).toLowerCase();
   const requirements = [
-    [/(?:face|eyes?|brow|jaw|tear|cheek|lips?)/, "face"],
-    [/(?:body|shoulder|hand|posture|chest|torso|spine|weight)/, "body"],
-    [/(?:breath|inhale|exhale|gasp|sob)/, "breath"],
-    [/(?:voice|volume|loud|quiet|whisper|shout|roar|yell|crack)/, "voice-volume"],
-    [/(?:pace|slow|fast|pause|beat|rhythm)/, "pace"],
-    [/(?:stress|emphas|accent|heavy|keyword|key word)/, "stress"]
+    [/(?:face|eyes?|brow|jaw|tear|cheek|lips?|眉|眼|脸|下颌|嘴|泪)/, "face"],
+    [/(?:body|shoulder|hand|posture|chest|torso|spine|weight|身体|肩|手|重心)/, "body"],
+    [/(?:breath|inhale|exhale|gasp|sob|呼吸|气口)/, "breath"],
+    [/(?:voice|volume|loud|quiet|whisper|shout|roar|yell|crack|音量|压低|拔高|轻声)/, "voice-volume"],
+    [/(?:pace|slow|fast|pause|beat|rhythm|语速|停顿|节奏)/, "pace"],
+    [/(?:stress|emphas|accent|heavy|keyword|key word|重音|强调)/, "stress"]
   ];
   return requirements.filter(([pattern]) => !pattern.test(source)).map(([, label]) => `${takeId}.performanceEn missing ${label}`);
 }
@@ -705,8 +732,8 @@ function mergeAgentTakeDraft(basePlan, raw, project = {}, shot = {}, options = {
       const requiredFields = ["styleEn", "visualEn", "cameraEn", "performanceEn", "listenerReactionEn", "soundEn"];
       for (const field of requiredFields) {
         const value = clean(authored[field]);
-        if (!value || CJK_RE.test(value) || /<d>|\[Shot\s+\d+\]|subject_definitions:|non_diegetic_music:/i.test(value)) {
-          failures.push(`${baseTake.id}.${field} must be authored in safe English`);
+        if (!value || /<d>|\[Shot\s+\d+\]|subject_definitions:|non_diegetic_music:/i.test(value)) {
+          failures.push(`${baseTake.id}.${field} must be authored`);
         }
       }
       failures.push(...performanceDirectionFailures(authored.performanceEn, baseTake.id));
@@ -736,14 +763,14 @@ function mergeAgentTakeDraft(basePlan, raw, project = {}, shot = {}, options = {
       : false;
     const mouthOwnerId = speakerId && onScreenSpeaker ? speakerId : "";
     const direction = {
-      styleEn: safeCreativeField(authored?.styleEn, fallback.styleEn, 90, /subtitle|caption|title|text|narration|voice[- ]?over|biography|portrait|logo|watermark|price|name tag|asset board|contact sheet|multi-view/i),
+      styleEn: safeCreativeField(authored?.styleEn, fallback.styleEn, 90, /subtitle|caption|title|text|narration|voice[- ]?over|biography|portrait|logo|watermark|price|name tag|asset board|contact sheet|multi-view|字幕|人物介绍/i),
       visualEn: safeCreativeField(authored?.visualEn, fallback.visualEn, 150, /subtitle|caption|title|readable text|narration|voice[- ]?over|biography|portrait|logo|watermark|price|name tag|asset board|contact sheet|multi-view|character intro/i),
-      cameraEn: safeCreativeField(authored?.cameraEn, fallback.cameraEn, 90, /internal cut|morph|switch speaker|shot 2/i),
+      cameraEn: safeCreativeField(authored?.cameraEn, fallback.cameraEn, 90, /internal cut|morph|switch speaker|shot 2|切换到另一个|切到另一个/i),
       performanceEn: safeCreativeField(authored?.performanceEn, fallback.performanceEn, 150, /two speakers|both speak|simultaneous|subtitle|caption/i),
       listenerReactionEn: safeCreativeField(authored?.listenerReactionEn, fallback.listenerReactionEn, 90, /speak|dialogue|subtitle|caption|title|text/i),
       soundEn: safeCreativeField(authored?.soundEn, fallback.soundEn, 100, /\bbgm\b|background music|underscore|score|soundtrack|non[- ]?diegetic|song/i)
     };
-    if (!/(?:camera|shot|push|pull|pan|truck|zoom|track|static|close-up|medium)/i.test(direction.cameraEn)) failures.push(`${baseTake.id} has no executable camera direction`);
+    if (!/(?:camera|shot|push|pull|pan|truck|zoom|track|static|close-up|medium|framing|近景|中近景|特写|硬切|推)/i.test(direction.cameraEn)) failures.push(`${baseTake.id} has no executable camera direction`);
     if (/(?:\bbgm\b|background music|underscore|score|soundtrack|non[- ]?diegetic music)/i.test(direction.soundEn)) failures.push(`${baseTake.id} illegally requests music`);
     return {
       ...baseTake,
@@ -769,9 +796,9 @@ function mergeAgentTakeDraft(basePlan, raw, project = {}, shot = {}, options = {
     if (options.requireAgentAuthored === true && authored) {
       for (const field of ["continuityEn", "transitionEn", "reasonEn"]) {
         const value = clean(authored[field]);
-        if (!value || CJK_RE.test(value) || /<d>|\[Shot\s+\d+\]|subject_definitions:|non_diegetic_music:/i.test(value)) failures.push(`${baseBlock.id}.${field} must be authored in safe English`);
+        if (!value || /<d>|\[Shot\s+\d+\]|subject_definitions:|non_diegetic_music:/i.test(value)) failures.push(`${baseBlock.id}.${field} must be authored`);
       }
-      if (lockedTakeIds.length > 1 && !/(?:hard cut|direct cut|editorial cut|timed cut)/i.test(clean(authored.transitionEn))) failures.push(`${baseBlock.id}.transitionEn must request timed hard cuts`);
+      if (lockedTakeIds.length > 1 && !/(?:hard cut|direct cut|editorial cut|timed cut|硬切)/i.test(clean(authored.transitionEn))) failures.push(`${baseBlock.id}.transitionEn must request timed hard cuts`);
       if (/(?:use|with|via|add)\s+(?:a\s+)?(?:morph|pan from|drift from|crossfade|dissolve)/i.test(clean(authored.transitionEn))) failures.push(`${baseBlock.id}.transitionEn requests an unsafe speaker transition`);
     }
     const blockTakes = lockedTakeIds.map(id => takeById.get(id)).filter(Boolean);
@@ -839,7 +866,7 @@ function cameraTakeCompilerMessages(project = {}, shot = {}, basePlan = {}) {
   return [
     {
       role: "system",
-      content: `You are the Director Agent for realistic Chinese vertical short drama. Return JSON only. Write English only in creative fields. Dialogue ids, order, timing, speaker, listener and Chinese wording are immutable. A take is an editorial camera segment, not a provider request. For every take, choose cameraOwnerId only from its locked participants. If the speaker is visibly talking, cameraOwnerId and mouthOwnerId must equal speakerId and onScreenSpeaker=true. A listener reaction may use cameraOwnerId=listenerId only with onScreenSpeaker=false and mouthOwnerId="" while the speaker remains off-screen. Never let a listener mouth the line. Each locked generation block is ONE provider clip and may contain several timed hard cuts; keep its id, takeIds, strategy and order unchanged. Never morph, pan, drift, crossfade or dissolve between speakers. Never add dialogue, captions, music, character introductions, asset boards or reference-sheet imagery. Camera wording names one executable framing/movement. Performance specifies face, body, breath, voice volume, pace and stress. Sound is continuous location ambience plus visible-action SFX only. Schema: {"takes":[{"id":"S01-T01","cameraOwnerId":"C01","mouthOwnerId":"C01","onScreenSpeaker":true,"styleEn":"...","visualEn":"...","cameraEn":"...","performanceEn":"...","listenerReactionEn":"...","soundEn":"..."}],"generationBlocks":[{"id":"S01-B01","takeIds":["S01-T01","S01-T02"],"strategy":"continuous_multicut","continuityEn":"...","transitionEn":"Use timed hard cuts...","reasonEn":"..."}]}.`
+      content: `你是写实竖屏中文短剧导演Agent，只返回JSON。创意字段用中文写语气、表情、呼吸、重音和身体动作，不要写英文。对白id、顺序、时间、说话人、听者和中文原文不可改。机位段不是一次上游请求；说话人开口时cameraOwnerId和mouthOwnerId必须等于speakerId且onScreenSpeaker=true。听者反应镜只能onScreenSpeaker=false且mouthOwnerId为空。禁止听者对口型。每个生成块是一条成片，可含多次硬切。禁止转场融化、摇到听者、加字幕、BGM、人物介绍和参考板入画。Schema: {"takes":[{"id":"S01-T01","cameraOwnerId":"C01","mouthOwnerId":"C01","onScreenSpeaker":true,"styleEn":"写实竖屏短剧自然光","visualEn":"中文动作","cameraEn":"说话人近景","performanceEn":"中文语气表情","listenerReactionEn":"中文听者反应","soundEn":"现场底噪与同步动作声"}],"generationBlocks":[{"id":"S01-B01","takeIds":["S01-T01","S01-T02"],"strategy":"continuous_multicut","continuityEn":"锁脸服装场景轴线","transitionEn":"按说话人硬切","reasonEn":"对白交接"}]}。`
     },
     {
       role: "user",
@@ -1028,7 +1055,9 @@ function blockReferenceBindings(block, references) {
     } else if (type === "scene") {
       definitions.push(`${picture}: locked set.`);
     } else if (["product", "prop", "wardrobe"].includes(type)) {
-      definitions.push(`${picture}: locked ${type}.`);
+      definitions.push(type === "product"
+        ? `${picture}: product appearance lock only; never the set, never white studio, never catalog model, never opening frame.`
+        : `${picture}: locked ${type}.`);
     } else if (["storyboard_generation_block_sheet", "storyboard_take_sheet", "storyboard_sheet"].includes(type)) {
       definitions.push(`${picture}: ordered shots; never render grid.`);
       retentions.push(`${picture}: preserve shot order and framing.`);
@@ -1078,55 +1107,47 @@ function blockTakeDialogueContract(take, bindings, relativeEnd) {
   const audio = bindings.audioByCharacterId.get(clean(take.speakerId)) || "<Audio missing>";
   const listeners = unique(take.listenerIds).map(bindings.ensureCharacterSubject).filter(Boolean);
   const address = listeners.length ? listeners.join(" and ") : "off-camera listener";
-  const delivery = englishField(take.direction?.performanceEn, "Eyes/body/breath tense; emotional volume, pace, stress.", 38);
+  const delivery = englishField(take.direction?.performanceEn, "brows/jaw/breath; vol+pace+stress", 40);
   const deadline = Math.max(0.4, Number(relativeEnd) - 0.2).toFixed(1);
   return list(take.dialogueTurns).map(turn => `${audio}:${speaker}->${address}; ${delivery}; END@${deadline}s:<d>[Chinese] ${turn.text}</d>.`).join(" ");
 }
 
+function dialogueTurnsFromTakes(takes = []) {
+  return list(takes).flatMap(take => list(take.dialogueTurns).map(turn => ({
+    speakerId: turn.speakerId || take.speakerId,
+    listenerIds: turn.listenerIds || take.listenerIds,
+    text: turn.text || turn.spokenText,
+    spokenText: turn.spokenText || turn.text,
+    metadata: {
+      ...(turn.metadata || {}),
+      delivery: turn.sourceTone || turn.metadata?.delivery || take.direction?.performanceEn || "",
+      emotion: turn.metadata?.emotion || take.direction?.performanceEn || "",
+      body: turn.metadata?.body || "",
+      listenerBeat: turn.metadata?.listenerBeat || take.direction?.listenerReactionEn || ""
+    }
+  })));
+}
+
+function compileApprovedPrompt(project = {}, shot = {}, references = {}, dialogueTurns = [], extraShot = {}) {
+  const prompt = buildApprovedHailuoPrompt({
+    project,
+    shot: { ...shot, ...extraShot },
+    references,
+    dialogueTurns
+  });
+  return compactFullReferencePrompt(prompt, HAILUO_BLOCK_PROMPT_LIMIT);
+}
+
 function buildHailuoGenerationBlockPrompt(project = {}, shot = {}, block = {}, references = {}) {
   const takes = list(block.takes);
-  const bindings = blockReferenceBindings(block, references);
-  const continuity = englishField(block.direction?.continuityEn, blockDirectionFallback(takes).continuityEn, 50);
-  const transition = englishField(block.direction?.transitionEn, blockDirectionFallback(takes).transitionEn, 55);
-  const detailedShots = takes.map((take, index) => {
-    const relativeStart = roundTime(Number(take.start) - Number(block.start));
-    const relativeEnd = roundTime(Number(take.end) - Number(block.start));
-    const cameraSubject = bindings.ensureCharacterSubject(take.cameraOwnerId) || "the locked performer";
-    const speakerSubject = bindings.ensureCharacterSubject(take.speakerId);
-    const camera = englishField(take.direction?.cameraEn, "MCU push-in.", 18);
-    const cut = index === 0 ? "OPEN" : `HARD_CUT@${relativeStart.toFixed(1)}s`;
-    const ownership = take.speakerId && take.onScreenSpeaker !== false
-      ? `MOUTH=${speakerSubject}; OTHERS=CLOSED`
-      : take.speakerId
-        ? `FOCUS=${cameraSubject}; ${speakerSubject}=OFFSCREEN; LIPS=CLOSED`
-        : `FOCUS=${cameraSubject}; LIPS=CLOSED`;
-    return `[Shot ${index + 1}|${relativeStart.toFixed(1)}-${relativeEnd.toFixed(1)}s] ${cut}; ${camera}; ${ownership}; ${blockTakeDialogueContract(take, bindings, relativeEnd)}`;
+  const prompt = compileApprovedPrompt(project, shot, references, dialogueTurnsFromTakes(takes), {
+    duration: Number(block.authoredDuration) || Number(shot.duration) || 10,
+    action: takes.map(take => clean(take.action || take.direction?.visualEn)).filter(Boolean).join("；") || shot.action,
+    performance: takes.map(take => clean(take.direction?.performanceEn)).filter(Boolean).join("；") || shot.performance,
+    compositionPlan: takes.some(take => take.speakerId && take.onScreenSpeaker !== false)
+      ? "说话人近景锁脸，开口时禁止切商品、手部或空镜特写；换说话人按视线轴硬切"
+      : shot.compositionPlan
   });
-  const sound = unique(takes.map(take => englishField(take.direction?.soundEn, "Continuous room tone and visible-action SFX only.", 60))).join(" ").slice(0, 100);
-  const padding = Number(block.providerDuration) - Number(block.authoredDuration);
-  if (padding > 0.05 && detailedShots.length) detailedShots[detailedShots.length - 1] += ` Hold the final closed-mouth reaction until ${Number(block.providerDuration).toFixed(1)}s.`;
-  const hasAudio = list(references.audios).length > 0;
-  const prompt = [
-    "subject_definitions:",
-    ...bindings.definitions,
-    "",
-    "summary:",
-    `One continuous generated clip; ${takes.length} timed shot${takes.length === 1 ? "" : "s"}; reference${hasAudio ? "+audio" : ""}.`,
-    "",
-    "retention_analysis:",
-    "Preserve identity, wardrobe, set, props, light, axis, room tone.",
-    "",
-    "detailed_description:",
-    `CONTINUITY LOCK: ${continuity}; ${transition}`,
-    ...detailedShots,
-    "End on closed lips; no boards or text.",
-    "",
-    `overall_soundscape: ${sound || "Continuous room tone and synchronized visible-action SFX only."}`,
-    "",
-    "non_diegetic_music: N/A",
-    "",
-    FINAL_OUTPUT_LOCK
-  ].join("\n").trim();
   assertAgentGenerationBlockPrompt(project, shot, block, references, prompt);
   return prompt;
 }
@@ -1153,33 +1174,24 @@ function assertAgentGenerationBlockPrompt(project, shot, block, references, prom
   const text = clean(prompt);
   const takes = list(block.takes);
   const failures = [];
-  if (text.length > HAILUO_BLOCK_PROMPT_LIMIT) failures.push(`prompt length ${text.length} exceeds ${HAILUO_BLOCK_PROMPT_LIMIT}`);
-  for (const section of REQUIRED_HAILUO_SECTIONS) if (!text.includes(section)) failures.push(`missing ${section}`);
-  if (!/One continuous generated clip/i.test(text)) failures.push("continuous generation-block lock is missing");
-  if (!/CONTINUITY LOCK:/i.test(text)) failures.push("continuity lock is missing");
-  if (takes.length > 1 && !/(?:HARD_CUT|timed hard cuts|editorial hard cuts)/i.test(text)) failures.push("timed hard-cut contract is missing");
-  takes.forEach((take, index) => {
-    if (!text.includes(`[Shot ${index + 1}|`)) failures.push(`missing Shot ${index + 1}`);
-    if (take.speakerId && take.onScreenSpeaker !== false && !text.includes(`MOUTH=${(blockReferenceBindings(block, references).ensureCharacterSubject(take.speakerId))}`)) failures.push(`${take.id} mouth ownership lock is missing`);
+  try { assertHailuoFinalPromptIntegrity(text, HAILUO_BLOCK_PROMPT_LIMIT); }
+  catch (error) { failures.push(...(error.failures || [error.message])); }
+  const images = list(references.images);
+  const audios = list(references.audios);
+  images.forEach((_item, index) => {
+    if (!text.includes(`图${index + 1}`)) failures.push(`missing image binding 图${index + 1}`);
   });
-  if (new RegExp(`\\[Shot\\s+${takes.length + 1}(?:\\s|\\|)`, "i").test(text)) failures.push("prompt adds an unlocked shot");
-  if (!text.includes(FINAL_OUTPUT_LOCK)) failures.push("final output lock is missing");
+  audios.forEach((_item, index) => {
+    if (!text.includes(`音频${index + 1}`)) failures.push(`missing audio binding 音频${index + 1}`);
+  });
   const expectedDialogue = takes.flatMap(take => list(take.dialogueTurns));
-  const blocks = [...text.matchAll(/<d>\s*\[Chinese\]\s*([\s\S]*?)<\/d>/gi)].map(match => clean(match[1]));
-  if (blocks.length !== expectedDialogue.length) failures.push(`dialogue block count ${blocks.length}/${expectedDialogue.length}`);
   expectedDialogue.forEach((turn, index) => {
-    if (blocks[index] !== turn.text) failures.push(`dialogue ${index + 1} changed`);
+    const line = clean(turn.text || turn.spokenText);
+    if (line && !text.includes(line)) failures.push(`dialogue ${index + 1} missing`);
   });
-  validateDialogueOccurrenceMultiplicity(expectedDialogue, text, failures);
+  if (!/对白内容＞语气＞情绪/.test(text)) failures.push("dialogue priority is missing");
   const speakerIds = generationBlockSpeakerIds(takes);
   if (speakerIds.length > HAILUO_MAX_BLOCK_AUDIO_REFERENCES) failures.push("generation block exceeds the audio-reference limit");
-  if (list(references.audios).length !== speakerIds.length) failures.push(`audio reference count ${list(references.audios).length}/${speakerIds.length}`);
-  const audioByCharacterId = new Map(list(references.audios).map((item, index) => [clean(item?.characterId), `<Audio ${index + 1}>`]));
-  for (const speakerId of speakerIds) {
-    const token = audioByCharacterId.get(speakerId);
-    if (!token || !text.includes(`${token}:`)) failures.push(`${speakerId} audio binding is missing`);
-  }
-  if (CJK_RE.test(outsideDialogue(text))) failures.push("Chinese text leaked outside dialogue blocks");
   if (failures.length) {
     throw Object.assign(new Error(`H3 Agent generation-block prompt failed: ${failures.join("; ")}`), {
       code: "HAILUO_AGENT_GENERATION_BLOCK_PROMPT_INVALID",
@@ -1297,46 +1309,14 @@ function dialogueContract(take, bindings) {
 }
 
 function buildHailuoTakePrompt(project = {}, shot = {}, take = {}, references = {}) {
-  const bindings = referenceBindings(project, take, references);
-  const speaker = bindings.speakerSubject || bindings.cameraSubject || "the locked performer";
-  const camera = bindings.cameraSubject || speaker;
-  const listeners = bindings.listenerSubjects.length ? bindings.listenerSubjects.join(" and ") : "off-camera listener";
-  const style = englishField(take.direction?.styleEn, "Realistic Chinese vertical short drama with natural cinematic light.", 90);
-  const visual = englishField(take.direction?.visualEn, "Perform the locked action; keep continuity.", 150);
-  const cameraDirection = englishField(take.direction?.cameraEn, "Stable medium close-up with one slow push-in.", 90);
-  const sound = englishField(take.direction?.soundEn, "Continuous room tone and visible-action SFX only.", 100);
-  const offscreen = take.onScreenSpeaker === false && take.speakerId;
-  const ownership = offscreen
-    ? `Camera ownership: ${camera}; ${speaker} is off-screen; visible mouths closed.`
-    : `Camera ownership and visible mouth ownership: ${speaker}; ${speaker} is dominant; ${listeners} stays off-camera or silent at frame edge. Never switch speaker or pan to listener.`;
-  const detail = [
-    `${style}`,
-    `[Shot 1] One continuous take with no internal cut. ${cameraDirection} ${ownership}`,
-    visual,
-    dialogueContract(take, bindings),
-    "After speech, close lips and hold; no boards or text."
-  ].join(" ");
-  const hasAudio = Boolean(take.speakerId && list(references.audios).length);
-  const taskTypes = ["reference generation", hasAudio ? "audio reference" : ""].filter(Boolean).join(" + ");
-  const prompt = [
-    "subject_definitions:",
-    ...bindings.definitions,
-    "",
-    "summary:",
-    `[${taskTypes}] One take: ${camera}${take.speakerId ? `; ${speaker} speaks` : "; silent"}.`,
-    "",
-    "retention_analysis:",
-    ...bindings.retentions,
-    "",
-    "detailed_description:",
-    detail,
-    "",
-    `overall_soundscape: ${sound}`,
-    "",
-    "non_diegetic_music: N/A",
-    "",
-    FINAL_OUTPUT_LOCK
-  ].join("\n").trim();
+  const prompt = compileApprovedPrompt(project, shot, references, dialogueTurnsFromTakes([take]), {
+    duration: Number(take.authoredDuration) || Number(shot.duration) || 6,
+    action: take.action || take.direction?.visualEn || shot.action,
+    performance: take.direction?.performanceEn || shot.performance,
+    compositionPlan: take.speakerId && take.onScreenSpeaker !== false
+      ? "说话人近景锁脸，开口时禁止切商品或手部特写"
+      : shot.compositionPlan
+  });
   assertAgentTakePrompt(project, shot, take, references, prompt);
   return prompt;
 }
@@ -1348,24 +1328,18 @@ function outsideDialogue(value) {
 function assertAgentTakePrompt(project, shot, take, references, prompt) {
   const text = clean(prompt);
   const failures = [];
-  if (text.length > HAILUO_TAKE_PROMPT_LIMIT) failures.push(`prompt length ${text.length} exceeds ${HAILUO_TAKE_PROMPT_LIMIT}`);
-  for (const section of REQUIRED_HAILUO_SECTIONS) if (!text.includes(section)) failures.push(`missing ${section}`);
-  if (/\[Shot\s+(?:[2-9]|\d{2,})\]/i.test(text)) failures.push("an atomic take contains an internal shot cut");
-  if (!/One continuous take with no internal cut/i.test(text)) failures.push("continuous-take lock is missing");
-  if (!/Camera ownership/i.test(text)) failures.push("camera ownership lock is missing");
-  if (take.onScreenSpeaker !== false && take.speakerId && !/visible mouth ownership/i.test(text)) failures.push("mouth ownership lock is missing");
-  if (!text.includes(FINAL_OUTPUT_LOCK)) failures.push("final output lock is missing");
-  const expectedDialogue = list(take.dialogueTurns);
-  const blocks = [...text.matchAll(/<d>\s*\[Chinese\]\s*([\s\S]*?)<\/d>/gi)].map(match => clean(match[1]));
-  if (blocks.length !== expectedDialogue.length) failures.push(`dialogue block count ${blocks.length}/${expectedDialogue.length}`);
-  expectedDialogue.forEach((turn, index) => {
-    if (blocks[index] !== turn.text) failures.push(`dialogue ${index + 1} changed`);
+  try { assertHailuoFinalPromptIntegrity(text, HAILUO_TAKE_PROMPT_LIMIT); }
+  catch (error) { failures.push(...(error.failures || [error.message])); }
+  list(references.images).forEach((_item, index) => {
+    if (!text.includes(`图${index + 1}`)) failures.push(`missing image binding 图${index + 1}`);
   });
-  validateDialogueOccurrenceMultiplicity(expectedDialogue, text, failures);
-  if (expectedDialogue.length && !list(references.audios).length) failures.push("speaker voice reference is missing");
-  if (list(references.audios).length > 1) failures.push("atomic take contains more than one audio reference");
-  if (expectedDialogue.length && !text.includes("<Audio 1>")) failures.push("Audio 1 binding is missing");
-  if (CJK_RE.test(outsideDialogue(text))) failures.push("Chinese text leaked outside dialogue blocks");
+  list(references.audios).forEach((_item, index) => {
+    if (!text.includes(`音频${index + 1}`)) failures.push(`missing audio binding 音频${index + 1}`);
+  });
+  list(take.dialogueTurns).forEach((turn, index) => {
+    const line = clean(turn.text || turn.spokenText);
+    if (line && !text.includes(line)) failures.push(`dialogue ${index + 1} missing`);
+  });
   if (failures.length) {
     throw Object.assign(new Error(`H3 Agent take prompt failed: ${failures.join("; ")}`), {
       code: "HAILUO_AGENT_TAKE_PROMPT_INVALID",

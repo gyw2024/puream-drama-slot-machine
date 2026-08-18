@@ -1,5 +1,7 @@
 "use strict";
 
+const { isActiveVideoJob } = require("./workbench-status");
+
 function latestCandidate(project, entityType, entityId, stage) {
   const activeRevision = project.productionRevision || "";
   const revisionMatches = (project.candidates || [])
@@ -126,7 +128,12 @@ function summarizeProjectOverview(project = {}, settings = null) {
   const counts = stageCounts(project, settings);
   const nextStage = inferNextStage(project, counts);
   const jobs = Array.isArray(project.jobs) ? project.jobs : [];
-  const activeJobs = jobs.filter(job => ["queued", "pending", "submitted", "running", "processing", "uploading", "waiting", "remote_pending", "download_pending"].includes(String(job.status || "").toLowerCase())).length;
+  const activeJobs = jobs.filter(job => {
+    const status = String(job.status || "").toLowerCase();
+    if (!["queued", "pending", "submitted", "running", "processing", "uploading", "waiting", "remote_pending", "download_pending"].includes(status)) return false;
+    if (["shot_video", "character_video"].includes(job.type || job.jobType)) return isActiveVideoJob(job);
+    return true;
+  }).length;
   return {
     id: project.id,
     title: project.title || "未命名项目",

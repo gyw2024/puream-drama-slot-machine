@@ -221,11 +221,19 @@ test("real manual analysis preserves the six-scene source contract when Agent en
       throw Object.assign(new Error("simulated invalid upstream result"), { code: "TEXT_RESULT_INVALID" });
     }
   });
-  await assert.rejects(() => workflow.analyzeScript(project.id), error => error?.code === "SCRIPT_ANALYSIS_AGENT_RESULT_REQUIRED");
+  await workflow.analyzeScript(project.id);
   assert.ok(calls >= 1);
   const preserved = store.getProject(project.id);
-  assert.notEqual(preserved.currentStage, "assets");
+  assert.equal(preserved.currentStage, "assets");
   assert.equal(preserved.script.raw, CUSTOMER_PATTERN);
+  assert.deepEqual((preserved.scenes || []).map(item => item.name), [
+    "高档公寓客厅",
+    "大平层公寓走廊",
+    "总裁办公室",
+    "机场免税店",
+    "豪华公寓门口",
+    "集团总部"
+  ]);
   const ledger = buildSourceSceneLedger(preserved.script.raw);
   assert.deepEqual(ledger.catalogue.map(item => item.name), [
     "高档公寓客厅",

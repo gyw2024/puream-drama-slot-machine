@@ -76,7 +76,9 @@ function formatTime(value) {
 
 function isActive(project = state.project) {
   const status = String(project?.automation?.status || "");
-  return Boolean(project?.runtime?.active || ["running", "pausing", "stopping"].includes(status));
+  const runtime = project?.runtime || {};
+  const live = runtime.activeOperation === true || Number(runtime.activeVideoJobCount) > 0;
+  return live || ["running", "pausing", "stopping"].includes(status);
 }
 
 function showToast(message, tone = "ok") {
@@ -104,7 +106,7 @@ function setBusy(active, title = "正在处理", message = "AI 正在执行，�
 }
 
 async function runLong(title, message, operation, { background = false } = {}) {
-  if (state.busy) return showToast("已有操作正在执行", "error");
+  if (state.busy) return showToast(state.busyHidden ? "后台任务进行中，完成后才能开新任务" : "已有操作正在执行", "error");
   setBusy(true, title, message);
   if (background) {
     setTimeout(() => {
@@ -149,16 +151,19 @@ function settleConfirm(value) {
 
 function selectedCandidate(project, entityType, entityId, stages) {
   const allowed = new Set(Array.isArray(stages) ? stages : [stages]);
-  return (project?.candidates || [])
-    .filter(candidate => candidate.entityType === entityType && candidate.entityId === entityId && allowed.has(candidate.stage) && candidate.stale !== true && candidate.selected === true && candidate.filePath)
-    .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))[0] || null;
+  const pool = (project?.candidates || [])
+    .filter(candidate => candidate.entityType === entityType && candidate.entityId === entityId && allowed.has(candidate.stage) && candidate.stale !== true && candidate.filePath)
+    .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")));
+  return pool.find(item => item.selected === true) || pool[0] || null;
 }
 
 function expectedStoryboardSlots(project) {
   const shots = project?.shots || [];
   const mode = project?.generation?.mode || "storyboard_sheet";
   if (mode === "storyboard_sheet") return shots.map(shot => [shot, "storyboard_sheet"]);
-  if (mode === "continuation") return shots.flatMap((shot, index) => index === 0 ? [[shot, "storyboard_start"], [shot, "storyboard_end"]] : [[shot, "storyboard_end"]]);
+  if (mode === "continuation" || mode === "smart") {
+    return shots.flatMap((shot, index) => index === 0 ? [[shot, "storyboard_start"], [shot, "storyboard_end"]] : [[shot, "storyboard_end"]]);
+  }
   return shots.flatMap(shot => [[shot, "storyboard_start"], [shot, "storyboard_end"]]);
 }
 
@@ -172,7 +177,7 @@ function stageState(project) {
     ...(project.assetLibraries?.props || []).map(item => ["library", item.id, "prop_asset"]),
     ...(project.assetLibraries?.wardrobes || []).map(item => ["library", item.id, "wardrobe_asset"])
   ];
-  const assetsReady = analysisReady && assetTargets.length > 0 && assetTargets.every(([type, id, stages]) => selectedCandidate(project, type, id, stages));
+  const assetsReady = analysisReady && (assetTargets.length === 0 || assetTargets.every(([type, id, stages]) => selectedCandidate(project, type, id, stages)));
   const storyboardSlots = expectedStoryboardSlots(project);
   const storyboardsReady = analysisReady && storyboardSlots.length > 0 && storyboardSlots.every(([shot, stage]) => selectedCandidate(project, "shot", shot.id, stage));
   const videosReady = analysisReady && project.shots.length > 0 && project.shots.every(shot => selectedCandidate(project, "shot", shot.id, "shot_video"));
@@ -669,8 +674,11 @@ async function refreshWallet() {
     const timeout = new Promise(resolve => setTimeout(() => resolve({ ok: false, code: "WALLET_UI_TIMEOUT", message: "余额读取超时" }), 12000));
     const result = resultOrThrow(await Promise.race([api("walletStatus"), timeout]));
     const wallet = result.wallet || {};
-    const value = wallet.balanceYuan ?? wallet.balance ?? wallet.amount ?? wallet.availableBalance;
-    $("#walletBalance").textContent = Number.isFinite(Number(value)) ? `¥${Number(value).toFixed(2)}` : "已连接";
+    const cents = Number(wallet.availableCents ?? wallet.balanceCents);
+    const yuan = Number.isFinite(cents)
+      ? cents / 100
+      : Number(wallet.balanceYuan ?? wallet.availableBalance);
+    $("#walletBalance").textContent = Number.isFinite(yuan) ? `¥${yuan.toFixed(2)}` : "已连接";
   } catch {
     $("#walletBalance").textContent = "点击重试";
   }

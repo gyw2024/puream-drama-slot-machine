@@ -87,7 +87,9 @@ function criticalDataJson(filePath, rootDir) {
   const relative = path.relative(path.resolve(rootDir), path.resolve(filePath)).replace(/\\/g, "/").toLowerCase();
   return ["projects.json", "settings.json", "account-switch.json", "voice-library/index.json", "reusable-asset-library/index.json"].includes(relative)
     || /^projects\/[^/]+\/project\.json$/.test(relative)
-    || /^deleted-projects\/[^/]+\/(?:project|deleted-project)\.json$/.test(relative);
+    || /^deleted-projects\/[^/]+\/(?:project|deleted-project)\.json$/.test(relative)
+    || /^simple-mode\/(?:projects\.json|settings\.json)$/.test(relative)
+    || /^simple-mode\/projects\/[^/]+\/project\.json$/.test(relative);
 }
 
 function relocateCopiedWorkbenchData(options = {}) {

@@ -50,6 +50,15 @@ if (process.platform === "win32") app.setAppUserModelId(APP_USER_MODEL_ID);
 // fallback instead of leaving the user on a black client area.
 const rendererAcceleration = configureRendererAcceleration(app);
 let gpuRecoveryTriggered = false;
+function workbenchHasLiveWork() {
+  try {
+    if (workbenchWorkflow?.hasAnyActiveOperation?.() || simpleModeWorkflow?.hasAnyActiveOperation?.()) return true;
+    if ((workbenchStore?.listActiveVideoJobs?.() || []).length > 0) return true;
+    if ((simpleModeStore?.listActiveVideoJobs?.() || []).length > 0) return true;
+  } catch {}
+  return false;
+}
+
 app.on("child-process-gone", (_event, details = {}) => {
   const processType = String(details.type || details.processType || "").toLowerCase();
   const reason = String(details.reason || "").toLowerCase();
@@ -58,6 +67,11 @@ app.on("child-process-gone", (_event, details = {}) => {
   gpuRecoveryTriggered = true;
   try { recordGpuCrash(rendererAcceleration, details); }
   catch (error) { console.error("[workbench] failed to persist GPU fallback", error); }
+  // Relaunch would kill in-flight paid batches. Keep this process if work is live.
+  if (workbenchHasLiveWork()) {
+    console.error("[workbench] GPU process gone during live work; staying alive and keeping the current window");
+    return;
+  }
   app.relaunch();
   app.exit(0);
 });
@@ -3301,7 +3315,9 @@ if (!app.requestSingleInstanceLock()) {
       foundryKernel
     });
     const simpleRoot = path.join(dataRoot, "simple-mode");
+    const simpleFoundryKernel = new AdaptiveDramaKernel({ rootDir: simpleRoot });
     simpleModeStore = new WorkbenchStore(simpleRoot, {
+      foundryKernel: simpleFoundryKernel,
       sharedLibraryRoot: dataRoot,
       encode: value => {
         if (!value) return "";
@@ -3324,13 +3340,15 @@ if (!app.requestSingleInstanceLock()) {
     simpleModeStore.saveSettings(enforceSimpleH3Settings(simpleModeStore.getSettings(), simpleModeStore.getSettings()));
     hydratePureamDefaults(simpleModeStore, dramaLicense.storedActivationCode(), simpleBridge);
     simpleBridge.configure(simpleModeStore.getSettings().videoProvider);
+    simpleFoundryKernel.settingsProvider = () => simpleModeStore?.getSettings?.() || {};
     simpleModeWorkflow = new WorkbenchWorkflow({
       store: simpleModeStore,
       bridge: simpleBridge,
       locateFfmpeg,
       stagingRoot: path.join(process.env.LOCALAPPDATA || app.getPath("temp"), "PureamDramaSlot", "simple-staging"),
       licenseClient: licenseBypassAllowed() ? null : dramaLicense,
-      integrityGuard
+      integrityGuard,
+      foundryKernel: simpleFoundryKernel
     });
     try {
       const mcpController = new McpAppController({
@@ -3360,7 +3378,14 @@ if (!app.requestSingleInstanceLock()) {
     simpleModeWorkflow.reconcileDetachedAutomations();
     createWindow();
   });
-  app.on("window-all-closed", () => app.quit());
+  app.on("window-all-closed", () => {
+    if (workbenchHasLiveWork()) {
+      console.warn("[workbench] last window closed during live work; restoring the workbench instead of quitting");
+      try { createWindow(); } catch (error) { console.error("[workbench] failed to restore window", error); }
+      return;
+    }
+    app.quit();
+  });
   app.on("before-quit", () => {
     try { mcpControlGateway?.close?.(); } catch {}
     try { foundryKernel?.runtime?.checkpoint?.(); } catch {}

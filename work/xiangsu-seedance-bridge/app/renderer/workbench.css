@@ -157,7 +157,7 @@ button { color: inherit; }
 .delete-project-button:hover:not(:disabled) { border-color:#ff7b70; background:#2a1210; color:#ffd1cd; }
 .text-button { padding: 4px 0; background: none; color: var(--amber); font-size: 12px; }
 
-.project-dialog { width: min(720px,calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; overflow: auto; color: var(--text); border: 1px solid #76501e; border-radius: 16px; background: radial-gradient(circle at 90% 0,rgba(214,120,12,.18),transparent 38%),#11100e; box-shadow: 0 28px 90px rgba(0,0,0,.68); }
+.project-dialog { width: min(720px,calc(100vw - 32px)); max-height: calc(100vh - env(titlebar-area-height, 36px) - 24px); margin-top: calc(env(titlebar-area-height, 36px) + 12px); padding: 0; overflow: auto; color: var(--text); border: 1px solid #76501e; border-radius: 16px; background: radial-gradient(circle at 90% 0,rgba(214,120,12,.18),transparent 38%),#11100e; box-shadow: 0 28px 90px rgba(0,0,0,.68); }
 .project-dialog::backdrop { background: rgba(0,0,0,.74); backdrop-filter: blur(4px); }
 .project-dialog[open] { animation: dialogIn .18s cubic-bezier(.2,.8,.2,1); }
 @keyframes dialogIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
@@ -165,7 +165,7 @@ button { color: inherit; }
 .project-dialog .dialog-panel { padding: 22px; }
 .dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .dialog-head h2 { margin: 6px 0 0; font-size: 20px; }
-.dialog-close { width: 36px; height: 36px; flex: 0 0 36px; display: grid; place-items: center; border: 1px solid #3b3328; border-radius: 9px; background: #17130e; color: #b8aa97; font-size: 22px; line-height: 1; cursor: pointer; }
+.dialog-close { width: 36px; height: 36px; flex: 0 0 36px; display: grid; place-items: center; border: 1px solid #3b3328; border-radius: 9px; background: #17130e; color: #b8aa97; font-size: 22px; line-height: 1; cursor: pointer; -webkit-app-region: no-drag; pointer-events: auto; position: relative; z-index: 5; margin-right: max(8px, calc(148px - (100vw - 100%) / 2)); }
 .dialog-close:hover { border-color: #9a6119; color: #ffd08a; }
 .dialog-description { margin: 13px 0 18px; color: var(--muted); font-size: 11px; line-height: 1.65; }
 .project-dialog label { margin-bottom: 7px; color: #d8c7ad; }
@@ -740,7 +740,7 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
   .pipeline-phase-rail li small { display: none; }
 }
 .danger-mini { border-color: rgba(255,107,95,.45) !important; color: #ffaaa3 !important; }
-.candidate-library-dialog { width: min(1100px, calc(100vw - 24px)); max-height: calc(100vh - 24px); }
+.candidate-library-dialog { width: min(1100px, calc(100vw - 24px)); max-height: calc(100vh - env(titlebar-area-height, 36px) - 24px); }
 .candidate-library-panel { display: grid; grid-template-rows: auto auto minmax(320px,1fr) auto; max-height: calc(100vh - 48px); }
 .candidate-history-modal { min-height: 360px; max-height: min(68vh, 720px); overflow: auto; }
 .reusable-asset-dialog .candidate-library-panel { grid-template-rows: auto auto minmax(260px,1fr) auto; }
@@ -835,7 +835,7 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
 .toast.show { transform: translateY(0); opacity: 1; }
 .toast.error { border-color: #80352e; background: #25100e; color: #ffaaa1; }
 
-.asset-viewer-dialog { width: min(980px,calc(100vw - 48px)); height: min(860px,calc(100vh - 48px)); padding: 0; overflow: hidden; color: var(--text); border: 1px solid #76501e; border-radius: 16px; background: radial-gradient(circle at 90% 0,rgba(214,120,12,.15),transparent 36%),#0d0d0b; box-shadow: 0 30px 100px rgba(0,0,0,.75); }
+.asset-viewer-dialog { width: min(980px,calc(100vw - 48px)); height: min(860px,calc(100vh - env(titlebar-area-height, 36px) - 48px)); margin-top: calc(env(titlebar-area-height, 36px) + 12px); padding: 0; overflow: hidden; color: var(--text); border: 1px solid #76501e; border-radius: 16px; background: radial-gradient(circle at 90% 0,rgba(214,120,12,.15),transparent 36%),#0d0d0b; box-shadow: 0 30px 100px rgba(0,0,0,.75); }
 .asset-viewer-dialog.portrait { width: min(520px,calc(100vw - 48px)); height: min(900px,calc(100vh - 32px)); }
 .asset-viewer-dialog::backdrop { background: rgba(0,0,0,.82); backdrop-filter: blur(5px); }
 .asset-viewer-dialog[open] { animation: dialogIn .18s cubic-bezier(.2,.8,.2,1); }

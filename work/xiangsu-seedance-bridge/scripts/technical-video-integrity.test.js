@@ -244,3 +244,79 @@ test("a clean live-story panel anchor may match the first video frame without be
   assert.equal(audit.failures.some(item => item.code === "VIDEO_REFERENCE_ASSET_BOARD_LEAK"), false);
   assert.equal(jobs.at(-1).localQualityRejected, false);
 });
+
+test("H3 generation accepts the first download without local review or atomic fallback", async () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
+  const start = source.indexOf("async generateHailuoAgentShotVideo");
+  const end = source.indexOf("async ensureHailuoPromptSpec", start);
+  const body = source.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.doesNotMatch(body, /auditAgentGenerationBlockResult/);
+  assert.doesNotMatch(body, /useFallback/);
+  assert.doesNotMatch(body, /atomic_fallback/);
+  assert.doesNotMatch(body, /AGENT_GENERATION_BLOCK_TECHNICAL_INTEGRITY_FAILED/);
+  assert.doesNotMatch(body, /agent_continuity_atomic_fallback/);
+
+  const project = {
+    id: "P01",
+    shots: [{ id: "S01", number: 1, duration: 5 }],
+    candidates: [{ id: "cand-1", entityType: "shot", entityId: "S01", stage: "shot_video" }],
+    generation: { engine: "hailuo-h3" }
+  };
+  let submitted = 0;
+  const workflow = new WorkbenchWorkflow({
+    store: {
+      getSettings: () => ({ generation: { qualityGatesEnabled: false } }),
+      getProject: () => project,
+      saveProject: next => Object.assign(project, next),
+      updateCandidate: (_projectId, candidateId, patch) => Object.assign(project.candidates.find(item => item.id === candidateId), patch)
+    },
+    bridge: {},
+    locateFfmpeg: () => ffmpeg,
+    stagingRoot: "",
+    textGenerator: async () => ({})
+  });
+  workflow.prepareHailuoAgentShotTakes = async () => ({
+    plan: { duration: 5, mode: "keyframe", sourceFingerprint: "fp", generationBlocks: [{ id: "S01-B01" }] },
+    prepared: [{
+      block: {
+        id: "S01-B01",
+        takeIds: ["T01"],
+        takes: [{ id: "T01", start: 0, end: 5 }],
+        authoredDuration: 5,
+        providerDuration: 5,
+        strategy: "continuous_single",
+        start: 0,
+        end: 5
+      },
+      blockShot: { id: "S01" },
+      references: { images: [], imageRoles: [] },
+      prompt: "最终输出锁：禁止字幕",
+      fallbackPrepared: [{ block: { id: "S01-B01-A01" } }],
+      preflightFallback: false
+    }],
+    promptManifest: "最终输出锁：禁止字幕",
+    internalGenerationBlock: false
+  });
+  workflow.submitVideo = async () => {
+    submitted += 1;
+    return { id: "cand-1", jobId: "job-1", taskId: "task-1", filePath: __filename, chargeYuan: 1, settlementStatus: "charged" };
+  };
+  workflow.auditAgentGenerationBlockResult = async () => {
+    throw new Error("synthesis results must not be reviewed");
+  };
+  workflow.stitchAgentCameraTakes = async () => {
+    throw new Error("atomic fallback stitch must not run");
+  };
+  const candidate = await workflow.generateHailuoAgentShotVideo(
+    "P01",
+    project,
+    project.shots[0],
+    { generation: { qualityGatesEnabled: false } },
+    "keyframe",
+    { images: [] }
+  );
+  assert.equal(submitted, 1);
+  assert.equal(candidate.id, "cand-1");
+  assert.equal(candidate.prompt, "最终输出锁：禁止字幕");
+});

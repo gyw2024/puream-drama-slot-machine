@@ -19,14 +19,28 @@
     })[0] || null;
   }
 
+function videoJobAgeMs(job) {
+  const updatedAt = Date.parse(job?.updatedAt || job?.createdAt || "");
+  return Number.isFinite(updatedAt) ? Date.now() - updatedAt : Number.POSITIVE_INFINITY;
+}
+
+function isPhantomVideoJob(job) {
+  if (!job || !VIDEO_JOB_TYPES.has(job.type || job.jobType)) return false;
+  const status = String(job.status || "").toLowerCase();
+  if (!ACTIVE_JOB_STATUSES.has(status)) return false;
+  if (job.taskId) return false;
+  // Local placeholder with no upstream id: after 90s nobody is submitting.
+  return videoJobAgeMs(job) > 90_000;
+}
+
 function isActiveVideoJob(job) {
-  if (!job || !VIDEO_JOB_TYPES.has(job.type)) return false;
-  if (!ACTIVE_JOB_STATUSES.has(String(job.status || "").toLowerCase())) return false;
-  // Uploading/queued without a real upstream task id is not “running upstream”.
-  if (!job.taskId && ["uploading", "queued", "pending", "submitted", "waiting"].includes(String(job.status || "").toLowerCase())) {
-    const updatedAt = Date.parse(job.updatedAt || job.createdAt || "");
-    if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > 90_000) return false;
-  }
+  if (!job || !VIDEO_JOB_TYPES.has(job.type || job.jobType)) return false;
+  const status = String(job.status || "").toLowerCase();
+  if (!ACTIVE_JOB_STATUSES.has(status)) return false;
+  if (isPhantomVideoJob(job)) return false;
+  const ageMs = videoJobAgeMs(job);
+  // remote_pending older than two hours with nobody polling is a ghost lock.
+  if (["remote_pending", "download_pending"].includes(status) && ageMs > 2 * 60 * 60 * 1000) return false;
   return true;
 }
 
@@ -206,6 +220,29 @@ function isActiveVideoJob(job) {
     }
 
     if (recoveredBlocks.length) {
+      const playable = recoveredBlocks.find(item => item.internalGenerationBlockFilePath || item.internalTakeFilePath);
+      const filePath = playable?.internalGenerationBlockFilePath || playable?.internalTakeFilePath || "";
+      if (filePath) {
+        return {
+          key: "ready",
+          label: recoveredBlocks.length > 1 ? `已就绪 · ${recoveredBlocks.length} 段` : "已就绪",
+          candidate: {
+            id: playable.candidateId || `recovered-${playable.id}`,
+            entityType: "shot",
+            entityId: shot?.id,
+            stage: "shot_video",
+            filePath,
+            fileUrl: playable.fileUrl || "",
+            taskId: playable.taskId || "",
+            recoveredInternalBlock: true
+          },
+          job,
+          activeJob: null,
+          recoveredBlocks,
+          progress: videoJobProgress({ status: "completed" }),
+          detail: "上游片段已取回并可以播放"
+        };
+      }
       const rejectedCount = recoveredBlocks.filter(item => item.localQualityRejected === true).length;
       return {
         key: "partial",
@@ -268,6 +305,8 @@ function isActiveVideoJob(job) {
 
   return {
     newest,
+    videoJobAgeMs,
+    isPhantomVideoJob,
     isActiveVideoJob,
     latestVideoJobs,
     activeVideoJobs,

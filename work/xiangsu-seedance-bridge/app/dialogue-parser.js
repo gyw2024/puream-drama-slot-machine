@@ -7,7 +7,10 @@ function clean(value) {
 const NON_SPEAKER_LABELS = new Set([
   "场景", "镜头", "地点", "时间", "人物", "角色", "物品", "道具", "动作", "画面", "景别", "运镜", "声音", "音效", "情绪", "产品", "商品", "说明", "备注",
   "计划", "原因", "结果", "重点", "注意", "描述", "信息", "状态", "目标", "步骤", "问题", "答案", "对白", "无对白",
-  "背景/动作", "背景动作", "商品动作", "商品说明", "制作说明", "分镜说明", "表演说明", "连续性"
+  "背景/动作", "背景动作", "商品动作", "商品说明", "制作说明", "分镜说明", "表演说明", "连续性",
+  "本单元叙事任务", "主线阶段", "主线推进", "善意代价", "反转伏笔", "状态变化", "因果承接",
+  "独占画面拍点", "构图计划", "全时段声音计划", "首帧", "尾帧", "进入", "出口", "转场", "切换",
+  "连续性", "承接", "情节任务", "情节", "商品节点", "核心道具", "关键道具"
 ]);
 
 function isProductionCue(value = "") {
@@ -17,7 +20,8 @@ function isProductionCue(value = "") {
     || /^(?:S|SC)\d{1,4}(?:\b|\s*[｜|])/i.test(raw)
     || /(?:^|[｜|])\s*(?:\d{1,2}:)?\d{1,2}(?::\d{2})?(?:\.\d+)?\s*[-–—~至]/.test(raw)
     || /^(?:背景\s*[\/／]\s*动作|无对白|商品动作|商品说明|制作说明|分镜说明|表演说明|连续性|subshot|shot)\b/i.test(raw)
-    || /[｜|]/.test(raw);
+    || /[｜|]/.test(raw)
+    || /^(?:本单元叙事任务|主线阶段|主线推进|善意代价|反转伏笔|状态变化|因果承接|独占画面拍点|构图计划|全时段声音计划|首帧|尾帧|进入|出口|转场|切换|核心道具|关键道具)$/.test(raw);
 }
 
 function isSpokenTextCandidate(value = "") {
@@ -138,14 +142,9 @@ function toneMetadata(tone = "") {
 }
 
 function dialogueMarkers(line, knownNames = []) {
-  const leadingParenthetical = String(line || "").match(/^\s*(.{1,24}?\s*[（(][^）)\n]{1,240}[）)])\s*[：:]/);
-  if (leadingParenthetical) {
-    const label = parseSpeakerLabel(leadingParenthetical[1], knownNames);
-    if (label) return [{ ...label, markerStart: 0, bodyStart: leadingParenthetical[0].length }];
-  }
   const markers = [];
   const known = new Set(knownNames.map(clean).filter(Boolean));
-  const matcher = /(?:^|[；;])\s*([^：:；;\n]{1,48})\s*[：:]/g;
+  const matcher = /(?:^|[；;]|\s\/\s)\s*(?:(?:对白|台词|旁白)\s*[：:]\s*)?([^：:；;\n]{1,48})\s*[：:]/g;
   let match;
   while ((match = matcher.exec(line))) {
     const label = parseSpeakerLabel(match[1], knownNames);
@@ -157,7 +156,10 @@ function dialogueMarkers(line, knownNames = []) {
 }
 
 function stripDialogueLinePrefix(value = "") {
-  return String(value || "").replace(/^\s*(?:\[(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?(?:\s*[-–—~至]\s*(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?)?\]\s*)?(?:\d{1,4}[.、)]\s*)?/, "");
+  return String(value || "")
+    .replace(/^\s*(?:\[(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?(?:\s*[-–—~至]\s*(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?)?\]\s*)?(?:\d{1,4}[.、)]\s*)?/, "")
+    .replace(/^\s*[-*•]\s*/, "")
+    .replace(/^(?:对白|台词|旁白)\s*[：:]\s*/, "");
 }
 
 function isSceneOrActionLine(value = "") {
@@ -243,10 +245,15 @@ function parseSourceDialogueLedger(value, knownNames = [], options = {}) {
   }));
   const sourceShotAt = position => sourceShotRanges.find(item => position >= item.sourceStart && position < item.sourceEnd) || null;
   const pushEntry = (label, text, sourceStart, sourceEnd) => {
-    const spokenText = clean(text).replace(/^[“\"]|[”\"]$/g, "").trim();
+    const spokenText = clean(text)
+      .replace(/[；;]\s*(?:声音|音效|切到|切至|接下|硬切|环境声).*$/u, "")
+      .replace(/^[“\"]|[”\"]$/g, "")
+      .trim();
     if (!isSpokenTextCandidate(spokenText)) return;
     const sourceShot = sourceShotAt(sourceStart);
-    if (sourceShotRanges.length && !sourceShot) return;
+    if (sourceShotRanges.length && !sourceShot && sourceStart >= sourceShotRanges[0].sourceStart) return;
+    const spokenKey = `${sourceShot?.sourceShotId || ""}|${label.speaker}|${spokenText}`;
+    if (ledger.some(item => `${item.sourceShotId || ""}|${item.speaker}|${item.text}` === spokenKey)) return;
     ledger.push({
       id: `${prefix}${String(ledger.length + 1).padStart(3, "0")}`,
       order: ledger.length + 1,
@@ -265,6 +272,7 @@ function parseSourceDialogueLedger(value, knownNames = [], options = {}) {
     const lineEntry = lines[lineIndex];
     const originalLine = lineEntry.text;
     const line = stripDialogueLinePrefix(originalLine);
+    if (isProductionCue(line) || /^subshot\s+\d+/i.test(line)) continue;
     const prefixLength = originalLine.indexOf(line);
     const markers = dialogueMarkers(line, [...inferredNames]);
     if (!markers.length) continue;

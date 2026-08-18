@@ -2218,7 +2218,10 @@ function renderJobs() {
 
 function videoCardView(project, shot) {
   const videoState = videoStatusApi.shotVideoState(project, shot, state.settings);
-  const video = videoState.candidate || chosenCandidate("shot", shot.id, "shot_video");
+  const recoveredFile = (videoState.recoveredBlocks || []).map(item => item.internalGenerationBlockFilePath || item.internalTakeFilePath).find(Boolean);
+  const video = videoState.candidate
+    || chosenCandidate("shot", shot.id, "shot_video")
+    || (recoveredFile ? { id: `recovered-${shot.id}`, filePath: recoveredFile, stage: "shot_video", entityId: shot.id } : null);
   const taskJob = videoState.activeJob || (videoState.key === "failed" ? videoState.job : null);
   const ratio = normalizedAspectRatio(project.generation?.aspectRatio || "9:16");
   const candidateCount = candidates("shot", shot.id, "shot_video").length;
@@ -2264,7 +2267,7 @@ function videoCardMarkup(project, shot) {
   const manualPrompt = shot.promptMode === "manual";
   return `<article class="video-card status-${escapeHtml(videoState.key)}${drawing ? " is-drawing has-active-task" : ""}${taskJob && videoStatusApi.isActiveVideoJob(taskJob) ? " has-active-task" : ""}" data-shot-id="${escapeHtml(shot.id)}" data-asset-signature="${escapeHtml(assetSignature)}" data-state-signature="${escapeHtml(stateSignature)}">
   <div class="drawing-banner" aria-hidden="true"><i></i><span>正在抽卡</span></div>
-  <div class="video-preview-shell" style="--video-aspect:${aspectStyle}">${video?.filePath ? `<video class="video-preview" src="${escapeHtml(video.fileUrl || fileUrl(video.filePath))}" controls preload="metadata" playsinline></video>` : `<div class="video-empty status-${escapeHtml(videoState.key)}"><b>${escapeHtml(emptyText)}</b><span>${escapeHtml(videoState.detail || "")}</span></div>`}<span class="aspect-badge">${escapeHtml(ratio)}</span></div>
+  <div class="video-preview-shell" style="--video-aspect:${aspectStyle}">${video?.filePath ? `<video class="video-preview" src="${escapeHtml(video.fileUrl || fileUrl(video.filePath))}" controls preload="none" playsinline></video>` : `<div class="video-empty status-${escapeHtml(videoState.key)}"><b>${escapeHtml(emptyText)}</b><span>${escapeHtml(videoState.detail || "")}</span></div>`}<span class="aspect-badge">${escapeHtml(ratio)}</span></div>
   <div class="video-card-main">
     ${videoState.key === "failed" && video?.filePath ? `<div class="video-quality-warning" role="status"><b>${escapeHtml(videoState.label)}</b><span>${escapeHtml(videoState.detail || "该候选不能进入成片")}</span></div>` : ""}
     ${taskJob ? `<div class="video-card-task">${videoJobProgressMarkup(taskJob)}${taskJob.message ? `<p>${escapeHtml(taskJob.message)}</p>` : ""}</div>` : ""}
@@ -2897,7 +2900,7 @@ function promptSuggestionTemplate(scope = "all") {
 }
 
 const legacyScriptFormatExamples = Object.freeze({
-  production: `# 完整制作稿示例\n\n## 故事简介\n退休教师林秋月发现儿子隐瞒债务，她必须在保护家庭与揭开真相之间作出选择。\n\n## 人物\n- C01 林秋月：62岁，克制、敏锐；紧张时捏住衣角。\n- C02 周远：35岁，林秋月之子；嘴硬但内疚。\n\n## SC01｜客厅｜傍晚\n【情节】林秋月从旧账本中找到转账记录。\n【动作】她把账本推到周远面前，手指停在日期上。\n【对白】\n- 林秋月（压低声音，失望但保持克制，对周远说）：你告诉我，这一笔钱到底去了哪里？\n- 周远（避开视线，语速加快，心虚地对母亲说）：妈，这件事我能处理，你别再问了。\n【商品节点】只有当剧情需要核对记录时，才让用户提供的商品作为解决问题的工具出现；名称与卖点必须来自用户资料。\n【承接】周远的回避促使林秋月继续追问。`,
+  production: `# 完整制作稿示例\n\n## 故事简介\n退休教师林秋月发现儿子隐瞒债务，她必须在保护家庭与揭开真相之间作出选择。\n\n## 人物\n### C01 林秋月\n- 62岁，克制、敏锐；紧张时捏住衣角。\n### C02 周远\n- 35岁，林秋月之子；嘴硬但内疚。\n\n### SC01 客厅｜傍晚\n- 内景旧式客厅，账本与茶几固定。\n\n### S01｜10秒｜客厅\n- 人物：C01 C02\n- 场景：SC01\n- 动作：林秋月把账本推到周远面前\n- 对白：林秋月（压低声音）：你告诉我，这一笔钱到底去了哪里？\n林秋月（压低声音）：你告诉我，这一笔钱到底去了哪里？\n周远（语速加快）：妈，这件事我能处理。\n- 情绪：克制追问\n- 声音：纸页摩擦、室内底噪\n- 商品：不出现\n- subshot 1｜0.0-3.0秒｜近景：推账本；对白：林秋月：你告诉我，这一笔钱到底去了哪里？；声音：纸页\n- subshot 2｜3.0-7.0秒｜反打：周远避开视线；对白：周远：妈，这件事我能处理。；声音：底噪\n- subshot 3｜7.0-10.0秒｜动作结果：手指停在日期上；对白：无；声音：底噪\n\n### S02｜10秒｜客厅\n- 人物：C01 C02\n- 场景：SC01\n- 动作：林秋月继续追问真话\n- 对白：林秋月（放慢）：我怕你连真话都不肯说。\n林秋月（放慢）：我怕你连真话都不肯说。\n- 情绪：失望\n- 声音：室内底噪\n- 商品：不出现\n- subshot 1｜0.0-3.0秒｜近景：林秋月开口；对白：林秋月：我怕你连真话都不肯说。；声音：底噪\n- subshot 2｜3.0-7.0秒｜反打：周远沉默；对白：无；声音：底噪\n- subshot 3｜7.0-10.0秒｜结果：账本留在两人之间；对白：无；声音：底噪`,
   dialogue: `# 简易对白稿示例\n\n【背景】傍晚客厅。林秋月发现旧账本里的异常转账，周远刚进门。\n\n林秋月（压低声音，失望又克制，盯着周远，对周远说）：你告诉我，这一笔钱到底去了哪里？\n\n周远（避开母亲的视线，语速加快，心虚地对林秋月说）：妈，这件事我能处理，你别再问了。\n\n【简单情节】林秋月没有争吵，而是把带日期的凭据推到他面前。周远看到日期后沉默。\n\n林秋月（眼眶发红，语速放慢，忍着怒气对周远说）：我不是怕你欠钱，我怕你连真话都不肯跟我说。\n\n【商品出现规则】如本段确实需要商品，必须使用用户上传的产品名称、图片和卖点，并让商品承担明确剧情作用；不得凭空添加。`,
   timed_storyboard: `# 秒级分镜成片稿示例\n\n## S01｜0.0–8.0秒｜客厅｜中近景转特写\n【人物与位置】林秋月在画面左前景，周远在右后景；两人保持视线轴。\n【0.0–2.0秒】林秋月把旧账本推到桌面中央，手指压住一行日期。表情克制，呼吸变重。\n【2.0–5.2秒｜对白】林秋月（压低声音，失望又克制，盯着周远，对周远说）：你告诉我，这一笔钱到底去了哪里？\n【5.2–8.0秒｜反应】周远先看日期，再避开母亲视线，吞咽一下。\n【声音】纸页摩擦、室内低环境声；对白清晰置前。\n【承接】切到周远近景回答。\n\n## S02｜8.0–15.0秒｜周远近景\n【8.0–11.5秒｜对白】周远（语速加快，心虚，避开视线，对林秋月说）：妈，这件事我能处理，你别再问了。\n【11.5–15.0秒｜反应】林秋月在前景虚焦中收紧手指；周远说完后短暂停顿。\n【商品节点】仅在剧本因果需要时引用用户产品，完整保留用户名称和卖点。`
 });
@@ -3536,8 +3539,12 @@ function isStageDrawing(stage, entityId) {
 
 function automationIsActive(project = state.project) {
   const statusClaimsActive = ["running", "pausing", "stopping"].includes(String(project?.automation?.status || ""));
-  if (project?.runtime && typeof project.runtime.active === "boolean") {
-    return project.runtime.active || (project === state.project && state.busy && statusClaimsActive);
+  const runtime = project?.runtime;
+  if (runtime && typeof runtime.active === "boolean") {
+    const liveOperation = runtime.activeOperation === true;
+    const liveJobs = Number(runtime.activeVideoJobCount) > 0;
+    const live = liveOperation || liveJobs;
+    return live || (project === state.project && state.busy && statusClaimsActive);
   }
   return statusClaimsActive;
 }
@@ -3590,7 +3597,8 @@ async function continuePipeline(project = state.project) {
   const currentOverview = overviewResult?.ok
     ? (overviewResult.projects || []).find(item => item.id === project.id)
     : null;
-  if (currentOverview?.nextStage) stage = currentOverview.nextStage;
+  const hasAutomationHint = /script|idea|blueprint|plan|unit|asset|storyboard|shot|video|stitch|final|creator_prompt/.test(String(project?.automation?.stage || ""));
+  if (!hasAutomationHint && currentOverview?.nextStage) stage = currentOverview.nextStage;
   if (stage === "script"
     && !String(project?.script?.raw || "").trim()
     && !project?.script?.generationCheckpoint
@@ -5090,6 +5098,10 @@ $("#discardFailedCandidates")?.addEventListener("click", async () => {
   showToast(`已清理失败候选 ${result.removedCandidates || 0} 条、失败任务 ${result.removedJobs || 0} 条`);
 });
 $("#refreshConsole")?.addEventListener("click", () => renderConsole());
+$("#queueResumePipelineBtn")?.addEventListener("click", () => {
+  if (!state.project) return showToast("请先选择一个项目", "error");
+  continuePipeline(state.project);
+});
 $("#generateAllAssets").addEventListener("click", () => {
   const characterEngine = ($("#characterVideoModel")?.value === "puream-gemini") ? "纯梦 Gemini"
     : ($("#characterVideoModel")?.value === "inherit-project") ? currentVideoEngineName()

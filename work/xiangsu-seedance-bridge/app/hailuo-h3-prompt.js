@@ -1387,11 +1387,23 @@ function compactFullReferencePrompt(prompt, maxLength = HAILUO_PROMPT_MAX_LENGTH
     compact = render(compactBinding, withoutTail);
   }
   if (compact.length > limit) {
+    const shortTimeline = timeline.split("\n").map(line => line
+      .replace(/角色“([^”]+)”使用音频(\d+)/g, "$1用音频$2")
+      .replace(/角色“([^”]+)”/g, "$1")
+      .replace(/，面向“([^”]+)”/g, "→$1")
+      .replace(/，语气“([^”]{18,})”/g, (_match, tone) => `，语气“${tone.slice(0, 16)}”`)
+      .replace(/，情绪“([^”]{14,})”/g, (_match, emotion) => `，情绪“${emotion.slice(0, 12)}”`)
+      .replace(/说话时仅“[^”]+”动嘴，/g, "")
+      .replace(/只使用该角色自己的声线，禁止借用其他角色音频/g, "只用本角色声线")
+    ).join("\n");
+    compact = render(compactBinding, shortTimeline);
+  }
+  if (compact.length > limit) {
     throw Object.assign(new Error(`Hailuo H3 dialogue contracts require ${compact.length} characters but the provider limit is ${limit}; refusing to truncate dialogue or output policy`), {
       code: "HAILUO_PROMPT_DIALOGUE_BUDGET_EXCEEDED",
       promptLength: compact.length,
       limit,
-      dialogueCount: dialogueContracts.length
+      dialogueCount: timeline.split("\n").filter(Boolean).length
     });
   }
   assertHailuoFinalPromptIntegrity(compact, limit);

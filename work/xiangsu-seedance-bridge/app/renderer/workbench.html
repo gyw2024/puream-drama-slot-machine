@@ -129,7 +129,7 @@
       <section class="stage-panel" data-panel="console">
         <div class="stage-head">
           <div><span class="eyebrow">GLOBAL CONTROL</span><h2>跨项目总控台</h2><p>监控全部漫剧项目的阶段进度、自动化状态、任务数与费用；点击可进入对应项目继续制作。</p></div>
-          <div class="head-actions"><button id="refreshConsole" class="outline-button" type="button">刷新总控</button></div>
+          <div class="head-actions"><button id="queueResumePipelineBtn" class="outline-button" type="button">继续任务</button><button id="refreshConsole" class="outline-button" type="button">刷新总控</button></div>
         </div>
         <div id="consoleSummary" class="console-summary panel-card"></div>
         <div id="consoleProjectGrid" class="console-project-grid" aria-live="polite"></div>
@@ -139,6 +139,7 @@
           <div><span class="eyebrow">PHASE 01 · IDEA TO SCRIPT</span><h2>一键选题，自动写完整短剧</h2><p>AI 先给出 10 个适合中老年观众的爆款题材；选中一个，填入商品图、商品名和卖点即可生产。</p></div>
           <div class="head-actions">
             <button id="saveScript" class="outline-button">保存剧本</button>
+            <button id="continueFromScript" class="outline-button" type="button">运行当前剧本阶段</button>
             <button id="analyzeScript" class="primary-button"><img src="../assets/icons/sparkle.png" alt="">AI 标准化并拆镜</button>
           </div>
         </div>
@@ -205,6 +206,7 @@
           <div><span class="eyebrow">PHASE 02 · ASSETS</span><h2>角色、音色与场景资产库</h2><p>每次点击都是一次抽卡；未确认前保留全部历史，确认后才清理同类其他候选。</p></div>
           <div class="head-actions">
             <div class="mode-chip">已就绪资产自动跳过</div>
+            <button id="continueFromAssets" class="outline-button" type="button">继续当前资产阶段</button>
             <button id="generateAllAssets" class="primary-button draw-button">AI 抽齐全部资产</button>
           </div>
         </div>
@@ -236,7 +238,7 @@
       <section class="stage-panel" data-panel="shots">
         <div class="stage-head">
           <div><span class="eyebrow">PHASE 03 · STORYBOARD</span><h2>逐镜可控的分镜工作台</h2><p>本阶段只管拆镜字段、首尾帧与引用资产；完整视频提示词在「04 分镜视频」编辑与提交。</p></div>
-          <div class="head-actions"><button id="generateAllStoryboards" class="primary-button draw-button">AI 抽卡：全部首尾帧</button><div class="mode-controls">
+          <div class="head-actions"><button id="continueFromShots" class="outline-button" type="button">继续当前分镜阶段</button><button id="generateAllStoryboards" class="primary-button draw-button">AI 抽卡：全部首尾帧</button><div class="mode-controls">
             <label>已确认模式<select id="generationMode" disabled><option value="continuation">视频延续模式</option><option value="keyframe">首尾帧模式</option><option value="smart">智能首尾帧+视频延续</option><option value="storyboard_sheet">逐秒分镜合图</option></select></label>
             <button id="editGenerationMode" class="outline-button" type="button">修改模式</button>
           </div></div>
@@ -253,6 +255,7 @@
         <div class="stage-head">
           <div><span class="eyebrow">PHASE 04 · VIDEO</span><h2 id="videoStageTitle">分镜视频生产线</h2><p id="videoModeDescription">延续模式串行：第1镜用首尾帧开场；第2镜起只抽尾帧，时间起点引用上一镜完整视频。</p></div>
           <div class="head-actions">
+            <button id="continueFromVideos" class="outline-button" type="button">继续当前视频阶段</button>
             <button id="generateAllVideos" class="primary-button draw-button">AI 抽卡：全部分镜视频</button>
           </div>
         </div>

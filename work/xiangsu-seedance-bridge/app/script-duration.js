@@ -110,7 +110,7 @@ function explicitTimelineDurationTarget(script = "", providerKind = "", options 
   const source = String(script || "").replace(/\r\n?/g, "\n");
   if (!source.trim()) return null;
 
-  const declared = source.match(/(?:全片|剧总时长|总时长|成片时长)\s*(?:约|大约|为|[:：=])*\s*(\d+(?:\.\d+)?)\s*(分钟|分|秒)/i);
+  const declared = source.match(/(?:全片|剧总时长|总时长|成片时长)\s*[】\]）)]*\s*(?:约|大约|为|[:：=])*\s*(\d+(?:\.\d+)?)\s*(分钟|分|秒)/i);
   const declaredSeconds = declared
     ? Number(declared[1]) * (/分钟|分/.test(declared[2]) ? 60 : 1)
     : 0;
