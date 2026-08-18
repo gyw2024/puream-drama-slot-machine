@@ -2554,7 +2554,15 @@ ipcMain.handle("simple:call", async (_event, method, args = []) => {
         return { ok: true, ...payload, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
       }
       case "analyzeScript":
-        return { ok: true, project: await workflow.analyzeScript(values[0]) };
+        {
+          await workflow.analyzeScript(values[0]);
+          // Simple mode exposes the same review gate as Agent mode: after the
+          // script is structured, persist every Chinese asset/storyboard/video
+          // prompt before any paid generator can be started.
+          return { ok: true, project: await workflow.preparePromptReviewBundle(values[0], { autoApprove: false }) };
+        }
+      case "preparePromptReview":
+        return { ok: true, project: await workflow.preparePromptReviewBundle(values[0], { autoApprove: false }) };
       case "rewriteDialogueScript":
         return { ok: true, project: await workflow.rewriteDialogueScript(values[0], values[1]) };
       case "generateTopics":

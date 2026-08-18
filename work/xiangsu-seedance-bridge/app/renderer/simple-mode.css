@@ -173,6 +173,15 @@ label { display: grid; gap: 7px; color: #aaa99f; font-size: 11px; }
 .summary-strip small { color: #81837b; font-size: 9px; }
 .summary-strip .progress-mini { flex: 1 1 220px; height: 5px; overflow: hidden; border-radius: 99px; background: #25251d; }
 .summary-strip .progress-mini i { display: block; height: 100%; background: linear-gradient(90deg, #d07a00, var(--amber-2)); }
+.prompt-review-status { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: center; margin: 0 0 18px; padding: 12px 14px; border: 1px solid rgba(255,181,43,.34); border-radius: 8px; background: rgba(37,27,10,.9); }
+.prompt-review-status[hidden] { display: none; }
+.prompt-review-status b { color: #ffd08a; font-size: 12px; line-height: 1.4; }
+.prompt-review-status span { color: #c7b99f; font-size: 10px; line-height: 1.55; }
+.prompt-review-status button { grid-column: 2; grid-row: 1 / span 2; min-width: 118px; }
+.prompt-review-status.is-approved { border-color: rgba(84,205,139,.34); background: rgba(11,31,22,.88); }
+.prompt-review-status.is-approved b { color: #8be2b1; }
+.prompt-textarea { width: 100%; min-height: 110px; border-color: rgba(255,181,43,.18); background: #090b09; color: #e5ddd0; font-size: 10px; }
+.prompt-field small { color: #858981; line-height: 1.45; }
 .asset-section { margin-top: 24px; }
 .section-title { display: flex; align-items: baseline; gap: 9px; margin-bottom: 10px; }
 .section-title h2 { margin: 0; font-size: 18px; }

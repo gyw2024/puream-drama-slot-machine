@@ -2773,8 +2773,8 @@ function renderProjectStrategy() {
   setTextIfChanged($("#videoStageTitle"), `${engine} 分镜视频生产线`);
   setTextIfChanged($("#productDropHelp"), `上传原图会被硬锁定；带货镜头必须引用此图，不会凭文字另画商品`);
   setTextIfChanged($("#productionSequenceNote"), stepExecution
-    ? `分步制作每次只运行当前阶段：剧本 → 资产 → 分镜图 → ${engine} 分镜视频 → 拼接成片；阶段完成后等待你手动继续。`
-    : `自动生产会按顺序执行：完整剧本 → 角色/场景资产 → 人物视频与音色 → 分镜图 → ${engine} 分镜视频 → 拼接成片。任务支持断点续做。`);
+    ? `分步制作每次只运行当前阶段：剧本 → 拆资产/拆分镜 → 中文提示词审阅 → 资产 → 分镜合图 → ${engine} 分镜视频 → 拼接成片；阶段完成后等待你手动继续。`
+    : `自动生产会按顺序执行：完整剧本 → 拆资产/拆分镜 → 先生成并保存全部中文提示词 → 角色/场景资产 → 分镜合图 → ${engine} 分镜视频 → 拼接成片。任务支持断点续做。`);
   $("#projectExecutionMode").textContent = plan.executionMode === "full" ? "AI 一键制作" : "分步制作";
   $("#projectInputMode").textContent = plan.inputMode === "manual" ? "自己输入/上传" : "AI 生成";
   $("#projectScriptFormat").textContent = plan.inputMode === "manual"
@@ -3709,6 +3709,23 @@ function renderPipelineControls(project = state.project) {
   stopButton.disabled = pending || !active;
 }
 
+function renderPromptReviewStatus(project = state.project) {
+  const panel = $("#promptReviewStatus");
+  if (!panel) return;
+  const review = project?.promptReview;
+  const counts = review?.counts || {};
+  const total = Number(counts.total) || 0;
+  if (!total) {
+    panel.hidden = true;
+    panel.textContent = "";
+    return;
+  }
+  const approved = review.status === "approved";
+  panel.hidden = false;
+  panel.className = `prompt-review-status ${approved ? "is-approved" : "is-ready"}`;
+  panel.innerHTML = `<b>${approved ? "提示词已随一键流程自动确认" : "提示词已生成，可在资产、分镜和视频卡片中逐项阅览/修改"}</b><span>中文提示词 ${total} 项：资产 ${Number(counts.assets) || 0}、分镜合图 ${Number(counts.storyboards) || 0}、分镜视频 ${Number(counts.videos) || 0}。提交上游时才按真实参考文件编译，不会因资产尚未生成而失败。</span>`;
+}
+
 function mutatingActionBlockedWhileRunning(action) {
   const value = String(action || "");
   if (!value || !state.project || !automationIsActive(state.project)) return false;
@@ -4001,6 +4018,7 @@ function renderAll() {
   if (state.candidateScope) renderCandidates(state.candidateScope);
   renderAccountSwitch();
   renderProjectStrategy();
+  renderPromptReviewStatus(state.project);
   renderPipelineControls(state.project);
   renderNextActionGuide(state.project);
   applyProductSurfaceLabels();

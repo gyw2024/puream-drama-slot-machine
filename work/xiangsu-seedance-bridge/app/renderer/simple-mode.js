@@ -309,10 +309,29 @@ function renderAssetCard(entity, descriptor) {
   const { entityType, stage, label, detail, libraryType } = descriptor;
   const candidate = selectedCandidate(state.project, entityType, entity.id, stage);
   const running = !candidate && entityRunning(state.project, entity.id);
+  const override = entity.promptOverrides?.[stage] || {};
+  const promptText = override.mode === "manual" && String(override.manual || "").trim()
+    ? override.manual
+    : override.system || "";
   const preview = candidate?.filePath
     ? `<img src="${escapeHtml(fileUrl(candidate.filePath))}" alt="${escapeHtml(label)}">`
     : running ? '<i class="loading-ring" aria-hidden="true"></i>' : '<img class="placeholder" src="../assets/icons/image.png" alt="">';
-  return `<article class="asset-card"><div class="asset-preview">${preview}</div><div class="asset-body"><div class="asset-title"><b>${escapeHtml(label)}</b><i>${candidate ? "已就绪" : running ? "生成中" : "待准备"}</i></div><p>${escapeHtml(detail || "等待 AI 补全资产描述")}</p><div class="asset-tags"><i>${escapeHtml(stage === "scene_asset" ? "统一 2×2 四视图" : stage === "character_sheet" ? "固定纯色背景" : "核心剧情资产")}</i></div><div class="asset-actions"><button type="button" data-action="generate-one" data-entity-type="${entityType}" data-stage="${stage}" data-entity-id="${escapeHtml(entity.id)}" data-library-type="${escapeHtml(libraryType || "")}" ${running ? "disabled" : ""}>${candidate ? "重新生成" : "AI 生成"}</button><button type="button" data-action="upload-one" data-entity-type="${entityType}" data-stage="${stage}" data-entity-id="${escapeHtml(entity.id)}">上传</button><button type="button" data-action="pick-shared" data-entity-type="${entityType}" data-stage="${stage}" data-entity-id="${escapeHtml(entity.id)}">共享库</button></div></div></article>`;
+  return `<article class="asset-card"><div class="asset-preview">${preview}</div><div class="asset-body"><div class="asset-title"><b>${escapeHtml(label)}</b><i>${candidate ? "已就绪" : running ? "生成中" : "待准备"}</i></div><p>${escapeHtml(detail || "等待 AI 补全资产描述")}</p><label class="prompt-field">中文生成提示词<textarea class="prompt-textarea" data-prompt-entity-type="${entityType}" data-prompt-entity-id="${escapeHtml(entity.id)}" data-prompt-stage="${stage}" data-prompt-system="${escapeHtml(override.system || "")}">${escapeHtml(promptText)}</textarea><small>可直接修改；保存后提交上游时由适配器编译为厂商格式。</small></label><div class="asset-tags"><i>${escapeHtml(stage === "scene_asset" ? "统一 2×2 四视图" : stage === "character_sheet" ? "固定纯色背景" : "核心剧情资产")}</i></div><div class="asset-actions"><button type="button" data-action="generate-one" data-entity-type="${entityType}" data-stage="${stage}" data-entity-id="${escapeHtml(entity.id)}" data-library-type="${escapeHtml(libraryType || "")}" ${running ? "disabled" : ""}>${candidate ? "重新生成" : "AI 生成"}</button><button type="button" data-action="upload-one" data-entity-type="${entityType}" data-stage="${stage}" data-entity-id="${escapeHtml(entity.id)}">上传</button><button type="button" data-action="pick-shared" data-entity-type="${entityType}" data-stage="${stage}" data-entity-id="${escapeHtml(entity.id)}">共享库</button></div></div></article>`;
+}
+
+function renderPromptReviewStatus(project = state.project) {
+  const panel = $("#promptReviewStatus");
+  if (!panel) return;
+  const review = project?.promptReview;
+  const counts = review?.counts || {};
+  const total = Number(counts.total) || 0;
+  panel.hidden = false;
+  panel.className = `prompt-review-status${review?.status === "approved" ? " is-approved" : ""}`;
+  if (!total) {
+    panel.innerHTML = `<b>尚未生成完整提示词</b><span>先完成 AI 标准化拆镜，再生成全部中文提示词；此操作不会提交图片或视频任务。</span><button type="button" class="outline-button" data-action="prepare-prompts">生成提示词</button>`;
+    return;
+  }
+  panel.innerHTML = `<b>全部提示词已在资产生成前保存</b><span>共 ${total} 项：资产 ${Number(counts.assets) || 0}、分镜合图 ${Number(counts.storyboards) || 0}、分镜视频 ${Number(counts.videos) || 0}。界面只显示中文，人工修改会在提交时编译为厂商格式。</span><button type="button" class="outline-button" data-action="save-prompt-edits">保存提示词修改</button>`;
 }
 
 function renderAssets() {
@@ -342,13 +361,26 @@ function renderAssets() {
   ].join("") || '<p class="muted">当前剧本没有必须独立生成的核心道具或服装。</p>';
 }
 
+function storyboardPromptFields(shot, project) {
+  return expectedStoryboardSlots(project)
+    .filter(([candidateShot]) => candidateShot.id === shot.id)
+    .map(([, stage]) => {
+      const override = shot.promptOverrides?.[stage] || {};
+      const prompt = override.mode === "manual" && String(override.manual || "").trim()
+        ? override.manual
+        : override.system || "";
+      const label = stage === "storyboard_sheet" ? "逐秒分镜合图提示词" : stage === "storyboard_start" ? "剧情首帧提示词" : "剧情尾帧提示词";
+      return `<label class="prompt-field">${label}<textarea class="prompt-textarea" data-prompt-entity-type="shot" data-prompt-entity-id="${escapeHtml(shot.id)}" data-prompt-stage="${stage}" data-prompt-system="${escapeHtml(override.system || "")}">${escapeHtml(prompt)}</textarea></label>`;
+    }).join("");
+}
+
 function renderStoryboards() {
   const project = state.project;
   if (!project) return;
   const slots = expectedStoryboardSlots(project);
   const ready = slots.filter(([shot, stage]) => selectedCandidate(project, "shot", shot.id, stage)).length;
   $("#storyboardMode").innerHTML = `<span><small>分镜模式</small><b>${escapeHtml(generationLabels[project.generation?.mode] || "多帧合图")}</b></span><span><small>分镜数量</small><b>${project.shots?.length || 0}</b></span><span><small>画面槽位</small><b>${ready}/${slots.length}</b></span><div class="progress-mini"><i style="width:${slots.length ? Math.round(ready / slots.length * 100) : 0}%"></i></div>`;
-  $("#shotEditorList").innerHTML = (project.shots || []).length ? project.shots.slice().sort((a, b) => Number(a.number) - Number(b.number)).map(shot => `<article class="shot-card" data-shot-id="${escapeHtml(shot.id)}"><div class="shot-index"><b>${String(shot.number || 0).padStart(2, "0")}</b><span>${shot.duration || 0} 秒</span><small>${escapeHtml(shot.shotSize || "景别待定")}</small></div><div class="shot-story"><h3>${escapeHtml(shot.title || `镜头 ${shot.number}`)}</h3><p>${escapeHtml(shot.action || shot.visualBeat || "暂无动作")}</p><p class="dialogue">${escapeHtml(shot.dialogue || "无对白")}</p><div class="asset-tags"><i>${escapeHtml(shot.sceneName || "场景待定")}</i><i>${escapeHtml(shot.cameraMove || "机位待定")}</i></div></div><div class="shot-edit-fields"><label>动作与画面<textarea data-shot-field="action">${escapeHtml(shot.action || "")}</textarea></label><label>对白<textarea data-shot-field="dialogue">${escapeHtml(shot.dialogue || "")}</textarea></label><label>视频提示词<textarea data-shot-field="manualVideoPrompt" placeholder="留空则使用 AI 系统编译稿">${escapeHtml(shot.manualVideoPrompt || "")}</textarea></label></div></article>`).join("") : '<div class="empty-project"><h2>还没有分镜</h2><p>先到“剧本与分集”保存并执行 AI 拆镜。</p><button class="primary-button" type="button" data-panel-jump="script">去拆镜</button></div>';
+  $("#shotEditorList").innerHTML = (project.shots || []).length ? project.shots.slice().sort((a, b) => Number(a.number) - Number(b.number)).map(shot => `<article class="shot-card" data-shot-id="${escapeHtml(shot.id)}"><div class="shot-index"><b>${String(shot.number || 0).padStart(2, "0")}</b><span>${shot.duration || 0} 秒</span><small>${escapeHtml(shot.shotSize || "景别待定")}</small></div><div class="shot-story"><h3>${escapeHtml(shot.title || `镜头 ${shot.number}`)}</h3><p>${escapeHtml(shot.action || shot.visualBeat || "暂无动作")}</p><p class="dialogue">${escapeHtml(shot.dialogue || "无对白")}</p><div class="asset-tags"><i>${escapeHtml(shot.sceneName || "场景待定")}</i><i>${escapeHtml(shot.cameraMove || "机位待定")}</i></div></div><div class="shot-edit-fields">${storyboardPromptFields(shot, project)}<label>动作与画面<textarea data-shot-field="action">${escapeHtml(shot.action || "")}</textarea></label><label>对白<textarea data-shot-field="dialogue">${escapeHtml(shot.dialogue || "")}</textarea></label><label>中文视频提示词<textarea data-shot-field="manualVideoPrompt" data-system-prompt="${escapeHtml(shot.systemVideoPrompt || "")}" placeholder="AI 系统提示词会显示在这里；修改后保存为人工稿">${escapeHtml(shot.manualVideoPrompt || shot.systemVideoPrompt || "")}</textarea></label></div></article>`).join("") : '<div class="empty-project"><h2>还没有分镜</h2><p>先到“剧本与分集”保存并执行 AI 拆镜。</p><button class="primary-button" type="button" data-panel-jump="script">去拆镜</button></div>';
 }
 
 function activeJobForShot(project, shotId) {
@@ -505,7 +537,7 @@ function ensureTextProviderOptions() {
   if (!select) return;
   const labels = {
     "zhipu-native": "智谱 GLM",
-    "minimax-native": "海螺 MiniMax",
+    "minimax-native": "MiniMax",
     "qwen-native": "阿里千问",
     "kimi-native": "Kimi",
     "doubao-native": "火山豆包",
@@ -542,6 +574,7 @@ function renderAll() {
   renderOverview();
   renderScript();
   renderAssets();
+  renderPromptReviewStatus(state.project);
   renderStoryboards();
   renderVideos();
   renderFinal();
@@ -621,21 +654,71 @@ function collectShotPatch() {
   });
   return (state.project?.shots || []).map(shot => {
     const patch = updates.get(shot.id) || {};
+    const systemPrompt = document.querySelector(`.shot-card[data-shot-id="${CSS.escape(shot.id)}"] [data-shot-field="manualVideoPrompt"]`)?.dataset.systemPrompt || shot.systemVideoPrompt || "";
+    const editedPrompt = String(patch.manualVideoPrompt ?? shot.manualVideoPrompt ?? "").trim();
+    const manualPrompt = editedPrompt && editedPrompt !== String(systemPrompt).trim() ? editedPrompt : "";
     return {
       ...shot,
       action: patch.action ?? shot.action,
       dialogue: patch.dialogue ?? shot.dialogue,
-      manualVideoPrompt: patch.manualVideoPrompt ?? shot.manualVideoPrompt,
-      promptMode: String(patch.manualVideoPrompt || "").trim() ? "manual" : (shot.promptMode || "system")
+      manualVideoPrompt: manualPrompt,
+      promptMode: manualPrompt ? "manual" : "system"
     };
   });
 }
 
-async function saveShotFields() {
-  if (!state.project) return;
-  const result = resultOrThrow(await api("patchProject", state.project.id, { shots: collectShotPatch(), activitySummary: "已保存简易模式分镜修改" }));
+function collectPromptOverridePatches() {
+  const changes = new Map();
+  $$('[data-prompt-entity-type][data-prompt-entity-id][data-prompt-stage]').forEach(input => {
+    const key = `${input.dataset.promptEntityType}:${input.dataset.promptEntityId}`;
+    const system = String(input.dataset.promptSystem || "").trim();
+    const value = String(input.value || "").trim();
+    const current = changes.get(key) || {};
+    current[input.dataset.promptStage] = {
+      mode: value && value !== system ? "manual" : "system",
+      system,
+      manual: value && value !== system ? value : ""
+    };
+    changes.set(key, current);
+  });
+  return changes;
+}
+
+async function savePromptReviewEdits({ toast = true } = {}) {
+  if (!state.project) return null;
+  const changes = collectPromptOverridePatches();
+  const apply = (entity, type) => ({
+    ...entity,
+    promptOverrides: { ...(entity.promptOverrides || {}), ...(changes.get(`${type}:${entity.id}`) || {}) }
+  });
+  const project = state.project;
+  const result = resultOrThrow(await api("patchProject", project.id, {
+    characters: (project.characters || []).map(item => apply(item, "character")),
+    scenes: (project.scenes || []).map(item => apply(item, "scene")),
+    assetLibraries: {
+      ...(project.assetLibraries || {}),
+      props: (project.assetLibraries?.props || []).map(item => apply(item, "library")),
+      wardrobes: (project.assetLibraries?.wardrobes || []).map(item => apply(item, "library"))
+    },
+    shots: collectShotPatch().map(item => apply(item, "shot")),
+    promptReview: {
+      ...(project.promptReview || {}),
+      status: "ready",
+      reviewedAt: new Date().toISOString(),
+      reviewLanguage: "zh-CN",
+      providerCompilation: "on-submit"
+    },
+    activitySummary: "已保存全部中文提示词修改"
+  }));
   state.project = result.project;
   renderAll();
+  if (toast) showToast("全部中文提示词修改已保存");
+  return result.project;
+}
+
+async function saveShotFields() {
+  if (!state.project) return;
+  await savePromptReviewEdits({ toast: false });
   showToast("分镜修改已保存");
 }
 
@@ -756,6 +839,11 @@ document.addEventListener("click", async event => {
   const jump = event.target.closest("[data-panel-jump]");
   if (jump) return setPanel(jump.dataset.panelJump);
   const action = event.target.closest("[data-action]")?.dataset.action;
+  if (action === "prepare-prompts") {
+    if (!state.project?.shots?.length) return showToast("请先完成 AI 标准化拆镜", "error");
+    return runLong("正在生成全部中文提示词", "只生成并保存提示词，不会提交图片或视频任务", () => api("preparePromptReview", state.project.id));
+  }
+  if (action === "save-prompt-edits") return savePromptReviewEdits();
   if (action === "new-project") return showNewProjectDialog();
   if (action === "next-step") return state.project ? setPanel(firstIncompleteStage(state.project).panel) : showNewProjectDialog();
   if (action === "switch-agent") return window.dramaSlot.appMode.select("agent");
@@ -763,6 +851,7 @@ document.addEventListener("click", async event => {
   if (action === "reveal-final") return window.dramaSlot.reveal(state.project.finalVideoPath);
   if (action === "generate-one") {
     const button = event.target.closest("[data-action]");
+    await savePromptReviewEdits({ toast: false });
     const libraryType = button.dataset.libraryType;
     const operation = libraryType
       ? () => api("generateLibraryAsset", state.project.id, libraryType, button.dataset.entityId)
@@ -852,6 +941,7 @@ $("#aiAnalyze").addEventListener("click", async () => {
 });
 $("#generateAssets").addEventListener("click", async () => {
   if (!state.project) return;
+  await savePromptReviewEdits({ toast: false });
   const accepted = await confirmAction("生成全部缺少资产", "将调用图片与人物视频服务并产生实际费用；已就绪资产会自动跳过。", "开始生成");
   if (accepted) runLong("正在生成资产", "人物、场景、核心道具与音色正在并发处理", () => api("generateAllAssets", state.project.id), { background: true });
 });
@@ -864,6 +954,7 @@ $("#generateStoryboards").addEventListener("click", async () => {
 });
 $("#generateVideos").addEventListener("click", async () => {
   if (!state.project) return;
+  await savePromptReviewEdits({ toast: false });
   const accepted = await confirmAction("生成全部分镜视频", "将提交真实视频任务并产生实际费用。任务没有总时限，可在任务中心持续查看。", "提交全部");
   if (accepted) runLong("分镜视频任务已启动", "所有分镜按设置并发提交并持续同步", () => api("generateAllShotVideos", state.project.id), { background: true });
 });

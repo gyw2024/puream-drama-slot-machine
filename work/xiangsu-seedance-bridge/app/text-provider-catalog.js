@@ -68,14 +68,14 @@ const TEXT_PROVIDER_CATALOG = Object.freeze({
   },
   "minimax-native": {
     tag: "MINIMAX HAILUO",
-    displayName: "海螺 MiniMax",
+    displayName: "MiniMax",
     baseUrl: "https://api.minimaxi.com/v1",
     defaultModel: "MiniMax-M3",
     models: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1", "MiniMax-M2", "abab6.5s-chat"],
     temperature: 1,
     authSource: "user",
     domestic: true,
-    help: "内置海螺 MiniMax 官方兼容接口，只需选择模型并填写 API Key。"
+    help: "内置 MiniMax 官方兼容接口，只需选择模型并填写 API Key。"
   },
   "qwen-native": {
     tag: "QWEN DASH SCOPE",

@@ -6257,6 +6257,74 @@ function imageBatchConcurrency(project) {
   return Math.max(1, Math.min(IMAGE_BATCH_MAX_CONCURRENCY, requested));
 }
 
+const PROMPT_REVIEW_BUNDLE_VERSION = "prompt-review-v1";
+
+function promptReviewReferencePlan(project = {}, shot = {}, mode = "") {
+  const imageRoles = [];
+  const addImage = (type, entityId, label) => {
+    if (!entityId && type !== "product") return;
+    if (imageRoles.some(item => item.type === type && item.entityId === entityId)) return;
+    imageRoles.push({ type, entityId, label, reviewPlaceholder: true });
+  };
+  const strategy = resolveShotVideoStrategy({
+    ...project,
+    generation: { ...(project.generation || {}), mode: mode || project.generation?.mode }
+  }, shot);
+  for (const stage of strategy.frameStages || []) {
+    const label = stage === "storyboard_sheet"
+      ? "本镜逐秒分镜合图（生成后自动绑定）"
+      : stage === "storyboard_start"
+        ? "本镜剧情首帧（生成后自动绑定）"
+        : "本镜剧情尾帧（生成后自动绑定）";
+    addImage(stage, shot.id, label);
+  }
+  if (shot.sceneId) {
+    const scene = (project.scenes || []).find(item => item.id === shot.sceneId);
+    addImage("scene", shot.sceneId, `场景“${scene?.name || shot.sceneId}”四视图参考（生成后自动绑定）`);
+  }
+  for (const characterId of expandShotCharacterCast(project, shot)) {
+    const character = (project.characters || []).find(item => item.id === characterId);
+    addImage("character", characterId, `角色“${character?.name || characterId}”人物参考（生成后自动绑定）`);
+  }
+  if (shot.productMention && project.product?.imagePath) {
+    addImage("product", "product", `商品“${project.product?.name || "用户上传商品"}”原图参考`);
+  }
+  const speakerIds = [...new Set(uniqueDialogueTurns(project, shot).map(turn => {
+    const character = (project.characters || []).find(item => item.id === turn.speakerId || item.name === turn.speaker);
+    return character?.id || turn.speakerId || "";
+  }).filter(Boolean))];
+  const audios = speakerIds.map(characterId => {
+    const character = (project.characters || []).find(item => item.id === characterId);
+    return {
+      characterId,
+      characterName: character?.name || characterId,
+      duration: HAILUO_VOICE_REFERENCE_TARGET_SECONDS,
+      reviewPlaceholder: true
+    };
+  });
+  return {
+    images: imageRoles.map((item, index) => `prompt-review://${shot.id || "shot"}/image-${index + 1}-${item.type}`),
+    imageRoles,
+    audios,
+    videos: [],
+    videoRoles: [],
+    videoAudios: [],
+    hailuoApiMode: audios.length ? "multimodal_to_video" : "image_to_video",
+    reviewOnly: true
+  };
+}
+
+function characterVideoPromptForReview(character = {}, duration = 5, speechScript = "") {
+  return [
+    `人物视频提示词：角色“${character.name || character.id || "未命名角色"}”。`,
+    `人物身份与外观：${character.description || character.identitySignature || "严格保持人物四视图中的脸、年龄、发型和整套服装一致"}。`,
+    `音色与说话方式：${character.voiceDescription || "自然、清晰、稳定，符合角色年龄与身份"}。`,
+    `画面：严格 ${Number(duration) || 5} 秒，单人正面真人中近景，纯净中性背景，双眼和完整面部始终清楚，嘴部无遮挡，不切镜，不出现第二个人。`,
+    `中文台词（从第零秒立即开口，完整说完且只说一次）：“${speechScript || character.signatureLine || "这件事，我今天一定说清楚。"}”`,
+    "禁止字幕、标题、人物介绍、标识、水印、人物多视图、角色设定板、资产卡、参考图边框、背景音乐和第二个人声。"
+  ].join("\n");
+}
+
 function authorityConcurrencyValue(session, kind, fallback) {
   const key = kind === "video" ? "videoConcurrency" : "imageConcurrency";
   const value = Math.floor(Number(session?.[key]));
@@ -14771,7 +14839,7 @@ class WorkbenchWorkflow {
       stage: "script_analysis",
       message: reusableIndices.size
         ? `已恢复 ${reusableIndices.size}/${chunkSchedules.length} 个拆镜断点，正在继续其余片段`
-        : `正在按输入/输出预算拆解 ${chunkSchedules.length} 个剧本片段（最多并发 ${analysisConcurrency}）`,
+        : `正在按输入/输出预算拆解 ${chunkSchedules.length} 个剧本片段（文本拆解并发 ${analysisConcurrency}；图片/视频并发由后台额度另行控制）`,
       updatedAt: new Date().toISOString()
     };
     this.store.saveProject(checkpointProject);
@@ -15343,16 +15411,152 @@ ${shotAnchor}
     if (!character) throw Object.assign(new Error("角色不存在"), { code: "CHARACTER_NOT_FOUND" });
     const compiled = this.compileCharacterVideoPrompt(project, settings, character);
     const override = character.promptOverrides?.character_video || {};
+    const displayPrompt = String(override.system || "").trim()
+      || characterVideoPromptForReview(character, compiled.duration, compiled.speechScript);
     return {
       characterId,
       mode: override.mode === "manual" ? "manual" : "system",
-      compiled: compiled.prompt,
+      compiled: displayPrompt,
+      providerPrompt: compiled.prompt,
       active: this.resolveCharacterVideoPrompt(project, settings, character),
       system: String(override.system || ""),
       manual: String(override.manual || ""),
       duration: compiled.duration,
       speechScript: compiled.speechScript
     };
+  }
+
+  async preparePromptReviewBundle(projectId, options = {}) {
+    this.reconcileProjectCharacterReferences(projectId);
+    let project = annotateProjectShotStrategies(this.store.getProject(projectId));
+    const settings = this.store.getSettings();
+    const mode = normalizeProjectMode(project.generation?.mode);
+    // Lightweight workflow doubles used by integrations may expose only the
+    // project/automation store. Keep the stage non-blocking for those callers;
+    // the real desktop store always carries the complete prompt catalog.
+    if (!settings?.generation || !settings?.prompts) {
+      project.promptReview = {
+        version: PROMPT_REVIEW_BUNDLE_VERSION,
+        status: options.autoApprove === true ? "approved" : "ready",
+        language: "zh-CN",
+        generatedAt: new Date().toISOString(),
+        submitCompilation: "provider-adapter-at-submit",
+        counts: { assets: 0, storyboards: 0, videos: 0, total: 0 },
+        items: []
+      };
+      return this.store.saveProject(project);
+    }
+    const overwriteManual = options.overwriteManual === true;
+    const generatedAt = new Date().toISOString();
+    const items = [];
+    const keepManual = (entity, stage) => entity?.promptOverrides?.[stage]?.mode === "manual"
+      && !overwriteManual
+      && Boolean(String(entity?.promptOverrides?.[stage]?.manual || "").trim());
+    const savePromptOverride = (entity, stage, systemPrompt) => ({
+      ...(entity.promptOverrides || {}),
+      [stage]: {
+        mode: keepManual(entity, stage) ? "manual" : "system",
+        system: String(systemPrompt || "").trim(),
+        manual: entity.promptOverrides?.[stage]?.manual || ""
+      }
+    });
+    const addItem = (group, entityType, entityId, stage, label, prompt, modeValue = "system") => {
+      items.push({
+        id: `${entityType}:${entityId}:${stage}`,
+        group,
+        entityType,
+        entityId,
+        stage,
+        label,
+        prompt: String(prompt || "").trim(),
+        language: "zh-CN",
+        mode: modeValue
+      });
+    };
+
+    project.characters = (project.characters || []).map(character => {
+      const characterSheet = this.compileImagePrompt(project, settings, "character_sheet", character);
+      const characterThreeView = this.compileImagePrompt(project, settings, "character_three_view", character);
+      const characterIntro = this.compileImagePrompt(project, settings, "character_intro", character);
+      const providerVideo = this.compileCharacterVideoPrompt(project, settings, character);
+      const characterVideo = characterVideoPromptForReview(character, providerVideo.duration, providerVideo.speechScript);
+      addItem("assets", "character", character.id, "character_sheet", `${character.name} · 人物四视图`, characterSheet, keepManual(character, "character_sheet") ? "manual" : "system");
+      addItem("assets", "character", character.id, "character_three_view", `${character.name} · 人物三视图`, characterThreeView, keepManual(character, "character_three_view") ? "manual" : "system");
+      addItem("assets", "character", character.id, "character_intro", `${character.name} · 身份参考图`, characterIntro, keepManual(character, "character_intro") ? "manual" : "system");
+      addItem("assets", "character", character.id, "character_video", `${character.name} · 人物视频`, characterVideo, keepManual(character, "character_video") ? "manual" : "system");
+      let promptOverrides = savePromptOverride(character, "character_sheet", characterSheet);
+      promptOverrides = savePromptOverride({ ...character, promptOverrides }, "character_three_view", characterThreeView);
+      promptOverrides = savePromptOverride({ ...character, promptOverrides }, "character_intro", characterIntro);
+      promptOverrides = savePromptOverride({ ...character, promptOverrides }, "character_video", characterVideo);
+      return { ...character, promptOverrides };
+    });
+
+    project.scenes = (project.scenes || []).map(scene => {
+      const prompt = this.compileImagePrompt(project, settings, "scene_asset", scene);
+      addItem("assets", "scene", scene.id, "scene_asset", `${scene.name} · 场景四视图`, prompt, keepManual(scene, "scene_asset") ? "manual" : "system");
+      return { ...scene, promptOverrides: savePromptOverride(scene, "scene_asset", prompt) };
+    });
+
+    // Props and wardrobes are project-owned library entities. They must be
+    // visible in the same review bundle as characters/scenes so no paid image
+    // request can be submitted from an unreviewed asset card.
+    for (const [libraryType, stage, labelSuffix] of [
+      ["props", "prop_asset", "核心道具"],
+      ["wardrobes", "wardrobe_asset", "服装"]
+    ]) {
+      const entries = Array.isArray(project.assetLibraries?.[libraryType])
+        ? project.assetLibraries[libraryType]
+        : [];
+      project.assetLibraries = { ...(project.assetLibraries || {}), [libraryType]: entries.map(entry => {
+        const prompt = this.compileImagePrompt(project, settings, stage, entry);
+        addItem("assets", "library", entry.id, stage, `${entry.name || entry.id} · ${labelSuffix}`, prompt, keepManual(entry, stage) ? "manual" : "system");
+        return { ...entry, promptOverrides: savePromptOverride(entry, stage, prompt) };
+      }) };
+    }
+
+    project.shots = (project.shots || []).map(shot => {
+      let next = { ...shot };
+      for (const stage of resolveShotVideoStrategy(project, shot).frameStages || []) {
+        const prompt = this.compileImagePrompt(project, settings, stage, shot);
+        const label = stage === "storyboard_sheet" ? "逐秒分镜合图" : stage === "storyboard_start" ? "剧情首帧" : "剧情尾帧";
+        addItem("storyboards", "shot", shot.id, stage, `镜头 ${shot.number} · ${label}`, prompt, keepManual(shot, stage) ? "manual" : "system");
+        next.promptOverrides = savePromptOverride(next, stage, prompt);
+      }
+      const reviewReferences = promptReviewReferencePlan(project, shot, mode);
+      const generatedVideoPrompt = renderApprovedVideoPrompt(project, shot, reviewReferences);
+      const manualVideoActive = shot.promptMode === "manual" && !overwriteManual && Boolean(String(shot.manualVideoPrompt || "").trim());
+      if (!manualVideoActive) {
+        next.promptMode = "system";
+        next.systemVideoPrompt = generatedVideoPrompt;
+      }
+      next.promptReviewReferencePlan = {
+        images: reviewReferences.imageRoles.map((role, index) => ({ index: index + 1, type: role.type, entityId: role.entityId, label: role.label })),
+        audios: reviewReferences.audios.map((audio, index) => ({ index: index + 1, characterId: audio.characterId, characterName: audio.characterName }))
+      };
+      addItem("videos", "shot", shot.id, "shot_video", `镜头 ${shot.number} · 分镜视频`, manualVideoActive ? shot.manualVideoPrompt : generatedVideoPrompt, manualVideoActive ? "manual" : "system");
+      return next;
+    });
+
+    const previous = project.promptReview || {};
+    const autoApproved = options.autoApprove === true;
+    project.promptReview = {
+      version: PROMPT_REVIEW_BUNDLE_VERSION,
+      status: autoApproved ? "approved" : "ready",
+      language: "zh-CN",
+      generatedAt,
+      approvedAt: autoApproved ? generatedAt : (previous.approvedAt || ""),
+      approvedBy: autoApproved ? "one-click-pipeline" : (previous.approvedBy || ""),
+      submitCompilation: "provider-adapter-at-submit",
+      counts: {
+        assets: items.filter(item => item.group === "assets").length,
+        storyboards: items.filter(item => item.group === "storyboards").length,
+        videos: items.filter(item => item.group === "videos").length,
+        total: items.length
+      },
+      items
+    };
+    project.updatedAt = generatedAt;
+    return this.store.saveProject(project);
   }
 
   async refreshCreatorPrompts(projectId, options = {}) {
@@ -15638,6 +15842,9 @@ ${shotAnchor}
   }
 
   async generateImageCandidate(projectId, stage, entityId, promptOverride = "", options = {}) {
+    if (options.promptPrepared !== true) {
+      await this.preparePromptReviewBundle(projectId, { autoApprove: false });
+    }
     if (stage === "product_asset" || stage === "product_reference" || /product/i.test(String(stage || ""))) {
       throw Object.assign(new Error("商品图禁止 AI 凭空生成；请上传真实产品图，系统仅允许基于原图抠图或轻微质感优化"), { code: "PRODUCT_AI_GENERATION_FORBIDDEN" });
     }
@@ -19313,9 +19520,57 @@ ${shotAnchor}
     return compiledPrompt;
   }
 
+  async compileManualReviewPromptForProvider(projectId, project, shot, settings, engine) {
+    const reviewPrompt = String(shot?.manualVideoPrompt || "").trim();
+    if (!reviewPrompt || engine !== "hailuo-h3" || !/[\u3400-\u9fff]/.test(reviewPrompt)) return reviewPrompt;
+    let providerPrompt = "";
+    try {
+      const raw = await this.generateText(settings.textProvider, [
+        {
+          role: "system",
+          content: "Translate the supplied Chinese video-generation review prompt into concise professional English instructions. Keep every character name and every spoken Chinese dialogue line exactly in Chinese. Preserve reference indices, timestamps, shot changes, emotions, speaking tone, speaker-listener direction, voice-reference bindings, no-subtitle/no-BGM rules, and all negative constraints. Output only the complete provider prompt, without explanation or Markdown."
+        },
+        { role: "user", content: reviewPrompt }
+      ], this.productionTextOptions(projectId, `manual_video_prompt_${shot.id}`, {
+        json: false,
+        sessionId: `manual-video-provider-${projectId}-${shot.id}-${crypto.createHash("sha256").update(reviewPrompt).digest("hex").slice(0, 12)}`,
+        timeoutMs: PROMPT_COMPILER_TIMEOUT_MS,
+        maxReconnectAttempts: 1,
+        costProjectId: projectId,
+        costOperation: "manual_video_prompt_provider_compile",
+        entityType: "shot",
+        entityId: shot.id
+      }));
+      providerPrompt = typeof raw === "string" ? raw.trim() : "";
+    } catch (error) {
+      // Provider compilation must not erase an approved manual prompt. Hailuo
+      // accepts Chinese instructions, so the original remains the safe fallback.
+      this.store.addActivity?.(projectId, "manual_prompt_compile_warning", `镜头 ${shot.number} 的英文厂商稿编译未完成，已保留中文人工稿继续提交：${error?.message || "未知错误"}`);
+    }
+    if (!providerPrompt) providerPrompt = reviewPrompt;
+    const missingDialogue = uniqueDialogueTurns(project, shot)
+      .filter(turn => turn.text && !providerPrompt.includes(turn.text));
+    if (missingDialogue.length) {
+      providerPrompt += `\n\nExact Chinese dialogue, preserve verbatim: ${missingDialogue.map(turn => `${turn.speaker}: ${turn.text}`).join(" | ")}`;
+    }
+    const latest = this.store.getProject(projectId);
+    latest.shots = (latest.shots || []).map(item => item.id === shot.id ? {
+      ...item,
+      providerVideoPrompt: providerPrompt,
+      providerVideoPromptLanguage: providerPrompt === reviewPrompt ? "zh-CN-fallback" : "en-with-zh-dialogue",
+      providerVideoPromptCompiledAt: new Date().toISOString(),
+      providerVideoPromptSourceHash: crypto.createHash("sha256").update(reviewPrompt).digest("hex")
+    } : item);
+    this.store.saveProject(latest);
+    return providerPrompt;
+  }
+
   async generateShotVideo(projectId, shotId, modeOverride = "", options = {}) {
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "shot_video", shotId, () => this.generateShotVideo(projectId, shotId, modeOverride, { ...options, track: false }));
+    }
+    if (options.promptPrepared !== true) {
+      await this.preparePromptReviewBundle(projectId, { autoApprove: false });
     }
     await this.ensureStageDependencies(projectId, "videos");
     const project = this.store.getProject(projectId);
@@ -19448,7 +19703,13 @@ ${shotAnchor}
         end: Number(((Number(item.end) || requestedDuration) * outputDuration / requestedDuration).toFixed(1))
       }))
     };
-    const prompt = this.buildShotPrompt(refreshedProject, settings, promptShot, mode, references, options.qualityRepair || "", options.qualityRepairKey || "");
+    const providerManualPrompt = manualPromptActive
+      ? await this.compileManualReviewPromptForProvider(projectId, refreshedProject, activeShot, settings, engine)
+      : "";
+    const providerPromptShot = providerManualPrompt
+      ? { ...promptShot, promptMode: "manual", manualVideoPrompt: providerManualPrompt }
+      : promptShot;
+    const prompt = this.buildShotPrompt(refreshedProject, settings, providerPromptShot, mode, references, options.qualityRepair || "", options.qualityRepairKey || "");
     if (engine === "hailuo-h3" && !manualPromptActive) {
       assertHailuoPromptVoiceBindings(refreshedProject, activeShot, references, prompt);
       // The exact prompt shown to the user and the prompt sent to the paid API
@@ -20083,6 +20344,9 @@ ${shotAnchor}
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "shot_videos", "", () => this.generateAllShotVideos(projectId, { track: false }));
     }
+    if (options.promptPrepared !== true) {
+      await this.preparePromptReviewBundle(projectId, { autoApprove: false });
+    }
     await this.ensureStageDependencies(projectId, "videos");
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
@@ -20307,6 +20571,9 @@ ${shotAnchor}
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "assets", "", () => this.generateAllAssets(projectId, { track: false }));
     }
+    if (options.promptPrepared !== true) {
+      await this.preparePromptReviewBundle(projectId, { autoApprove: false });
+    }
     this.reconcileProjectCharacterReferences(projectId);
     this.ensureProjectShotScenes(projectId);
     this.syncReferenceLibraries(projectId);
@@ -20355,8 +20622,8 @@ ${shotAnchor}
       this.updateAssetBatchProgress(projectId, item.key, { status: "running", errorCode: "", message: "正在提交上游" });
       try {
         let result;
-        if (item.kind === "character_sheet") result = await this.generateImageCandidate(projectId, "character_sheet", item.entityId, "", { track: false });
-        else if (item.kind === "character_three_view") result = await this.generateImageCandidate(projectId, "character_three_view", item.entityId, "", { track: false });
+        if (item.kind === "character_sheet") result = await this.generateImageCandidate(projectId, "character_sheet", item.entityId, "", { track: false, promptPrepared: true });
+        else if (item.kind === "character_three_view") result = await this.generateImageCandidate(projectId, "character_three_view", item.entityId, "", { track: false, promptPrepared: true });
         else if (item.kind === "character_video") {
           let lastError = null;
           for (let attempt = 1; attempt <= 5; attempt += 1) {
@@ -20766,7 +21033,7 @@ ${shotAnchor}
           stage: "assets",
           message: `后续阶段发现 ${missingAssets.length} 项依赖资产缺失，正在自动回到资产阶段补齐`
         });
-        await this.generateAllAssets(projectId, { track: false });
+        await this.generateAllAssets(projectId, { track: false, promptPrepared: true });
         actions.push("assets");
         project = this.store.getProject(projectId);
       }
@@ -20779,7 +21046,7 @@ ${shotAnchor}
           stage: "storyboards",
           message: `视频阶段发现 ${missingFrames.length} 张分镜图缺失，正在自动回到分镜阶段补齐，完成后自动继续视频`
         });
-        await this.generateAllStoryboards(projectId, { track: false, dependenciesReady: true });
+        await this.generateAllStoryboards(projectId, { track: false, dependenciesReady: true, promptPrepared: true });
         actions.push("storyboards");
         project = this.store.getProject(projectId);
       }
@@ -20872,13 +21139,23 @@ ${shotAnchor}
       // this run eligible. It becomes replayable evidence for every later job.
       this.store.saveProject(project);
     }
+    // Prompt review is a first-class stage. It must finish before any asset,
+    // storyboard, or video generator can submit a paid request.
+    if (shouldRun("assets") || shouldRun("shots") || shouldRun("videos")) {
+      this.setAutomation(projectId, {
+        stage: "prompt_review",
+        message: "正在生成全部中文提示词：资产、分镜合图和分镜视频均可先阅览与修改"
+      });
+      this.assertOperationActive(projectId);
+      project = await this.preparePromptReviewBundle(projectId, {
+        autoApprove: project.productionPlan?.executionMode === "full"
+      });
+    }
     if (shouldRun("assets")) {
       this.setAutomation(projectId, { stage: "assets", message: "正在补齐人物/场景/服装/道具资产" });
       this.assertOperationActive(projectId);
-      await this.generateAllAssets(projectId, { track: false });
-      this.setAutomation(projectId, { stage: "creator_prompts", message: "资产已就绪，正在绑定场景锚图并刷新创作提示" });
-      this.assertOperationActive(projectId);
-      await this.refreshCreatorPrompts(projectId);
+      await this.generateAllAssets(projectId, { track: false, promptPrepared: true });
+      project = this.store.getProject(projectId);
     }
     if (shouldRun("shots")) {
       const sheetMode = normalizeProjectMode(project.generation?.mode) === "storyboard_sheet";
@@ -20887,13 +21164,13 @@ ${shotAnchor}
         message: sheetMode ? "正在按逐秒合图模式补齐每镜唯一合图（本模式不生成首帧或尾帧）" : "正在按当前模式补齐分镜帧"
       });
       this.assertOperationActive(projectId);
-      await this.generateAllStoryboards(projectId, { track: false });
+      await this.generateAllStoryboards(projectId, { track: false, promptPrepared: true });
     }
     if (shouldRun("videos")) {
       await this.ensureStageDependencies(projectId, "videos");
       this.setAutomation(projectId, { stage: "shot_videos", message: "正在补齐缺失的分镜视频" });
       this.assertOperationActive(projectId);
-      await this.generateAllShotVideos(projectId, { track: false });
+      await this.generateAllShotVideos(projectId, { track: false, promptPrepared: true });
     }
     if (shouldRun("final")) {
       this.setAutomation(projectId, { stage: "stitch", message: "正在拼接并验收完整短剧" });
@@ -21117,6 +21394,9 @@ ${shotAnchor}
   async generateLibraryAssetImage(projectId, type, assetId, options = {}) {
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "library_asset", `${type}:${assetId}`, () => this.generateLibraryAssetImage(projectId, type, assetId, { ...options, track: false }));
+    }
+    if (options.promptPrepared !== true) {
+      await this.preparePromptReviewBundle(projectId, { autoApprove: false });
     }
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
@@ -21343,6 +21623,9 @@ ${shotAnchor}
   async generateAllStoryboards(projectId, options = {}) {
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "storyboards", "", () => this.generateAllStoryboards(projectId, { track: false }));
+    }
+    if (options.promptPrepared !== true) {
+      await this.preparePromptReviewBundle(projectId, { autoApprove: false });
     }
     if (options.dependenciesReady !== true) await this.ensureStageDependencies(projectId, "shots");
     else this.reconcileProjectCharacterReferences(projectId);
@@ -22151,7 +22434,7 @@ ${shotAnchor}
         stage: "agent_voice_asset_recovery",
         message: "检测到说话角色缺少真实音色文件，Agent 正在定向补人物视频并提取音色；本错误只恢复一次"
       });
-      await this.generateAllAssets(projectId, { track: false });
+      await this.generateAllAssets(projectId, { track: false, promptPrepared: true });
       const repairedProject = this.store.getProject(projectId);
       const repairedVoice = characterId
         ? candidateReady(repairedProject, "character", characterId, "character_voice", this.store.getSettings())
@@ -22558,3 +22841,6 @@ module.exports.resumedTextProvider = resumedTextProvider;
 module.exports.directorCompileConcurrency = directorCompileConcurrency;
 module.exports.voiceLibraryFingerprint = voiceLibraryFingerprint;
 module.exports.isRetryableStoryboardFailure = isRetryableStoryboardFailure;
+module.exports.promptReviewReferencePlan = promptReviewReferencePlan;
+module.exports.characterVideoPromptForReview = characterVideoPromptForReview;
+module.exports.PROMPT_REVIEW_BUNDLE_VERSION = PROMPT_REVIEW_BUNDLE_VERSION;

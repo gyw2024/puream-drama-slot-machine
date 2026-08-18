@@ -2370,7 +2370,7 @@ class WorkbenchStore {
     }
     const shouldInvalidatePlan = inputChangeReasons.length > 0 && hasMaterializedProduction(project);
     let activitySummary = String(patch?.activitySummary || "项目已更新");
-    const allowed = ["title", "status", "currentStage", "script", "ideation", "product", "generation", "productionPlan", "promptIntake", "characters", "scenes", "shots", "automation", "finalVideoPath", "finalVideoHistory"];
+    const allowed = ["title", "status", "currentStage", "script", "ideation", "product", "generation", "productionPlan", "promptIntake", "characters", "scenes", "shots", "assetLibraries", "promptReview", "automation", "finalVideoPath", "finalVideoHistory"];
     for (const key of allowed) {
       if (!Object.prototype.hasOwnProperty.call(patch || {}, key)) continue;
       project[key] = ["script", "product", "generation", "productionPlan", "promptIntake", "automation"].includes(key)

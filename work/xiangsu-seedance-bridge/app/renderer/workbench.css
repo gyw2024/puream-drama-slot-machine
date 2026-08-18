@@ -633,6 +633,12 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
 .asset-batch-progress-counts .has-failed { color: #ff9a90; }
 .asset-batch-progress-track { margin-top: 10px; height: 6px; border-radius: 999px; background: #231c14; overflow: hidden; }
 .asset-batch-progress-track i { display: block; height: 100%; background: linear-gradient(90deg,#c67a12,#ffc45d); }
+.prompt-review-status { display: grid; gap: 5px; margin: 0 0 12px; padding: 12px 14px; border: 1px solid rgba(84,205,139,.34); border-radius: 8px; background: rgba(11,31,22,.88); }
+.prompt-review-status[hidden] { display: none; }
+.prompt-review-status b { color: #8be2b1; font-size: 12px; line-height: 1.4; }
+.prompt-review-status span { color: #b7c8bf; font-size: 10px; line-height: 1.55; }
+.prompt-review-status.is-ready { border-color: rgba(255,181,43,.34); background: rgba(37,27,10,.9); }
+.prompt-review-status.is-ready b { color: #ffd08a; }
 .asset-batch-running-list, .asset-batch-failures { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .asset-batch-running-list span, .asset-batch-failures span { padding: 3px 7px; border-radius: 999px; border: 1px solid rgba(255,255,255,.08); background: rgba(0,0,0,.28); color: #d8c7ad; font-size: 9px; }
 .asset-batch-failures span { border-color: rgba(255,107,95,.35); color: #ffb0a8; }
