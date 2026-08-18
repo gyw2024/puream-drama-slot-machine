@@ -220,29 +220,6 @@ function isActiveVideoJob(job) {
     }
 
     if (recoveredBlocks.length) {
-      const playable = recoveredBlocks.find(item => item.internalGenerationBlockFilePath || item.internalTakeFilePath);
-      const filePath = playable?.internalGenerationBlockFilePath || playable?.internalTakeFilePath || "";
-      if (filePath) {
-        return {
-          key: "ready",
-          label: recoveredBlocks.length > 1 ? `已就绪 · ${recoveredBlocks.length} 段` : "已就绪",
-          candidate: {
-            id: playable.candidateId || `recovered-${playable.id}`,
-            entityType: "shot",
-            entityId: shot?.id,
-            stage: "shot_video",
-            filePath,
-            fileUrl: playable.fileUrl || "",
-            taskId: playable.taskId || "",
-            recoveredInternalBlock: true
-          },
-          job,
-          activeJob: null,
-          recoveredBlocks,
-          progress: videoJobProgress({ status: "completed" }),
-          detail: "上游片段已取回并可以播放"
-        };
-      }
       const rejectedCount = recoveredBlocks.filter(item => item.localQualityRejected === true).length;
       return {
         key: "partial",

@@ -2751,11 +2751,14 @@ function characterIdentityCandidate(project, characterId, settings = null) {
   if (active) return active;
   const byRecency = (left, right) => String(right.manualSelectedAt || right.updatedAt || right.createdAt || "")
     .localeCompare(String(left.manualSelectedAt || left.updatedAt || left.createdAt || ""));
+  // The portrait is a private H3 voice/identity anchor. It must never replace
+  // the visible four-view character asset in the workbench or project overview.
+  // Explicit user selection still wins, then prefer the reusable four-view
+  // board before falling back to the portrait when no board exists.
   return available.filter(item => item.selected === true && item.manualSelectionOverride === true).sort(byRecency)[0]
-    || available.filter(item => item.selected === true).sort(byRecency)[0]
-    || candidateReady(project, "character", characterId, "character_intro", settings)
     || candidateReady(project, "character", characterId, "character_sheet", settings)
-    || candidateReady(project, "character", characterId, "character_three_view", settings);
+    || candidateReady(project, "character", characterId, "character_three_view", settings)
+    || candidateReady(project, "character", characterId, "character_intro", settings);
 }
 
 /** Paid video and storyboard frames must never consume a multi-panel identity board. */
@@ -5121,14 +5124,14 @@ function renderApprovedVideoPrompt(project = {}, shot = {}, references = {}) {
     : [
       { type: "storyboard_sheet", entityId: shot?.id },
       ...(shot?.sceneId ? [{ type: "scene", entityId: shot.sceneId }] : []),
-      ...list(shot?.characterIds).map(id => ({ type: "character", entityId: id }))
+      ...normalizeStringArray(shot?.characterIds).map(id => ({ type: "character", entityId: id }))
     ];
   const images = Array.isArray(references?.images) && references.images.length
     ? references.images
     : imageRoles.map((_item, index) => `bound-image-${index + 1}`);
   const audios = Array.isArray(references?.audios) && references.audios.length
     ? references.audios
-    : list(shot?.characterIds).map(id => ({
+    : normalizeStringArray(shot?.characterIds).map(id => ({
       characterId: id,
       characterName: (project?.characters || []).find(item => item.id === id)?.name || id
     }));
@@ -14251,6 +14254,25 @@ class WorkbenchWorkflow {
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
     if (!project.script?.raw?.trim()) throw Object.assign(new Error("请先粘贴完整短剧剧本"), { code: "SCRIPT_REQUIRED" });
+    // Old desktop builds could import a user script without persisting the
+    // manual input flag. Generated topic scripts carry their own lineage, so a
+    // raw script without that lineage is safely recognized as an upload here.
+    const legacyUploadedScript = project.productionPlan?.inputMode !== "manual"
+      && !project.script?.generatedFromTopicId
+      && !project.script?.ideaSignature
+      && !project.script?.generationCheckpoint;
+    if (legacyUploadedScript) {
+      project.productionPlan = {
+        ...(project.productionPlan || {}),
+        inputMode: "manual",
+        scriptHandling: "respect"
+      };
+      project.ideation = {
+        ...(project.ideation || {}),
+        message: "已识别为用户上传剧本；系统将自动标准化、拆镜并提取唯一资产"
+      };
+      this.store.saveProject(project);
+    }
     // Older builds could leave an uploaded timed-storyboard project in AI
     // ideation mode. Its authored format is unambiguous, so repair the mode at
     // the analysis boundary as well as in the upload UI.
@@ -14747,6 +14769,7 @@ class WorkbenchWorkflow {
     };
     const pendingChunks = chunkSchedules.filter(chunk => !reusableIndices.has(chunk.index));
     const completedAgentIndices = new Set(reusableIndices);
+    const localRepairIndices = new Set();
     const upstreamReceipts = [];
     await mapWithConcurrency(pendingChunks, analysisConcurrency, async chunk => {
       this.assertOperationActive(projectId);
@@ -14812,7 +14835,11 @@ class WorkbenchWorkflow {
         bound = enforceSourceSceneLedger(bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger), chunk.sourceSceneLedger, chunk.sourceDialogueLedger);
       } catch (error) {
         if (isScriptControlError(error)) throw error;
-        if (projectInputMode(project) === "manual" && Array.isArray(localBound?.shots) && localBound.shots.length === chunk.unitCount) {
+        // Uploaded scripts can arrive from older clients with inputMode left at
+        // "ai". The source is still user-authored here, and the deterministic
+        // compiler already preserves every dialogue ledger entry. Never strand
+        // the run merely because that legacy mode flag is missing.
+        if (Array.isArray(localBound?.shots) && localBound.shots.length === chunk.unitCount) {
           bound = enforceSourceSceneLedger(
             bindSourceDialogueLedgerToAnalysis(localBound, chunk.sourceDialogueLedger),
             chunk.sourceSceneLedger,
@@ -14822,9 +14849,10 @@ class WorkbenchWorkflow {
             ...bound,
             authoredBy: "local-uploaded-script-compiler",
             localFallback: true,
-            enhancementStatus: "local-fallback",
+            enhancementStatus: "local-auto-repair",
             enhancementCauseCode: error?.code || "TEXT_PROVIDER_FAILED"
           }, requestChars);
+          localRepairIndices.add(chunk.index);
           partials[chunk.index] = bound;
           return bound;
         }
@@ -14849,11 +14877,11 @@ class WorkbenchWorkflow {
       return bound;
     });
     uploadedAnalysisFallbackSummary = {
-      source: "agent-structured-result-required",
+      source: localRepairIndices.size ? "agent-plus-local-auto-repair" : "agent-structured-result",
       totalChunks: chunkSchedules.length,
       agentCompletedChunks: completedAgentIndices.size,
-      localFallbackCount: 0,
-      localFallbackChunks: [],
+      localFallbackCount: localRepairIndices.size,
+      localFallbackChunks: [...localRepairIndices].sort((left, right) => left - right).map(index => index + 1),
       providerKind: settings.textProvider?.kind || "",
       model: settings.textProvider?.model || "",
       requestSessions: chunkSchedules.map(chunk => `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-agent-v4`),
@@ -19765,7 +19793,13 @@ ${shotAnchor}
     if (!force) {
       try {
         const assembled = await this.assembleRecoveredShotVideoIfNeeded(projectId, shot);
-        if (assembled?.filePath && fs.existsSync(assembled.filePath)) return assembled;
+        if (assembled?.filePath && fs.existsSync(assembled.filePath)) {
+          if (!qualityEnabled && assembled.selected !== true && assembled.id) {
+            this.store.confirmCandidate(projectId, assembled.id, false);
+            return this.store.getProject(projectId).candidates.find(item => item.id === assembled.id) || assembled;
+          }
+          return assembled;
+        }
       } catch (error) {
         this.setAutomation(projectId, {
           message: `S${String(shot.number).padStart(2, "0")} 已取回片段未能合成：${error.message}`
@@ -20263,8 +20297,8 @@ ${shotAnchor}
     if (this.foundryKernel && this.qualityGatesEnabled(settings, "script")) {
       this.foundryKernel.assertPaidGenerationReady(contractProject, "assets");
     }
-    // Uploaded scripts stay usable when quality is advisory; AI-authored formal
-    // quality still blocks here before the first paid image/video call.
+    // Contract findings are available for targeted AI repair, but are not an
+    // execution lock for asset production.
     const plan = this.buildAssetBatchPlan(projectId);
     const concurrency = await this.authoritativeGenerationConcurrency(this.store.getProject(projectId));
     const batchStartedAt = new Date().toISOString();
@@ -20893,7 +20927,7 @@ ${shotAnchor}
         kind: "character_sheet",
         entityId: character.id,
         libraryType: "",
-        label: `${character.name} · 人物合板`,
+        label: `${character.name} · 人物四视图`,
         status: identityReady ? "skipped" : "queued",
         errorCode: "",
         message: identityReady ? "已就绪，跳过" : "等待生成",

@@ -120,7 +120,8 @@ test("upload fallback, immediate character voice extraction and provider masking
   assert.match(renderer, /api\.workbench\.restoreCandidate\(state\.project\.id, id\)/);
   assert.match(renderer, /item\.selected === true && item\.manualSelectionOverride === true/);
   assert.match(renderer, /item\.entityType === "shot" \? "选中此镜"/);
-  assert.match(renderer, /listProjectsOverview\(\)[\s\S]{0,350}currentOverview\?\.nextStage/);
+  const continuePipeline = renderer.slice(renderer.indexOf("async function continuePipeline"), renderer.indexOf("async function runLong"));
+  assert.match(continuePipeline, /listProjectsOverview\(\)[\s\S]*currentOverview\?\.nextStage/);
   assert.doesNotMatch(css, /candidate-card\.archived-revision\s*\{[^}]*opacity:\s*\.66/);
   assert.match(workflow, /item\.kind === "character_video"[\s\S]{0,700}projectVoice[\s\S]{0,400}跳过人物视频/);
   assert.match(workflow, /kind === "character_video"[\s\S]{0,500}projectVoice[\s\S]{0,500}reusableVoice[\s\S]{0,500}qualityAccepted/);

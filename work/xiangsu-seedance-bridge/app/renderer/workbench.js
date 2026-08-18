@@ -178,7 +178,7 @@ const textProviderPresets = Object.freeze({
 const pureamTextModels = Object.freeze(["gpt-5-6-sol", "claude-opus-5"]);
 
 const stageLabels = {
-  character_sheet: "人物合板",
+  character_sheet: "人物四视图",
   character_three_view: "人物三视图",
   character_intro: "人物身份参考图（不进成片）",
   storyboard_sheet: "逐秒分镜合图",
@@ -1055,11 +1055,11 @@ function chosenCharacterIdentity(characterId) {
     .localeCompare(String(left.manualSelectedAt || left.updatedAt || left.createdAt || ""));
   const manual = available.filter(item => item.selected === true && item.manualSelectionOverride === true).sort(byRecency)[0];
   if (manual) return manual;
-  const selected = available.filter(item => item.selected === true).sort(byRecency)[0];
-  if (selected) return selected;
-  return chosenCandidate("character", characterId, "character_intro")
-    || chosenCandidate("character", characterId, "character_sheet")
-    || chosenCandidate("character", characterId, "character_three_view");
+  // The frontal intro is only a private voice/identity anchor. Show the
+  // reusable four-view asset first so the main card cannot look like a portrait.
+  return chosenCandidate("character", characterId, "character_sheet")
+    || chosenCandidate("character", characterId, "character_three_view")
+    || chosenCandidate("character", characterId, "character_intro");
 }
 
 function unmeshedGridSource(entityId, stage) {
@@ -2003,7 +2003,7 @@ function renderAssets(force = false) {
     return `<article class="asset-card${headerWork?.active || (visibleVideoJob && videoStatusApi.isActiveVideoJob(visibleVideoJob)) ? " is-drawing" : ""}${headerWork?.status === "failed" ? " has-work-failure" : ""}">
       <div class="drawing-banner" role="status" aria-live="polite"><i aria-hidden="true"></i><span>${escapeHtml(headerWork?.label || "正在抽卡")}</span></div>
       <div class="asset-card-head">${assetPreview(identity, "image", headerWork)}<div><h4>${escapeHtml(character.name)}</h4><p>${escapeHtml(character.description || "暂无人物外貌设定")}</p></div></div>
-      <div class="asset-tags"><span>合板 ${candidates("character", character.id, "character_sheet").length}</span><span>视频 ${candidates("character", character.id, "character_video").length}</span><span>音色 ${candidates("character", character.id, "character_voice").length}</span>${boundVoice ? `<span>库音色已绑定</span>` : ""}${cloudSeedanceMesh ? `<span class="mesh-required-tag">云端算力 · 一致性检查</span>` : '<span>本地像塑 · 无需网格</span>'}</div>
+      <div class="asset-tags"><span>四视图 ${candidates("character", character.id, "character_sheet").length}</span><span>视频 ${candidates("character", character.id, "character_video").length}</span><span>音色 ${candidates("character", character.id, "character_voice").length}</span>${boundVoice ? `<span>库音色已绑定</span>` : ""}${cloudSeedanceMesh ? `<span class="mesh-required-tag">云端算力 · 一致性检查</span>` : '<span>本地像塑 · 无需网格</span>'}</div>
       <details class="creator-panel" data-editor-key="character:${escapeHtml(character.id)}:settings">
         <summary>角色设定与提示词（点击展开）</summary>
         <div class="creator-panel-body">
@@ -2018,24 +2018,24 @@ function renderAssets(force = false) {
             <button class="mini-button" data-action="save-character-fields" data-id="${character.id}">保存角色设定</button>
             <button class="mini-button" data-action="bind-voice-library" data-id="${character.id}">应用库音色到本角色</button>
             <button class="mini-button" data-action="deposit-voice-library" data-id="${character.id}">沉淀当前音色到库</button>
-            <button class="mini-button" data-action="edit-entity-prompt" data-entity-type="character" data-stage="character_sheet" data-id="${character.id}">编辑合板提示词</button>
+            <button class="mini-button" data-action="edit-entity-prompt" data-entity-type="character" data-stage="character_sheet" data-id="${character.id}">编辑四视图提示词</button>
             <button class="mini-button" data-action="edit-character-video-prompt" data-id="${character.id}">编辑人物视频提示词</button>
           </div>
         </div>
       </details>
       <div class="asset-stage-grid">
-        ${assetStageTile(identity, `${character.name} · 人物合板`, "image", "", sheetWork)}
+        ${assetStageTile(identity, `${character.name} · 人物四视图`, "image", "", sheetWork)}
         ${assetStageTile(video, `${character.name} · 人物视频`, "video", project.generation?.aspectRatio || "9:16", videoWork)}
         ${assetStageTile(voice, `${character.name} · 人物音色`, "audio", "", voiceWork)}
       </div>
       ${visibleVideoJob ? `<div class="asset-video-task">${videoJobProgressMarkup(visibleVideoJob)}${visibleVideoJob.message ? `<p>${escapeHtml(visibleVideoJob.message)}</p>` : ""}</div>` : ""}
       <div class="card-actions">
-        <button class="mini-button draw-button${sheetWork?.active ? " is-loading" : ""}" data-long-action data-action="generate-image" data-stage="character_sheet" data-id="${character.id}" ${sheetWork?.active ? "disabled" : ""}>${sheetWork?.active ? "生成中…" : "抽卡：人物合板"}</button>
+        <button class="mini-button draw-button${sheetWork?.active ? " is-loading" : ""}" data-long-action data-action="generate-image" data-stage="character_sheet" data-id="${character.id}" ${sheetWork?.active ? "disabled" : ""}>${sheetWork?.active ? "生成中…" : "抽卡：人物四视图"}</button>
         ${cloudSeedanceMesh ? `<button class="mini-button draw-button mesh-draw-button" data-long-action data-action="remesh-character" data-id="${character.id}" data-candidate-id="${escapeHtml(meshSource?.id || "")}" ${meshSource ? "" : "disabled"}>抽卡：全脸网格版</button>` : ""}
         ${cloudSeedanceMesh ? `<button class="mini-button grid-draw-button" data-long-action data-action="apply-grid" data-id="${character.id}" data-portrait-id="${escapeHtml(sheetGridSource?.id || portraitGridSource?.id || "")}" data-intro-id="${escapeHtml(introGridSource?.id || "")}" ${sheetGridSource || portraitGridSource || introGridSource ? "" : "disabled"} title="本地检测真实人脸后添加棋盘网格，不调用付费模型">一键检测并加网格</button>` : ""}
         <button class="mini-button draw-button${videoWork?.active ? " is-loading" : ""}" data-long-action data-action="character-video" data-id="${character.id}" ${videoWork?.active ? "disabled" : ""}>${videoWork?.active ? "生成中…" : "抽卡：人物视频"}</button>
         <button class="mini-button${voiceWork?.active ? " is-loading" : ""}" data-long-action data-action="extract-voice" data-id="${character.id}" ${voiceWork?.active ? "disabled" : ""}>${voiceWork?.active ? "提取中…" : "提取音色"}</button>
-        <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_sheet" data-id="${character.id}">上传人物参考图</button>
+        <button class="mini-button" data-action="import-candidate" data-entity-type="character" data-stage="character_sheet" data-id="${character.id}">上传人物四视图</button>
         <button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="character" data-id="${character.id}">当前角色版本</button>
       </div>
       <details class="card-more-actions">

@@ -271,9 +271,28 @@ function parseSourceDialogueLedger(value, knownNames = [], options = {}) {
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const lineEntry = lines[lineIndex];
     const originalLine = lineEntry.text;
+    // Markdown cast/scene/prop lists are metadata, not spoken turns. Keep this
+    // check before stripDialogueLinePrefix removes the bullet marker.
+    if (/^\s*[-*•]\s+/.test(originalLine)
+      && !/^\s*[-*•]\s+(?:对白|台词)\s*[：:]/.test(originalLine)) continue;
     const line = stripDialogueLinePrefix(originalLine);
     if (isProductionCue(line) || /^subshot\s+\d+/i.test(line)) continue;
     const prefixLength = originalLine.indexOf(line);
+    // A normal Chinese screenplay cue often stores several performance beats
+    // inside one parenthesis. Generic multi-speaker parsing treats semicolons as
+    // turn separators, so claim the complete leading cue first.
+    const leadingParenthetical = line.match(/^\s*(.{1,24}?)\s*[（(]([^）)]{1,240})[）)]\s*[：:]\s*([\s\S]+)$/);
+    const hasInlineNextSpeaker = leadingParenthetical
+      && /(?:\/|／)\s*[^：:\n]{1,24}(?:\s*[（(][^）)]{1,120}[）)])?\s*[：:]/.test(leadingParenthetical[3]);
+    if (leadingParenthetical && !hasInlineNextSpeaker) {
+      const label = parseSpeakerLabel(`${leadingParenthetical[1]}（${leadingParenthetical[2]}）`, [...inferredNames]);
+      if (label) {
+        const markerStart = line.indexOf(leadingParenthetical[1]);
+        const bodyStart = line.indexOf(leadingParenthetical[3], markerStart + leadingParenthetical[1].length);
+        pushEntry(label, leadingParenthetical[3], lineEntry.start + Math.max(0, prefixLength) + markerStart, lineEntry.start + Math.max(0, prefixLength) + bodyStart + leadingParenthetical[3].length);
+        continue;
+      }
+    }
     const markers = dialogueMarkers(line, [...inferredNames]);
     if (!markers.length) continue;
     for (let index = 0; index < markers.length; index += 1) {

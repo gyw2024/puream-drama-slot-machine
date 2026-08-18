@@ -28,7 +28,7 @@ test("dialogue construction budgets fit the five-minute and ten-minute contracts
 test("analysis and prompt compilers are bounded and preserve full local output on timeout", () => {
   assert.match(workflowSource, /const UPLOADED_ANALYSIS_TIMEOUT_MS = 60_000/);
   assert.match(workflowSource, /localUploadedAnalysisChunk/);
-  assert.match(workflowSource, /source:\s*"agent-structured-result-required"/);
+  assert.match(workflowSource, /source:\s*localRepairIndices\.size \? "agent-plus-local-auto-repair" : "agent-structured-result"/);
   assert.match(workflowSource, /const PROMPT_COMPILER_TIMEOUT_MS = 90_000/);
   assert.match(workflowSource, /const maxCompileAttempts = promptQualityEnabled \? 2 : 1/);
   assert.match(workflowSource, /buildFallbackHailuoPromptSpec/);

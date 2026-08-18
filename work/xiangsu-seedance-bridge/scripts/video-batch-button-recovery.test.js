@@ -36,12 +36,13 @@ test("all-video button exposes immediate loading state and refreshes failed proj
   assert.match(runLong, /return \{ ok: false, code:/);
 });
 
-test("production-only H3 preparation cannot invoke the retired storyboard crop gate", () => {
+test("H3 preparation crops storyboard grids independently of quality-review settings", () => {
   const workflow = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
   const start = workflow.indexOf("async prepareHailuoAgentShotTakes");
   const end = workflow.indexOf("async auditAgentGenerationBlockResult", start);
   const preparation = workflow.slice(start, end);
   assert.ok(start >= 0 && end > start);
-  assert.match(preparation, /const needsCrop = this\.qualityGatesEnabled\(settings, "videos"\)/);
+  assert.match(preparation, /const needsCrop = hasStoryboardSheet/);
+  assert.doesNotMatch(preparation, /const needsCrop = this\.qualityGatesEnabled\(settings, "videos"\)/);
   assert.match(preparation, /needsCrop \? await this\.cropStoryboardTakeSheet/);
 });

@@ -14,6 +14,19 @@ function unique(value) {
   return [...new Set(list(value).map(clean).filter(Boolean))];
 }
 
+function actionWithoutDialogue(value, dialogueTurns = []) {
+  let result = clean(value);
+  for (const turn of list(dialogueTurns)) {
+    const line = clean(turn?.text || turn?.spokenText);
+    if (!line) continue;
+    result = result.split(line).join("");
+  }
+  return result
+    .replace(/[“”"'']{2,}/g, "")
+    .replace(/[；;，,。.!！？?、\s]+$/g, "")
+    .trim();
+}
+
 function modeLabel(value = "auto") {
   return ({
     text_to_video: "文生视频",
@@ -126,12 +139,13 @@ function buildApprovedHailuoPrompt({ project = {}, shot = {}, references = {}, d
   }
 
   const scene = list(project?.scenes).find(item => clean(item?.id) === clean(shot?.sceneId) || clean(item?.name) === clean(shot?.scene));
+  const actionSummary = actionWithoutDialogue(shot?.action || shot?.visualBeat, turns);
   const performance = [
     "每句对白逐字完整，只说一次；对白内容＞语气＞情绪＞场景＞运镜＞其他",
     `情绪弧线：${clean(shot?.emotion) || "受刺激、压住反应、情绪峰值、余震或决定逐级推进"}`,
     `人物表演：${clean(shot?.performance) || "眉眼、下颌、呼吸、手部和重心必须随台词变化，禁止平声念稿"}`,
     "当前说话人开口时其他人物闭口并同步反应；说话人变化时立即按视线轴切到新说话人，禁止抢话、串台、复读和声线互换",
-    `场景与动作：${clean(scene?.name || shot?.scene) || "同一连续场景"}；${clean(shot?.action || shot?.visualBeat) || "只完成本镜唯一因果动作"}`,
+    `场景与动作：${clean(scene?.name || shot?.scene) || "同一连续场景"}；${actionSummary || "只完成本镜唯一因果动作"}`,
     `运镜：${clean(shot?.compositionPlan || shot?.cameraMove || shot?.shotSize) || "说话人近景与听者反应正反打，稳定机位"}`
   ];
   if (clean(qualityRepair)) performance.push(`本次修复：${clean(qualityRepair)}`);

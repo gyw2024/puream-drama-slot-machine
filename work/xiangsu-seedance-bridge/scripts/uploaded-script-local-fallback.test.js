@@ -42,7 +42,7 @@ test("uploaded dialogue local-first compiler preserves source truth and is used 
   const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
   assert.equal((workflowSource.match(/localUploadedAnalysisChunk\(/g) || []).length, 2, "production analysis must materialize the local checkpoint before Agent enhancement");
   assert.match(workflowSource, /local-uploaded-script-compiler/);
-  assert.match(workflowSource, /agent-structured-result-required/);
+  assert.match(workflowSource, /agent-plus-local-auto-repair/);
 });
 
 test("local fallback preserves explicit characters but promotes only causal props", () => {

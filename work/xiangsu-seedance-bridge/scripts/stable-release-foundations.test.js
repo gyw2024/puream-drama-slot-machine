@@ -10,6 +10,7 @@ const { detectUploadedScriptFormat, parseSourceDialogueLedger } = require("../ap
 const { assetUrlForPath, pathFromAssetUrl, realPathWithinRoot } = require("../app/secure-asset-protocol");
 const { WorkbenchStore } = require("../app/workbench-store");
 const { characterIdentityCandidate, splitUploadedScriptSections } = require("../app/workbench-workflow");
+const { stageCounts } = require("../app/project-overview");
 
 test("secure asset URLs round-trip Chinese and reserved path characters but reject files outside the data root", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-asset-root-"));
@@ -80,6 +81,35 @@ test("explicitly choosing any character identity stage makes that exact asset cu
     const current = store.getProject(created.id);
     assert.equal(current.characters[0].activeIdentityCandidateId, three.id);
     assert.equal(characterIdentityCandidate(current, "C01")?.id, three.id);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic portrait selection never hides an available four-view character board", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-four-view-preview-"));
+  try {
+    const store = new WorkbenchStore(root);
+    const created = store.createProject("人物四视图优先");
+    const project = store.getProject(created.id);
+    project.characters = [{ id: "C01", name: "母亲" }];
+    store.saveProject(project);
+    const sheetPath = path.join(root, "four-view.png");
+    const introPath = path.join(root, "front-face.png");
+    fs.writeFileSync(sheetPath, "four-view");
+    fs.writeFileSync(introPath, "front-face");
+    const sheet = store.addCandidate(created.id, { entityType: "character", entityId: "C01", stage: "character_sheet", filePath: sheetPath, qualityAudit: { ok: true } });
+    store.confirmCandidate(created.id, sheet.id, false);
+    const intro = store.addCandidate(created.id, { entityType: "character", entityId: "C01", stage: "character_intro", filePath: introPath, qualityAudit: { ok: true } });
+    store.confirmCandidate(created.id, intro.id, false);
+    const current = store.getProject(created.id);
+    current.characters[0].activeIdentityCandidateId = "";
+    store.saveProject(current);
+    const latest = store.getProject(created.id);
+    assert.equal(characterIdentityCandidate(latest, "C01")?.id, sheet.id);
+    assert.equal(stageCounts(latest, store.getSettings()).characters.ready, 1);
+    const renderer = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.js"), "utf8");
+    assert.match(renderer, /return chosenCandidate\("character", characterId, "character_sheet"\)[\s\S]{0,180}character_intro/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

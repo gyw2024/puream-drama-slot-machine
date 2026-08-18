@@ -119,8 +119,8 @@ test("video prompt preview follows the approved dialogue-first Chinese timeline"
   assert.match(prompt, /对白内容＞语气＞情绪＞场景＞运镜＞其他/);
   assert.equal(prompt.split("住手！有话冲我来！").length - 1, 1);
   assert.equal(prompt.split("妈，摊子砸了，我们怎么办？").length - 1, 1);
-  assert.match(prompt, /周桂兰面向林晓梅/);
-  assert.match(prompt, /林晓梅面向周桂兰/);
+  assert.match(prompt, /周桂兰”只使用[\s\S]{0,100}面向“林晓梅/);
+  assert.match(prompt, /林晓梅”只使用[\s\S]{0,100}面向“周桂兰/);
   assert.match(prompt, /周桂兰闭口/);
   assert.match(prompt, /林晓梅闭口/);
   assert.match(prompt, /压着急火/);
@@ -217,8 +217,7 @@ test("five-minute text pipeline produces clean assets, storyboards and dialogue-
   assert.ok(productShotIndexes.every(index => videoPrompts[index].includes(product.name)));
   project.shots.forEach((shot, index) => {
     for (const turn of shot.dialogueTurns || []) {
-      const quotedSpeech = `说：“${turn.text}”`;
-      assert.equal(videoPrompts[index].split(quotedSpeech).length - 1, 1, `${shot.id}:${turn.text}`);
+      assert.equal(videoPrompts[index].split(turn.text).length - 1, 1, `${shot.id}:${turn.text}`);
     }
   });
   assert.doesNotMatch(videoPrompts.join("\n"), /subject_definitions|retention_analysis|【(?:背景\/动作|无对白|商品动作)[：:][^\n]*说：“/);

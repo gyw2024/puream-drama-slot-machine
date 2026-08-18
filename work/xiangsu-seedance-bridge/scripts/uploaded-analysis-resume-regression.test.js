@@ -61,7 +61,7 @@ function responseFor(messages) {
   };
 }
 
-test("uploaded-script analysis checkpoints locally first and keeps only the failed Agent chunk local", async t => {
+test("uploaded-script analysis automatically repairs one failed Agent chunk and continues", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-analysis-resume-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -73,9 +73,11 @@ test("uploaded-script analysis checkpoints locally first and keeps only the fail
     const listener = index % 2 ? "周岚" : "陈立";
     return `${speaker}（${index % 3 ? "克制但坚定，直视对方" : "压低声音，停顿后开口"}）：第${index + 1}句，${listener}，这句话必须完整保留。`;
   }).join("\n");
-  const project = store.createProject("上传剧本拆镜断点", { inputMode: "manual" });
+  const project = store.createProject("上传剧本拆镜断点", { inputMode: "ai" });
   store.patchProject(project.id, {
-    productionPlan: { inputMode: "manual", executionMode: "step" },
+    // Simulate a project imported by an older client that forgot to persist
+    // inputMode=manual even though the source is a user upload.
+    productionPlan: { inputMode: "ai", executionMode: "step" },
     generation: { engine: "seedance", videoProviderKind: "local-xiangsu", mode: "smart" },
     script: { raw: source }
   });
@@ -102,14 +104,16 @@ test("uploaded-script analysis checkpoints locally first and keeps only the fail
     }
   });
 
-  await assert.rejects(() => workflow.analyzeScript(project.id), error => error?.code === "SCRIPT_ANALYSIS_AGENT_RESULT_REQUIRED");
+  const analyzed = await workflow.analyzeScript(project.id);
   assert.equal(calls.get(2), 1, "failed chunk must not trigger an automatic second billable request");
   assert.equal(sessions.get(2).length, 1);
   assert.equal(calls.get(1), 1, "completed chunk 1 must be reused");
   assert.equal(calls.get(3), 1, "completed chunk 3 must be reused");
-  const failed = store.getProject(project.id);
-  assert.notEqual(failed.currentStage, "assets");
-  assert.ok(failed.script.analysisCheckpoint);
-  assert.equal(failed.script.analysisCheckpoint.chunks.length, 3);
-  assert.equal(failed.script.analysisCheckpoint.chunks.filter(item => item.data?.localFallback === true).length, 1);
+  assert.equal(analyzed.productionPlan.inputMode, "manual");
+  assert.equal(analyzed.currentStage, "assets");
+  assert.equal(analyzed.script.analysisCheckpoint, null);
+  assert.equal(analyzed.script.analysisEnhancement.source, "agent-plus-local-auto-repair");
+  assert.equal(analyzed.script.analysisEnhancement.localFallbackCount, 1);
+  assert.deepEqual(analyzed.script.analysisEnhancement.localFallbackChunks, [2]);
+  assert.equal(analyzed.shots.flatMap(shot => shot.dialogueTurns || []).length, 24);
 });

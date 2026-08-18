@@ -45,11 +45,12 @@ function characterIdentityCandidate(project, character, settings = null) {
   if (active) return active;
   const byRecency = (left, right) => String(right.manualSelectedAt || right.updatedAt || right.createdAt || "")
     .localeCompare(String(left.manualSelectedAt || left.updatedAt || left.createdAt || ""));
+  // character_intro is a private frontal voice/identity anchor. Keep the
+  // reusable four-view board as the visible identity whenever one exists.
   return matches.filter(item => item.selected === true && item.manualSelectionOverride === true).sort(byRecency)[0]
-    || matches.filter(item => item.selected === true).sort(byRecency)[0]
-    || latestCandidate(project, "character", character.id, "character_intro")
     || latestCandidate(project, "character", character.id, "character_sheet")
-    || latestCandidate(project, "character", character.id, "character_three_view");
+    || latestCandidate(project, "character", character.id, "character_three_view")
+    || latestCandidate(project, "character", character.id, "character_intro");
 }
 
 function stageCounts(project = {}, settings = null) {
