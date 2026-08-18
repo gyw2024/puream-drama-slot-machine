@@ -2728,12 +2728,22 @@ function selectedOrLatest(project, entityType, entityId, stage) {
   return qualityPassed[0] || unverified[0] || matches[0] || null;
 }
 
+function candidateFileExists(candidate) {
+  if (!candidate?.filePath) return false;
+  try {
+    const stat = fs.statSync(path.resolve(String(candidate.filePath)));
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
 function candidateReady(project, entityType, entityId, stage, settings = null) {
   const candidate = selectedOrLatest(project, entityType, entityId, stage);
-  if (!candidate?.filePath) return null;
+  if (!candidateFileExists(candidate)) return null;
   if (!qualityAccepted(candidate, settings)) return null;
   if (isQualityGatesEnabled(settings, "assets") && projectRequiresFaceMesh(project, settings) && entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(stage) && candidate.faceMesh?.applied !== true) return null;
-  return !path.isAbsolute(candidate.filePath) || fs.existsSync(candidate.filePath) ? candidate : null;
+  return candidate;
 }
 
 /** Use the identity explicitly selected for the character, regardless of which identity-card stage produced it. */
@@ -2746,7 +2756,7 @@ function characterIdentityCandidate(project, characterId, settings = null) {
     .filter(item => (item.productionRevision || "") === activeRevision && item.stale !== true && item.filePath)
     .filter(item => qualityAccepted(item, settings))
     .filter(item => !(isQualityGatesEnabled(settings, "assets") && projectRequiresFaceMesh(project, settings) && item.faceMesh?.applied !== true))
-    .filter(item => !path.isAbsolute(item.filePath) || fs.existsSync(item.filePath));
+    .filter(item => candidateFileExists(item));
   const active = available.find(item => item.id === character?.activeIdentityCandidateId);
   if (active) return active;
   const byRecency = (left, right) => String(right.manualSelectedAt || right.updatedAt || right.createdAt || "")
@@ -2761,9 +2771,11 @@ function characterIdentityCandidate(project, characterId, settings = null) {
     || candidateReady(project, "character", characterId, "character_intro", settings);
 }
 
-/** Paid video and storyboard frames must never consume a multi-panel identity board. */
+/** Reuse the paid four-view asset as identity input; do not buy a private portrait. */
 function characterVideoIdentityCandidate(project, characterId, settings = null) {
-  return candidateReady(project, "character", characterId, "character_intro", settings);
+  return candidateReady(project, "character", characterId, "character_sheet", settings)
+    || candidateReady(project, "character", characterId, "character_three_view", settings)
+    || candidateReady(project, "character", characterId, "character_intro", settings);
 }
 
 function storyboardStageLabel(stage) {
@@ -17172,10 +17184,10 @@ ${shotAnchor}
     if (!character) throw Object.assign(new Error("角色不存在"), { code: "CHARACTER_NOT_FOUND" });
     let portrait = characterVideoIdentityCandidate(project, characterId, settings);
     if (!portrait?.filePath) {
-      this.setAutomation(projectId, { message: `角色“${character.name}”尚无 H3 人物身份参考图，正在自动补齐锁脸资产后继续生成人物视频；该图不会进入成片` });
-      await this.ensureCharacterIntroCandidate(projectId, characterId);
-      project = this.store.getProject(projectId);
-      portrait = characterVideoIdentityCandidate(project, characterId, settings);
+      throw Object.assign(new Error(`角色“${character.name}”缺少人物四视图，已停止人物视频提交以避免额外生成付费身份图`), {
+        code: "ASSET_VIDEO_DEPENDENCIES_PENDING",
+        characterId
+      });
     }
     if (!portrait?.filePath) throw Object.assign(new Error(projectRequiresFaceMesh(project, settings) ? "角色人物身份参考图尚未就绪；系统已保留任务，补齐云端 Seedance 全脸网格后可直接续跑" : "角色人物身份参考图尚未就绪；系统已保留任务，补齐后可直接续跑"), { code: "ASSET_VIDEO_DEPENDENCIES_PENDING" });
     const engine = projectVideoEngine(project);
@@ -17365,24 +17377,22 @@ ${shotAnchor}
     }
     const ffmpeg = this.locateFfmpeg();
     if (!ffmpeg) throw Object.assign(new Error("未找到像塑 FFmpeg"), { code: "FFMPEG_NOT_FOUND" });
-    const intro = selectedOrLatest(project, "character", characterId, "character_intro");
     const sheet = selectedOrLatest(project, "character", characterId, "character_sheet")
       || selectedOrLatest(project, "character", characterId, "character_three_view");
-    const [audio, endpoints, introImage, sheetImage] = await Promise.all([
+    const identity = characterVideoIdentityCandidate(project, characterId, settings);
+    const [audio, endpoints, identityImage, sheetImage] = await Promise.all([
       analyzeAudioFile(ffmpeg, candidate.filePath, 10),
       analyzeVideoEndpointFrames(ffmpeg, candidate.filePath),
-      intro?.filePath && fs.existsSync(intro.filePath) ? analyzeImageFile(ffmpeg, intro.filePath) : Promise.resolve({ ok: false, hash: "" }),
+      identity?.filePath && fs.existsSync(identity.filePath) ? analyzeImageFile(ffmpeg, identity.filePath) : Promise.resolve({ ok: false, hash: "" }),
       sheet?.filePath && fs.existsSync(sheet.filePath) ? analyzeImageFile(ffmpeg, sheet.filePath) : Promise.resolve({ ok: false, hash: "" })
     ]);
     const audioDecision = assessAudioQuality(audio, { hasDialogue: true });
-    const anchors = assessReferenceAnchors(endpoints, introImage, introImage, [{ ...sheetImage, candidateId: sheet?.id || "", characterId, characterName: character.name }]);
+    const anchors = assessReferenceAnchors(endpoints, identityImage, identityImage, [{ ...sheetImage, candidateId: sheet?.id || "", characterId, characterName: character.name }]);
     const task = candidate.taskId ? project.jobs.find(item => item.taskId === candidate.taskId) : null;
     const referenceManifest = candidate.referenceManifest || task?.referenceManifest || null;
     const failures = [...audioDecision.failures, ...anchors.failures];
-    if (candidate.taskId && Array.isArray(referenceManifest?.images) && referenceManifest.images.some(item => ["character_three_view", "character_sheet"].includes(item.sourceStage))) {
-      failures.push({ code: "VIDEO_USED_CHARACTER_SHEET_REFERENCE", message: "人物视频生成任务直接使用了人物设定板，必须改用通过质检的单人身份参考图" });
-    } else if (candidate.taskId && (!Array.isArray(referenceManifest?.images) || !referenceManifest.images.length)) {
-      failures.push({ code: "VIDEO_REFERENCE_LINEAGE_UNVERIFIED", message: "人物视频缺少参考资产清单，无法证明首帧没有误用三视图" });
+    if (candidate.taskId && (!Array.isArray(referenceManifest?.images) || !referenceManifest.images.length)) {
+      failures.push({ code: "VIDEO_REFERENCE_LINEAGE_UNVERIFIED", message: "人物视频缺少参考资产清单，无法核对实际使用的人物身份参考" });
     }
     const audit = { ok: failures.length === 0, checkedAt: new Date().toISOString(), type: "character_video", audio, anchors, failures, repairDirective: buildRepairDirective(failures) };
     this.store.updateCandidate(projectId, candidateId, { qualityAudit: audit });
@@ -19508,19 +19518,7 @@ ${shotAnchor}
     }, characters, { requireStart, requireEnd });
     const failures = [...decision.failures];
     const manifestImages = candidate.referenceManifest?.images || [];
-    const illegalReference = manifestImages.find(item => item.sourceStage === "character_three_view");
-    if (illegalReference) {
-      failures.push({
-        code: "VIDEO_USED_CHARACTER_SHEET_REFERENCE",
-        message: `提交记录显示图${illegalReference.index || "?"}直接使用人物三视图，结果不可进入成片`,
-        relatedCandidateId: illegalReference.candidateId || ""
-      });
-    } else if (candidate.taskId && !candidate.referenceManifest && /(?:使用|传入|参考).{0,12}(?:定妆三视图|人物三视图|角色三视图)/.test(String(candidate.prompt || "")) && !/(?:禁止|不得).{0,12}(?:定妆三视图|人物三视图|角色三视图)/.test(String(candidate.prompt || ""))) {
-      failures.push({
-        code: "VIDEO_USED_CHARACTER_SHEET_REFERENCE",
-        message: "旧任务提示词证实直接向 Seedance 传入了人物三视图，资产链路不安全，必须按新规则重抽"
-      });
-    } else if (candidate.taskId && !candidate.referenceManifest) {
+    if (candidate.taskId && !candidate.referenceManifest) {
       failures.push({
         code: "VIDEO_REFERENCE_LINEAGE_UNVERIFIED",
         message: "旧视频没有保存参考素材归属与顺序，无法证明首尾帧未串线，不能进入最终成片"
@@ -20352,7 +20350,6 @@ ${shotAnchor}
         let result;
         if (item.kind === "character_sheet") result = await this.generateImageCandidate(projectId, "character_sheet", item.entityId, "", { track: false });
         else if (item.kind === "character_three_view") result = await this.generateImageCandidate(projectId, "character_three_view", item.entityId, "", { track: false });
-        else if (item.kind === "character_intro") result = await this.ensureCharacterIntroCandidate(projectId, item.entityId);
         else if (item.kind === "character_video") {
           let lastError = null;
           for (let attempt = 1; attempt <= 5; attempt += 1) {
@@ -20406,12 +20403,12 @@ ${shotAnchor}
     const inheritProjectVideo = stageProvider === "inherit-project";
     const waves = [
       { id: "identity_and_scene", resource: "image", label: "第1波 · 人物合板 / 场景四视图", items: plan.filter(item => ["character_sheet", "scene_asset", "product_reference"].includes(item.kind)) },
-      { id: "character_intro", resource: "image", label: "第2A波 · H3人物身份参考图（不进成片）", items: plan.filter(item => ["character_intro", "character_three_view"].includes(item.kind)) },
+      { id: "character_legacy", resource: "image", label: "第2A波 · 兼容旧人物资产", items: plan.filter(item => item.kind === "character_three_view") },
       { id: "asset_library", resource: "image", label: "第2B波 · 道具 / 换装资产库", items: plan.filter(item => ["prop_asset", "wardrobe_asset"].includes(item.kind)) },
       {
         id: "character_video",
         resource: "video",
-        label: inheritProjectVideo ? "第3波 · 人物视频（依赖独立正脸图，跟随项目引擎）" : "第3波 · 人物视频（依赖独立正脸图）",
+        label: inheritProjectVideo ? "第3波 · 人物视频（复用人物四视图，跟随项目引擎）" : "第3波 · 人物视频（复用人物四视图）",
         items: plan.filter(item => item.kind === "character_video")
       },
       {
@@ -20913,13 +20910,15 @@ ${shotAnchor}
         // become ready only when the current revision explicitly selected them.
         ready = Boolean(active?.selected === true);
       } else if (kind === "character_voice") {
-        ready = Boolean(candidateReady(project, "character", entityId, kind, settings)?.filePath)
-          || Boolean(this.findReusableVoice(character)?.entry?.filePath);
+        // A reusable library file still has to be materialized into this
+        // project's selected character_voice candidate before prompt binding.
+        ready = Boolean(candidateReady(project, "character", entityId, kind, settings)?.filePath);
       } else if (kind === "character_video") {
         const projectVoice = candidateReady(project, "character", entityId, "character_voice", settings);
         const reusableVoice = this.findReusableVoice(character)?.entry;
         const video = candidateReady(project, "character", entityId, "character_video", settings);
-        ready = Boolean(projectVoice?.filePath || reusableVoice?.filePath) || qualityAccepted(video, settings);
+        ready = Boolean(projectVoice?.filePath || reusableVoice?.filePath)
+          || Boolean(video && candidateFileExists(video) && qualityAccepted(video, settings));
       } else {
         ready = Boolean(candidateReady(project, "character", entityId, kind, settings));
       }
@@ -20949,7 +20948,6 @@ ${shotAnchor}
         message: identityReady ? "已就绪，跳过" : "等待生成",
         updatedAt: new Date().toISOString()
       });
-      add("character_intro", character.id, `${character.name} · 正脸身份锚图（不进成片）`);
       if (needsCharacterVoiceAssets) {
         add("character_video", character.id, `${character.name} · 人物视频`);
         add("character_voice", character.id, `${character.name} · 音色`);
@@ -22110,6 +22108,30 @@ ${shotAnchor}
       this.setAutomation(projectId, { status: "running", stage: "agent_character_repair", message: `人物引用不一致，Agent 正在重建唯一人物映射并复检（第 ${count} 次）` });
       this.reconcileProjectCharacterReferences(projectId, { clearFailure: false, allowCharacterCreation: true });
       await abortableDelay(2000, this.operationControls.get(projectId)?.controller?.signal);
+      return true;
+    }
+
+    if (code === "SHOT_SPEAKER_VOICE_REQUIRED") {
+      if (count > 1) return false;
+      const characterId = String(error?.characterId || "").trim();
+      this.setAutomation(projectId, {
+        status: "running",
+        stage: "agent_voice_asset_recovery",
+        message: "检测到说话角色缺少真实音色文件，Agent 正在定向补人物视频并提取音色；本错误只恢复一次"
+      });
+      await this.generateAllAssets(projectId, { track: false });
+      const repairedProject = this.store.getProject(projectId);
+      const repairedVoice = characterId
+        ? candidateReady(repairedProject, "character", characterId, "character_voice", this.store.getSettings())
+        : null;
+      if (!repairedVoice) return false;
+      this.appendAutonomousRepairJournal(projectId, {
+        attempt: count,
+        code,
+        status: "voice_asset_recovered",
+        characterId,
+        candidateId: repairedVoice.id
+      });
       return true;
     }
 

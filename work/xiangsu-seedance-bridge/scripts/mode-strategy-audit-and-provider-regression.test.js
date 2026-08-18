@@ -126,13 +126,13 @@ test("a recoverable character-video outage does not block independent visual ass
       return store.addCandidate(created.id, { entityType: "character", entityId, stage, filePath, qualityAudit: { ok: false } });
     };
     workflow.generateImageCandidate = async (_projectId, stage, entityId) => addImage(stage, entityId);
-    workflow.ensureCharacterIntroCandidate = async (_projectId, entityId) => addImage("character_intro", entityId);
     workflow.generateQualityCharacterVideo = async () => {
       throw Object.assign(new Error("云端算力节点 服务已隔离"), { code: "PROVIDER_QUARANTINED" });
     };
     const results = await workflow.generateAllAssets(created.id, { track: false });
     assert.ok(results.some(item => item.stage === "character_sheet"));
-    assert.ok(results.some(item => item.stage === "character_intro"));
+    assert.equal(results.some(item => item.stage === "character_intro"), false);
+    assert.equal(workflow.buildAssetBatchPlan(created.id).some(item => item.kind === "character_intro"), false);
     const progress = store.getProject(created.id).automation.progress;
     assert.equal(progress.items.find(item => item.kind === "character_video").status, "queued");
     assert.equal(progress.items.find(item => item.kind === "character_voice").status, "queued");

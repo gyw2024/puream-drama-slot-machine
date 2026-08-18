@@ -649,6 +649,79 @@ function defaultAutomation() {
   };
 }
 
+function reconcilePersistedAssetProgress(project) {
+  const progress = project?.automation?.progress;
+  if (progress?.kind !== "asset_batch" || !Array.isArray(progress.items)) return project;
+  const activeRevision = String(project.productionRevision || "");
+  const realCandidate = (entityType, entityId, stage) => (project.candidates || []).some(candidate => {
+    if (candidate.entityType !== entityType || String(candidate.entityId || "") !== String(entityId || "") || candidate.stage !== stage) return false;
+    if (String(candidate.productionRevision || "") !== activeRevision || candidate.stale === true || !candidate.filePath) return false;
+    try {
+      const stat = fs.statSync(path.resolve(String(candidate.filePath)));
+      return stat.isFile() && stat.size > 0;
+    } catch {
+      return false;
+    }
+  });
+  const stageType = kind => {
+    if (["character_sheet", "character_three_view", "character_video", "character_voice"].includes(kind)) return "character";
+    if (kind === "scene_asset") return "scene";
+    if (["prop_asset", "wardrobe_asset"].includes(kind)) return "library";
+    return "";
+  };
+  let changed = false;
+  const items = progress.items
+    .filter(item => {
+      if (item.kind !== "character_intro") return true;
+      changed = true;
+      return false;
+    })
+    .map(item => {
+      const entityType = stageType(item.kind);
+      if (!entityType || !["completed", "skipped"].includes(item.status)) return item;
+      const voiceCanReplaceVideo = item.kind === "character_video"
+        && realCandidate("character", item.entityId, "character_voice");
+      if (voiceCanReplaceVideo || realCandidate(entityType, item.entityId, item.kind)) return item;
+      changed = true;
+      return {
+        ...item,
+        status: "queued",
+        errorCode: "ASSET_FILE_MISSING",
+        message: "旧进度没有对应的真实文件，等待从本项恢复",
+        updatedAt: now()
+      };
+    });
+  if (!changed) return project;
+  const completed = items.filter(item => ["completed", "skipped"].includes(item.status)).length;
+  const failed = items.filter(item => item.status === "failed").length;
+  const queued = items.filter(item => item.status === "queued").length;
+  const running = items.filter(item => item.status === "running").map(item => ({ key: item.key, label: item.label }));
+  project.automation.progress = {
+    ...progress,
+    items,
+    total: items.length,
+    completed,
+    failed,
+    queued,
+    running,
+    percent: items.length ? Math.round((completed / items.length) * 100) : 100,
+    waveLabel: "已按真实资产文件重新核对，可从缺失项继续",
+    updatedAt: now()
+  };
+  if (project.automation.status === "failed" && queued > 0) {
+    project.automation = {
+      ...project.automation,
+      status: "paused",
+      stage: "assets",
+      message: "检测到旧版本把缺失的人物视频或音色误报为完成，现已恢复到资产阶段；继续任务时只处理缺失项",
+      errorCode: "ASSET_VIDEO_DEPENDENCIES_PENDING",
+      recoverableFailure: true,
+      updatedAt: now()
+    };
+  }
+  return project;
+}
+
 function defaultAccountSwitchState() {
   return {
     version: 1,
@@ -2104,6 +2177,7 @@ class WorkbenchStore {
         ? legacyGeneration.durationContract
         : null
     };
+    reconcilePersistedAssetProgress(project);
     applyPromptIntakeToMaterializedEntities(project);
     return attachStoreBaseline(project, storeBaseline);
   }
