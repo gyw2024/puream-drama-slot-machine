@@ -368,14 +368,14 @@ function ideaSignature(project) {
   });
 }
 
-function normalizeTopicOptions(data, { expectedCount = 10, idOffset = 0 } = {}) {
+function normalizeTopicOptions(data, { expectedCount = 10, idOffset = 0, enforceDiversity = true } = {}) {
   const source = Array.isArray(data) ? data : data?.topics;
   if (!Array.isArray(source)) throw Object.assign(new Error("选题模型没有返回 topics 数组"), { code: "TOPIC_RESULT_INVALID" });
   const seen = new Set();
   const topics = source.map((item, index) => {
     const title = String(item?.title || "").trim().replace(/^[《]|[》]$/g, "");
     const highlights = (Array.isArray(item?.highlights) ? item.highlights : []).map(value => String(value || "").trim()).filter(Boolean).slice(0, 3);
-    if (!title || seen.has(title) || highlights.length !== 3) return null;
+    if (!title || (enforceDiversity && seen.has(title)) || highlights.length !== 3) return null;
     seen.add(title);
     const authoredMechanism = String(item?.storyMechanism || "").trim().toLowerCase();
     const storyMechanism = ["rescue_repaid", "kindness_misjudged", "sacrifice_repaid", "evidence_reversal"].includes(authoredMechanism)
@@ -404,7 +404,7 @@ function normalizeTopicOptions(data, { expectedCount = 10, idOffset = 0 } = {}) 
   }).filter(Boolean);
   const relationships = new Set(topics.map(item => item.relationship).filter(Boolean));
   const requiredRelationships = expectedCount >= 10 ? 5 : Math.min(2, expectedCount);
-  if (topics.length !== expectedCount || relationships.size < requiredRelationships) {
+  if (topics.length !== expectedCount || (enforceDiversity && relationships.size < requiredRelationships)) {
     throw Object.assign(new Error(`选题必须是 ${expectedCount} 个不同题材并覆盖至少 ${requiredRelationships} 种关系；当前有效选题 ${topics.length} 个、关系 ${relationships.size} 种`), { code: "TOPIC_DIVERSITY_INVALID" });
   }
   return topics;
@@ -468,7 +468,7 @@ function topicJsonParseOptions() {
   };
 }
 
-function recoverTopicOptionsFromDiagnostics(project) {
+function recoverTopicOptionsFromDiagnostics(project, options = {}) {
   const requestSessionId = String(project?.ideation?.requestSessionId || "");
   const failures = Array.isArray(project?.textProviderDiagnostics?.failures)
     ? project.textProviderDiagnostics.failures
@@ -489,7 +489,7 @@ function recoverTopicOptionsFromDiagnostics(project) {
       const parsed = parseStructuredJson(rawText, topicJsonParseOptions());
       return {
         status: "recovered",
-        topics: normalizeTopicOptions(parsed),
+      topics: normalizeTopicOptions(parsed, options),
         failureId: String(failure.id || ""),
         rawTextSha256: actualSha256,
         sessionId: String(failure.sessionId || requestSessionId),
@@ -12166,9 +12166,12 @@ class WorkbenchWorkflow {
       ...previousTopics.map(item => String(item?.title || "").trim()),
       ...priorTopicTitles(project, 120)
     ].filter(Boolean));
+    const topicDiversityAuditEnabled = this.qualityGatesEnabled(settings, "script");
     const generationIndex = Math.max(1, Math.floor(Number(project.ideation?.generationIndex) || 0) + (options.fresh ? 1 : 0));
     const recoveryEligible = !options.fresh && ["failed", "generating"].includes(String(project.ideation?.status || ""));
-    const recovered = recoveryEligible ? recoverTopicOptionsFromDiagnostics(project) : { status: "none" };
+    const recovered = recoveryEligible
+      ? recoverTopicOptionsFromDiagnostics(project, { enforceDiversity: topicDiversityAuditEnabled })
+      : { status: "none" };
     if (recovered.status === "recovered") {
       const selectedTopicId = recovered.topics.some(item => item.id === project.ideation?.selectedTopicId)
         ? project.ideation.selectedTopicId
@@ -12229,11 +12232,12 @@ class WorkbenchWorkflow {
           ...topicJsonParseOptions(),
           sessionId: topicSessionId,
           maxTokens: 2_400,
-          costOperation: "topic_ideation"
+          costOperation: "topic_ideation",
+          maxReconnectAttempts: UNLIMITED_ATTEMPTS
         }));
-        const topics = normalizeTopicOptions(data);
+        const topics = normalizeTopicOptions(data, { enforceDiversity: topicDiversityAuditEnabled });
         const repeatedTitles = topics.filter(item => previousTitles.has(String(item.title || "").trim()));
-        if (options.fresh && repeatedTitles.length > 0) {
+        if (topicDiversityAuditEnabled && options.fresh && repeatedTitles.length > 0) {
           throw Object.assign(new Error(`云端重复返回上一批选题：${repeatedTitles.map(item => item.title).join("、")}`), { code: "TOPIC_NOT_NOVEL" });
         }
         project = this.store.getProject(projectId);
@@ -12261,7 +12265,9 @@ class WorkbenchWorkflow {
     const failure = agentCreativeOutputRequired(
       lastError,
       "TOPIC_AGENT_RESULT_REQUIRED",
-      "选题 Agent 未返回 10 个通过去重合同的选题，已停止，绝不使用固定本地题库冒充 AI"
+      topicDiversityAuditEnabled
+        ? "选题 Agent 未返回 10 个通过去重合同的选题，已停止，绝不使用固定本地题库冒充 AI"
+        : "选题 Agent 未返回 10 个结构完整的选题，已停止，绝不使用固定本地题库冒充 AI"
     );
     project.ideation = {
       ...(project.ideation || {}),
@@ -12953,9 +12959,13 @@ class WorkbenchWorkflow {
         checkpoint.shotPlan,
         Array.from({ length: unitCount }, (_, index) => `S${String(index + 1).padStart(2, "0")}`)
       );
-      // This preflight runs before any provider call. Invalid legacy checkpoints
-      // must stop locally instead of paying for a later batch that cannot pass.
-      assertShotPlanCheckpointReversalContract(resumePlanPrefix.items, unitCount, filmSchedule.totalSeconds);
+      // The checkpoint contract is a production-structure audit, not a parser
+      // prerequisite. When the script audit blueprint is disabled, preserve the
+      // authored checkpoint and continue; enabled blueprints still fail locally
+      // before another paid planning request is made.
+      if (productionStructureGateEnabled(settings, project)) {
+        assertShotPlanCheckpointReversalContract(resumePlanPrefix.items, unitCount, filmSchedule.totalSeconds);
+      }
     }
     const durationContractNote = [
       `剧总时长合同：精确 ${filmSchedule.totalSeconds} 秒；约 ${unitCount} 个生成单元；合计必须等于 ${filmSchedule.totalSeconds}。`,
@@ -19448,9 +19458,12 @@ ${shotAnchor}
         }
       }
     );
-    if (options.audit !== false) {
-      if (this.qualityGatesEnabled(settings, "videos")) await this.auditShotCandidate(projectId, activeShot.id, candidate.id);
-      else await this.auditTechnicalShotCandidate(projectId, activeShot.id, candidate.id);
+    if (options.audit !== false && this.qualityGatesEnabled(settings, "videos")) {
+      // Technical visual integrity is part of the video quality module. With
+      // the module disabled, submission and the local file-existence checks are
+      // still production prerequisites, but FFmpeg-based auditing must not
+      // interrupt the user's production run.
+      await this.auditShotCandidate(projectId, activeShot.id, candidate.id);
       candidate = this.store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
     }
     return candidate;
@@ -22190,7 +22203,9 @@ ${shotAnchor}
     }
     const ffmpeg = this.locateFfmpeg();
     if (!ffmpeg) throw Object.assign(new Error("未找到本地媒体处理组件 FFmpeg，请检查像塑安装或重新安装纯梦短剧老虎机"), { code: "FFMPEG_NOT_FOUND" });
-    if (deliveryQualityEnabled) {
+    // Per-shot technical integrity belongs to the videos quality module. The
+    // delivery module only governs final-media review after stitching.
+    if (this.qualityGatesEnabled(settings, "videos")) {
     const orderedShotsForIntegrity = project.shots.slice().sort((a, b) => a.number - b.number);
     const technicalShotAudits = await mapWithConcurrency(videos.map((candidate, index) => ({
       candidate,

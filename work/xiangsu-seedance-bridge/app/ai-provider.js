@@ -296,6 +296,27 @@ function openAiCompatibleRequestExtras(config, options = {}) {
   return {};
 }
 
+function isOpenAiCompatibleTransientError(error) {
+  const code = String(error?.code || error?.cause?.code || "").toUpperCase();
+  const status = Number(error?.status);
+  if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
+  if ([
+    "UND_ERR_SOCKET",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "EPIPE",
+    "ETIMEDOUT",
+    "EAI_AGAIN",
+    "ENOTFOUND",
+    "ERR_FAILED",
+    "ERR_EMPTY_RESPONSE",
+    "PROVIDER_TIMEOUT"
+  ].includes(code)) return true;
+  const message = `${error?.message || ""} ${error?.cause?.message || ""}`.toLowerCase();
+  return error instanceof TypeError
+    || /fetch failed|socket closed|socket hang up|connection reset|other side closed|net::err_failed|err_empty_response|upstream_network_error/.test(message);
+}
+
 function describeEmptyTextChoice(choice, data) {
   const finish = choice?.finish_reason || data?.choices?.[0]?.finish_reason || "";
   const reasoningLen = contentText(choice?.message?.reasoning_content || choice?.message?.reasoning || "").length;
@@ -937,6 +958,7 @@ function requireProviderKey(config, providerName) {
 async function generateOpenAiCompatibleText(config, messages, options = {}) {
   requireProviderKey(config, providerPreset(config.kind).displayName || (config.kind === "openai-native" ? "OpenAI" : "OpenAI Compatible"));
   const maxTokens = normalizedMaxTokens(config);
+  const clientRequestId = String(options.sessionId || `text-${Date.now()}-${crypto.randomUUID()}`).trim().slice(0, 180);
   const baseBody = {
     model: config.model,
     messages,
@@ -945,10 +967,54 @@ async function generateOpenAiCompatibleText(config, messages, options = {}) {
   };
   const request = body => providerFetch(endpoint(config.baseUrl, "/chat/completions"), {
     method: "POST",
-    headers: authHeaders(config),
+    headers: {
+      ...authHeaders(config),
+      // Providers that support idempotency can replay the same logical request
+      // after a dropped connection. Providers that ignore these headers still
+      // receive a normal OpenAI-compatible request.
+      "idempotency-key": clientRequestId,
+      "x-client-request-id": clientRequestId
+    },
     body: JSON.stringify(body),
     signal: options.signal
   }, providerTimeout(options));
+
+  const requestedAttempts = options.maxReconnectAttempts === undefined
+    ? 3
+    : Number(options.maxReconnectAttempts);
+  const maxAttempts = requestedAttempts === 0
+    ? Number.POSITIVE_INFINITY
+    : Math.max(1, Number.isFinite(requestedAttempts) ? Math.floor(requestedAttempts) : 3);
+  const requestWithRecovery = async (body, label) => {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await request(body);
+      } catch (error) {
+        const recoverable = !options.signal?.aborted
+          && attempt < maxAttempts
+          && isOpenAiCompatibleTransientError(error);
+        if (typeof options.onAttemptFailure === "function") {
+          try {
+            options.onAttemptFailure({
+              attempt,
+              retrying: recoverable,
+              retryDelayMs: recoverable ? Math.min(15_000, Math.max(250, Number(options.retryBaseDelayMs) || 1_000) * (2 ** Math.min(attempt - 1, 4))) : 0,
+              sessionId: clientRequestId,
+              model: config?.model || "",
+              code: error?.code || "TEXT_PROVIDER_FAILED",
+              message: recoverable ? "文本模型网络波动，正在续接同一请求" : (error?.message || "")
+            });
+          } catch {}
+        }
+        if (!recoverable) throw error;
+        await waitForRetry(
+          Math.min(15_000, Math.max(250, Number(options.retryBaseDelayMs) || 1_000) * (2 ** Math.min(attempt - 1, 4))),
+          options.signal
+        );
+      }
+    }
+    throw Object.assign(new Error(`${label || "文本模型"}重试耗尽`), { code: "PROVIDER_RETRY_EXHAUSTED" });
+  };
 
   const attempts = [];
   const primaryExtras = openAiCompatibleRequestExtras(config, options);
@@ -979,13 +1045,13 @@ async function generateOpenAiCompatibleText(config, messages, options = {}) {
     const attempt = attempts[index];
     let data;
     try {
-      data = await request(attempt.body);
+      data = await requestWithRecovery(attempt.body, attempt.label);
     } catch (error) {
       lastError = error;
       // Older gateways reject response_format / thinking; fall back to bare chat body once.
       if ([400, 422].includes(Number(error?.status)) && index === 0) {
         try {
-          data = await request({
+          data = await requestWithRecovery({
             model: baseBody.model,
             messages: baseBody.messages,
             temperature: baseBody.temperature,

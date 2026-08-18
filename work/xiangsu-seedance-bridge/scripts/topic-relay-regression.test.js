@@ -123,6 +123,38 @@ test("topic generation has no total deadline", () => {
   assert.doesNotMatch(topicSource, /timeoutMs:\s*(?:45_000|60_000|300_000)/);
 });
 
+test("OpenAI-compatible domestic providers retry fetch failures with one logical request id", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (_url, init = {}) => {
+    calls.push({ headers: init.headers, body: JSON.parse(init.body) });
+    if (calls.length === 1) throw Object.assign(new Error("fetch failed"), { code: "UND_ERR_SOCKET" });
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    const result = await generateText({
+      kind: "kimi-native",
+      baseUrl: "https://api.moonshot.invalid/v1",
+      apiKey: "test-only",
+      model: "kimi-k3"
+    }, [{ role: "user", content: "test" }], {
+      sessionId: "kimi-logical-request",
+      json: true,
+      requiredKeys: ["ok"],
+      retryBaseDelayMs: 1
+    });
+    assert.deepEqual(result, { ok: true });
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.headers["idempotency-key"] === "kimi-logical-request"));
+    assert.ok(calls.every(call => call.headers["x-client-request-id"] === "kimi-logical-request"));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("unlimited production reconnect survives beyond the historic retry cap with one idempotency key", async () => {
   const originalFetch = global.fetch;
   const calls = [];
@@ -165,6 +197,53 @@ test("topic JSON parser accepts a root array without weakening other schemas", (
     () => parseStructuredJson(JSON.stringify(topics), { requiredKeys: ["shots"] }),
     error => error?.code === "MODEL_JSON_INVALID"
   );
+});
+
+test("topic diversity is an optional audit, while the ten-item production shape stays required", () => {
+  const topics = validTopicFixture().map((item, index) => ({
+    ...item,
+    title: index === 0 ? "同一个标题" : "同一个标题",
+    relationship: "同一关系"
+  }));
+  assert.throws(() => normalizeTopicOptions({ topics }), error => error?.code === "TOPIC_DIVERSITY_INVALID");
+  const accepted = normalizeTopicOptions({ topics }, { enforceDiversity: false });
+  assert.equal(accepted.length, 10);
+  assert.equal(new Set(accepted.map(item => item.title)).size, 1);
+  assert.throws(
+    () => normalizeTopicOptions({ topics: topics.slice(0, 9) }, { enforceDiversity: false }),
+    error => error?.code === "TOPIC_DIVERSITY_INVALID"
+  );
+});
+
+test("video technical audit is controlled by the videos quality module", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
+  const generateStart = source.indexOf("async generateShotVideo");
+  const auditStart = source.indexOf("async auditTechnicalShotCandidate", generateStart);
+  const generateSource = source.slice(generateStart, auditStart);
+  assert.doesNotMatch(generateSource, /else\s+await this\.auditTechnicalShotCandidate/);
+  assert.match(generateSource, /options\.audit !== false && this\.qualityGatesEnabled\(settings, "videos"\)/);
+});
+
+test("legacy checkpoint reversal review is controlled by the production-structure blueprint", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
+  const scriptStart = source.indexOf("async generateCompleteScript");
+  const pipelineStart = source.indexOf("async runIdeaToFullPipeline", scriptStart);
+  const scriptSource = source.slice(scriptStart, pipelineStart);
+  assert.match(
+    scriptSource,
+    /if \(productionStructureGateEnabled\(settings, project\)\) \{\s*assertShotPlanCheckpointReversalContract/
+  );
+});
+
+test("stitching assigns per-shot technical review to videos and final review to delivery", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
+  const stitchStart = source.indexOf("async stitchProject");
+  const stitchSource = source.slice(stitchStart);
+  const technicalStart = stitchSource.indexOf("const orderedShotsForIntegrity");
+  const technicalPrefix = stitchSource.slice(Math.max(0, technicalStart - 240), technicalStart);
+  assert.match(technicalPrefix, /if \(this\.qualityGatesEnabled\(settings, "videos"\)\)/);
+  assert.doesNotMatch(technicalPrefix, /if \(deliveryQualityEnabled\)/);
+  assert.match(stitchSource, /if \(!deliveryQualityEnabled\) \{/);
 });
 
 test("topic JSON parser accepts common aliases and deeply wrapped fenced arrays", () => {
