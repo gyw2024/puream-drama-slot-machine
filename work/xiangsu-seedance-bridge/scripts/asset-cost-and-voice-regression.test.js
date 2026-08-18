@@ -123,6 +123,90 @@ test("missing video and voice files can never be reported ready", t => {
   assert.equal(plan.find(item => item.kind === "character_voice").status, "queued");
 });
 
+test("three uploaded voices satisfy video and voice dependencies so only six images remain", t => {
+  const { root, store, workflow } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const created = store.createProject("已上传音色只补六张图片", { engine: "hailuo-h3", mode: "storyboard_sheet" });
+  const characters = ["C01", "C02", "C03"].map((id, index) => ({ id, name: `角色${index + 1}` }));
+  const scenes = ["SC01", "SC02", "SC03"].map((id, index) => ({ id, name: `场景${index + 1}` }));
+  store.patchProject(created.id, {
+    characters,
+    scenes,
+    generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "storyboard_sheet", modeConfirmed: true }
+  });
+  for (const character of characters) {
+    store.addCandidate(created.id, {
+      entityType: "character",
+      entityId: character.id,
+      stage: "character_voice",
+      filePath: writeMedia(root, `uploaded-${character.id}.wav`, `voice:${character.id}`),
+      selected: true,
+      duration: 5,
+      mediaProbeVerified: true,
+      qualityAudit: { ok: true }
+    });
+  }
+
+  const plan = workflow.buildAssetBatchPlan(created.id);
+  const ready = plan.filter(item => ["completed", "skipped"].includes(item.status));
+  const missing = plan.filter(item => !["completed", "skipped"].includes(item.status));
+
+  assert.equal(plan.length, 12);
+  assert.equal(ready.length, 6);
+  assert.equal(missing.length, 6);
+  assert.deepEqual([...new Set(missing.map(item => item.kind))].sort(), ["character_sheet", "scene_asset"]);
+  assert.equal(plan.filter(item => item.kind === "character_video").every(item => item.status === "skipped"), true);
+  assert.equal(plan.filter(item => item.kind === "character_voice").every(item => item.status === "skipped"), true);
+});
+
+test("bound library voices materialize before the asset plan and never submit character videos", async t => {
+  const { root, store, workflow } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const created = store.createProject("库音色直接复用", { engine: "hailuo-h3", mode: "storyboard_sheet" });
+  const voicePath = writeMedia(root, "bound-library-voice.wav", "bound voice");
+  const entry = store.upsertVoiceLibraryEntry({
+    id: "voice-bound-C01",
+    label: "周桂兰音色",
+    characterName: "周桂兰",
+    filePath: voicePath,
+    fileUrl: `file://${voicePath}`,
+    duration: 5,
+    mediaProbeVerified: true,
+    audioAudit: { ok: true, source: "manual-import" }
+  });
+  store.patchProject(created.id, {
+    characters: [{ id: "C01", name: "周桂兰", voiceLibraryId: entry.id }],
+    scenes: [{ id: "SC01", name: "客厅" }],
+    generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "storyboard_sheet", modeConfirmed: true }
+  });
+  const generatedStages = [];
+  workflow.generateImageCandidate = async (projectId, stage, entityId) => {
+    generatedStages.push(stage);
+    return store.addCandidate(projectId, {
+      entityType: stage === "scene_asset" ? "scene" : "character",
+      entityId,
+      stage,
+      filePath: writeMedia(root, `${stage}-${entityId}.png`, `${stage}:${entityId}`),
+      selected: true,
+      qualityAudit: { ok: true }
+    });
+  };
+  workflow.generateQualityCharacterVideo = async () => {
+    throw new Error("bound voice must not submit a character video");
+  };
+
+  await workflow.generateAllAssets(created.id, { track: false });
+
+  const project = store.getProject(created.id);
+  const voice = project.candidates.find(item => item.entityType === "character" && item.entityId === "C01" && item.stage === "character_voice" && item.selected);
+  assert.ok(voice?.filePath && fs.existsSync(voice.filePath));
+  assert.equal(voice.voiceLibraryId, entry.id);
+  assert.deepEqual(generatedStages.sort(), ["character_sheet", "scene_asset"]);
+  assert.equal(project.candidates.some(item => item.stage === "character_video"), false);
+  assert.equal(project.automation.progress.total, 4);
+  assert.equal(project.automation.progress.completed, 4);
+});
+
 test("character video reuses the existing four-view image", async t => {
   const { root, store, workflow } = fixture();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

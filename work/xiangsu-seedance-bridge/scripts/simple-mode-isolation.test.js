@@ -166,7 +166,7 @@ test("legacy official Claude settings migrate to Sol without changing custom pro
     }), "utf8");
 
     const settings = new WorkbenchStore(tempRoot, secretCodec()).getSettings();
-    assert.equal(settings.settingsVersion, 16);
+    assert.equal(settings.settingsVersion, 17);
     assert.equal(settings.textProvider.model, "gpt-5-6-sol");
     assert.equal(settings.textProviderProfiles["puream-relay"].model, "gpt-5-6-sol");
     assert.equal(settings.textProviderProfiles["openai-compatible"].apiKey, custom.apiKey);

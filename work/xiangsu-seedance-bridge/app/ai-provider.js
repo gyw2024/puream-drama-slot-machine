@@ -210,12 +210,27 @@ async function providerFetchOpenAiStream(url, options = {}, timeoutMs = 180_000,
     : Object.assign(new Error("供应商请求已取消"), { code: "PROVIDER_REQUEST_ABORTED" });
   externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
   const effectiveTimeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 0;
-  const timer = effectiveTimeoutMs ? setTimeout(() => {
+  let idleTimer = null;
+  let maxTimer = null;
+  const maxTimeoutMs = effectiveTimeoutMs
+    ? Math.max(300_000, Number(streamOptions.maxTimeoutMs) || effectiveTimeoutMs * 4)
+    : 0;
+  const abortForTimeout = () => {
     timedOut = true;
     controller.abort();
-  }, effectiveTimeoutMs) : null;
+  };
+  const armIdleTimer = () => {
+    if (!effectiveTimeoutMs) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(abortForTimeout, effectiveTimeoutMs);
+  };
+  if (effectiveTimeoutMs) {
+    armIdleTimer();
+    maxTimer = setTimeout(abortForTimeout, maxTimeoutMs);
+  }
   try {
     const response = await fetch(url, { ...options, signal: controller.signal });
+    armIdleTimer();
     const requestId = String(response.headers.get("x-request-id") || response.headers.get("request-id") || "").trim();
     if (!response.ok) {
       const errorText = await response.text();
@@ -307,6 +322,7 @@ async function providerFetchOpenAiStream(url, options = {}, timeoutMs = 180_000,
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        armIdleTimer();
         const chunk = decoder.decode(value, { stream: true });
         raw += chunk;
         if (raw.length > rawLimit) raw = raw.slice(-rawLimit);
@@ -361,7 +377,8 @@ async function providerFetchOpenAiStream(url, options = {}, timeoutMs = 180_000,
     }
     throw error;
   } finally {
-    if (timer) clearTimeout(timer);
+    if (idleTimer) clearTimeout(idleTimer);
+    if (maxTimer) clearTimeout(maxTimer);
     externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }
@@ -851,7 +868,7 @@ function parsePureamSse(sse) {
   return { text, streamError, streamErrorCode, events, sessionId, usage: { ...(streamModel ? { model: streamModel } : {}), ...usage } };
 }
 
-async function readPureamSse(response, onDelta) {
+async function readPureamSse(response, onDelta, onProgress) {
   if (!response.body?.getReader) {
     const raw = await response.text();
     const parsed = parsePureamSse(raw);
@@ -865,6 +882,7 @@ async function readPureamSse(response, onDelta) {
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+    try { onProgress?.(); } catch {}
     raw += decoder.decode(value, { stream: true });
     const parsed = parsePureamSse(raw);
     if (parsed.text !== lastText) {
@@ -901,11 +919,23 @@ async function generatePureamTextOnce(config, messages, options = {}) {
   // forever; recovery retains this same logical request id.
   let timeoutReject;
   const timeoutPromise = new Promise((_, reject) => { timeoutReject = reject; });
-  const timer = timeoutMs > 0 ? setTimeout(() => {
+  let idleTimer = null;
+  let maxTimer = null;
+  const maxTimeoutMs = timeoutMs > 0 ? Math.max(300_000, Number(options.maxTimeoutMs) || timeoutMs * 4) : 0;
+  const rejectTimeout = () => {
     timedOut = true;
     controller.abort();
     timeoutReject(Object.assign(new Error("纯梦文本中转请求超时"), { code: "PROVIDER_TIMEOUT" }));
-  }, timeoutMs) : null;
+  };
+  const armIdleTimer = () => {
+    if (!timeoutMs) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(rejectTimeout, timeoutMs);
+  };
+  if (timeoutMs) {
+    armIdleTimer();
+    maxTimer = setTimeout(rejectTimeout, maxTimeoutMs);
+  }
   try {
     const clientRequestId = String(options.sessionId || "").trim().slice(0, 180);
     const fetchPromise = desktopRelayFetch(endpoint(config.baseUrl, "/api/desktop/chat/complete"), {
@@ -959,7 +989,7 @@ async function generatePureamTextOnce(config, messages, options = {}) {
     // forever. Racing only fetch() does not bound that state, and some
     // Electron streams also ignore AbortSignal after headers have arrived.
     const { raw, parsed } = await Promise.race([
-      readPureamSse(response, options.onDelta),
+      readPureamSse(response, options.onDelta, armIdleTimer),
       timeoutPromise
     ]);
     const { text, streamError, streamErrorCode, events } = parsed;
@@ -1034,7 +1064,8 @@ async function generatePureamTextOnce(config, messages, options = {}) {
     }
     throw error;
   } finally {
-    if (timer) clearTimeout(timer);
+    if (idleTimer) clearTimeout(idleTimer);
+    if (maxTimer) clearTimeout(maxTimer);
     externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }
@@ -2024,6 +2055,7 @@ module.exports = {
   generateVideo: generatePureamVideo,
   parseStructuredJson,
   parsePureamSse,
+  providerFetchOpenAiStream,
   testProvider,
   normalizedReferenceInputs,
   localImageDataUri,

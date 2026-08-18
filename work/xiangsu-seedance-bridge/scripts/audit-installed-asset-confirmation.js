@@ -25,27 +25,34 @@ async function main() {
   const characters = ["C01", "C02", "C03"].map((id, index) => ({ id, name: `角色${index + 1}` }));
   const scenes = ["SC01", "SC02", "SC03"].map((id, index) => ({ id, name: `场景${index + 1}` }));
   store.patchProject(created.id, { characters, scenes, generation: { engine: "hailuo-h3", mode: "storyboard_sheet", modeConfirmed: true } });
-  const sourceImage = path.join(__dirname, "..", "app", "assets", "drama-slot-mark.png");
-  for (const item of [...characters.map(item => ({ ...item, type: "character", stage: "character_sheet" })), ...scenes.map(item => ({ ...item, type: "scene", stage: "scene_asset" }))]) {
-    const target = path.join(root, `${item.stage}-${item.id}.png`);
-    fs.copyFileSync(sourceImage, target);
-    const candidate = store.addCandidate(created.id, { entityType: item.type, entityId: item.id, stage: item.stage, filePath: target, selected: true, qualityAudit: { ok: true } });
-    store.confirmCandidate(created.id, candidate.id, false);
+  for (const character of characters) {
+    const target = path.join(root, `uploaded-voice-${character.id}.wav`);
+    fs.writeFileSync(target, `voice:${character.id}`, "utf8");
+    store.addCandidate(created.id, {
+      entityType: "character",
+      entityId: character.id,
+      stage: "character_voice",
+      filePath: target,
+      selected: true,
+      duration: 5,
+      mediaProbeVerified: true,
+      qualityAudit: { ok: true }
+    });
   }
   const project = store.getProject(created.id);
   const items = [];
   for (const character of characters) {
     items.push(
-      { key: `character_sheet:${character.id}`, kind: "character_sheet", entityId: character.id, label: `${character.name} · 人物四视图`, status: "skipped" },
+      { key: `character_sheet:${character.id}`, kind: "character_sheet", entityId: character.id, label: `${character.name} · 人物四视图`, status: "queued" },
       { key: `character_video:${character.id}`, kind: "character_video", entityId: character.id, label: `${character.name} · 人物视频`, status: "queued" },
-      { key: `character_voice:${character.id}`, kind: "character_voice", entityId: character.id, label: `${character.name} · 人物音色`, status: "queued" }
+      { key: `character_voice:${character.id}`, kind: "character_voice", entityId: character.id, label: `${character.name} · 人物音色`, status: "skipped" }
     );
   }
-  for (const scene of scenes) items.push({ key: `scene_asset:${scene.id}`, kind: "scene_asset", entityId: scene.id, label: `${scene.name} · 场景四视图`, status: "skipped" });
+  for (const scene of scenes) items.push({ key: `scene_asset:${scene.id}`, kind: "scene_asset", entityId: scene.id, label: `${scene.name} · 场景四视图`, status: "queued" });
   project.automation = {
     status: "paused",
     stage: "assets",
-    progress: { kind: "asset_batch", total: 12, completed: 6, queued: 6, failed: 0, running: [], items }
+    progress: { kind: "asset_batch", total: 12, completed: 3, queued: 9, failed: 0, running: [], items }
   };
   store.saveProject(project);
 
@@ -66,7 +73,9 @@ async function main() {
     });
     const message = await page.evaluate(() => window.__assetConfirmMessage);
     assert.match(message, /已就绪 6 项会跳过，只补缺失\/失败的 6 项/);
+    assert.match(message, /已绑定音色会直接复用，不生成人物视频，也不执行音色提取/);
     assert.doesNotMatch(message, /9 项/);
+    assert.doesNotMatch(message, /分 4 波/);
     console.log(JSON.stringify({ ok: true, version: await app.evaluate(({ app }) => app.getVersion()), message }, null, 2));
   } finally {
     await app.close();

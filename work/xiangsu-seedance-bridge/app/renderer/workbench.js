@@ -3689,12 +3689,15 @@ async function repairCharacterReferencesAndContinue(project = state.project) {
 }
 
 function renderPipelineControls(project = state.project) {
+  const runButton = $("#runFullPipeline");
   const pauseButton = $("#pausePipeline");
   const stopButton = $("#stopPipeline");
-  if (!pauseButton || !stopButton) return;
+  if (!runButton || !pauseButton || !stopButton) return;
   const active = automationIsActive(project);
   const resumable = pipelineCanResume(project);
   const pending = state.pipelineControlPending === true;
+  runButton.hidden = active || resumable;
+  runButton.disabled = active || pending;
   pauseButton.hidden = !active && !resumable;
   pauseButton.disabled = pending || (!active && !resumable);
   pauseButton.dataset.intent = active ? "pause" : "resume";
@@ -4054,6 +4057,7 @@ async function renderConsole() {
         <button class="mini-button accent" data-action="open-console-project" data-id="${escapeHtml(item.id)}" data-stage="${escapeHtml(item.nextStage || "script")}">进入项目</button>
         <button class="mini-button draw-button" data-action="console-continue" data-id="${escapeHtml(item.id)}" data-stage="${escapeHtml(item.nextStage || "assets")}">从下一环节继续</button>
         ${item.automation?.active ? `<button class="mini-button" data-action="console-pause" data-id="${escapeHtml(item.id)}">暂停</button>` : ""}
+        <button class="mini-button danger" data-action="console-delete" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title)}" data-active="${item.automation?.active ? "true" : "false"}" ${item.automation?.active ? "disabled title=\"运行中的项目不能删除\"" : ""}>彻底删除</button>
       </div>
     </article>`;
   }).join("") : `<div class="empty-hint">还没有项目。先新建一部漫剧。</div>`;
@@ -4653,6 +4657,23 @@ document.addEventListener("click", async event => {
     await renderConsole();
     return showToast("已请求暂停该项目自动化");
   }
+  if (action === "console-delete") {
+    if (button.dataset.active === "true") return showToast("该项目仍在运行，请先暂停或结束任务", "error");
+    const title = button.dataset.title || id;
+    if (!window.confirm(`彻底删除项目《${title}》？项目剧本、素材、任务历史和成片都会永久删除，无法从回收区恢复。`)) return;
+    if (!window.confirm(`最后确认：永久删除《${title}》，且不可恢复？`)) return;
+    button.disabled = true;
+    const result = await api.workbench.purgeProject(id);
+    if (!result?.ok) {
+      button.disabled = false;
+      return showToast(result?.message || "彻底删除项目失败", "error");
+    }
+    state.projectBusyCounts?.delete(id);
+    const keepProjectId = state.project?.id === id ? "" : state.project?.id;
+    await loadProjects(keepProjectId);
+    switchStage("console");
+    return showToast(`项目《${title}》已彻底删除，无法恢复`);
+  }
   if (action === "remesh-character") {
     if (!button.dataset.candidateId) return showToast("请先生成或上传人物合板（旧项目可用三视图/身份参考图）", "error");
     return runLong("正在抽取人物一致性检查资产…", () => api.workbench.remeshCharacterAsset(state.project.id, button.dataset.candidateId), { entityType: "character", entityId: id });
@@ -5234,7 +5255,14 @@ $("#generateAllAssets").addEventListener("click", () => {
         .filter(wardrobe => wardrobe.changeRequired !== false && (!wardrobe.characterId || String(wardrobe.id || "") !== `wardrobe_${wardrobe.characterId}`))
         .map(wardrobe => ({ kind: "wardrobe_asset", entityId: wardrobe.id }))
     ];
+  const hasReusableCharacterVoice = entityId => {
+    if (chosenCandidate("character", entityId, "character_voice")) return true;
+    const character = (project.characters || []).find(item => item.id === entityId);
+    if (!character?.voiceLibraryId) return false;
+    return (state.voiceLibrary || []).some(item => item.id === character.voiceLibraryId && (item.filePath || item.fileUrl));
+  };
   const isReady = item => item.status === "skipped" || item.status === "completed" || item.status === "ready"
+    || (["character_video", "character_voice"].includes(item.kind) && hasReusableCharacterVoice(item.entityId))
     || Boolean(chosenCandidate(item.kind === "scene_asset" ? "scene" : item.kind.endsWith("_asset") ? "library" : "character", item.entityId, item.kind));
   const ready = plannedItems.filter(isReady).length;
   const missing = plannedItems.length - ready;
@@ -5242,7 +5270,14 @@ $("#generateAllAssets").addEventListener("click", () => {
   const failHint = failed.length
     ? `当前已有 ${failed.length} 项失败（如：${failed.slice(0, 3).map(item => `${item.label}：${item.message || item.errorCode}`).join("；")}）。`
     : "";
-  if (!window.confirm(`已就绪 ${ready} 项会跳过，只补缺失/失败的 ${missing} 项。${failHint}将按依赖分 4 波调用图片 API、${characterEngine} 和 FFmpeg，系统会自动安排顺序。继续吗？`)) return;
+  const pendingKinds = new Set(plannedItems.filter(item => !isReady(item)).map(item => item.kind));
+  const providers = ["图片 API"];
+  if (pendingKinds.has("character_video")) providers.push(characterEngine);
+  if (pendingKinds.has("character_voice")) providers.push("FFmpeg");
+  const voiceReuseHint = !pendingKinds.has("character_video") && !pendingKinds.has("character_voice")
+    ? "已绑定音色会直接复用，不生成人物视频，也不执行音色提取。"
+    : "缺少音色的角色才会生成人物视频并提取音色。";
+  if (!window.confirm(`已就绪 ${ready} 项会跳过，只补缺失/失败的 ${missing} 项。${failHint}${voiceReuseHint}将按实际依赖调用${providers.join("、")}，系统会自动安排顺序。继续吗？`)) return;
   runLong("正在生产全部角色和场景资产…", () => api.workbench.generateAllAssets(state.project.id));
 });
 $("#importVoiceLibrary")?.addEventListener("click", async () => {

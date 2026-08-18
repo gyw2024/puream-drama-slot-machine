@@ -3708,6 +3708,18 @@ function isTransientProviderError(error) {
   return /502|503|504|429|408|500|SERVER_ERROR|PROVIDER_HTTP|PROVIDER_TIMEOUT|TIMEOUT|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|network|VIDEO_REMOTE_PENDING|VIDEO_DOWNLOAD_PENDING|REMOTE_TASK_PENDING|BRIDGE_HTTP_ERROR|网关|超时|限流|繁忙|远端待恢复|稍后再试|Bad Gateway|Service Unavailable|Too Many Requests|Internal Server Error/i.test(text);
 }
 
+const NON_RETRYABLE_STORYBOARD_ERROR_PATTERN = /^(?:CONTINUITY_REFERENCE_REQUIRED|STORYBOARD_(?:PREVIOUS_END|CHARACTER|SCENE|WARDROBE|PROP)_REFERENCE_REQUIRED|IMAGE_REFERENCE_(?:URL_REQUIRED|LIMIT_EXCEEDED)|IMAGE_REFERENCE_PLATE_[A-Z_]+|PRODUCT_REFERENCE_REQUIRED|PUREAM_AUTH_REQUIRED|PUREAM_MANAGED_MEDIA_UPLOAD_FAILED|OSS_[A-Z_]+_REQUIRED|MEDIA_FILE_MISSING)$/i;
+
+function isRetryableStoryboardFailure(failure = {}) {
+  const code = String(failure.code || "").trim();
+  if (NON_RETRYABLE_STORYBOARD_ERROR_PATTERN.test(code)) return false;
+  return isTransientProviderError({
+    code,
+    status: Number(failure.status) || 0,
+    message: String(failure.message || "")
+  });
+}
+
 /** Retry transient upstream image failures with backoff; never swallow non-transient errors. */
 async function withTransientProviderRetries(run, {
   attempts = UNLIMITED_ATTEMPTS,
@@ -4703,7 +4715,7 @@ function continuityReferenceRequired(stage) {
 }
 
 function continuityReferenceError(stage, message = "", cause = null) {
-  const error = Object.assign(new Error(message || `阶段 ${stage} 缺少可用的连续性参考图，已在调用图片供应商前停止，禁止纯文字降级生成。`), {
+  const error = Object.assign(new Error(message || `阶段 ${stage} 缺少当前镜头所需的人物、场景或道具参考图，已在调用图片供应商前停止，禁止无参考生成。`), {
     code: "CONTINUITY_REFERENCE_REQUIRED",
     stage: String(stage || ""),
     uploadErrors: cause?.uploadErrors || []
@@ -20299,6 +20311,7 @@ ${shotAnchor}
     this.ensureProjectShotScenes(projectId);
     this.syncReferenceLibraries(projectId);
     this.restoreUnchangedScriptAssets(projectId);
+    this.materializeReusableCharacterVoices(projectId);
     this.reconcileProductionContracts(projectId, { markScriptFailed: false });
     let contractProject = this.store.getProject(projectId);
     const settings = this.store.getSettings();
@@ -20962,6 +20975,23 @@ ${shotAnchor}
     return items;
   }
 
+  materializeReusableCharacterVoices(projectId) {
+    let project = this.store.getProject(projectId);
+    if (projectVideoEngine(project) !== "hailuo-h3") return [];
+    const settings = this.store.getSettings();
+    const materialized = [];
+    for (const character of project.characters || []) {
+      const projectVoice = candidateReady(project, "character", character.id, "character_voice", settings);
+      if (projectVoice?.filePath && fs.existsSync(projectVoice.filePath)) continue;
+      const reusable = this.findReusableVoice(character)?.entry;
+      if (!reusable?.filePath || !fs.existsSync(reusable.filePath)) continue;
+      const candidate = this.materializeVoiceFromLibrary(projectId, character.id, reusable.id);
+      materialized.push(candidate.id);
+      project = this.store.getProject(projectId);
+    }
+    return materialized;
+  }
+
   /**
    * Re-analysis of the exact same source may change timing or AI annotations, but
    * it must not redraw identity assets. Restore only non-timeline assets whose
@@ -21381,6 +21411,7 @@ ${shotAnchor}
             message: error?.message || "分镜帧生成失败",
             kind: item.kind,
             entityId: item.entityId,
+            status: Number(error?.status) || 0,
             uploadErrors: error?.uploadErrors || error?.cause?.uploadErrors || []
           });
           this.updateAssetBatchProgress(projectId, item.key, {
@@ -21421,6 +21452,7 @@ ${shotAnchor}
             message: error?.message || item.message || "分镜帧生成失败",
             kind: item.kind,
             entityId: item.entityId,
+            status: Number(error?.status) || Number(item.status) || 0,
             uploadErrors: error?.uploadErrors || error?.cause?.uploadErrors || item.uploadErrors || []
           });
           this.updateAssetBatchProgress(projectId, item.key, {
@@ -21435,7 +21467,9 @@ ${shotAnchor}
     // Wave 1: missing starts / sheets only. Existing ready starts stay skipped by buildStoryboardBatchPlan.
     await runWave(startPending, sheetMode ? "逐秒合图" : "第1波 · 首帧", concurrency);
     const startFailures = failures.splice(0, failures.length);
-    if (startFailures.length) await retryWave(startFailures, sheetMode ? "逐秒合图" : "第1波 · 首帧", concurrency);
+    const retryableStartFailures = startFailures.filter(isRetryableStoryboardFailure);
+    failures.push(...startFailures.filter(item => !isRetryableStoryboardFailure(item)));
+    if (retryableStartFailures.length) await retryWave(retryableStartFailures, sheetMode ? "逐秒合图" : "第1波 · 首帧", concurrency);
     if (failures.length) {
       const failureSummary = failures.slice(0, 8).map(item => `${item.label}(${item.code})`).join("；");
       const failureDetail = failures.slice(0, 8).map(item => `${item.label}(${item.code}): ${item.message}`).join("；");
@@ -21464,7 +21498,9 @@ ${shotAnchor}
     const endConcurrency = mode === "keyframe" ? concurrency : 1;
     await runWave(endPending, "第2波 · 尾帧", endConcurrency);
     const endFailures = failures.splice(0, failures.length);
-    if (endFailures.length) await retryWave(endFailures, "第2波 · 尾帧", endConcurrency);
+    const retryableEndFailures = endFailures.filter(isRetryableStoryboardFailure);
+    failures.push(...endFailures.filter(item => !isRetryableStoryboardFailure(item)));
+    if (retryableEndFailures.length) await retryWave(retryableEndFailures, "第2波 · 尾帧", endConcurrency);
 
     // Wave 3: repair any starts still missing/stale after wave 1 (e.g. asset upstream churn).
     // Ends do not invalidate next starts; start+end are independent asset-driven frames.
@@ -21501,7 +21537,9 @@ ${shotAnchor}
       });
       await runWave(staleStartPending, "第3波 · 续写首帧", concurrency);
       const staleStartFailures = failures.splice(0, failures.length);
-      if (staleStartFailures.length) await retryWave(staleStartFailures, "第3波 · 续写首帧", concurrency);
+      const retryableStaleFailures = staleStartFailures.filter(isRetryableStoryboardFailure);
+      failures.push(...staleStartFailures.filter(item => !isRetryableStoryboardFailure(item)));
+      if (retryableStaleFailures.length) await retryWave(retryableStaleFailures, "第3波 · 续写首帧", concurrency);
     }
 
     if (failures.length) {
@@ -22519,3 +22557,4 @@ module.exports.hasPollutedStoryFoundation = hasPollutedStoryFoundation;
 module.exports.resumedTextProvider = resumedTextProvider;
 module.exports.directorCompileConcurrency = directorCompileConcurrency;
 module.exports.voiceLibraryFingerprint = voiceLibraryFingerprint;
+module.exports.isRetryableStoryboardFailure = isRetryableStoryboardFailure;

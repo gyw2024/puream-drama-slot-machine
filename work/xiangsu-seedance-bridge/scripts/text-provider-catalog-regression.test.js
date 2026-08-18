@@ -17,6 +17,14 @@ test("built-in domestic text providers have locked official endpoints and select
     assert.ok(preset.models.length > 0);
     assert.equal(OPENAI_COMPATIBLE_KINDS.includes(kind), true);
   }
+  assert.equal(TEXT_PROVIDER_CATALOG["deepseek-native"].baseUrl, "https://api.deepseek.com");
+  assert.equal(TEXT_PROVIDER_CATALOG["deepseek-native"].defaultModel, "deepseek-v4-flash");
+  assert.deepEqual(TEXT_PROVIDER_CATALOG["deepseek-native"].models.slice(0, 2), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  assert.equal(TEXT_PROVIDER_CATALOG["deepseek-native"].models.includes("deepseek-v4"), false);
+  assert.equal(TEXT_PROVIDER_CATALOG["zhipu-native"].defaultModel, "glm-5.3");
+  assert.equal(TEXT_PROVIDER_CATALOG["minimax-native"].defaultModel, "MiniMax-M3");
+  assert.equal(TEXT_PROVIDER_CATALOG["qwen-native"].defaultModel, "qwen3.8-max");
+  assert.equal(TEXT_PROVIDER_CATALOG["doubao-native"].defaultModel, "doubao-seed-1-8");
 });
 
 test("Kimi K3 always sends the only accepted temperature value", () => {

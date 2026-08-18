@@ -2637,6 +2637,16 @@ ipcMain.handle("workbench:delete-project", (_event, projectId) => {
   }
   catch (error) { return publicError(error); }
 });
+ipcMain.handle("workbench:purge-project", (_event, projectId) => {
+  try {
+    const { store, workflow } = requireWorkbench();
+    if (workflow.hasActiveOperation(projectId) || store.listActiveVideoJobs(projectId).length > 0) {
+      throw Object.assign(new Error("该项目仍有任务运行，结束任务后才能永久删除"), { code: "PROJECT_DELETE_ACTIVE" });
+    }
+    return { ok: true, result: store.purgeProject(projectId) };
+  }
+  catch (error) { return publicError(error); }
+});
 ipcMain.handle("workbench:list-deleted-projects", () => {
   try { return { ok: true, projects: requireWorkbench().store.listDeletedProjects() }; }
   catch (error) { return publicError(error); }

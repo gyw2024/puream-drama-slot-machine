@@ -22,8 +22,9 @@ const {
 const { TEXT_PROVIDER_CATALOG, providerPreset, providerTemperature } = require("./text-provider-catalog");
 
 const PROJECT_VERSION = 13;
-const SETTINGS_VERSION = 16;
+const SETTINGS_VERSION = 17;
 const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const ARCHIVE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/;
 const MAX_SCRIPT_CHARS = 500_000;
 const MAX_MANUAL_PROMPT_CHARS = 60_000;
 const MAX_SETTINGS_PROMPT_CHARS = 100_000;
@@ -2007,10 +2008,36 @@ class WorkbenchStore {
     };
   }
 
+  purgeProject(projectId) {
+    const deleted = this.deleteProject(projectId);
+    if (!deleted.recoverable || !deleted.archivedPath) {
+      throw Object.assign(new Error("项目没有可安全永久删除的归档目录"), { code: "PROJECT_PURGE_ARCHIVE_MISSING" });
+    }
+    const archiveDir = path.resolve(deleted.archivedPath);
+    if (!isPathInside(this.deletedProjectsDir, archiveDir) || !ARCHIVE_ID_PATTERN.test(path.basename(archiveDir))) {
+      throw Object.assign(new Error("项目归档路径校验失败，已保留在回收区"), { code: "PROJECT_PURGE_PATH_INVALID" });
+    }
+    try {
+      fs.rmSync(archiveDir, { recursive: true, force: false });
+    } catch (error) {
+      throw Object.assign(new Error(`永久删除项目失败，项目仍可从回收区恢复：${error?.message || error}`), {
+        code: "PROJECT_PURGE_FAILED",
+        cause: error
+      });
+    }
+    return {
+      id: deleted.id,
+      title: deleted.title,
+      purged: true,
+      recoverable: false,
+      archiveId: path.basename(archiveDir)
+    };
+  }
+
   listDeletedProjects() {
     if (!fs.existsSync(this.deletedProjectsDir)) return [];
     return fs.readdirSync(this.deletedProjectsDir, { withFileTypes: true })
-      .filter(entry => entry.isDirectory() && PROJECT_ID_PATTERN.test(entry.name))
+      .filter(entry => entry.isDirectory() && ARCHIVE_ID_PATTERN.test(entry.name))
       .map(entry => {
         const archiveDir = path.join(this.deletedProjectsDir, entry.name);
         try {
@@ -2040,7 +2067,7 @@ class WorkbenchStore {
 
   restoreProject(archiveId) {
     const id = String(archiveId || "").trim();
-    if (!PROJECT_ID_PATTERN.test(id)) throw Object.assign(new Error("回收项目编号无效"), { code: "PROJECT_ARCHIVE_ID_INVALID" });
+    if (!ARCHIVE_ID_PATTERN.test(id)) throw Object.assign(new Error("回收项目编号无效"), { code: "PROJECT_ARCHIVE_ID_INVALID" });
     const archiveDir = path.resolve(this.deletedProjectsDir, id);
     if (!isPathInside(this.deletedProjectsDir, archiveDir) || !fs.existsSync(archiveDir)) {
       throw Object.assign(new Error("待恢复项目不存在"), { code: "PROJECT_ARCHIVE_NOT_FOUND" });
@@ -2931,6 +2958,24 @@ class WorkbenchStore {
         textProviderProfiles["puream-relay"].model = "gpt-5-6-sol";
         if (textProvider.kind === "puream-relay") textProvider.model = "gpt-5-6-sol";
       }
+      if (savedSettingsVersion < 17) {
+        const currentDomesticDefaults = {
+          "zhipu-native": { legacy: new Set(["", "glm-4.5"]), model: "glm-5.3" },
+          "minimax-native": { legacy: new Set(["", "MiniMax-M2.1"]), model: "MiniMax-M3" },
+          "qwen-native": { legacy: new Set(["", "qwen-plus"]), model: "qwen3.8-max" },
+          "kimi-native": { legacy: new Set([""]), model: "kimi-k3" },
+          "doubao-native": { legacy: new Set(["", "doubao-seed-1-6-250615"]), model: "doubao-seed-1-8" },
+          "deepseek-native": { legacy: new Set(["", "deepseek-chat", "deepseek-v4"]), model: "deepseek-v4-flash" }
+        };
+        for (const [kind, migration] of Object.entries(currentDomesticDefaults)) {
+          if (migration.legacy.has(String(textProviderProfiles[kind]?.model || ""))) {
+            textProviderProfiles[kind].model = migration.model;
+          }
+        }
+        if (currentDomesticDefaults[textProvider.kind]?.legacy.has(String(textProvider.model || ""))) {
+          textProvider.model = currentDomesticDefaults[textProvider.kind].model;
+        }
+      }
       textProviderProfiles[textProvider.kind] = {
         ...(textProviderProfiles[textProvider.kind] || {}),
         ...textProvider,
@@ -3020,6 +3065,7 @@ class WorkbenchStore {
       const mergedProfile = { ...(defaults.textProviderProfiles[kind] || {}), ...(profile || {}), kind };
       if (preset.managedEndpoint || preset.domestic) mergedProfile.baseUrl = preset.baseUrl;
       if (!String(mergedProfile.model || "").trim() && preset.defaultModel) mergedProfile.model = preset.defaultModel;
+      if (kind === "deepseek-native" && String(mergedProfile.model || "").trim() === "deepseek-v4") mergedProfile.model = "deepseek-v4-flash";
       mergedProfile.temperature = providerTemperature(mergedProfile);
       return [kind, mergedProfile];
     }));
@@ -3040,6 +3086,7 @@ class WorkbenchStore {
     }
     const activePreset = providerPreset(activeTextProvider.kind);
     if (activePreset.managedEndpoint || activePreset.domestic) activeTextProvider.baseUrl = activePreset.baseUrl;
+    if (activeTextProvider.kind === "deepseek-native" && String(activeTextProvider.model || "").trim() === "deepseek-v4") activeTextProvider.model = "deepseek-v4-flash";
     activeTextProvider.temperature = providerTemperature(activeTextProvider);
     const requestedVideoProvider = { ...defaults.videoProvider, ...(settings?.videoProvider || {}) };
     requestedVideoProvider.baseUrl = requestedVideoProvider.kind === "local-xiangsu"

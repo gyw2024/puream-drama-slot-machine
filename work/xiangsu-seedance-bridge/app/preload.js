@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     listProjects: () => ipcRenderer.invoke("workbench:list-projects"),
     createProject: (title, options) => ipcRenderer.invoke("workbench:create-project", title, options),
     deleteProject: projectId => ipcRenderer.invoke("workbench:delete-project", projectId),
+    purgeProject: projectId => ipcRenderer.invoke("workbench:purge-project", projectId),
     listDeletedProjects: () => ipcRenderer.invoke("workbench:list-deleted-projects"),
     restoreProject: archiveId => ipcRenderer.invoke("workbench:restore-project", archiveId),
     getProject: projectId => ipcRenderer.invoke("workbench:get-project", projectId),
