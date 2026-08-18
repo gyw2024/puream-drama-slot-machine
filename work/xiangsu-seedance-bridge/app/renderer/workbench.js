@@ -161,7 +161,7 @@ const legacyTextProviderPresets = Object.freeze({
 });
 const textProviderPresets = Object.freeze({
   ...legacyTextProviderPresets,
-  ...Object.fromEntries(Object.entries(window.dramaSlot?.textProviderCatalog || {}).map(([kind, preset]) => [kind, {
+  ...Object.fromEntries(Object.entries(window.textProviderCatalog || {}).map(([kind, preset]) => [kind, {
     ...(legacyTextProviderPresets[kind] || {}),
     ...preset,
     model: preset.defaultModel || "",
