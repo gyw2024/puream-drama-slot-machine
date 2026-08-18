@@ -19,6 +19,7 @@ const {
   normalizeCostEntry,
   normalizeCostLedger
 } = require("./project-costs");
+const { TEXT_PROVIDER_CATALOG, providerPreset, providerTemperature } = require("./text-provider-catalog");
 
 const PROJECT_VERSION = 13;
 const SETTINGS_VERSION = 16;
@@ -683,54 +684,17 @@ function defaultIdeation() {
 }
 
 function defaultTextProviderProfiles() {
-  return {
-    "puream-relay": {
-      kind: "puream-relay",
-      baseUrl: "https://puream.cn",
-      apiKey: "",
-      model: "gpt-5-6-sol",
-      modelStrategy: "explicit",
-      authSource: "official-desktop",
-      temperature: 0.2,
-      maxTokens: 16384
-    },
-    "openai-native": {
-      kind: "openai-native",
-      baseUrl: "https://api.openai.com/v1",
-      apiKey: "",
-      model: "",
-      authSource: "user",
-      temperature: 0.3,
-      maxTokens: 16384
-    },
-    "openai-compatible": {
-      kind: "openai-compatible",
-      baseUrl: "",
-      apiKey: "",
-      model: "",
-      authSource: "user",
-      temperature: 0.3,
-      maxTokens: 16384
-    },
-    "gemini-native": {
-      kind: "gemini-native",
-      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-      apiKey: "",
-      model: "",
-      authSource: "user",
-      temperature: 1,
-      maxTokens: 16384
-    },
-    "anthropic-native": {
-      kind: "anthropic-native",
-      baseUrl: "https://api.anthropic.com/v1",
-      apiKey: "",
-      model: "",
-      authSource: "user",
-      temperature: 0.3,
-      maxTokens: 16384
-    }
-  };
+  return Object.fromEntries(Object.entries(TEXT_PROVIDER_CATALOG).map(([kind, preset]) => [kind, {
+    kind,
+    baseUrl: preset.baseUrl || "",
+    apiKey: "",
+    model: preset.defaultModel || "",
+    modelStrategy: kind === "puream-relay" ? "explicit" : "manual-or-preset",
+    authSource: preset.authSource || "user",
+    temperature: Number(preset.temperature ?? 0.3),
+    ...(preset.temperaturePolicy ? { temperaturePolicy: preset.temperaturePolicy } : {}),
+    maxTokens: 16384
+  }]));
 }
 
 function defaultSettings() {
@@ -2943,10 +2907,14 @@ class WorkbenchStore {
     const defaults = defaultSettings();
     const officialPureamBaseUrl = "https://puream.cn";
     const requestedProfiles = settings?.textProviderProfiles || {};
-    const textProviderProfiles = Object.fromEntries(Object.entries({ ...defaults.textProviderProfiles, ...requestedProfiles }).map(([kind, profile]) => [
-      kind,
-      { ...(defaults.textProviderProfiles[kind] || {}), ...(profile || {}), kind }
-    ]));
+    const textProviderProfiles = Object.fromEntries(Object.entries({ ...defaults.textProviderProfiles, ...requestedProfiles }).map(([kind, profile]) => {
+      const preset = providerPreset(kind);
+      const mergedProfile = { ...(defaults.textProviderProfiles[kind] || {}), ...(profile || {}), kind };
+      if (preset.managedEndpoint || preset.domestic) mergedProfile.baseUrl = preset.baseUrl;
+      if (!String(mergedProfile.model || "").trim() && preset.defaultModel) mergedProfile.model = preset.defaultModel;
+      mergedProfile.temperature = providerTemperature(mergedProfile);
+      return [kind, mergedProfile];
+    }));
     const activeTextProvider = { ...defaults.textProvider, ...(settings?.textProvider || {}) };
     textProviderProfiles[activeTextProvider.kind] = {
       ...(textProviderProfiles[activeTextProvider.kind] || {}),
@@ -2962,6 +2930,9 @@ class WorkbenchStore {
     if (activeTextProvider.kind === "puream-relay") {
       Object.assign(activeTextProvider, textProviderProfiles["puream-relay"]);
     }
+    const activePreset = providerPreset(activeTextProvider.kind);
+    if (activePreset.managedEndpoint || activePreset.domestic) activeTextProvider.baseUrl = activePreset.baseUrl;
+    activeTextProvider.temperature = providerTemperature(activeTextProvider);
     const requestedVideoProvider = { ...defaults.videoProvider, ...(settings?.videoProvider || {}) };
     requestedVideoProvider.baseUrl = requestedVideoProvider.kind === "local-xiangsu"
       ? "http://127.0.0.1:28911"

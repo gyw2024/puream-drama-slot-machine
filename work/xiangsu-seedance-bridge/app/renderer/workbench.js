@@ -87,7 +87,7 @@ const DEFAULT_BLUEPRINT_AUDIT_CHECKS = Object.freeze({
   visualVariety: false
 });
 
-const textProviderPresets = Object.freeze({
+const legacyTextProviderPresets = Object.freeze({
   "puream-relay": {
     tag: "PUREAM OFFICIAL",
     baseUrl: "https://puream.cn",
@@ -158,6 +158,22 @@ const textProviderPresets = Object.freeze({
     modelPlaceholder: "填写账号可用的 Claude 模型",
     help: "使用 Anthropic 原生 Messages API；系统提示词与多轮消息会自动转换。"
   }
+});
+const textProviderPresets = Object.freeze({
+  ...legacyTextProviderPresets,
+  ...Object.fromEntries(Object.entries(window.dramaSlot?.textProviderCatalog || {}).map(([kind, preset]) => [kind, {
+    ...(legacyTextProviderPresets[kind] || {}),
+    ...preset,
+    model: preset.defaultModel || "",
+    maxTokens: 16384,
+    baseLabel: "官方请求地址",
+    keyLabel: "API Key",
+    modelLabel: "模型",
+    basePlaceholder: preset.baseUrl || "",
+    modelPlaceholder: preset.defaultModel || "输入模型 ID",
+    managedEndpoint: Boolean(preset.managedEndpoint || preset.domestic),
+    modelOptions: Array.isArray(preset.models) ? preset.models : []
+  }]))
 });
 const pureamTextModels = Object.freeze(["gpt-5-6-sol", "claude-opus-5"]);
 
@@ -2460,22 +2476,65 @@ function textProviderFormValue(kind) {
   const preset = textProviderPresets[kind] || textProviderPresets["openai-compatible"];
   const previous = state.settings?.textProviderProfiles?.[kind] || {};
   const puream = kind === "puream-relay";
+  const managed = Boolean(preset.managedEndpoint);
   return {
     kind,
     authSource: previous.authSource || preset.authSource,
-    baseUrl: puream ? "https://puream.cn" : $("#textBaseUrl").value.trim(),
+    baseUrl: puream || managed ? preset.baseUrl : $("#textBaseUrl").value.trim(),
     apiKey: $("#textApiKey").value.trim(),
     model: puream
       ? (pureamTextModels.includes($("#textOfficialModel")?.value) ? $("#textOfficialModel").value : preset.model)
       : $("#textModel").value.trim(),
-    temperature: Number.isFinite(Number(previous.temperature)) ? Number(previous.temperature) : preset.temperature,
+    temperature: preset.temperaturePolicy === "fixed-1"
+      ? 1
+      : Number.isFinite(Number(previous.temperature)) ? Number(previous.temperature) : preset.temperature,
     maxTokens: puream ? preset.maxTokens : Math.max(256, Math.min(131072, Number($("#textMaxTokens").value) || preset.maxTokens || 16384))
   };
 }
 
+function renderTextModelChoices(preset, value) {
+  const input = $("#textModel");
+  if (!input) return;
+  let select = $("#textModelPreset");
+  if (!select) {
+    select = document.createElement("select");
+    select.id = "textModelPreset";
+    select.className = "provider-model-preset";
+    input.parentElement.insertBefore(select, input);
+  }
+  if (!select) return;
+  const models = Array.isArray(preset.modelOptions) ? preset.modelOptions.filter(Boolean) : [];
+  select.innerHTML = models.map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("")
+    + (models.length ? `<option value="__custom__">自定义模型 ID…</option>` : "");
+  const current = String(value || "");
+  const known = models.includes(current);
+  select.value = known ? current : (models.length ? "__custom__" : "");
+  select.classList.toggle("hidden", models.length === 0);
+  $("#textModel")?.classList.toggle("hidden", models.length > 0 && known);
+}
+
+function ensureTextProviderOptions() {
+  const select = $("#textProviderKind");
+  if (!select) return;
+  const labels = {
+    "zhipu-native": "智谱 GLM",
+    "minimax-native": "海螺 MiniMax",
+    "qwen-native": "阿里千问",
+    "kimi-native": "Kimi",
+    "doubao-native": "火山豆包",
+    "deepseek-native": "DeepSeek"
+  };
+  for (const [value, label] of Object.entries(labels)) {
+    if (!select.querySelector(`option[value="${value}"]`)) select.add(new Option(label, value));
+  }
+}
+
 function writeTextProviderForm(config) {
+  ensureTextProviderOptions();
   const kind = config?.kind && textProviderPresets[config.kind] ? config.kind : "puream-relay";
   const preset = textProviderPresets[kind];
+  const managed = Boolean(preset.managedEndpoint);
+  const puream = kind === "puream-relay";
   $("#textProviderKind").value = kind;
   $("#textProviderKind").dataset.currentKind = kind;
   $("#textBaseUrl").value = config?.baseUrl ?? preset.baseUrl;
@@ -2492,13 +2551,13 @@ function writeTextProviderForm(config) {
   $("#textProviderHelp").textContent = preset.help;
   $("#textMaxTokens").disabled = kind === "puream-relay";
   $("#pureamAuthState").classList.toggle("hidden", kind !== "puream-relay");
-  const puream = kind === "puream-relay";
+  renderTextModelChoices(preset, $("#textModel").value);
   $("#textApiKey")?.closest("label")?.classList.toggle("hidden", puream);
   $("#textOfficialLock")?.classList.toggle("hidden", !puream);
   $("#textOfficialModelField")?.classList.toggle("hidden", !puream);
-  ["#textBaseUrlField", "#textModelField", "#textMaxTokensField", "#textPricingFields", "#textPricingHelp"].forEach(selector => $(selector)?.classList.toggle("hidden", puream));
-  $("#textBaseUrl").readOnly = puream;
-  $("#textModel").readOnly = puream;
+  ["#textBaseUrlField", "#textMaxTokensField", "#textPricingFields", "#textPricingHelp"].forEach(selector => $(selector)?.classList.toggle("hidden", puream || managed));
+  $("#textModelField")?.classList.toggle("hidden", puream);
+  $("#textBaseUrl").readOnly = puream || managed;
 }
 
 function renderQualityBlueprintToggle() {
@@ -5276,16 +5335,29 @@ $("#textProviderKind").addEventListener("change", event => {
   const saved = state.settings.textProviderProfiles[nextKind] || {};
   const nextProfile = {
     kind: nextKind,
-    baseUrl: saved.baseUrl ?? preset.baseUrl,
+    baseUrl: preset.managedEndpoint ? preset.baseUrl : (saved.baseUrl ?? preset.baseUrl),
     apiKey: saved.apiKey || "",
     model: saved.model ?? preset.model,
     authSource: saved.authSource || preset.authSource,
-    temperature: Number.isFinite(Number(saved.temperature)) ? Number(saved.temperature) : preset.temperature,
+    temperature: preset.temperaturePolicy === "fixed-1"
+      ? 1
+      : Number.isFinite(Number(saved.temperature)) ? Number(saved.temperature) : preset.temperature,
     maxTokens: Number(saved.maxTokens) || preset.maxTokens
   };
   state.settings.textProvider = nextProfile;
   writeTextProviderForm(nextProfile);
   showToast(`已切换到${event.currentTarget.selectedOptions[0]?.textContent || "新的文本供应商"}，保存后全流程生效`);
+});
+
+$("#textModelPreset")?.addEventListener("change", event => {
+  const value = event.currentTarget.value;
+  if (value !== "__custom__") {
+    $("#textModel").value = value;
+    $("#textModel").classList.add("hidden");
+  } else {
+    $("#textModel").classList.remove("hidden");
+    $("#textModel").focus();
+  }
 });
 
 async function saveQualityBlueprintSetting(enabled, requestedModules = null, requestedChecks = null) {

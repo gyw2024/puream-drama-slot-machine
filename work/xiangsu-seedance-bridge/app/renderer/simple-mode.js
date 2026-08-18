@@ -4,12 +4,22 @@ const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const api = (...args) => window.dramaSlot.simple.call(...args);
 
-const textProviderPresets = Object.freeze({
+const legacyTextProviderPresets = Object.freeze({
   "puream-relay": { baseUrl: "https://puream.cn", model: "gpt-5-6-sol", maxTokens: 16384, help: "纯梦官网由系统自动调度，无需填写 API Key。" },
   "openai-native": { baseUrl: "https://api.openai.com/v1", model: "", maxTokens: 16384, help: "填写 OpenAI API Key 和账号可用的模型名称。" },
   "openai-compatible": { baseUrl: "", model: "", maxTokens: 16384, help: "填写兼容 /chat/completions 的 Base URL、API Key 和实际模型 ID。" },
   "gemini-native": { baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "", maxTokens: 16384, help: "填写 Gemini API Key 和账号可用的模型名称。" },
   "anthropic-native": { baseUrl: "https://api.anthropic.com/v1", model: "", maxTokens: 16384, help: "填写 Anthropic API Key 和账号可用的 Claude 模型名称。" }
+});
+const textProviderPresets = Object.freeze({
+  ...legacyTextProviderPresets,
+  ...Object.fromEntries(Object.entries(window.dramaSlot?.textProviderCatalog || {}).map(([kind, preset]) => [kind, {
+    ...preset,
+    model: preset.defaultModel || "",
+    maxTokens: 16384,
+    modelOptions: Array.isArray(preset.models) ? preset.models : [],
+    managedEndpoint: Boolean(preset.managedEndpoint || preset.domestic)
+  }]))
 });
 
 const state = {
@@ -457,28 +467,72 @@ function currentTextProviderProfile(kind) {
 function readTextProviderForm(kind = $("#textProviderKind").value) {
   const preset = textProviderPresets[kind] || textProviderPresets["openai-compatible"];
   const puream = kind === "puream-relay";
+  const managed = Boolean(preset.managedEndpoint);
   return {
     ...currentTextProviderProfile(kind),
     kind,
     authSource: puream ? "official-desktop" : "user",
-    baseUrl: puream ? preset.baseUrl : $("#textBaseUrl").value.trim(),
+    baseUrl: puream || managed ? preset.baseUrl : $("#textBaseUrl").value.trim(),
     apiKey: puream ? "" : $("#textApiKey").value.trim(),
     model: puream ? preset.model : $("#textModel").value.trim(),
+    temperature: preset.temperaturePolicy === "fixed-1" ? 1 : Number(preset.temperature ?? 0.3),
     maxTokens: puream ? preset.maxTokens : Math.max(256, Math.min(131072, Number($("#textMaxTokens").value) || preset.maxTokens))
   };
 }
 
+function renderTextModelChoices(preset, value) {
+  const input = $("#textModel");
+  if (!input) return;
+  let select = $("#textModelPreset");
+  if (!select) {
+    select = document.createElement("select");
+    select.id = "textModelPreset";
+    select.className = "provider-model-preset";
+    input.parentElement.insertBefore(select, input);
+  }
+  const models = Array.isArray(preset.modelOptions) ? preset.modelOptions.filter(Boolean) : [];
+  select.innerHTML = models.map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("")
+    + (models.length ? `<option value="__custom__">自定义模型 ID…</option>` : "");
+  const current = String(value || "");
+  const known = models.includes(current);
+  select.value = known ? current : (models.length ? "__custom__" : "");
+  select.classList.toggle("hidden", models.length === 0);
+  $("#textModel")?.classList.toggle("hidden", models.length > 0 && known);
+}
+
+function ensureTextProviderOptions() {
+  const select = $("#textProviderKind");
+  if (!select) return;
+  const labels = {
+    "zhipu-native": "智谱 GLM",
+    "minimax-native": "海螺 MiniMax",
+    "qwen-native": "阿里千问",
+    "kimi-native": "Kimi",
+    "doubao-native": "火山豆包",
+    "deepseek-native": "DeepSeek"
+  };
+  for (const [value, label] of Object.entries(labels)) {
+    if (!select.querySelector(`option[value="${value}"]`)) select.add(new Option(label, value));
+  }
+}
+
 function writeTextProviderForm(config) {
+  ensureTextProviderOptions();
   const kind = textProviderPresets[config?.kind] ? config.kind : "puream-relay";
   const profile = { ...currentTextProviderProfile(kind), ...config, kind };
   const puream = kind === "puream-relay";
+  const managed = Boolean(textProviderPresets[kind].managedEndpoint);
   $("#textProviderKind").value = kind;
   $("#textProviderKind").dataset.currentKind = kind;
   $("#textBaseUrl").value = profile.baseUrl || "";
   $("#textApiKey").value = profile.apiKey || "";
   $("#textModel").value = profile.model || "";
   $("#textMaxTokens").value = String(profile.maxTokens || 16384);
-  ["#textBaseUrlField", "#textApiKeyField", "#textModelField", "#textMaxTokensField"].forEach(selector => $(selector).classList.toggle("hidden", puream));
+  renderTextModelChoices(textProviderPresets[kind], profile.model || "");
+  ["#textBaseUrlField", "#textMaxTokensField"].forEach(selector => $(selector).classList.toggle("hidden", puream || managed));
+  $("#textApiKeyField").classList.toggle("hidden", puream);
+  $("#textModelField").classList.toggle("hidden", puream);
+  $("#textBaseUrl").readOnly = puream || managed;
   $("#textProviderHelp").textContent = textProviderPresets[kind].help;
 }
 
@@ -852,6 +906,16 @@ $("#textProviderKind").addEventListener("change", event => {
     textProviderProfiles: { ...(state.settings?.textProviderProfiles || {}), [previousKind]: previousProfile }
   };
   writeTextProviderForm(currentTextProviderProfile(event.currentTarget.value));
+});
+$("#textModelPreset")?.addEventListener("change", event => {
+  const value = event.currentTarget.value;
+  if (value !== "__custom__") {
+    $("#textModel").value = value;
+    $("#textModel").classList.add("hidden");
+  } else {
+    $("#textModel").classList.remove("hidden");
+    $("#textModel").focus();
+  }
 });
 $("#testTextProvider").addEventListener("click", async () => {
   const status = $("#textProviderStatus");

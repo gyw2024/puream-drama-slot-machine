@@ -9,6 +9,11 @@ const {
   stripSystemVideoOutputLock,
   systemVideoOutputLockForPrompt
 } = require("./production-mode-matrix");
+const {
+  OPENAI_COMPATIBLE_KINDS,
+  providerPreset,
+  providerTemperature
+} = require("./text-provider-catalog");
 const { abortableDelay, resolveAttemptLimit } = require("./production-liveness");
 const MAX_REMOTE_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_REMOTE_VIDEO_BYTES = 500 * 1024 * 1024;
@@ -930,12 +935,12 @@ function requireProviderKey(config, providerName) {
 }
 
 async function generateOpenAiCompatibleText(config, messages, options = {}) {
-  requireProviderKey(config, config.kind === "openai-native" ? "OpenAI" : "OpenAI Compatible");
+  requireProviderKey(config, providerPreset(config.kind).displayName || (config.kind === "openai-native" ? "OpenAI" : "OpenAI Compatible"));
   const maxTokens = normalizedMaxTokens(config);
   const baseBody = {
     model: config.model,
     messages,
-    temperature: Number.isFinite(Number(config.temperature)) ? Number(config.temperature) : 0.3,
+    temperature: providerTemperature(config),
     max_tokens: maxTokens
   };
   const request = body => providerFetch(endpoint(config.baseUrl, "/chat/completions"), {
@@ -1121,7 +1126,7 @@ async function generateText(config, messages, options = {}) {
   if (!config?.model) throw Object.assign(new Error("请先配置文本模型名称"), { code: "TEXT_MODEL_REQUIRED" });
   if (config.kind === "gemini-native") return generateGeminiText(config, messages, options);
   if (config.kind === "anthropic-native") return generateAnthropicText(config, messages, options);
-  if (["openai-native", "openai-compatible"].includes(config.kind)) return generateOpenAiCompatibleText(config, messages, options);
+  if (OPENAI_COMPATIBLE_KINDS.includes(config.kind)) return generateOpenAiCompatibleText(config, messages, options);
   throw Object.assign(new Error(`不支持的文本供应商类型：${config.kind || "未设置"}`), { code: "TEXT_PROVIDER_INVALID" });
 }
 
@@ -1734,6 +1739,7 @@ module.exports = {
   openImageUploadBody,
   isDeepSeekV4Model,
   openAiCompatibleRequestExtras,
+  providerTemperature,
   assistantChoiceText,
   describeEmptyTextChoice
 };

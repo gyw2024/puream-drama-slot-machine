@@ -1,8 +1,10 @@
 "use strict";
 
 const { contextBridge, ipcRenderer } = require("electron");
+const { TEXT_PROVIDER_CATALOG } = require("./text-provider-catalog");
 
 contextBridge.exposeInMainWorld("dramaSlot", {
+  textProviderCatalog: TEXT_PROVIDER_CATALOG,
   appMode: {
     get: () => ipcRenderer.invoke("app-mode:get"),
     select: mode => ipcRenderer.invoke("app-mode:select", mode)
