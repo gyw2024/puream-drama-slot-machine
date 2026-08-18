@@ -61,7 +61,7 @@ function responseFor(messages) {
   };
 }
 
-test("uploaded-script analysis automatically repairs one failed Agent chunk and continues", async t => {
+test("uploaded-script analysis never publishes a local fallback when one Agent chunk fails", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-analysis-resume-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -104,16 +104,76 @@ test("uploaded-script analysis automatically repairs one failed Agent chunk and 
     }
   });
 
-  const analyzed = await workflow.analyzeScript(project.id);
+  await assert.rejects(
+    workflow.analyzeScript(project.id),
+    error => error?.code === "SCRIPT_ANALYSIS_AGENT_RESULT_REQUIRED"
+      && error?.localCreativeFallbackUsed === false
+  );
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const failed = store.getProject(project.id);
   assert.equal(calls.get(2), 1, "failed chunk must not trigger an automatic second billable request");
   assert.equal(sessions.get(2).length, 1);
+  assert.notEqual(failed.currentStage, "assets");
+  assert.equal(failed.scenes.length, 0, "local preview scenes must not be committed as assets");
+  assert.equal(failed.script.analysisEnhancement.source, "agent-required");
+  assert.equal(failed.script.analysisEnhancement.localFallbackCount, 0);
+  assert.match(failed.automation.message, /未写入本地兜底资产/);
+
+  const analyzed = await workflow.analyzeScript(project.id);
+  assert.equal(calls.get(2), 2, "explicit resume retries only the failed Agent chunk");
+  assert.equal(sessions.get(2).length, 2);
   assert.equal(calls.get(1), 1, "completed chunk 1 must be reused");
   assert.equal(calls.get(3), 1, "completed chunk 3 must be reused");
   assert.equal(analyzed.productionPlan.inputMode, "manual");
   assert.equal(analyzed.currentStage, "assets");
   assert.equal(analyzed.script.analysisCheckpoint, null);
-  assert.equal(analyzed.script.analysisEnhancement.source, "agent-plus-local-auto-repair");
-  assert.equal(analyzed.script.analysisEnhancement.localFallbackCount, 1);
-  assert.deepEqual(analyzed.script.analysisEnhancement.localFallbackChunks, [2]);
+  assert.equal(analyzed.script.analysisEnhancement.source, "agent-structured-result");
+  assert.equal(analyzed.script.analysisEnhancement.localFallbackCount, 0);
+  assert.deepEqual(analyzed.script.analysisEnhancement.localFallbackChunks, []);
   assert.equal(analyzed.shots.flatMap(shot => shot.dialogueTurns || []).length, 24);
+});
+
+test("uploaded-script Agent automatically repairs a returned time-range scene before committing assets", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-analysis-scene-repair-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const store = new WorkbenchStore(root);
+  const settings = store.getSettings();
+  settings.generation.qualityGatesEnabled = false;
+  store.saveSettings(settings);
+  const project = store.createProject("客户时间轴剧本", { inputMode: "manual", targetDurationSeconds: 30 });
+  const source = [
+    "场景：客厅",
+    "0-10秒",
+    "周岚（克制）：你先听我说完。",
+    "陈立（低声）：我在听。"
+  ].join("\n");
+  store.patchProject(project.id, {
+    productionPlan: { inputMode: "manual", executionMode: "step" },
+    generation: { engine: "seedance", videoProviderKind: "local-xiangsu", mode: "smart", targetDurationSeconds: 30 },
+    script: { raw: source }
+  });
+  let calls = 0;
+  const requestMessages = [];
+  const workflow = new WorkbenchWorkflow({
+    store,
+    bridge: {},
+    locateFfmpeg: () => "",
+    stagingRoot: root,
+    textGenerator: async (_config, messages) => {
+      calls += 1;
+      requestMessages.push(messages.map(item => String(item.content || "")).join("\n"));
+      const response = responseFor(messages);
+      response.scenes = calls === 1
+        ? [{ id: "SC01", name: "0-10秒", description: "时间轴标题" }]
+        : [{ id: "SC01", name: "客厅", description: "木桌、布沙发、东侧窗和固定门口轴线" }];
+      return response;
+    }
+  });
+
+  const analyzed = await workflow.analyzeScript(project.id);
+  assert.equal(calls, 2, "invalid returned structure gets exactly one bounded Agent repair turn");
+  assert.match(requestMessages[1], /时间范围、镜头编号/);
+  assert.deepEqual(analyzed.scenes.map(item => item.name), ["客厅"]);
+  assert.ok(analyzed.scenes.every(item => !/秒|第\d+镜/.test(item.name)));
+  assert.equal(analyzed.script.analysisEnhancement.localFallbackCount, 0);
 });

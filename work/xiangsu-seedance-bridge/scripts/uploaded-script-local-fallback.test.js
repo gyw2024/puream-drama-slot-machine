@@ -10,7 +10,7 @@ const {
   localUploadedAnalysisChunk
 } = require("../app/workbench-workflow");
 
-test("uploaded dialogue local-first compiler preserves source truth and is used by production", () => {
+test("uploaded dialogue local compiler preserves source truth only as non-authoritative recovery evidence", () => {
   const raw = [
     "【场景】客厅",
     "林梅（压低声音，忍着火）：你把那张单子给我。",
@@ -40,9 +40,11 @@ test("uploaded dialogue local-first compiler preserves source truth and is used 
     return character?.name;
   }), ledger.map(item => item.speaker));
   const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
-  assert.equal((workflowSource.match(/localUploadedAnalysisChunk\(/g) || []).length, 2, "production analysis must materialize the local checkpoint before Agent enhancement");
-  assert.match(workflowSource, /local-uploaded-script-compiler/);
-  assert.match(workflowSource, /agent-plus-local-auto-repair/);
+  assert.equal((workflowSource.match(/localUploadedAnalysisChunk\(/g) || []).length, 2, "production analysis may prepare local evidence before Agent enhancement");
+  assert.doesNotMatch(workflowSource, /local-uploaded-script-compiler/);
+  assert.doesNotMatch(workflowSource, /agent-plus-local-auto-repair/);
+  assert.match(workflowSource, /Local parsing is recovery evidence only/);
+  assert.match(workflowSource, /localFallbackCount:\s*0/);
 });
 
 test("local fallback preserves explicit characters but promotes only causal props", () => {

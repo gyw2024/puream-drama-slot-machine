@@ -25,10 +25,13 @@ test("dialogue construction budgets fit the five-minute and ten-minute contracts
   assert.match(workflowSource, /buildDirectFastFallbackSegment/);
 });
 
-test("analysis and prompt compilers are bounded and preserve full local output on timeout", () => {
+test("analysis is bounded, fails closed without AI, and prompt compilers preserve local technical output", () => {
   assert.match(workflowSource, /const UPLOADED_ANALYSIS_TIMEOUT_MS = 60_000/);
   assert.match(workflowSource, /localUploadedAnalysisChunk/);
-  assert.match(workflowSource, /source:\s*localRepairIndices\.size \? "agent-plus-local-auto-repair" : "agent-structured-result"/);
+  assert.match(workflowSource, /source:\s*"agent-structured-result"/);
+  assert.match(workflowSource, /localFallbackCount:\s*0/);
+  assert.match(workflowSource, /未写入本地兜底资产/);
+  assert.doesNotMatch(workflowSource, /agent-plus-local-auto-repair/);
   assert.match(workflowSource, /const PROMPT_COMPILER_TIMEOUT_MS = 90_000/);
   assert.match(workflowSource, /const maxCompileAttempts = promptQualityEnabled \? 2 : 1/);
   assert.match(workflowSource, /buildFallbackHailuoPromptSpec/);

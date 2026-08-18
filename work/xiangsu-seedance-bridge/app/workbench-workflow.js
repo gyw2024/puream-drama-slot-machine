@@ -17,6 +17,7 @@ const {
   bindDialogueLedgerToScenes,
   buildSourceSceneLedger,
   enforceSourceSceneLedger,
+  isInvalidPhysicalSceneAssetName,
   sceneAtSourceOffset,
   sceneContextForRange,
   sourceScenePromptBlock
@@ -7963,6 +7964,12 @@ function validateScriptAnalysisChunkResult(result = {}, payload = {}) {
   if (shots.length !== expectedUnits) failures.push(`shots 必须恰好 ${expectedUnits} 个，实际 ${shots.length} 个`);
   if (!characters.length) failures.push("characters 不能为空");
   if (!scenes.length) failures.push("scenes 不能为空");
+  for (const scene of scenes) {
+    const sceneName = scene?.name || scene?.scene || scene?.sceneName;
+    if (isInvalidPhysicalSceneAssetName(sceneName)) {
+      failures.push(`场景“${sceneName || "未命名"}”不是物理空间，时间段/镜头标题不得进入场景资产`);
+    }
+  }
   if (!Array.isArray(result?.props)) failures.push("props 必须是数组；原稿没有明确物品且自然文本没有独立剧情道具时返回空数组");
   if (payload?.requireCoreProp === true && !props.length) failures.push("原稿明确存在核心道具/证物，props 不能留空");
   const explicitPropNames = normalizeStringArray(payload?.explicitPropNames);
@@ -10471,7 +10478,7 @@ class WorkbenchWorkflow {
     );
     if (!this.adaptiveAgent.hasSkill("script.analyze_chunk")) {
       this.adaptiveAgent.registerSkill("script.analyze_chunk", {
-        maxAttempts: 1,
+        maxAttempts: 2,
         run: (payload, context) => context.agent.execute(
           "text",
           payload.config?.kind || "default",
@@ -10491,7 +10498,7 @@ class WorkbenchWorkflow {
               ...payload.messages,
               {
                 role: "user",
-                content: `上一次 JSON 未通过剧本理解合同。请重新输出完整 JSON，保留原稿事实、逐字对白、镜数和时长。用户在物品/道具栏明确列出的每一项必须完整进入唯一 props 台账并跨镜去重，不得因为它是手机、椅子、包装盒或普通物件而删除；自然文本中未明确列出的家具、门窗和环境陈设仍只属于场景。修复项：${Array.isArray(error?.details) ? error.details.join("；") : error?.message || error}`
+                content: `上一次 JSON 未通过剧本理解合同。请重新输出完整 JSON，保留原稿事实、逐字对白、镜数和时长。场景只能是可复用的唯一物理空间；时间范围、镜头编号、机位、景别、昼夜/天气/状态描述不得进入 scenes。用户在物品/道具栏明确列出的每一项必须完整进入唯一 props 台账并跨镜去重，不得因为它是手机、椅子、包装盒或普通物件而删除；自然文本中未明确列出的家具、门窗和环境陈设仍只属于场景。修复项：${Array.isArray(error?.details) ? error.details.join("；") : error?.message || error}`
               }
             ],
             textOptions: {
@@ -14684,7 +14691,7 @@ class WorkbenchWorkflow {
       scenes: (chunk.sourceSceneLedger?.catalogue || []).map(item => [item.id, item.name, item.aliases])
     })).digest("hex");
     const analysisSignature = crypto.createHash("sha256").update(JSON.stringify({
-      version: 5,
+      version: 6,
       sourceFingerprint,
       targetSeconds: filmSchedule.totalSeconds,
       unitDurations: filmSchedule.unitDurations,
@@ -14794,20 +14801,12 @@ class WorkbenchWorkflow {
     };
     const pendingChunks = chunkSchedules.filter(chunk => !reusableIndices.has(chunk.index));
     const completedAgentIndices = new Set(reusableIndices);
-    const localRepairIndices = new Set();
     const upstreamReceipts = [];
     await mapWithConcurrency(pendingChunks, analysisConcurrency, async chunk => {
       this.assertOperationActive(projectId);
       const localBound = localUploadedAnalysisChunk(chunk, project);
       const explicitPropNames = explicitTaggedAssetNames(chunk.text, ["物品", "道具", "核心道具", "关键道具"]);
       const corePropNames = explicitPropNames.filter(name => isCoreStoryPropCandidate(name, chunk.text, localBound.shots || [], project.product?.name || ""));
-      partials[chunk.index] = localBound;
-      saveCompletedAnalysisChunk(chunk, {
-        ...localBound,
-        authoredBy: "local-uploaded-script-compiler",
-        localFallback: true,
-        enhancementStatus: "pending"
-      }, 0);
       const ledgerPrompt = sourceDialoguePromptBlock(chunk.sourceDialogueLedger);
       const scenePrompt = sourceScenePromptBlock(chunk.sourceSceneLedger);
       const messages = [
@@ -14830,7 +14829,7 @@ class WorkbenchWorkflow {
           rootArrayAliases: ["units", "scriptUnits", "productionShots", "storyboards"],
           unwrapKeys: ["data", "result", "payload", "content", "response", "output", "analysis"],
           recursiveUnwrap: true,
-          sessionId: `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-agent-v4`,
+          sessionId: `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-agent-v5`,
           maxTokens: Math.min(16384, 4096 + chunk.unitCount * 2400),
           timeoutMs: UPLOADED_ANALYSIS_TIMEOUT_MS,
           maxReconnectAttempts: 1,
@@ -14860,38 +14859,33 @@ class WorkbenchWorkflow {
         bound = enforceSourceSceneLedger(bindSourceDialogueLedgerToAnalysis(partial, chunk.sourceDialogueLedger), chunk.sourceSceneLedger, chunk.sourceDialogueLedger);
       } catch (error) {
         if (isScriptControlError(error)) throw error;
-        // Uploaded scripts can arrive from older clients with inputMode left at
-        // "ai". The source is still user-authored here, and the deterministic
-        // compiler already preserves every dialogue ledger entry. Never strand
-        // the run merely because that legacy mode flag is missing.
-        if (Array.isArray(localBound?.shots) && localBound.shots.length === chunk.unitCount) {
-          bound = enforceSourceSceneLedger(
-            bindSourceDialogueLedgerToAnalysis(localBound, chunk.sourceDialogueLedger),
-            chunk.sourceSceneLedger,
-            chunk.sourceDialogueLedger
-          );
-          saveCompletedAnalysisChunk(chunk, {
-            ...bound,
-            authoredBy: "local-uploaded-script-compiler",
-            localFallback: true,
-            enhancementStatus: "local-auto-repair",
-            enhancementCauseCode: error?.code || "TEXT_PROVIDER_FAILED"
-          }, requestChars);
-          localRepairIndices.add(chunk.index);
-          partials[chunk.index] = bound;
-          return bound;
-        }
-        saveCompletedAnalysisChunk(chunk, {
-          ...localBound,
-          authoredBy: "local-uploaded-script-compiler",
-          localFallback: true,
-          enhancementStatus: "agent-required",
-          enhancementCauseCode: error?.code || "TEXT_PROVIDER_FAILED"
-        }, requestChars);
+        // Local parsing is recovery evidence only. A missing or invalid AI
+        // result must never be published as completed asset extraction.
+        const failedProject = this.store.getProject(projectId);
+        failedProject.automation = {
+          ...(failedProject.automation || {}),
+          stage: "script_analysis",
+          status: "error",
+          message: `AI 拆镜第 ${chunk.index + 1}/${chunks.length} 段未通过结构化校验；未写入本地兜底资产，可点击继续任务重试`,
+          errorCode: String(error?.code || "TEXT_PROVIDER_FAILED"),
+          updatedAt: new Date().toISOString()
+        };
+        failedProject.script = {
+          ...(failedProject.script || {}),
+          analysisEnhancement: {
+            source: "agent-required",
+            localFallbackCount: 0,
+            failedChunk: chunk.index + 1,
+            failureCode: String(error?.code || "TEXT_PROVIDER_FAILED"),
+            localPreviewAvailable: Boolean(localBound?.shots?.length),
+            updatedAt: new Date().toISOString()
+          }
+        };
+        this.store.saveProject(failedProject);
         throw agentCreativeOutputRequired(
           error,
           "SCRIPT_ANALYSIS_AGENT_RESULT_REQUIRED",
-          `AI 拆镜第 ${chunk.index + 1}/${chunks.length} 段未返回合格结构化结果；已保留本地预解析断点，但不会冒充 AI 拆镜成功`,
+          `AI 拆镜第 ${chunk.index + 1}/${chunks.length} 段未返回合格结构化结果；已保留可重试断点，未写入本地兜底资产`,
           { chunkIndex: chunk.index + 1, totalChunks: chunks.length }
         );
       }
@@ -14902,14 +14896,14 @@ class WorkbenchWorkflow {
       return bound;
     });
     uploadedAnalysisFallbackSummary = {
-      source: localRepairIndices.size ? "agent-plus-local-auto-repair" : "agent-structured-result",
+      source: "agent-structured-result",
       totalChunks: chunkSchedules.length,
       agentCompletedChunks: completedAgentIndices.size,
-      localFallbackCount: localRepairIndices.size,
-      localFallbackChunks: [...localRepairIndices].sort((left, right) => left - right).map(index => index + 1),
+      localFallbackCount: 0,
+      localFallbackChunks: [],
       providerKind: settings.textProvider?.kind || "",
       model: settings.textProvider?.model || "",
-      requestSessions: chunkSchedules.map(chunk => `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-agent-v4`),
+      requestSessions: chunkSchedules.map(chunk => `uploaded-analysis-${analysisSignature.slice(0, 24)}-${chunk.index + 1}-agent-v5`),
       upstreamReceipts,
       promptSlaMs: TEXT_STAGE_SLA_MS,
       noTotalDeadline: true,
@@ -14924,7 +14918,7 @@ class WorkbenchWorkflow {
       data,
       project,
       { adaptiveTargetSeconds: filmSchedule.totalSeconds, durationEstimate }
-    ), projectInputMode(project) === "manual" ? "uploaded-script-agent-structured-v5" : "ai-duration-contract-dialogue-ledger-v2", chunks.length);
+    ), projectInputMode(project) === "manual" ? "uploaded-script-agent-structured-v6" : "ai-duration-contract-dialogue-ledger-v2", chunks.length);
   }
 
   importAsset(projectId, category, sourcePath, name = "") {
@@ -22486,7 +22480,7 @@ ${shotAnchor}
   }
 }
 
-module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, topicJsonParseOptions, recoverTopicOptionsFromDiagnostics, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, projectScriptFormat, assertAiScriptFormatConfirmed, scriptFormatDirective, viewerComprehensionPriorityDirective, renderProductionScript, renderDialogueScript, renderTimedStoryboardScript, renderScriptForProject, ideaSignature, parseTimedStoryboardScript, expandTimedStoryboardForProvider, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, localUploadedAnalysisChunk, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, compactGeneratedSeedanceVideoPrompt, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, voiceLibraryFingerprint, buildCharacterSpeechScript, characterVideoOutputContract, dialogueRewriteNameMap, validateDialogueRewriteLines, localDialogueRewriteLines, renderDialogueRewriteScript };
+module.exports = { WorkbenchWorkflow, fillTemplate, normalizeAnalysis, conformImportedAnalysisToDurationContract, projectDurationContract, normalizeTopicOptions, topicJsonParseOptions, recoverTopicOptionsFromDiagnostics, stripGlobalTextSuffix, compileTextStagePrompt, compileTopicIdeationPrompt, topicIdeationRuntimePrompt, seedanceTextStageDirective, textStagePromptForProject, validateStoryBible, validateBlueprint, validateShotBatch, validateShotPlanBatch, extractCompleteShotPlanPrefix, recoverPaidPlanJsonPrefixEvidence, recoverPaidPlanJsonPrefix, recoverPaidPlanContractFailure, continuousCheckpointPrefix, mainReversalWindow, mainReversalTimeRatio, shotPlanCheckpointReversalFailures, assertShotPlanCheckpointReversalContract, normalizeShotPlanForContract, planBatchContractHints, productTailUnitCount, productTailRange, productTailRole, scriptFailureRepairRoute, scriptRepairFailureSnapshot, scriptPipelineEntryRoute, projectInputMode, ideaScriptBootstrapGaps, assertIdeaScriptBootstrapReady, assertScriptMaterializedForPipeline, projectScriptFormat, assertAiScriptFormatConfirmed, scriptFormatDirective, viewerComprehensionPriorityDirective, renderProductionScript, renderDialogueScript, renderTimedStoryboardScript, renderScriptForProject, ideaSignature, parseTimedStoryboardScript, expandTimedStoryboardForProvider, parseStructuredProductionScript, parsePropBibleFromScript, selectedOrLatest, candidateReady, characterIdentityCandidate, storyboardStageLabel, projectRequiresFaceMesh, projectVideoProviderKind, videoSubmissionFingerprint, selectHailuoReferencesForMode, resolveHailuoApiModeForStrategy, shotStoryboardFrameStages, shotRequiresStartFrame, resolveShotVideoStrategy, generationModeSourceDirective, productionUnitGenerationModeDirective, generationModeLabel, normalizeSecondPanels, formatSecondPanelBeats, modeAwareReferencePlan, productionShotSchema, directorUnitLockPrompt, h3DialogueBudgetPrompt, scriptUnitUserPrompt, annotateProjectShotStrategies, applyCandidateQualityAudits, spawnCapture, parseFfmpegProgressSeconds, probeMediaStreamDuration, storyboardSheetGrid, criticalTextOverlayFilters, finalCriticalTextOverlayFilter, h3ExactStitchFilter, analysisChunksForSchedule, analysisChunkSchedules, localUploadedAnalysisChunk, dialogueTurns, spokenCharacters, shotDialogueStats, auditDramaSpec, normalizeSemanticReview, parseAudioAnalysis, analyzeAudioFile, rewriteSeedanceAuthoredWithPictureTokens, compactGeneratedSeedanceVideoPrompt, hasOssCredentials, isHttpsReferenceExpiredOrExpiring, signedUrlExpiryUnix, limitStaticStoryboardImagePrompt, stripStaticStoryboardDialogueBlocks, selectImageReferenceInputs, isSameProductName, productMentionTokens, textMentionsProduct, productSemanticTokens, applyUploadedProductBindings, productPromptDirective, storyboardDialogueVisualDirective, storyAssetDirective, shotContractText, openingHookContractFailures, productionHardContractFailures, assertProductionHardContracts, shotSpeakingCharacterIds, requiredHailuoVoiceCharacterIds, audioReferenceAudit, assertHailuoDialogueVoiceReferences, assertHailuoPromptVoiceBindings, imageBatchConcurrency, mapWithConcurrency, summarizeAssetBatch, listMissingStoryboardFrames, assertProjectStoryboardsReady, sanitizeBatchProgress, assertVideoProviderAligned, formatDialogueWithAudioBinding, uniqueDialogueTurns, assertSystemPromptDialogueParity, sourceDialoguePromptBlock, bindSourceDialogueLedgerToAnalysis, assertSourceDialogueParity, stageEmotionIntensity, inferDeliveryTone, buildEmotionPerformanceInstruction, isQualityGatesEnabled, skippedQualityAudit, qualityAccepted, shotUsesManualVideoPrompt, isImageContentPolicyError, sanitizePromptAgainstSafetyFilters, sanitizeEmptySceneDescription, emptySceneVisualStyle, isTransientProviderError, inferVoiceProfile, scoreVoiceLibraryMatch, buildCharacterSpeechScript, characterVideoOutputContract, dialogueRewriteNameMap, validateDialogueRewriteLines, localDialogueRewriteLines, renderDialogueRewriteScript, validateScriptAnalysisChunkResult };
 module.exports.reconcileShotSceneCatalog = reconcileShotSceneCatalog;
 module.exports.resolveHailuoApiModeForReferences = resolveHailuoApiModeForReferences;
 module.exports.finalizeVideoPromptForSubmission = finalizeVideoPromptForSubmission;
@@ -22524,3 +22518,4 @@ module.exports.fastPlanCacheState = fastPlanCacheState;
 module.exports.hasPollutedStoryFoundation = hasPollutedStoryFoundation;
 module.exports.resumedTextProvider = resumedTextProvider;
 module.exports.directorCompileConcurrency = directorCompileConcurrency;
+module.exports.voiceLibraryFingerprint = voiceLibraryFingerprint;

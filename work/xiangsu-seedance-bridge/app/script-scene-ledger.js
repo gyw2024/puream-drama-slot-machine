@@ -15,6 +15,8 @@ function normalizeSceneName(value = "") {
     .replace(/^@+/, "")
     .replace(/[。；;，,]+$/, "")
     .trim();
+  // Day/time state is shot continuity, not a reusable physical location.
+  name = name.replace(/\s*[（(](?:次日|翌日|当天|当晚|同日|数日后|几日后|第二天|第三天|白天|夜晚|夜间|清晨|傍晚|深夜|凌晨)[^）)]{0,32}[）)]?\s*$/i, "").trim();
   name = name.replace(/集团总裁办(?:公室)?/g, "总裁办公室").replace(/总裁办(?!公室)/g, "总裁办公室");
   return name;
 }
@@ -39,6 +41,16 @@ function isSceneTimeToken(value = "") {
   if (/^(?:夜间|白天|日间|夜里|清晨|黄昏|深夜|凌晨|傍晚)?(?:雨光|明亮|阴天|晴天|灯光|暖光|冷光|日光|月光|路灯|室内光|室外光)$/i.test(name)) return true;
   if (/^(?:夜间|白天|日间|夜里|清晨|黄昏|深夜|凌晨|傍晚).{0,8}$/.test(name)
     && !/(厅|房|室|廊|街|院|店|馆|楼|口|厨|车|会|办|诊|屋|柜|场|站|区|园)/.test(name)) return true;
+  return false;
+}
+
+function isInvalidPhysicalSceneAssetName(value = "") {
+  const name = normalizeSceneName(value);
+  if (!name || isSceneTimeToken(name)) return true;
+  // Shot ranges and production headings are never reusable physical scenes.
+  if (/^(?:第\s*[一二三四五六七八九十百千万\d]+\s*(?:镜|分镜|镜头)|(?:S|SHOT)\s*\d+)(?:\s|$|[:：|｜])/i.test(name)) return true;
+  if (/^\d+(?:\.\d+)?\s*(?:秒)?\s*(?:[-~—至]\s*\d+(?:\.\d+)?\s*秒?)?(?:内|外)?$/i.test(name)) return true;
+  if (/^(?:镜头|分镜|镜号|时间轴|时长|场景固定|本镜|当前镜头)\b/i.test(name)) return true;
   return false;
 }
 
@@ -94,7 +106,7 @@ function transitionTarget(line = "") {
   const text = String(line || "").trim();
   const match = text.match(/^(?:[-*•]\s*)?[（(\[]?\s*(?:转场|切至|切到|转至|来到)\s*[:：-]?\s*([^）)\]\n]{2,80})[）)\]]?\s*$/i);
   const name = match ? normalizeSceneName(match[1]) : "";
-  return name && !isSceneTimeToken(name) ? name : "";
+  return name && !isInvalidPhysicalSceneAssetName(name) ? name : "";
 }
 
 function findScene(catalogue, value, candidates = catalogue) {
@@ -132,7 +144,7 @@ function buildSourceSceneLedger(value = "") {
   }
   const addScene = (rawName, sourceStart, declared = true, kind = "") => {
     const name = normalizeSceneName(rawName);
-    if (!name || PLACEHOLDER_SCENE.test(name)) return null;
+    if (!name || PLACEHOLDER_SCENE.test(name) || isInvalidPhysicalSceneAssetName(name)) return null;
     const semanticKey = sceneSemanticKey(name);
     // A declared heading is authoritative. Similar broad words such as
     // "公寓" must never merge 客厅、走廊 and 门口 into one asset.
@@ -339,6 +351,7 @@ module.exports = {
   buildSourceSceneLedger,
   enforceSourceSceneLedger,
   normalizeSceneName,
+  isInvalidPhysicalSceneAssetName,
   parseSceneHeading,
   sceneAtSourceOffset,
   sceneContextForRange,

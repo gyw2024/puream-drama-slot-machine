@@ -10,7 +10,8 @@ const {
   bindSourceDialogueLedgerToAnalysis,
   normalizeAnalysis,
   applyUploadedProductBindings,
-  conformImportedAnalysisToDurationContract
+  conformImportedAnalysisToDurationContract,
+  validateScriptAnalysisChunkResult
 } = require("../app/workbench-workflow");
 
 test("production field labels are not speakers", () => {
@@ -50,6 +51,34 @@ test("scene lists and time suffixes do not become dirty or fake places", () => {
   assert.ok(timed.catalogue.some(item => item.name.includes("苏妈厨房")));
   const dashTransition = buildSourceSceneLedger("【场景】厨房\n- 转场：客厅\n苏妈：过来。");
   assert.ok(dashTransition.catalogue.some(item => item.name === "客厅"));
+});
+
+test("26 timed blocks collapse to unique physical scene assets", () => {
+  const raw = Array.from({ length: 26 }, (_, index) => {
+    const start = index * 10;
+    const location = index < 18
+      ? (index === 1 ? "旧小区楼道（次日清晨）" : "旧小区楼道")
+      : "银行大厅";
+    return `${start}-${start + 10}秒\n场景：${location}\n周宁：第${index + 1}段对白完整保留。`;
+  }).join("\n");
+  const ledger = buildSourceSceneLedger(raw);
+  assert.deepEqual(ledger.catalogue.map(item => item.name), ["旧小区楼道", "银行大厅"]);
+  assert.ok(ledger.catalogue.every(item => !/^\d+\s*[-~—至]\s*\d+\s*秒$/.test(item.name)));
+});
+
+test("Agent analysis rejects time ranges and shot headings as scene assets", () => {
+  const base = {
+    story: { premise: "客户上传剧本" },
+    characters: [{ id: "C01", name: "周宁" }],
+    props: [],
+    shots: [{ id: "S01", duration: 10 }]
+  };
+  const timed = validateScriptAnalysisChunkResult({ ...base, scenes: [{ name: "0-10秒" }] }, { unitCount: 1 });
+  assert.ok(Array.isArray(timed));
+  assert.ok(timed.some(item => item.includes("不是物理空间")));
+  const shotHeading = validateScriptAnalysisChunkResult({ ...base, scenes: [{ name: "第18镜" }] }, { unitCount: 1 });
+  assert.ok(Array.isArray(shotHeading));
+  assert.ok(shotHeading.some(item => item.includes("不是物理空间")));
 });
 
 test("local fallback keeps multiple scenes and core props from bracket lists", () => {
