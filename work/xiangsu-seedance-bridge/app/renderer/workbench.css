@@ -897,6 +897,11 @@ input:focus, textarea:focus, select:focus { border-color: #8c5b1c; box-shadow: 0
 .asset-strip span { padding: 3px 6px; border: 1px solid #3a3227; border-radius: 4px; color: #8e8270; font-size: 8px; background: #11100e; }
 .asset-strip span.has { border-color: rgba(72,244,138,.28); color: #7ee5a5; }
 .asset-strip span.missing { border-color: rgba(255,107,95,.28); color: #ffaaa3; }
+.reference-asset-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 7px; padding: 5px 7px; border: 1px solid rgba(255,255,255,.09); border-radius: 5px; background: rgba(9,11,10,.45); }
+.reference-asset-title { color: #a89d8a; font-size: 9px; font-weight: 700; }
+.reference-asset-chip { border: 1px solid rgba(72,244,138,.3); border-radius: 4px; padding: 3px 6px; color: #8eeab0; background: rgba(30,54,38,.55); font-size: 9px; cursor: pointer; }
+.reference-asset-chip:hover, .reference-asset-chip:focus-visible { border-color: #48f48a; color: #effff3; outline: 2px solid rgba(72,244,138,.3); outline-offset: 1px; }
+.reference-asset-chip.missing { border-color: rgba(255,107,95,.3); color: #ffaaa3; background: rgba(65,24,22,.35); cursor: default; }
 .creator-prompt-block { display: grid; gap: 7px; }
 .creator-prompt-block textarea { min-height: 72px; font-size: 10px; }
 .creator-prompt-actions { display: flex; flex-wrap: wrap; gap: 5px; }

@@ -4225,7 +4225,8 @@ function assertShotReferenceBundle(project, shot, mode, references, previousVide
     if (!path.isAbsolute(role.path) || !fs.existsSync(role.path)) fail(`图${index + 1}素材文件不存在`, "MEDIA_FILE_MISSING");
     if (seen.has(role.path)) fail(`图${index + 1}重复引用了同一个文件`);
     seen.add(role.path);
-    if (["character_three_view", "character_sheet"].includes(role.sourceStage)) {
+    if (["character_three_view", "character_sheet"].includes(role.sourceStage)
+      && !(role.type === "character" && role.identityOnly === true)) {
       fail(`图${index + 1}直接引用人物设定板，可能被模型误当成成片画面`, "CHARACTER_SHEET_VIDEO_REFERENCE_FORBIDDEN");
     }
     if (!role.candidateId) return;
@@ -18369,6 +18370,7 @@ ${shotAnchor}
       }
       addImage(candidate.filePath, {
         type: "character",
+        identityOnly: true,
         entityId: characterId,
         label: `角色身份参考（独立正脸图；核对名 ${character?.name || characterId}）`,
         candidateId: candidate.id,
@@ -18380,7 +18382,10 @@ ${shotAnchor}
     }
     const isolatedProductFrame = /product_(?:packshot|detail)/i.test(`${shot.productShotType || ""} ${shot.shotFunction || ""}`)
       || (shot.productMention && !(shot.characterIds || []).length);
-    if (shot.productMention && shot.videoReferenceIncludeProduct !== false && project.product?.imagePath && !isolatedProductFrame) addImage(project.product.imagePath, {
+    // Product packshot/detail units still need the real product image as the
+    // authoritative visual anchor. The isolated flag only suppresses character
+    // identity references; it must never remove the product reference itself.
+    if (shot.productMention && shot.videoReferenceIncludeProduct !== false && project.product?.imagePath) addImage(project.product.imagePath, {
       type: "product",
       label: `商品${project.product.name ? `“${project.product.name}”` : ""}外观锁（只锁形状材质，禁止白底棚拍、电商模特图、包装静物当整镜）`,
       sourceStage: "product",
