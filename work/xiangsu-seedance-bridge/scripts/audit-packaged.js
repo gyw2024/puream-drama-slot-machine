@@ -718,6 +718,60 @@ async function main() {
       await page.waitForFunction(id => document.querySelector("#projectSelect")?.value === id && document.body.dataset.workbenchReady === "true", projectId, { timeout: 10_000 });
       await page.waitForTimeout(180);
     };
+    const pauseControlAudit = [];
+    for (const scenario of [
+      { name: "running", status: "running", expectedText: "暂停任务", expectedIntent: "pause", expectedHidden: false, expectedDisabled: false },
+      { name: "pausing", status: "pausing", expectedText: "暂停中…", expectedIntent: "pause", expectedHidden: false, expectedDisabled: true },
+      { name: "paused", status: "paused_user", expectedText: "继续任务", expectedIntent: "resume", expectedHidden: false, expectedDisabled: false },
+      { name: "failed", status: "failed", expectedText: "继续任务", expectedIntent: "resume", expectedHidden: false, expectedDisabled: false }
+    ]) {
+      await switchProject(stateTransitions.firstId);
+      const snapshot = await page.evaluate(({ projectId, status }) => {
+        state.project.automation = {
+          ...(state.project.automation || {}),
+          status,
+          operation: "storyboards",
+          stage: "storyboards",
+          message: `pause-control-audit:${status}`
+        };
+        state.frontendPipeline = ["running", "pausing"].includes(status)
+          ? { projectId, label: "packaged pause audit", active: true, startedAt: Date.now() }
+          : null;
+        state.pipelineControlPending = status === "pausing";
+        renderPipelineControls(state.project);
+        const pause = document.querySelector("#pausePipeline");
+        return {
+          text: pause?.textContent?.trim() || "",
+          intent: pause?.dataset.intent || "",
+          hidden: pause?.hidden === true,
+          disabled: pause?.disabled === true,
+          blockedActions: ["generate-image", "import-candidate", "delete-reusable-library", "bind-voice-library", "save-character-fields", "select-topic"]
+            .filter(action => mutatingActionBlockedWhileRunning(action)),
+          safeActions: ["open-asset", "focus-candidates", "view-prompt-example"]
+            .filter(action => mutatingActionBlockedWhileRunning(action))
+        };
+      }, { projectId: stateTransitions.firstId, status: scenario.status });
+      await page.waitForTimeout(120);
+      await captureBackground(`pause-control-${scenario.name}`);
+      pauseControlAudit.push({ ...scenario, ...snapshot });
+    }
+    await page.evaluate(async projectId => {
+      const api = window.dramaSlot.workbench;
+      const current = await api.getProject(projectId);
+      await api.patchProject(projectId, {
+        automation: {
+          ...(current.project?.automation || {}),
+          status: "interrupted",
+          operation: "shot_videos",
+          stage: "videos",
+          message: "persisted running flag recovery audit",
+          updatedAt: new Date().toISOString()
+        }
+      });
+    }, stateTransitions.firstId);
+    const runningControl = pauseControlAudit.find(item => item.name === "running");
+    assert.equal(runningControl?.blockedActions.length, 6, "running packaged project must block every audited mutating action");
+    assert.deepEqual(runningControl?.safeActions, [], "running packaged project must keep safe viewing and navigation actions available");
     await switchProject(stateTransitions.firstId);
     await switchProject(stateTransitions.secondId);
     await page.click('.library-nav-button[data-library="characters"]');
@@ -816,6 +870,7 @@ async function main() {
       scriptExampleDownloads,
       rechargePolicy,
       blueprintOffState,
+      pauseControlAudit,
       stageMatrix,
       dialogMatrix,
       visibilityAudit,
@@ -944,6 +999,19 @@ async function main() {
     assert.equal(dialogMatrix.some(item => item.seriousAxe.length), false, "primary dialogs must have no serious accessibility violation");
     assert.equal(axe.violations.some(item => ["critical", "serious"].includes(item.impact)), false, "critical/serious accessibility violations are release blockers");
     assert.deepEqual(runtime.blankImages, [], "every image left in the packaged DOM must decode successfully");
+    assert.deepEqual(pauseControlAudit.map(item => ({
+      name: item.name,
+      text: item.text,
+      intent: item.intent,
+      hidden: item.hidden,
+      disabled: item.disabled
+    })), pauseControlAudit.map(item => ({
+      name: item.name,
+      text: item.expectedText,
+      intent: item.expectedIntent,
+      hidden: item.expectedHidden,
+      disabled: item.expectedDisabled
+    })), "packaged pause control must follow running, paused and failed project state");
     const report = {
       executablePath,
       runDir,
@@ -972,6 +1040,7 @@ async function main() {
       scriptExampleDownloads,
       rechargePolicy,
       blueprintOffState,
+      pauseControlAudit,
       stageMatrix,
       dialogMatrix,
       axe: {

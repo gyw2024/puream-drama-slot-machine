@@ -12,6 +12,8 @@ const state = {
   captureMode: false,
   stage: "script",
   busy: false,
+  frontendPipeline: null,
+  pipelineControlPending: false,
   activeJobs: new Map(),
   projectBusyCounts: new Map(),
   drawingScopes: new Set(),
@@ -3598,6 +3600,9 @@ function isStageDrawing(stage, entityId) {
 
 function automationIsActive(project = state.project) {
   const statusClaimsActive = ["running", "pausing", "stopping"].includes(String(project?.automation?.status || ""));
+  const frontendActive = state.frontendPipeline?.active === true
+    && state.frontendPipeline.projectId === project?.id;
+  if (frontendActive) return true;
   const runtime = project?.runtime;
   if (runtime && typeof runtime.active === "boolean") {
     const liveOperation = runtime.activeOperation === true;
@@ -3668,7 +3673,7 @@ async function continuePipeline(project = state.project) {
   const message = projectUsesStepExecution(project)
     ? `正在从${resumeStageLabel(stage)}断点继续当前阶段…`
     : `正在从${resumeStageLabel(stage)}断点继续完整流程…`;
-  return runLong(message, () => api.workbench.runPipelineFromStage(project.id, stage));
+  return runPipelineLong(message, () => api.workbench.runPipelineFromStage(project.id, stage));
 }
 
 async function repairCharacterReferencesAndContinue(project = state.project) {
@@ -3689,15 +3694,34 @@ function renderPipelineControls(project = state.project) {
   if (!pauseButton || !stopButton) return;
   const active = automationIsActive(project);
   const resumable = pipelineCanResume(project);
+  const pending = state.pipelineControlPending === true;
   pauseButton.hidden = !active && !resumable;
-  pauseButton.disabled = !active && !resumable;
+  pauseButton.disabled = pending || (!active && !resumable);
   pauseButton.dataset.intent = active ? "pause" : "resume";
-  pauseButton.textContent = active ? "暂停任务" : "继续任务";
+  pauseButton.textContent = pending ? "暂停中…" : active ? "暂停任务" : "继续任务";
   pauseButton.title = active
-    ? "保存当前断点并暂停自动生产"
+    ? (pending ? "正在保存断点并暂停自动生产" : "保存当前断点并暂停自动生产")
     : `从${resumeStageLabel(resumeStageForAutomation(project))}断点继续${projectUsesStepExecution(project) ? "当前阶段" : "完整流程"}`;
   stopButton.hidden = !active;
-  stopButton.disabled = !active;
+  stopButton.disabled = pending || !active;
+}
+
+function mutatingActionBlockedWhileRunning(action) {
+  const value = String(action || "");
+  if (!value || !state.project || !automationIsActive(state.project)) return false;
+  if (["console-pause", "open-console-project", "focus-candidates", "clear-candidate-filter", "view-prompt-example", "download-prompt-example", "download-prompt-suggestions"].includes(value)) return false;
+  return /^(?:generate|import|delete|bind|save|confirm|discard|restore|select-topic|console-continue|refresh|reupload|set-)/i.test(value);
+}
+
+function runPipelineLong(label, action) {
+  const projectId = state.project?.id || "";
+  state.frontendPipeline = { projectId, label, active: true, startedAt: Date.now() };
+  renderPipelineControls(state.project);
+  return runLong(label, action).finally(() => {
+    if (state.frontendPipeline?.projectId === projectId) state.frontendPipeline = null;
+    state.pipelineControlPending = false;
+    renderPipelineControls(state.project);
+  });
 }
 
 function renderAutomationQueue(project = state.project) {
@@ -3797,10 +3821,18 @@ async function clearAutomationFailures() {
 
 async function controlPipeline(intent = "pause") {
   if (!state.project) return;
-  const result = await api.workbench.pausePipeline(state.project.id, intent);
-  if (!result?.ok) return showToast(result?.message || (intent === "stop" ? "当前没有可结束的抽卡任务" : "当前没有可暂停的抽卡任务"), "error");
-  await loadProject(state.project.id);
-  showToast(intent === "stop" ? "已请求结束抽卡任务，已完成结果保留" : "已请求暂停抽卡，可手动改提示词/上传素材后再继续");
+  if (state.pipelineControlPending) return;
+  state.pipelineControlPending = true;
+  renderPipelineControls(state.project);
+  try {
+    const result = await api.workbench.pausePipeline(state.project.id, intent);
+    if (!result?.ok) return showToast(result?.message || (intent === "stop" ? "当前没有可结束的抽卡任务" : "当前没有可暂停的抽卡任务"), "error");
+    await loadProject(state.project.id);
+    showToast(intent === "stop" ? "已请求结束抽卡任务，已完成结果保留" : "已请求暂停抽卡，可手动改提示词/上传素材后再继续");
+  } finally {
+    state.pipelineControlPending = false;
+    renderPipelineControls(state.project);
+  }
 }
 
 function renderCandidateCard(item, stageItems) {
@@ -4368,6 +4400,11 @@ async function runLong(label, action, candidateScope = null) {
   state.drawingStages = state.drawingStages || new Set();
   const projectId = state.project?.id || "";
   const projectTitle = state.project?.title || "当前项目";
+  const ownsFrontendPipeline = Boolean(projectId && !candidateScope && !state.frontendPipeline);
+  if (ownsFrontendPipeline) {
+    state.frontendPipeline = { projectId, label, active: true, startedAt: Date.now() };
+    renderPipelineControls(state.project);
+  }
   const jobKey = `${projectId}:${Date.now()}:${Math.random().toString(36).slice(2, 9)}`;
   state.activeJobs.set(jobKey, { projectId, label });
   const scopeKey = candidateScope?.entityType && candidateScope?.entityId
@@ -4419,6 +4456,11 @@ async function runLong(label, action, candidateScope = null) {
     if (scopeKey) state.drawingScopes.delete(scopeKey);
     if (stageKey) state.drawingStages.delete(stageKey);
     setBusy(false, "", projectId);
+    if (ownsFrontendPipeline && state.frontendPipeline?.projectId === projectId) {
+      state.frontendPipeline = null;
+      state.pipelineControlPending = false;
+      renderPipelineControls(state.project);
+    }
     refreshDrawingUi();
     if (state.project?.id === projectId) {
       if (scriptWorkflowState().active) ensureScriptLivePolling();
@@ -4472,6 +4514,7 @@ async function runScriptLong(label, action, operation) {
     message: project.script?.generationCheckpoint ? "正在从已保存断点继续写作" : "正在启动剧本写作"
   };
   renderScriptTask();
+  renderPipelineControls(project);
   ensureScriptLivePolling();
   return runLong(label, action);
 }
@@ -4506,6 +4549,9 @@ document.addEventListener("click", async event => {
   if (button.dataset.action === "view-prompt-example") return openPromptExample(button.dataset.promptKey);
   if (button.dataset.action === "download-prompt-example") return downloadTextFile(`${button.dataset.promptKey || "prompt"}-example.json`, promptExampleForKey(button.dataset.promptKey));
   const action = button.dataset.action;
+  if (mutatingActionBlockedWhileRunning(action)) {
+    return showToast("当前任务正在运行，请先暂停任务后再修改生产内容", "error");
+  }
   if (action === "import-prompt-batch") return importPromptBatchForScope(button.dataset.promptScope || "all");
   if (action === "download-prompt-suggestions") {
     const scope = button.dataset.promptScope || "all";

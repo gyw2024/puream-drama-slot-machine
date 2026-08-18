@@ -197,6 +197,175 @@ async function providerFetch(url, options, timeoutMs = 180_000) {
   }
 }
 
+// OpenAI-compatible providers (including Kimi/Moonshot) expose a real SSE
+// stream. Keep this reader separate from providerFetch because the latter is
+// intentionally a JSON helper for models, image APIs and health checks.
+async function providerFetchOpenAiStream(url, options = {}, timeoutMs = 180_000, streamOptions = {}) {
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  let timedOut = false;
+  const abortFromExternal = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) throw externalSignal.reason instanceof Error
+    ? externalSignal.reason
+    : Object.assign(new Error("供应商请求已取消"), { code: "PROVIDER_REQUEST_ABORTED" });
+  externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+  const effectiveTimeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 0;
+  const timer = effectiveTimeoutMs ? setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, effectiveTimeoutMs) : null;
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    const requestId = String(response.headers.get("x-request-id") || response.headers.get("request-id") || "").trim();
+    if (!response.ok) {
+      const errorText = await response.text();
+      let payload;
+      try { payload = errorText ? JSON.parse(errorText) : {}; } catch { payload = { message: errorText }; }
+      throw Object.assign(new Error(payload?.error?.message || payload?.message || `供应商请求失败：HTTP ${response.status}`), {
+        code: payload?.error?.code || payload?.code || "PROVIDER_HTTP_ERROR",
+        status: response.status,
+        upstream: payload,
+        requestId
+      });
+    }
+    if (!response.body?.getReader) {
+      const raw = await response.text();
+      let payload;
+      try { payload = raw ? JSON.parse(raw) : {}; } catch { payload = { message: raw }; }
+      return { singlePayload: payload, raw, requestId, streamAccepted: false };
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let raw = "";
+    let text = "";
+    let reasoning = "";
+    let lastEmitted = "";
+    let usage = null;
+    let finishReason = "";
+    let doneEvent = false;
+    let currentEvent = "";
+    const rawLimit = 240_000;
+    const emit = () => {
+      const combined = text || reasoning;
+      if (combined.length <= lastEmitted.length) return;
+      lastEmitted = combined;
+      try { streamOptions.onDelta?.(combined); } catch {}
+    };
+    const parseFrame = frame => {
+      const lines = String(frame || "").split(/\r?\n/);
+      const dataLines = [];
+      for (const line of lines) {
+        if (line.startsWith("event:")) currentEvent = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+      }
+      if (!dataLines.length) return;
+      const payloadText = dataLines.join("\n").trim();
+      if (!payloadText) return;
+      if (payloadText === "[DONE]") {
+        doneEvent = true;
+        currentEvent = "done";
+        return;
+      }
+      let payload;
+      try { payload = JSON.parse(payloadText); } catch { return; }
+      if (payload?.error) {
+        const error = Object.assign(new Error(payload.error.message || payload.message || "文本流返回错误"), {
+          code: payload.error.code || payload.code || "PROVIDER_STREAM_ERROR",
+          requestId,
+          partialText: (text || reasoning).trim() ? (text || reasoning) : "",
+          rawText: text || reasoning,
+          rawTextLength: (text || reasoning).length,
+          rawTextSha256: (text || reasoning) ? crypto.createHash("sha256").update(text || reasoning, "utf8").digest("hex") : "",
+          rawResponse: raw.slice(0, rawLimit),
+          rawResponseLength: raw.length,
+          upstreamDone: doneEvent,
+          upstreamReceipt: usage,
+          noAutomaticRetry: doneEvent || Boolean(usage)
+        });
+        throw error;
+      }
+      const choice = payload?.choices?.[0] || {};
+      const delta = choice?.delta || {};
+      const nextText = contentText(delta.content ?? choice?.message?.content ?? payload?.content ?? payload?.text);
+      const nextReasoning = contentText(delta.reasoning_content ?? delta.reasoning ?? choice?.message?.reasoning_content ?? choice?.message?.reasoning);
+      if (nextText) text += nextText;
+      if (nextReasoning && !nextText) reasoning += nextReasoning;
+      if (choice?.finish_reason) finishReason = String(choice.finish_reason);
+      if (payload?.usage || payload?.billing || payload?.receipt || payload?.settlement) usage = {
+        ...(usage || {}),
+        ...(payload.usage || {}),
+        ...(payload.billing || {}),
+        ...(payload.receipt || {}),
+        ...(payload.settlement || {})
+      };
+      if (payload?.id && !streamOptions.requestId) streamOptions.requestId = String(payload.id);
+      emit();
+      currentEvent = "";
+    };
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        raw += chunk;
+        if (raw.length > rawLimit) raw = raw.slice(-rawLimit);
+        buffer += chunk;
+        let separator;
+        while ((separator = buffer.search(/\r?\n\r?\n/)) >= 0) {
+          const frame = buffer.slice(0, separator);
+          buffer = buffer.slice(separator + (buffer[separator] === "\r" ? 4 : 2));
+          parseFrame(frame);
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) parseFrame(buffer);
+    } catch (error) {
+      if (error?.code === "PROVIDER_STREAM_ERROR") throw error;
+      throw Object.assign(new Error(timedOut ? "文本模型请求超时" : "文本模型流连接中断"), {
+        code: timedOut ? "PROVIDER_TIMEOUT" : "PROVIDER_STREAM_INTERRUPTED",
+        cause: error,
+        requestId,
+        partialText: (text || reasoning).trim() ? (text || reasoning) : "",
+        rawText: text || reasoning,
+        rawTextLength: (text || reasoning).length,
+        rawTextSha256: (text || reasoning) ? crypto.createHash("sha256").update(text || reasoning, "utf8").digest("hex") : "",
+        rawResponse: raw.slice(0, rawLimit),
+        rawResponseLength: raw.length,
+        upstreamDone: doneEvent,
+        upstreamReceipt: usage,
+        noAutomaticRetry: doneEvent || Boolean(usage)
+      });
+    }
+    // A few gateways ignore stream:true and send one normal JSON response
+    // while still exposing a ReadableStream body. Treat that as a valid
+    // non-stream response so the compatibility fallback does not submit twice.
+    if (!text && !reasoning && raw.trim().startsWith("{")) {
+      try {
+        return { singlePayload: JSON.parse(raw), raw, requestId, streamAccepted: false };
+      } catch {}
+    }
+    return {
+      text: text || reasoning,
+      raw,
+      usage,
+      finishReason,
+      requestId: streamOptions.requestId || requestId,
+      upstreamDone: doneEvent,
+      streamAccepted: true
+    };
+  } catch (error) {
+    if (timedOut) throw Object.assign(error, { code: "PROVIDER_TIMEOUT" });
+    if (error?.name === "AbortError" && externalSignal?.aborted) {
+      throw externalSignal.reason instanceof Error ? externalSignal.reason : Object.assign(new Error("供应商请求已取消"), { code: "PROVIDER_REQUEST_ABORTED" });
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
+  }
+}
+
 function authHeaders(config) {
   const headers = { "content-type": "application/json" };
   if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
@@ -310,6 +479,7 @@ function isOpenAiCompatibleTransientError(error) {
     "ENOTFOUND",
     "ERR_FAILED",
     "ERR_EMPTY_RESPONSE",
+    "PROVIDER_STREAM_INTERRUPTED",
     "PROVIDER_TIMEOUT"
   ].includes(code)) return true;
   const message = `${error?.message || ""} ${error?.cause?.message || ""}`.toLowerCase();
@@ -978,20 +1148,38 @@ async function generateOpenAiCompatibleText(config, messages, options = {}) {
     body: JSON.stringify(body),
     signal: options.signal
   }, providerTimeout(options));
+  const streamRequest = body => providerFetchOpenAiStream(endpoint(config.baseUrl, "/chat/completions"), {
+    method: "POST",
+    headers: {
+      ...authHeaders(config),
+      accept: "text/event-stream",
+      "idempotency-key": clientRequestId,
+      "x-client-request-id": clientRequestId
+    },
+    body: JSON.stringify(body),
+    signal: options.signal
+  }, providerTimeout(options), options);
 
   const requestedAttempts = options.maxReconnectAttempts === undefined
     ? 3
     : Number(options.maxReconnectAttempts);
+  // Zero used to mean Infinity here. A client retry cannot prove whether the
+  // provider accepted the previous paid request, so keep the default bounded;
+  // explicit Continue is the only way to start a new logical attempt.
   const maxAttempts = requestedAttempts === 0
-    ? Number.POSITIVE_INFINITY
+    ? 3
     : Math.max(1, Number.isFinite(requestedAttempts) ? Math.floor(requestedAttempts) : 3);
-  const requestWithRecovery = async (body, label) => {
+  const requestWithRecovery = async (body, label, requestFn = request) => {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        return await request(body);
+        return await requestFn(body);
       } catch (error) {
         const recoverable = !options.signal?.aborted
           && attempt < maxAttempts
+          && error?.upstreamDone !== true
+          && !error?.upstreamReceipt
+          && !String(error?.partialText || "").trim()
+          && error?.noAutomaticRetry !== true
           && isOpenAiCompatibleTransientError(error);
         if (typeof options.onAttemptFailure === "function") {
           try {
@@ -1045,20 +1233,25 @@ async function generateOpenAiCompatibleText(config, messages, options = {}) {
     const attempt = attempts[index];
     let data;
     try {
-      data = await requestWithRecovery(attempt.body, attempt.label);
-    } catch (error) {
-      lastError = error;
-      // Older gateways reject response_format / thinking; fall back to bare chat body once.
-      if ([400, 422].includes(Number(error?.status)) && index === 0) {
-        try {
-          data = await requestWithRecovery({
+        data = await requestWithRecovery({
+          ...attempt.body,
+          stream: true,
+          stream_options: { include_usage: true }
+        }, attempt.label, streamRequest);
+      } catch (error) {
+        lastError = error;
+        // Older gateways reject response_format / thinking; fall back to bare chat body once.
+        if ([400, 422].includes(Number(error?.status)) && index === 0) {
+          try {
+            data = await requestWithRecovery({
             model: baseBody.model,
             messages: baseBody.messages,
             temperature: baseBody.temperature,
             max_tokens: baseBody.max_tokens,
-            ...(isDeepSeekV4Model(config.model) ? { thinking: { type: "disabled" } } : {})
-          });
-        } catch (fallbackError) {
+              ...(isDeepSeekV4Model(config.model) ? { thinking: { type: "disabled" } } : {}),
+              stream: false
+            }, `${attempt.label}-non-stream`);
+          } catch (fallbackError) {
           lastError = fallbackError;
           continue;
         }
@@ -1066,10 +1259,40 @@ async function generateOpenAiCompatibleText(config, messages, options = {}) {
         continue;
       }
     }
+    const streamText = contentText(data?.text).trim();
+    if (streamText) {
+      if (data?.usage && typeof options.onUsage === "function") {
+        try {
+          options.onUsage({
+            ...data.usage,
+            model: data.usage.model || config.model,
+            requestId: data.requestId || clientRequestId,
+            sessionId: clientRequestId,
+            attempt: index + 1,
+            receiptSource: "openai.compatible.usage"
+          });
+        } catch {}
+      }
+      if (options.json) return parseStructuredJson(streamText, options);
+      return streamText;
+    }
+    if (data?.singlePayload) data = data.singlePayload;
     const choice = data?.choices?.[0];
-    const text = contentText(choice?.message?.content).trim();
+    const text = assistantChoiceText(choice);
     if (text) {
       if (typeof options.onDelta === "function") options.onDelta(text);
+      if (data?.usage && typeof options.onUsage === "function") {
+        try {
+          options.onUsage({
+            ...data.usage,
+            model: data.usage.model || config.model,
+            requestId: data.id || clientRequestId,
+            sessionId: clientRequestId,
+            attempt: index + 1,
+            receiptSource: "openai.compatible.usage"
+          });
+        } catch {}
+      }
       return options.json ? parseStructuredJson(text, options) : text;
     }
     lastEmptyMeta = describeEmptyTextChoice(choice, data);
@@ -1080,7 +1303,9 @@ async function generateOpenAiCompatibleText(config, messages, options = {}) {
     throw Object.assign(new Error(`文本模型返回内容为空（${lastEmptyMeta || attempt.label}）`), {
       code: "TEXT_RESULT_EMPTY",
       finishReason: finish,
-      details: lastEmptyMeta
+      details: lastEmptyMeta,
+      rawText: JSON.stringify(data || {}).slice(0, 120_000),
+      rawTextLength: JSON.stringify(data || {}).length
     });
   }
   if (lastError) throw lastError;

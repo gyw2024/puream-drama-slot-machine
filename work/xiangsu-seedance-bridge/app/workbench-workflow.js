@@ -12233,7 +12233,10 @@ class WorkbenchWorkflow {
           sessionId: topicSessionId,
           maxTokens: 2_400,
           costOperation: "topic_ideation",
-          maxReconnectAttempts: UNLIMITED_ATTEMPTS
+          // A dropped response may already be accepted/charged upstream. Keep
+          // topic ideation single-submit; Continue creates the next explicit
+          // logical session instead of replaying indefinitely in the background.
+          maxReconnectAttempts: 1
         }));
         const topics = normalizeTopicOptions(data, { enforceDiversity: topicDiversityAuditEnabled });
         const repeatedTitles = topics.filter(item => previousTitles.has(String(item.title || "").trim()));
