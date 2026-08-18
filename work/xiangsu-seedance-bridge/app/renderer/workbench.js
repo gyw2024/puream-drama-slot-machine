@@ -1238,6 +1238,44 @@ function referenceManifestItems(project, manifest) {
   });
 }
 
+function shotReferenceFallbackManifest(project, shot, stage = "video") {
+  const images = [];
+  const add = (candidate, type, label) => {
+    if (!candidate?.filePath) return;
+    images.push({
+      type,
+      label,
+      filePath: candidate.filePath,
+      candidateId: candidate.id || "",
+      sourceStage: candidate.stage || type,
+      entityId: candidate.entityId || ""
+    });
+  };
+  const mode = project.generation?.mode || "continuation";
+  const storyboardStage = mode === "storyboard_sheet" ? "storyboard_sheet" : "storyboard_end";
+  const storyboard = chosenCandidate("shot", shot.id, storyboardStage)
+    || chosenCandidate("shot", shot.id, "storyboard_start");
+  add(storyboard, "storyboard_sheet", `本镜分镜${mode === "storyboard_sheet" ? "合图" : "关键帧"}`);
+  const visibleIds = [...new Set([
+    ...(Array.isArray(shot.visibleCharacterIds) ? shot.visibleCharacterIds : []),
+    ...(Array.isArray(shot.videoReferenceCharacterIds) ? shot.videoReferenceCharacterIds : []),
+    ...(Array.isArray(shot.imageReferenceCharacterIds) ? shot.imageReferenceCharacterIds : [])
+  ].map(String))];
+  for (const id of visibleIds) {
+    const character = (project.characters || []).find(item => String(item.id) === id);
+    const candidate = chosenCharacterIdentity(id);
+    add(candidate, "character", `人物“${character?.name || id}”身份参考`);
+  }
+  const scene = resolveSceneForShot(project, shot);
+  if (scene) add(chosenCandidate("scene", scene.id, "scene_asset"), "scene", `场景“${scene.name || shot.sceneName || scene.id}”参考`);
+  if (shot.productMention && project.product?.imagePath) {
+    images.push({ type: "product", label: `商品“${project.product.name || "用户商品"}”原图`, filePath: project.product.imagePath, sourceStage: "product" });
+  }
+  for (const wardrobe of shotLinkedWardrobes(project, shot)) add(chosenCandidate("library", wardrobe.id, "wardrobe_asset"), "wardrobe", `服装“${wardrobe.name || wardrobe.id}”参考`);
+  for (const prop of shotLinkedProps(project, shot)) add(chosenCandidate("library", prop.id, "prop_asset"), "prop", `道具“${prop.name || prop.id}”参考`);
+  return { images };
+}
+
 function referenceAssetStripMarkup(project, manifests, title) {
   const seen = new Set();
   const items = (Array.isArray(manifests) ? manifests : [manifests])
@@ -1252,6 +1290,12 @@ function referenceAssetStripMarkup(project, manifests, title) {
   return `<div class="reference-asset-strip" aria-label="${escapeHtml(title)}"><span class="reference-asset-title">${escapeHtml(title)}</span>${items.map(item => item.filePath
     ? `<button type="button" class="reference-asset-chip has" data-action="open-asset" data-path="${escapeHtml(item.filePath)}" data-title="${escapeHtml(item.label)}" data-kind="${escapeHtml(item.kind)}" title="定位原素材：${escapeHtml(item.label)}">${escapeHtml(item.label)}</button>`
     : `<span class="reference-asset-chip missing" title="${escapeHtml(item.label)}：本地原素材路径不可用">${escapeHtml(item.label)} · 未定位</span>`).join("")}</div>`;
+}
+
+function referenceAssetGroupsMarkup(project, actualManifest, plannedManifest, title) {
+  const actual = referenceAssetStripMarkup(project, actualManifest, `${title} · 实际提交`);
+  const planned = referenceAssetStripMarkup(project, plannedManifest, `${title} · 当前计划`);
+  return `${actual}${planned}`;
 }
 
 function creatorField(label, field, value, rows = 2, span = false) {
@@ -2205,7 +2249,7 @@ function renderShots() {
         <p class="dialogue">${escapeHtml(shot.dialogue || "无对白")}</p>
         <div class="shot-meta"><span>${escapeHtml(shot.sceneName || "未指定场景")}</span><span>${escapeHtml(shot.shotSize || "景别未定")}</span><span>${escapeHtml(shot.cameraMove || "机位未定")}</span>${shot.productMention ? `<span class="product">商品图注入</span>` : ""}</div>
         ${shotAssetStripMarkup(project, shot)}
-        ${referenceAssetStripMarkup(project, (sheet || start || end)?.referenceManifest, "分镜图引用资产")}
+        ${referenceAssetGroupsMarkup(project, (sheet || start || end)?.referenceManifest, shotReferenceFallbackManifest(project, shot, "storyboard"), "分镜图引用资产")}
         <div class="shot-brief-actions">
           <button type="button" class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="shot" data-id="${shot.id}">本镜资产库</button>
           ${sheetMode
@@ -2325,7 +2369,7 @@ function videoCardMarkup(project, shot) {
   const view = videoCardView(project, shot);
   const { videoState, video, taskJob, ratio, aspectStyle, emptyText, drawLabel, candidateCount, qualityLabel, drawing, assetSignature, stateSignature } = view;
   const manualPrompt = shot.promptMode === "manual";
-  const referenceManifest = video?.referenceManifest || taskJob?.referenceManifest || null;
+  const referenceManifest = video?.referenceManifest || taskJob?.referenceManifest || shotReferenceFallbackManifest(project, shot, "video");
   return `<article class="video-card status-${escapeHtml(videoState.key)}${drawing ? " is-drawing has-active-task" : ""}${taskJob && videoStatusApi.isActiveVideoJob(taskJob) ? " has-active-task" : ""}" data-shot-id="${escapeHtml(shot.id)}" data-asset-signature="${escapeHtml(assetSignature)}" data-state-signature="${escapeHtml(stateSignature)}">
   <div class="drawing-banner" aria-hidden="true"><i></i><span>正在抽卡</span></div>
   <div class="video-preview-shell" style="--video-aspect:${aspectStyle}">${video?.filePath ? `<video class="video-preview" src="${escapeHtml(video.fileUrl || fileUrl(video.filePath))}" controls preload="none" playsinline></video>` : `<div class="video-empty status-${escapeHtml(videoState.key)}"><b>${escapeHtml(emptyText)}</b><span>${escapeHtml(videoState.detail || "")}</span></div>`}<span class="aspect-badge">${escapeHtml(ratio)}</span></div>
@@ -2341,7 +2385,7 @@ function videoCardMarkup(project, shot) {
       </div>
     </details>
     <div class="video-card-footer"><div><b>镜头 ${shot.number}</b><div class="muted" data-role="video-candidate-count">候选 ${candidateCount} · ${shot.duration} 秒${qualityLabel ? ` · ${escapeHtml(qualityLabel)}` : ""}</div></div><div class="video-card-actions"><button class="mini-button asset-open-button" ${assetActionAttributes(video, `镜头 ${shot.number} · 分镜视频`, "video", ratio)}>打开视频</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="shot" data-id="${shot.id}">本镜资产库</button><button class="mini-button" data-action="import-candidate" data-entity-type="shot" data-stage="shot_video" data-id="${shot.id}">上传本镜视频</button><button class="mini-button" data-action="select-independent-asset" data-entity-type="shot" data-stage="shot_video" data-id="${shot.id}">从独立库选视频</button><button class="mini-button draw-button" data-long-action data-action="shot-video" data-id="${shot.id}">${drawLabel}</button></div></div>
-     ${referenceAssetStripMarkup(project, referenceManifest, "分镜视频引用资产")}
+     ${referenceAssetGroupsMarkup(project, video?.referenceManifest || taskJob?.referenceManifest, shotReferenceFallbackManifest(project, shot, "video"), "分镜视频引用资产")}
    </div>
  </article>`;
 }
