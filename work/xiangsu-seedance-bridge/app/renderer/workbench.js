@@ -808,6 +808,8 @@ function restoreLiveEditorState(snapshot) {
 function setStateProject(project) {
   const previousId = state.project?.id || "";
   state.project = project;
+  const selector = $("#projectSelect");
+  if (selector && project?.id && selector.value !== project.id) selector.value = project.id;
   state.busy = (state.projectBusyCounts?.get(project?.id || "") || 0) > 0;
   state.projectRenderSignature = projectRenderSignature(project);
   if (previousId && previousId !== project?.id) {
@@ -2216,15 +2218,22 @@ function renderJobs() {
   renderPipelineLiveStatus(project);
   renderAutomationQueue(project);
   const activeJobs = videoStatusApi.activeVideoJobs(project);
+  const automationActive = automationIsActive(project);
   const history = (project.jobs || []).slice().sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || ""))).slice(0, 10);
   const detailSummary = $("#runDetailSummary");
   if (detailSummary) detailSummary.textContent = activeJobs.length
     ? `后端任务 ${activeJobs.length} 个正在同步`
     : history.length ? `无后端调用 · 保留 ${history.length} 条历史` : "当前没有后端任务";
+  if (automationActive && !activeJobs.length) {
+    $("#runDetailSummary").textContent = `\u89c6\u9891\u4efb\u52a1\u5c1a\u672a\u63d0\u4ea4\uff1a${project.automation?.message || "\u6b63\u5728\u6267\u884c\u524d\u7f6e\u68c0\u67e5"}`;
+  }
   if ($("#jobStrip")) {
     $("#jobStrip").innerHTML = activeJobs.length
       ? activeJobs.map(job => `<div class="job-chip ${videoJobStatusClass(job)}"><div class="job-chip-title"><b>${escapeHtml(stageLabels[job.type] || job.type || "生产任务")}${job.entityId ? ` ${escapeHtml(job.entityId)}` : ""}</b><span>${escapePublicText(videoStatusApi.videoJobProvider(job))}实时同步</span></div>${videoJobProgressMarkup(job)}${job.message ? `<p>${escapePublicText(job.message)}</p>` : ""}</div>`).join("")
       : `<div class="empty-hint synced-empty"><b>当前没有视频生成任务</b><span>任务状态已与本地项目记录同步</span></div>`;
+  }
+  if (automationActive && !activeJobs.length) {
+    $("#jobStrip").innerHTML = `<div class="empty-hint synced-empty"><b>\u6b63\u5728\u6267\u884c\u89c6\u9891\u63d0\u4ea4\u524d\u68c0\u67e5</b><span>${escapePublicText(project.automation?.message || "\u901a\u8fc7\u68c0\u67e5\u540e\u624d\u4f1a\u521b\u5efa\u89c6\u9891\u4efb\u52a1")}</span></div>`;
   }
   $("#jobHistory").innerHTML = [
     ...(activeJobs.length
@@ -3954,7 +3963,11 @@ function renderActiveStage(force = false) {
 function nextActionForProject(project = state.project) {
   if (!project) return null;
   if (automationIsActive(project)) {
-    return { title: "后台正在执行当前任务", detail: "运行详情会按后端真实任务更新；完成前无需重复点击。", selector: "" };
+    return {
+      title: "后台正在执行当前任务",
+      detail: project.automation?.message || "运行详情会按后端真实任务更新；完成前无需重复点击。",
+      selector: ""
+    };
   }
   const scriptText = String(project.script?.raw || "").trim();
   const hasShots = Array.isArray(project.shots) && project.shots.length > 0;

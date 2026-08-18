@@ -4384,6 +4384,10 @@ function productionOnlyLegacyVideoFailureCanResume(automation = {}, settings = {
   return RETIRED_PRODUCTION_ONLY_VIDEO_ERROR_CODES.has(String(automation.errorCode || "").trim());
 }
 
+function retiredVideoGateRecovered(project = {}) {
+  return project?.automation?.retiredVideoGateRecovered === true;
+}
+
 function characterVideoStageProvider(settings = {}) {
   const configured = String(settings?.videoStageModels?.characterVideo || "inherit-project").trim();
   // Project video engines (Seedance / Hailuo H3) always win unless user explicitly picks Grok/Gemini.
@@ -18716,6 +18720,7 @@ ${shotAnchor}
     const sheetTypes = new Set(["storyboard_sheet", "storyboard_take_sheet", "storyboard_generation_block_sheet"]);
     const sourceRoles = Array.isArray(references.imageRoles) ? references.imageRoles : [];
     if (!sourceRoles.some(role => sheetTypes.has(String(role?.type || "")))) return references;
+    if (retiredVideoGateRecovered(this.store.getProject(projectId))) return references;
     if (!this.qualityGatesEnabled(this.store.getSettings(), "videos")) return references;
     const panelCount = storyboardSheetGrid(shot.duration || 10).panelCount;
     const sanitizedPath = await this.cropStoryboardTakeSheet(projectId, shot, {
@@ -18761,7 +18766,8 @@ ${shotAnchor}
       const hasStoryboardSheet = (references.imageRoles || []).some(role => ["storyboard_sheet", "storyboard_take_sheet"].includes(String(role?.type || "")));
       const repairNeedsSinglePanel = /完全无字|时间码|分镜序号|资产板|参考图|展示画面/.test(String(options.qualityRepair || ""));
       const singlePanel = prepareOptions.atomicFallback === true || repairNeedsSinglePanel;
-      const needsCrop = hasStoryboardSheet || prepareOptions.forceCrop === true || multiBlock || block.takes.length > 1;
+      const recoveredRetiredGate = retiredVideoGateRecovered(this.store.getProject(projectId));
+      const needsCrop = !recoveredRetiredGate && (hasStoryboardSheet || prepareOptions.forceCrop === true || multiBlock || block.takes.length > 1);
       const blockSheetPath = needsCrop ? await this.cropStoryboardTakeSheet(projectId, shot, block, references, {
         singlePanel
       }) : "";
@@ -19570,8 +19576,16 @@ ${shotAnchor}
       return this.runTrackedOperation(projectId, "shot_video", shotId, () => this.generateShotVideo(projectId, shotId, modeOverride, { ...options, track: false }));
     }
     if (options.promptPrepared !== true) {
+      this.setAutomation(projectId, {
+        stage: "prompt_review",
+        message: "正在准备分镜视频提交清单：整理提示词、对白和参考素材"
+      });
       await this.preparePromptReviewBundle(projectId, { autoApprove: false });
     }
+    this.setAutomation(projectId, {
+      stage: "video_preflight",
+      message: "正在执行视频提交前检查：分镜帧、音色引用和视频引擎"
+    });
     await this.ensureStageDependencies(projectId, "videos");
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
@@ -20345,8 +20359,16 @@ ${shotAnchor}
       return this.runTrackedOperation(projectId, "shot_videos", "", () => this.generateAllShotVideos(projectId, { track: false }));
     }
     if (options.promptPrepared !== true) {
+      this.setAutomation(projectId, {
+        stage: "prompt_review",
+        message: "正在准备分镜视频提交清单：整理提示词、对白和参考素材"
+      });
       await this.preparePromptReviewBundle(projectId, { autoApprove: false });
     }
+    this.setAutomation(projectId, {
+      stage: "video_preflight",
+      message: "正在执行视频提交前检查：分镜帧、音色引用和视频引擎"
+    });
     await this.ensureStageDependencies(projectId, "videos");
     const project = this.store.getProject(projectId);
     const settings = this.store.getSettings();
@@ -20357,6 +20379,10 @@ ${shotAnchor}
     assertProjectGenerationMode(project);
     assertVideoProviderAligned(project, settings);
     assertProjectStoryboardsReady(project, settings);
+    this.setAutomation(projectId, {
+      stage: "shot_videos",
+      message: "视频提交前检查已通过，正在获取后台并发并创建分镜任务"
+    });
     const mode = normalizeProjectMode(project.generation?.mode);
     const shots = project.shots.slice().sort((a, b) => a.number - b.number);
     // Preflight every speaking voice before the first paid non-H3/desktop task.
@@ -22821,6 +22847,7 @@ module.exports.productionContractRepairShotIds = productionContractRepairShotIds
 module.exports.executeShotVideoBatch = executeShotVideoBatch;
 module.exports.legacyAutomationIsAdvisory = legacyAutomationIsAdvisory;
 module.exports.productionOnlyLegacyVideoFailureCanResume = productionOnlyLegacyVideoFailureCanResume;
+module.exports.retiredVideoGateRecovered = retiredVideoGateRecovered;
 module.exports.imageGenerationOptions = imageGenerationOptions;
 module.exports.buildLocalTopicOptions = buildLocalTopicOptions;
 module.exports.splitUploadedScriptSections = splitUploadedScriptSections;

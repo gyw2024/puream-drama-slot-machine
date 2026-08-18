@@ -316,10 +316,10 @@ test("source keeps legacy pause codes in equivalent-job recovery and never abort
   assert.match(cssSource, /\.dialog-close[^{]*\{[^}]*148px - \(100vw - 100%\) \/ 2/);
 });
 
-test("H3 video submit always crops storyboard grids and skips catalog product stills on packshots", () => {
+test("H3 video submit crops storyboard grids unless a recovered project uses the retired gate", () => {
   const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
   const directorSource = fs.readFileSync(path.join(__dirname, "..", "app", "agent-director.js"), "utf8");
-  assert.match(workflowSource, /const needsCrop = hasStoryboardSheet/);
+  assert.match(workflowSource, /const needsCrop = !recoveredRetiredGate && \(hasStoryboardSheet/);
   assert.doesNotMatch(workflowSource, /const needsCrop = this\.qualityGatesEnabled\(settings, "videos"\)/);
   assert.match(workflowSource, /isolatedProductFrame/);
   assert.match(workflowSource, /assembleRecoveredShotVideoIfNeeded/);
