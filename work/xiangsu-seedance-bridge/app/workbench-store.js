@@ -1938,11 +1938,26 @@ class WorkbenchStore {
       // moved out of this directory, while a crash between the SQLite commit
       // and JSON mirror write still leaves the newly created folder recoverable.
       if (!row.projectId || !fs.existsSync(this.projectDir(row.projectId))) continue;
-      byId.set(row.projectId, this.projectSummary({
-        ...(row.project || {}),
+      // Runtime snapshots can lag behind user-facing metadata after a rename
+      // while an automation is running. Keep runtime progress, but prefer the
+      // project file's title so an existing project is never shown as another one.
+      let diskProject = null;
+      try {
+        diskProject = readJsonFile(this.projectPath(row.projectId), {
+          validate: value => value?.id === row.projectId,
+          errorCode: "PROJECT_FILE_CORRUPTED"
+        });
+      } catch {}
+      const runtimeProject = row.project || {};
+      const summaryProject = {
+        ...runtimeProject,
+        ...(diskProject || {}),
+        title: diskProject?.title || runtimeProject.title,
+        workspaceTitle: diskProject?.workspaceTitle || runtimeProject.workspaceTitle,
         id: row.projectId,
-        updatedAt: row.updatedAt || row.project?.updatedAt
-      }));
+        updatedAt: row.updatedAt || runtimeProject.updatedAt || diskProject?.updatedAt
+      };
+      byId.set(row.projectId, this.projectSummary(summaryProject));
     }
     return [...byId.values()].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
