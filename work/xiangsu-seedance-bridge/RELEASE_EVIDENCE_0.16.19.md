@@ -19,12 +19,12 @@
 
 ## Artifacts
 
-- 目录版：`D:\Backup\Documents\无限画布\纯梦短剧老虎机\work\xiangsu-seedance-bridge\dist-fixed-0.16.19\win-unpacked\纯梦短剧老虎机.exe`
+- 目录版：`D:\Backup\Documents\无限画布\纯梦短剧老虎机\release\0.16.19-audit-gates\纯梦短剧老虎机.exe`
   - SHA-256：`2696C943789E9D08153171409FBC863212EB5C462B3FE39BC45AE89466001CAF`
 - 安装包：`D:\Backup\Documents\无限画布\纯梦短剧老虎机\work\xiangsu-seedance-bridge\dist-fixed-0.16.19\纯梦短剧老虎机-安装版-0.16.19.exe`
   - SHA-256：`1E4E0DD83C249FF76DFB3A64E3A9ACD7EAB0A50F8B540D6ECF5C5D9CA29142E5`
 - 桌面快捷方式：`C:\Users\Administrator\Desktop\纯梦短剧老虎机.lnk`
-  - 目标：`D:\Backup\Documents\无限画布\纯梦短剧老虎机\work\xiangsu-seedance-bridge\dist-fixed-0.16.19\win-unpacked\纯梦短剧老虎机.exe`
+- 目标：`D:\Backup\Documents\无限画布\纯梦短剧老虎机\release\0.16.19-audit-gates\纯梦短剧老虎机.exe`
 - 正式备份：`D:\Backup\Documents\无限画布\纯梦短剧老虎机\.codex_backups\releases\TASK-20260818-AUDIT-GATE-CLOSE-001\final`
 
 ## External boundary
