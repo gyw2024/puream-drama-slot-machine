@@ -2257,6 +2257,40 @@ class WorkbenchStore {
     return { migrated, existing, failures };
   }
 
+  migrateAssetProgressContracts() {
+    let migrated = 0;
+    const failures = [];
+    for (const summary of this.listProjects()) {
+      try {
+        const project = this.getProject(summary.id);
+        const beforeAutomation = project.__storeBaseline?.automation || {};
+        const afterAutomation = project.automation || {};
+        const before = JSON.stringify({
+          status: beforeAutomation.status,
+          stage: beforeAutomation.stage,
+          message: beforeAutomation.message,
+          errorCode: beforeAutomation.errorCode,
+          recoverableFailure: beforeAutomation.recoverableFailure,
+          progress: beforeAutomation.progress
+        });
+        const after = JSON.stringify({
+          status: afterAutomation.status,
+          stage: afterAutomation.stage,
+          message: afterAutomation.message,
+          errorCode: afterAutomation.errorCode,
+          recoverableFailure: afterAutomation.recoverableFailure,
+          progress: afterAutomation.progress
+        });
+        if (before === after) continue;
+        this.saveProject(project);
+        migrated += 1;
+      } catch (error) {
+        failures.push({ projectId: summary.id, code: error?.code || "ASSET_PROGRESS_MIGRATION_FAILED", message: error?.message || String(error) });
+      }
+    }
+    return { migrated, failures };
+  }
+
   beginCostEntry(projectId, entry) {
     const project = this.getProject(projectId);
     project.costLedger = normalizeCostLedger(project.costLedger);

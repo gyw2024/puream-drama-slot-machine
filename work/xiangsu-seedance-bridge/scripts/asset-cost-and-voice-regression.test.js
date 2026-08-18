@@ -231,6 +231,9 @@ test("startup reconciliation makes a false-complete legacy project resumable wit
   };
   store.saveProject(project);
 
+  const migration = store.migrateAssetProgressContracts();
+  assert.equal(migration.migrated, 1);
+  assert.deepEqual(migration.failures, []);
   project = store.getProject(created.id);
   assert.equal(project.automation.status, "paused");
   assert.equal(project.automation.stage, "assets");

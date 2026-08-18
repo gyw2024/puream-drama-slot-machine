@@ -3303,6 +3303,8 @@ if (!app.requestSingleInstanceLock()) {
     foundryKernel.settingsProvider = () => workbenchStore?.getSettings?.() || {};
     const foundryMigration = workbenchStore.migrateFoundryRuntime();
     if (foundryMigration.failures.length) console.warn("[foundry] legacy migration retained failures", foundryMigration.failures);
+    const assetProgressMigration = workbenchStore.migrateAssetProgressContracts();
+    if (assetProgressMigration.failures.length) console.warn("[assets] progress migration retained failures", assetProgressMigration.failures);
     integrityGuard.start();
     hydratePureamDefaults(workbenchStore, dramaLicense.storedActivationCode());
     workbenchWorkflow = new WorkbenchWorkflow({

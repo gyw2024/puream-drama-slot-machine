@@ -5214,31 +5214,35 @@ $("#generateAllAssets").addEventListener("click", () => {
   const project = state.project;
   if (!project) return;
   const progress = project?.automation?.progress?.kind === "asset_batch" ? project.automation.progress : null;
-  const failed = Array.isArray(progress?.items) ? progress.items.filter(item => item.status === "failed") : [];
-  let ready = 0;
-  let missing = 0;
-  for (const character of project.characters || []) {
-    for (const stage of ["character_sheet", "character_three_view", "character_intro", "character_video", "character_voice"]) {
-      if (chosenCandidate("character", character.id, stage)) ready += 1;
-      else missing += 1;
-    }
-  }
-  for (const scene of project.scenes || []) {
-    if (chosenCandidate("scene", scene.id, "scene_asset")) ready += 1;
-    else missing += 1;
-  }
-  for (const prop of project.assetLibraries?.props || []) {
-    if ((project.candidates || []).some(item => item.entityType === "library" && item.entityId === prop.id && item.stage === "prop_asset" && item.filePath)) ready += 1;
-    else missing += 1;
-  }
-  for (const wardrobe of project.assetLibraries?.wardrobes || []) {
-    if ((project.candidates || []).some(item => item.entityType === "library" && item.entityId === wardrobe.id && item.stage === "wardrobe_asset" && item.filePath)) ready += 1;
-    else missing += 1;
-  }
+  // The persisted backend plan is authoritative. The old renderer-side list
+  // counted retired identity work and reported false gaps.
+  const normalizedProductName = String(project.product?.name || "").replace(/\s+/g, "").toLowerCase();
+  const plannedItems = Array.isArray(progress?.items) && progress.items.length
+    ? progress.items
+    : [
+      ...(project.characters || []).flatMap(character => [
+        { kind: "character_sheet", entityId: character.id },
+        ...(project.generation?.engine === "hailuo-h3"
+          ? [{ kind: "character_video", entityId: character.id }, { kind: "character_voice", entityId: character.id }]
+          : [])
+      ]),
+      ...(project.scenes || []).map(scene => ({ kind: "scene_asset", entityId: scene.id })),
+      ...(project.assetLibraries?.props || [])
+        .filter(prop => !normalizedProductName || String(prop.name || "").replace(/\s+/g, "").toLowerCase() !== normalizedProductName)
+        .map(prop => ({ kind: "prop_asset", entityId: prop.id })),
+      ...(project.assetLibraries?.wardrobes || [])
+        .filter(wardrobe => wardrobe.changeRequired !== false && (!wardrobe.characterId || String(wardrobe.id || "") !== `wardrobe_${wardrobe.characterId}`))
+        .map(wardrobe => ({ kind: "wardrobe_asset", entityId: wardrobe.id }))
+    ];
+  const isReady = item => item.status === "skipped" || item.status === "completed" || item.status === "ready"
+    || Boolean(chosenCandidate(item.kind === "scene_asset" ? "scene" : item.kind.endsWith("_asset") ? "library" : "character", item.entityId, item.kind));
+  const ready = plannedItems.filter(isReady).length;
+  const missing = plannedItems.length - ready;
+  const failed = plannedItems.filter(item => item.status === "failed");
   const failHint = failed.length
     ? `当前已有 ${failed.length} 项失败（如：${failed.slice(0, 3).map(item => `${item.label}：${item.message || item.errorCode}`).join("；")}）。`
     : "";
-  if (!window.confirm(`已就绪 ${ready} 项会跳过，只补缺失/失败的 ${missing + failed.length} 项。${failHint}将按依赖分 4 波调用图片 API、${characterEngine} 和 FFmpeg，系统会自动安排顺序。继续吗？`)) return;
+  if (!window.confirm(`已就绪 ${ready} 项会跳过，只补缺失/失败的 ${missing} 项。${failHint}将按依赖分 4 波调用图片 API、${characterEngine} 和 FFmpeg，系统会自动安排顺序。继续吗？`)) return;
   runLong("正在生产全部角色和场景资产…", () => api.workbench.generateAllAssets(state.project.id));
 });
 $("#importVoiceLibrary")?.addEventListener("click", async () => {
