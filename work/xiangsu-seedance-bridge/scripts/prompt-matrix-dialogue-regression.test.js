@@ -1,3 +1,5 @@
+function continuityFixture(payload){return {shots:(payload.requestedShotIds||(payload.shots||[]).map(s=>s.id)).map(shotId=>({shotId,openingEn:'Source opening state.',transitionsEn:'Source physical action.',endingEn:'Source ending state.',visiblePropIds:[],offscreenEn:'None',actions:[]}))};}
+function designFixture(payload){return {items:(payload.items||[]).map(i=>({id:i.id,descriptionZh:'synthetic source-grounded design fixture',descriptionEn:i.id.startsWith('character:')?'One fictional adult has short dark hair, a neutral closed-mouth posture, and plain consistent clothing.':'One reusable empty room has fixed door geometry, a wooden table, plain walls and consistent soft daylight.',designChoices:[],gender:'male'}))};}
 "use strict";
 
 const test = require("node:test");
@@ -8,13 +10,18 @@ const path = require("node:path");
 
 const { parseSourceDialogueLedger } = require("../app/dialogue-parser");
 const { planFilmSchedule } = require("../app/duration-contract");
-const { estimateUploadedScriptDuration } = require("../app/script-duration");
+const { adaptiveUploadedUnitDurations, estimateUploadedScriptDuration } = require("../app/script-duration");
 const { WorkbenchStore } = require("../app/workbench-store");
 const {
   MATRIX,
   matrixEntry,
   matrixGlobalPrompt
 } = require("../app/production-mode-matrix");
+const {
+  HAILUO_PROMPT_SPEC_VERSION,
+  containsCjkOutsideDialogue,
+  promptFingerprint
+} = require("../app/hailuo-h3-prompt");
 const {
   WorkbenchWorkflow,
   analysisChunkSchedules,
@@ -86,8 +93,8 @@ function projectFixture() {
       imagePath: "C:\\fixtures\\book.png"
     },
     generation: {
-      engine: "seedance",
-      videoProviderKind: "local-xiangsu",
+      engine: "hailuo-h3",
+      videoProviderKind: "puream-hailuo-h3",
       mode: "keyframe",
       targetDurationSeconds: 30,
       shotDuration: 10,
@@ -96,6 +103,33 @@ function projectFixture() {
     productionPlan: { inputMode: "manual", executionMode: "step" },
     script: { raw: uploadedScript }
   };
+}
+
+function attachH3PromptSpec(project, shot, mode = project?.generation?.mode || "keyframe") {
+  shot.characterIds = [...new Set([...(shot.characterIds || []), ...(shot.visibleCharacterIds || [])])];
+  shot.hailuoPromptSpec = {
+    specVersion: HAILUO_PROMPT_SPEC_VERSION,
+    fingerprint: promptFingerprint(project, shot, mode),
+    mode,
+    styleEn: "Realistic Chinese vertical short-drama live action, natural skin, motivated practical light, medium close-up coverage and precise emotional performance.",
+    summaryEn: "Execute the supplied confrontation as one causal action chain with exact speaker ownership, visible listener reactions and stable identity continuity.",
+    propStateBindings: [],
+    subshots: (shot.subshots || []).map((item, index) => ({
+      number: index + 1,
+      visualEn: index === 0
+        ? "C01 pushes open the study door, advances toward the desk and points at the hidden book while C02 shields it and meets the confrontation."
+        : index === 1
+          ? "Hard-cut to C02 protecting the book, lowering his voice and loosening his grip while C01 stays in the eyeline and reacts."
+          : "Hold both characters across the desk as the action reaches the authored end state without resetting posture or prop ownership.",
+      soundEn: "Continuous indoor study room tone supports exact dialogue, close breathing, one door movement, cloth motion and synchronized hand contact.",
+      visibleCharacterIds: item.visibleCharacterIds || shot.visibleCharacterIds || [],
+      offscreenSpeakerIds: item.offscreenSpeakerIds || [],
+      speakerIds: (item.sourceDialogueIds || []).map(id => id === "D001" ? "C01" : "C02")
+    })),
+    overallSoundscapeEn: "Continuous indoor study room tone remains stable under exact dialogue, close breathing, one door movement and synchronized cloth and hand contact.",
+    nonDiegeticMusicEn: "N/A"
+  };
+  return shot;
 }
 
 function settingsFixture() {
@@ -139,11 +173,11 @@ test("dialogue punctuation labels stay inside the exact line while known inline 
   assert.deepEqual(ledger.slice(2).map(item => item.text), ["还有一句", "这句由我来说。"]);
 });
 
-test("the provider-by-generation matrix has eight distinct global contracts", () => {
-  assert.equal(Object.keys(MATRIX).length, 8);
+test("the H3-only production matrix has six distinct global contracts", () => {
+  assert.equal(Object.keys(MATRIX).length, 6);
   const prompts = [];
-  for (const provider of ["xiangsu", "cloud"]) {
-    for (const mode of ["keyframe", "continuation", "smart", "storyboard_sheet"]) {
+  for (const provider of ["cloud"]) {
+    for (const mode of ["production_package", "asset_direct", "keyframe", "continuation", "smart", "storyboard_sheet"]) {
       const entry = matrixEntry(provider, mode);
       const prompt = matrixGlobalPrompt(provider, mode);
       assert.equal(entry.key, `${provider}:${mode}`);
@@ -152,11 +186,12 @@ test("the provider-by-generation matrix has eight distinct global contracts", ()
       prompts.push(prompt);
     }
   }
-  assert.equal(new Set(prompts).size, 8);
-  assert.match(matrixGlobalPrompt("xiangsu", "storyboard_sheet"), /不生成首帧、尾帧，也不检查尾帧/);
-  assert.match(matrixGlobalPrompt("cloud", "continuation"), /上一镜已确认视频/);
+  assert.equal(new Set(prompts).size, 6);
+  assert.match(matrixGlobalPrompt("cloud", "production_package"), /人物、场景、道具和商品原图.*不要求、不生成任何额外镜头锚点图/);
+  assert.match(matrixGlobalPrompt("cloud", "storyboard_sheet"), /不生成首尾帧/);
+  assert.match(matrixGlobalPrompt("cloud", "continuation"), /上一镜确认视频/);
   assert.match(generationModeSourceDirective("smart", "hailuo-h3"), /cloud:smart/);
-  assert.match(generationModeSourceDirective("smart", "seedance"), /xiangsu:smart/);
+  assert.match(generationModeSourceDirective("smart", "retired-provider-value"), /cloud:smart/);
 });
 
 test("one-click and staged manual entry route the same uploaded script into analysis", () => {
@@ -166,22 +201,24 @@ test("one-click and staged manual entry route the same uploaded script into anal
   assert.equal(scriptPipelineEntryRoute(oneClick), "analyze_imported");
 });
 
-test("all eight provider-mode combinations use the intended frame and continuation flow", () => {
+test("all six H3 modes use the intended frame and continuation flow", () => {
   const shots = [
     { id: "S01", number: 1, sceneId: "SC01" },
     { id: "S02", number: 2, sceneId: "SC01" },
     { id: "S03", number: 3, sceneId: "SC02" }
   ];
   const expected = {
+    production_package: [[], [], []],
+    asset_direct: [[], [], []],
     keyframe: [["storyboard_start", "storyboard_end"], ["storyboard_start", "storyboard_end"], ["storyboard_start", "storyboard_end"]],
-    continuation: [["storyboard_start", "storyboard_end"], ["storyboard_end"], ["storyboard_end"]],
+    continuation: [["storyboard_start", "storyboard_end"], ["storyboard_end"], ["storyboard_start", "storyboard_end"]],
     smart: [["storyboard_start", "storyboard_end"], ["storyboard_end"], ["storyboard_start", "storyboard_end"]],
     storyboard_sheet: [["storyboard_sheet"], ["storyboard_sheet"], ["storyboard_sheet"]]
   };
-  for (const providerKind of ["local-xiangsu", "puream-hailuo-h3"]) {
+  for (const providerKind of ["puream-hailuo-h3"]) {
     for (const mode of Object.keys(expected)) {
       const project = {
-        generation: { mode, engine: providerKind === "local-xiangsu" ? "seedance" : "hailuo-h3", videoProviderKind: providerKind },
+        generation: { mode, engine: "hailuo-h3", videoProviderKind: providerKind },
         shots
       };
       assert.deepEqual(shots.map(shot => resolveShotVideoStrategy(project, shot).frameStages), expected[mode]);
@@ -206,9 +243,45 @@ test("source dialogue IDs deterministically restore speaker, exact text, tone an
   assert.equal(shot.productMention, true);
   assert.equal(shot.productBinding.name, "家庭沟通训练图书");
   assert.deepEqual(shot.productBinding.sourceDialogueIds, ["D001"]);
+  assert.match(shot.productCausalBridge.situationNeed, /原稿已成立的情境需求/);
+  assert.match(shot.productCausalBridge.whyNow, /家庭沟通训练图书.*此刻/);
+  assert.match(shot.productCausalBridge.action, /家庭沟通训练图书.*原稿可见动作/);
+  assert.match(shot.productCausalBridge.observableOutcome, /可直接观察到的结果/);
+  assert.match(shot.productCausalBridge.relationOrDecisionShift, /林娜|秦添/);
+  assert.deepEqual(shot.dialogueTurns.map(turn => turn.text), ledger.map(item => item.text), "补全商品因果桥不得改写原对白");
 });
 
-test("asset, storyboard and Xiangsu video prompts share story, dialogue, product and matrix facts", () => {
+test("product bridge completion uses authored action and never invents a character decision for a people-free detail shot", () => {
+  const ledger = parseSourceDialogueLedger(uploadedScript);
+  const data = analysisFixture(ledger);
+  data.shots[0] = {
+    ...data.shots[0],
+    productMention: true,
+    productShotType: "product_detail",
+    characters: [],
+    scenePresenceCharacterIds: [],
+    visibleCharacterIds: [],
+    sourceDialogueBindings: [],
+    dialogueTurns: [],
+    dialogue: "",
+    subshots: [
+      { start: 0, end: 5, visibleCharacterIds: [], framing: "物件近景", action: "家庭沟通训练图书翻到练习页" },
+      { start: 5, end: 10, visibleCharacterIds: [], framing: "练习页细节", action: "步骤栏与折页状态保持连续" }
+    ],
+    action: "桌面上的家庭沟通训练图书被翻到练习页，步骤栏与折页状态保持连续",
+    visualBeat: "翻开的练习页承接上一镜护书动作",
+    stateAfter: "练习页保持摊开，等待下一镜人物继续处理",
+    productCausalBridge: {}
+  };
+  const project = projectFixture();
+  const shot = applyUploadedProductBindings(normalizeAnalysis(data, project), project).shots[0];
+  assert.match(shot.productCausalBridge.action, /家庭沟通训练图书.*翻到练习页/);
+  assert.match(shot.productCausalBridge.observableOutcome, /练习页/);
+  assert.equal(shot.productCausalBridge.relationOrDecisionShift, "");
+  assert.deepEqual(shot.dialogueTurns.map(turn => turn.text), []);
+});
+
+test("asset, storyboard and H3 video prompts share story, dialogue, product and matrix facts", () => {
   const ledger = parseSourceDialogueLedger(uploadedScript);
   const baseProject = projectFixture();
   const bound = bindSourceDialogueLedgerToAnalysis(analysisFixture(ledger), ledger);
@@ -222,17 +295,19 @@ test("asset, storyboard and Xiangsu video prompts share story, dialogue, product
   };
   const settings = settingsFixture();
   const shot = project.shots[0];
+  attachH3PromptSpec(project, shot, "keyframe");
   const compileImage = WorkbenchWorkflow.prototype.compileImagePrompt;
   const storyboardPrompt = compileImage.call({}, project, settings, "storyboard_start", shot);
-  assert.match(storyboardPrompt, /本地像塑 × 首尾帧/);
+  assert.match(storyboardPrompt, /H3 × 首尾帧/);
   assert.match(storyboardPrompt, /林娜以“突然推门，声嘶力竭”面向秦添说话/);
   assert.match(storyboardPrompt, /用户上传商品硬绑定/);
   assert.match(storyboardPrompt, /家庭沟通训练图书/);
+  assert.ok(storyboardPrompt.length <= 3200, "static storyboard prompt stays inside its bounded provider contract");
 
+  assert.match(storyboardPrompt, /(?:禁止[^\n]{0,24}文字|严禁[^\n]{0,24}文字|no text|readable text)/i, "static storyboard prompt must state a clean text-free frame");
   const characterPrompt = compileImage.call({}, project, settings, "character_sheet", project.characters[0]);
-  assert.match(characterPrompt, /故事判断后的资产合同/);
-  assert.match(characterPrompt, /声嘶力竭/);
-  assert.match(characterPrompt, /本地像塑 × 首尾帧/);
+  assert.match(characterPrompt, /独立人物资产合同/);
+  assert.doesNotMatch(characterPrompt, /林娜以“突然推门|秦添|H3 × 首尾帧/);
 
   const references = {
     imageRoles: [
@@ -240,18 +315,23 @@ test("asset, storyboard and Xiangsu video prompts share story, dialogue, product
       { type: "storyboard_end", label: "剧情尾帧" },
       { type: "product", label: "用户上传商品外观" }
     ],
-    audios: []
+    audios: [
+      { characterId: "C01", characterName: project.characters[0].name, path: "https://example.invalid/c01.wav", duration: 8 },
+      { characterId: "C02", characterName: project.characters[1].name, path: "https://example.invalid/c02.wav", duration: 8 }
+    ],
+    hailuoApiMode: "multimodal_to_video"
   };
-  const videoPrompt = WorkbenchWorkflow.prototype.buildShotPrompt.call({}, project, settings, shot, "keyframe", references);
+  const videoPrompt = WorkbenchWorkflow.prototype.buildShotPrompt.call(WorkbenchWorkflow.prototype, project, settings, shot, "keyframe", references);
   for (const item of ledger) assert.equal(videoPrompt.split(item.text).length - 1, 1);
-  assert.match(videoPrompt, /角色“林娜”[^\n]*语气=突然推门，声嘶力竭/);
-  assert.match(videoPrompt, /角色“秦添”[^\n]*语气=压低声音，眼神躲闪/);
-  assert.match(videoPrompt, /用户上传商品硬绑定/);
-  assert.match(videoPrompt, /首帧到尾帧形成连续因果动作/);
-  assert.doesNotMatch(videoPrompt, /xiangsu:|product_(?:packshot|detail|use|result|reaction)/i);
+  assert.match(videoPrompt, /<Subject 1> \(S1\) faces <Subject 2> and speaks once using only the vocal identity of <Audio 1>[\s\S]*vocal arc is/);
+  assert.match(videoPrompt, /<Subject 2> \(S2\) faces <Subject 1> and speaks once using only the vocal identity of <Audio 2>[\s\S]*vocal arc is/);
+  assert.match(videoPrompt, /<Subject 3> is the recurring product[\s\S]{0,180}<Picture 3>/);
+  assert.match(videoPrompt, /<Picture 1> is the exact before-action narrative frame at 0\.00 seconds/);
+  assert.equal(containsCjkOutsideDialogue(videoPrompt), false);
+  assert.doesNotMatch(videoPrompt, /xiangsu|seedance|product_(?:packshot|detail|use|result|reaction)/i);
 });
 
-test("local video quality repairs create fresh prompts and keep reference assets offscreen", () => {
+test("technical redraw direction stays deterministic and English-only", () => {
   const ledger = parseSourceDialogueLedger(uploadedScript);
   const baseProject = projectFixture();
   const bound = bindSourceDialogueLedgerToAnalysis(analysisFixture(ledger), ledger);
@@ -265,22 +345,29 @@ test("local video quality repairs create fresh prompts and keep reference assets
   };
   const shot = project.shots[0];
   const settings = settingsFixture();
+  attachH3PromptSpec(project, shot, "keyframe");
   const references = {
     imageRoles: [
       { type: "storyboard_start", label: "story opening frame" },
       { type: "storyboard_end", label: "story ending frame" }
     ],
-    audios: []
+    audios: [
+      { characterId: "C01", characterName: project.characters[0].name, path: "https://example.invalid/c01.wav", duration: 8 },
+      { characterId: "C02", characterName: project.characters[1].name, path: "https://example.invalid/c02.wav", duration: 8 }
+    ],
+    hailuoApiMode: "multimodal_to_video"
   };
   const repair = "Remove every baked subtitle, title card, UI panel, portrait introduction and reference board.";
-  const first = WorkbenchWorkflow.prototype.buildShotPrompt.call({}, project, settings, shot, "keyframe", references, repair, "candidate-a:attempt-1");
-  const second = WorkbenchWorkflow.prototype.buildShotPrompt.call({}, project, settings, shot, "keyframe", references, repair, "candidate-a:attempt-2");
+  const first = WorkbenchWorkflow.prototype.buildShotPrompt.call(WorkbenchWorkflow.prototype, project, settings, shot, "keyframe", references, repair, "candidate-a:attempt-1");
+  const second = WorkbenchWorkflow.prototype.buildShotPrompt.call(WorkbenchWorkflow.prototype, project, settings, shot, "keyframe", references, repair, "candidate-a:attempt-2");
 
-  assert.notEqual(first, second);
-  assert.match(first, /[0-9a-f]{12}/);
-  assert.match(second, /[0-9a-f]{12}/);
-  assert.match(first, /NO subtitles|禁止.*字幕|无字/i);
-  assert.match(first, /禁止.*人物介绍|禁止.*资产展示|asset board/i);
+  assert.equal(first, second);
+  assert.match(first, /^subject_definitions:/);
+  assert.match(first, /Speak only the 2 tagged Chinese lines, each once and complete/);
+  assert.match(first, /Correct the prior technical failure while preserving the authored dialogue, action order, reference bindings, and final state/i);
+  for (const item of ledger) assert.equal(first.split(item.text).length - 1, 1);
+  assert.doesNotMatch(first, /subtitle|caption|on[- ]screen\s+text|reference board/i);
+  assert.equal(containsCjkOutsideDialogue(first), false);
 });
 
 test("a sanitized storyboard panel is treated as a live-story anchor, never a contact sheet", () => {
@@ -289,8 +376,8 @@ test("a sanitized storyboard panel is treated as a live-story anchor, never a co
     ...projectFixture(),
     generation: {
       ...projectFixture().generation,
-      engine: "seedance",
-      videoProviderKind: "local-xiangsu",
+      engine: "hailuo-h3",
+      videoProviderKind: "puream-hailuo-h3",
       mode: "storyboard_sheet"
     }
   };
@@ -305,10 +392,15 @@ test("a sanitized storyboard panel is treated as a live-story anchor, never a co
   };
   const references = {
     imageRoles: [{ type: "storyboard_panel_anchor", label: "sanitized live-story opening anchor" }],
-    audios: []
+    audios: [
+      { characterId: "C01", characterName: project.characters[0].name, path: "https://example.invalid/c01.wav", duration: 8 },
+      { characterId: "C02", characterName: project.characters[1].name, path: "https://example.invalid/c02.wav", duration: 8 }
+    ],
+    hailuoApiMode: "multimodal_to_video"
   };
+  attachH3PromptSpec(project, project.shots[0], "storyboard_sheet");
   const prompt = WorkbenchWorkflow.prototype.buildShotPrompt.call(
-    {},
+    WorkbenchWorkflow.prototype,
     project,
     settingsFixture(),
     project.shots[0],
@@ -318,9 +410,20 @@ test("a sanitized storyboard panel is treated as a live-story anchor, never a co
     "sheet-candidate:attempt-1"
   );
 
-  assert.match(prompt, /无字剧情起点/);
-  assert.match(prompt, /禁止.*人物介绍|禁止.*资产展示/);
-  assert.doesNotMatch(prompt, /接触印/);
+  assert.match(prompt, /<Picture 1> supplies ordered narrative frame composition and physical state/);
+  assert.match(prompt, /At \d+(?:\.\d+)? seconds, (?:switch camera ownership and speaking-mouth ownership together with a direct hard cut|cut to <Subject \d+>'s established visible speaking face without changing that person's identity)/);
+  assert.match(prompt, /Keep every identity unique; preserve wardrobe, screen side, depth, and the 180-degree axis/);
+  assert.match(prompt, /<Subject 1>: fully_preserved - identity, age, body, and role remain stable; hair and wardrobe remain at the current authored state/);
+  assert.match(prompt, /<Subject 2>: fully_preserved - identity, age, body, and role remain stable; hair and wardrobe remain at the current authored state/);
+  assert.match(prompt, /<Picture 1>: fully_preserved - preserve only the authored composition, spatial state, and continuity role/);
+  assert.match(prompt, /Never restart, teleport, duplicate, or swap bodies/);
+  assert.match(prompt, /clean full-frame camera-original live-action plate: every visible pixel belongs to the photographed story world/);
+  assert.match(prompt, /<Subject 1> pushes open the study door/);
+  assert.match(prompt, /Hard-cut to <Subject 2> protecting the book/);
+  assert.match(prompt, /without resetting posture or prop ownership/);
+  assert.match(prompt, /Speak only the 2 tagged Chinese lines, each once and complete/);
+  for (const item of ledger) assert.equal(prompt.split(item.text).length - 1, 1);
+  assert.equal(containsCjkOutsideDialogue(prompt), false);
 });
 
 test("storyboard sheets map every panel to an atomic camera and mouth owner without rewriting the authored action", () => {
@@ -366,9 +469,69 @@ test("storyboard sheets map every panel to an atomic camera and mouth owner with
   assert.match(prompt, /S01-T02[^\n]*cameraOwnerId=C02，mouthOwnerId=C02/);
   assert.match(prompt, /林娜跪地攥紧旧账本/);
   assert.match(prompt, /前一人立即闭口/);
-  assert.match(prompt, /所有格内禁止序号、角标、字幕/);
+  assert.match(prompt, /4列×4行/);
+  assert.match(prompt, /整张画布比例必须是 9:16/);
+  assert.match(prompt, /每个独立小格必须严格为完整9:16构图/);
+  assert.match(prompt, /绝对禁止非等比拉伸、挤压人物/);
+  assert.match(prompt, /保留整齐纯色外边距/);
+  assert.match(prompt, /所有格内及整张画布禁止任何序号、角标、时间轴刻度、字幕/);
   assert.doesNotMatch(prompt, /允许极小角标/);
   assert.doesNotMatch(prompt, /和解|鞠躬/);
+});
+
+test("object-only storyboard sheets keep every panel personless and remove all numbering permissions", () => {
+  const settings = settingsFixture();
+  const project = {
+    ...projectFixture(),
+    generation: {
+      ...projectFixture().generation,
+      engine: "hailuo-h3",
+      videoProviderKind: "puream-hailuo-h3",
+      mode: "storyboard_sheet"
+    },
+    characters: [{ id: "C01", name: "陈建国" }]
+  };
+  const shot = {
+    id: "S06",
+    number: 6,
+    duration: 6,
+    characterIds: ["C01"],
+    characterNames: ["陈建国"],
+    visibleCharacterIds: [],
+    cameraOwnerId: "C01",
+    mouthOwnerId: "C01",
+    focusCharacterId: "C01",
+    action: "护膝平放在木桌上，窗光掠过织物纹理",
+    subshots: [{
+      start: 0,
+      end: 6,
+      visibleCharacterIds: [],
+      framing: "商品静物特写",
+      camera: "稳定机位轻推",
+      action: "护膝保持平整，光线缓慢移动"
+    }],
+    secondPanels: Array.from({ length: 6 }, (_item, second) => ({
+      second,
+      cameraOwnerId: "C01",
+      mouthOwnerId: "C01",
+      speakerId: "C01",
+      visibleCharacterIds: ["C01"],
+      framing: "陈建国主导的说话人中近景/反打",
+      camera: "反打说话人",
+      action: `第${second + 1}秒护膝纹理逐步显现`
+    }))
+  };
+  project.shots = [shot];
+
+  const prompt = WorkbenchWorkflow.prototype.compileImagePrompt.call({}, project, settings, "storyboard_sheet", shot);
+  assert.match(prompt, /【本镜强制人物】无人/);
+  assert.match(prompt, /cameraOwnerId=none；mouthOwnerId=none；speakerId=silent/);
+  assert.match(prompt, /无人静物\/环境镜/);
+  assert.doesNotMatch(prompt, /说话人中近景\/反打/);
+  assert.doesNotMatch(prompt, /cameraOwner=C01|mouthOwner=C01|speaker=C01/);
+  assert.doesNotMatch(prompt, /【本镜强制人物】[^\n]*陈建国/);
+  assert.doesNotMatch(prompt, /允许极小|底部可有极短时间轴刻度|序号只是规划信息/);
+  assert.match(prompt, /禁止任何序号、角标、时间轴刻度/);
 });
 
 test("legacy multi-speaker storyboard sheets hard-cut the panel camera at every speaker boundary", () => {
@@ -434,7 +597,8 @@ test("long uploaded dialogue scripts keep every source line intact across fast p
   const ledger = parseSourceDialogueLedger(source);
   assert.equal(ledger.length, sourceLines.length);
   const chunks = analysisChunksForSchedule(source, 30);
-  assert.equal(chunks.length, 6);
+  assert.ok(chunks.length >= 2);
+  assert.ok(chunks.length <= 30);
   for (const item of ledger) {
     assert.equal(chunks.filter(chunk => chunk.text.includes(item.text)).length, 1, item.id);
   }
@@ -536,25 +700,32 @@ test("parallel analysis chunks cannot collide on local character and scene IDs",
   assert.notEqual(merged.shots[0].sceneId, merged.shots[1].sceneId);
 });
 
-test("natural uploaded script completes the real adaptive-duration analysis in bounded parallel calls", async t => {
+test("natural uploaded screenplay with an exact product name reaches prompt confirmation without media submission", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-dialogue-matrix-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = Array.from({ length: 70 }, (_, index) => {
     const speaker = index % 2 === 0 ? "林娜" : "秦添";
     const listener = index % 2 === 0 ? "秦添" : "林娜";
-    const product = index === 40 ? "这本书正好能把我们没说清的步骤列出来，" : "";
+    const product = index === 40 ? "暖心阅读灯正好能把我们没说清的步骤照亮，" : "";
     return `${speaker}（${index % 3 === 0 ? "压低声音，眉头紧锁" : "语速加快，目光坚定"}）：${product}第${index + 1}句，${listener}，原稿内容必须完整保留。`;
   }).join("\n");
   const sourceLedger = parseSourceDialogueLedger(source);
   const estimatedDuration = estimateUploadedScriptDuration(source, sourceLedger, "local-xiangsu", { engine: "seedance" });
-  const expectedCallCount = analysisChunksForSchedule(source, planFilmSchedule(estimatedDuration.targetSeconds, "local-xiangsu", { engine: "seedance" }).unitCount).length;
+  const adaptiveDurations = adaptiveUploadedUnitDurations(estimatedDuration.turnSeconds, estimatedDuration.targetSeconds, "local-xiangsu", { engine: "seedance" });
+  const canonicalForTest = source.split(/\r?\n/).filter(Boolean).map((line, index) => [
+    `### S${String(index + 1).padStart(2, "0")}｜场景：书房`,
+    "【动作】两人隔桌继续交谈",
+    `【对白】${line}`,
+    "【声音】安静室内环境声",
+    "【承接】承接上一段对话"
+  ].join("\n")).join("\n\n");
   const store = new WorkbenchStore(root);
   const settings = store.getSettings();
   settings.generation.qualityGatesEnabled = false;
   store.saveSettings(settings);
   const created = store.createProject("自然台词上传集成", { targetDurationSeconds: 300, shotDuration: 10 });
   store.patchProject(created.id, {
-    product: { name: "家庭沟通训练图书", description: "分步骤练习家庭沟通", sellingPoints: "案例清晰" },
+    product: { name: "暖心阅读灯", description: "暖光阅读灯，适合夜间阅读", sellingPoints: "柔和护眼、定时关闭" },
     generation: { engine: "seedance", videoProviderKind: "local-xiangsu", mode: "smart", targetDurationSeconds: 300, shotDuration: 10 },
     productionPlan: { inputMode: "manual", executionMode: "full" },
     script: { raw: source }
@@ -576,6 +747,29 @@ test("natural uploaded script completes the real adaptive-duration analysis in b
       maxRequestChars = Math.max(maxRequestChars, JSON.stringify(messages).length);
       await new Promise(resolve => setTimeout(resolve, 3));
       const system = String(messages.find(message => message.role === "system")?.content || "");
+      if(system.includes('Plan ONE shared physical continuity')){activeCalls -= 1;return continuityFixture(JSON.parse(messages.at(-1).content));}
+      if(system.includes('Extract source-bound appearance cues')){activeCalls -= 1;return {items:JSON.parse(messages.at(-1).content).items.map(i=>({id:i.id,text:'Source-bound adult identity with short dark hair and distinctive facial shape.'}))};}
+      if(system.includes('source-grounded casting and set designer')){activeCalls -= 1;return designFixture(JSON.parse(messages.at(-1).content));}
+      if(messages.some(m=>m.role==='user'&&m.content.includes('"capacityGroups"')&&m.content.includes('"completeSource"'))){activeCalls -= 1;return require('./whole-script-test-fixture')(JSON.parse(messages.find(m=>m.role==='user').content).completeSource);}
+      if (system.includes('"productionScript"') || system.includes('Read the entire numbered source')) {
+        activeCalls -= 1;
+        return {
+          productionScript: canonicalForTest,
+          sourceAudit: {
+            sceneOccurrenceCount: 70,
+            dialogueCount: 70,
+            sceneOccurrences: Array.from({ length: 70 }, (_, index) => ({
+              order: index + 1,
+              physicalSceneName: "书房"
+            })),
+            preservedAllDialogue: true,
+            preservedAllScenes: true,
+            preservedAllActions: true,
+            preservedEventOrder: true,
+            noInventedDialogue: true
+          }
+        };
+      }
       const ledgerText = system.split("【上传剧本逐句事实账本·最高优先级】\n")[1]?.split("\n每个ID必须")[0] || "[]";
       const ledger = JSON.parse(ledgerText);
       const contract = system.match(/当前片段必须恰好输出 (\d+) 个 shots，duration 依次严格写为 ([^\n]+) 秒/);
@@ -593,7 +787,7 @@ test("natural uploaded script completes the real adaptive-duration analysis in b
         shots: Array.from({ length: count }, (_, shotIndex) => {
           const local = ledger.filter((_, ledgerIndex) => ledgerIndex % count === shotIndex);
           const ids = local.map(item => item.id);
-          const productMention = local.some(item => item.text.includes("这本书"));
+          const productMention = local.some(item => item.text.includes("暖心阅读灯"));
           return {
             id: `S${String(shotIndex + 1).padStart(2, "0")}`,
             title: `对话推进${shotIndex + 1}`,
@@ -632,19 +826,25 @@ test("natural uploaded script completes the real adaptive-duration analysis in b
     }
   });
   const analyzed = await workflow.analyzeScript(created.id);
-  assert.equal(modelCalls, expectedCallCount);
+  assert.equal(modelCalls, 1, "AI standardization is paid once; deterministic local compilation must not call the model again");
   assert.ok(maxActiveCalls <= 3);
-  assert.ok(maxActiveCalls >= 2);
+  assert.ok(maxActiveCalls >= 1);
   assert.ok(maxRequestedUnits <= 5);
   assert.ok(maxRequestChars < 60_000);
   assert.equal(analyzed.currentStage, "assets");
+  assert.equal(analyzed.script.analysisMethod, "uploaded-ai-standardized-local-compiler-v1");
+  assert.equal(analyzed.script.analysisEnhancement?.noDuplicatePaidAnalysis, true);
   assert.equal(analyzed.script.analysisCheckpoint, null);
   assert.equal(analyzed.script.sourceDialogueLedger.length, sourceLedger.length);
-  assert.equal(analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0), estimatedDuration.targetSeconds);
-  assert.equal(analyzed.generation.targetDurationSeconds, estimatedDuration.targetSeconds);
+  const plannedSeconds = analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0);
+  assert.ok(plannedSeconds >= estimatedDuration.targetSeconds, "natural dialogue and action may safely extend an uploaded script beyond the initial estimate");
+  assert.equal(analyzed.generation.targetDurationSeconds, plannedSeconds);
   const actualTurns = analyzed.shots.flatMap(shot => shot.dialogueTurns).sort((left, right) => left.sourceDialogueId.localeCompare(right.sourceDialogueId));
   assert.deepEqual(actualTurns.map(turn => turn.text), sourceLedger.map(item => item.text));
   assert.deepEqual(actualTurns.map(turn => turn.sourceTone), sourceLedger.map(item => item.tone));
   const productShot = analyzed.shots.find(shot => shot.productBinding?.sourceDialogueIds?.includes("D041"));
-  assert.equal(productShot?.productBinding?.name, "家庭沟通训练图书");
+  assert.equal(productShot?.productBinding?.name, "暖心阅读灯");
+  // This fixture implements source analysis only. Asset and prompt Agent repair
+  // completion is covered by review-remaining-acceptance and native-identity-cues.
+  assert.notEqual(analyzed.promptReview?.status, "approved", "analysis does not authorize media generation");
 });

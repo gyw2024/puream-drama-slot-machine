@@ -36,16 +36,15 @@ function performanceBeatSeconds(tone = "") {
 function estimateSpokenTurnSeconds(turn = {}) {
   const text = String(turn.text || turn.spokenText || "").trim();
   const tone = [turn.tone, turn.sourceTone, turn.delivery, turn.emotion, turn.body].filter(Boolean).join("；");
-  const paceMultiplier = FAST_PACE.test(tone) ? 1.2 : SLOW_PACE.test(tone) ? 0.78 : 1;
-  const speechSeconds = spokenUnitCount(text) / (3.7 * paceMultiplier);
-  const total = speechSeconds + punctuationPauseSeconds(text) + performanceBeatSeconds(tone) + 0.16;
-  return Number(Math.max(0.85, total).toFixed(3));
+  const argument = /争吵|吵架|怒|骂|斥|吼|质问|逼问|反击|揭露|控诉|羞辱|威胁|冲突|爆发/.test(tone);
+  const targetRate = argument ? 8 : FAST_PACE.test(tone) ? 6 : 5.5;
+  return Number((spokenUnitCount(text) / targetRate).toFixed(3));
 }
 
 function estimateFallbackNarrationSeconds(script = "") {
   const source = String(script || "").trim();
   if (!source) return 0;
-  const spoken = spokenUnitCount(source) / 3.7;
+  const spoken = spokenUnitCount(source) / 5.5;
   const lineBeats = Math.max(0, source.split(/\r?\n/).filter(line => line.trim()).length - 1) * 0.18;
   return spoken + punctuationPauseSeconds(source) + lineBeats;
 }
@@ -210,7 +209,55 @@ function estimateUploadedScriptDuration(script, dialogueLedger = [], providerKin
   };
 }
 
+function adaptiveUploadedUnitDurations(turnSeconds = [], targetTotalSeconds, providerKind = "", options = {}) {
+  const contract = durationContract(providerKind, options);
+  const min = Number(contract.min) || 5;
+  const max = Number(contract.max) || 15;
+  const preferred = Math.max(min, Math.min(max, Number(contract.preferred) || 10));
+  const values = (Array.isArray(turnSeconds) ? turnSeconds : [])
+    .map(Number)
+    .filter(value => Number.isFinite(value) && value > 0);
+  const target = Math.max(min, Math.round(Number(targetTotalSeconds) || values.reduce((sum, value) => sum + value, 0) || preferred));
+  if (!values.length) return [];
+
+  const groups = [];
+  let current = 0;
+  for (const seconds of values) {
+    const turn = Math.max(0.85, seconds);
+    const wouldOverflow = current > 0 && current + turn > Math.min(max, preferred + 2);
+    if (wouldOverflow) {
+      groups.push(current);
+      current = 0;
+    }
+    current += turn;
+    if (current >= max - 0.5) {
+      groups.push(current);
+      current = 0;
+    }
+  }
+  if (current > 0) groups.push(current);
+
+  while (groups.length > 1 && target < groups.length * min) {
+    let mergeAt = 0;
+    let smallest = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < groups.length - 1; index += 1) {
+      const combined = groups[index] + groups[index + 1];
+      if (combined < smallest) {
+        smallest = combined;
+        mergeAt = index;
+      }
+    }
+    groups.splice(mergeAt, 2, groups[mergeAt] + groups[mergeAt + 1]);
+  }
+  while (target > groups.length * max) groups.push(preferred);
+
+  const requested = groups.map(value => Math.max(min, Math.min(max, Math.round(value))));
+  const { reconcileUnitDurations } = require("./duration-contract");
+  return [...reconcileUnitDurations(requested, target, contract, { unitCount: requested.length })];
+}
+
 module.exports = {
+  adaptiveUploadedUnitDurations,
   explicitShotTimelinePlan,
   explicitTimelineDurationTarget,
   estimateSpokenTurnSeconds,

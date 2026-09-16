@@ -54,11 +54,14 @@ test("dialogue ledger preserves inline, timed and standalone screenplay dialogue
 儿子：我也听见了。
 [00:08-00:16] 母亲（急促）：马上报警。`;
   const ledger = parseSourceDialogueLedger(source, ["母亲", "儿子"]);
-  assert.deepEqual(ledger.map(item => [item.speaker, item.tone, item.spokenText]), [
-    ["母亲", "压低声音", "别开门。"],
-    ["儿子", "", "我也听见了。"],
-    ["母亲", "急促", "马上报警。"]
+  assert.deepEqual(ledger.map(item => [item.speaker, item.spokenText]), [
+    ["母亲", "别开门。"],
+    ["儿子", "我也听见了。"],
+    ["母亲", "马上报警。"]
   ]);
+  assert.match(ledger[0].tone, /压低声音/);
+  assert.match(ledger[1].tone, /生活化|中速|核心词/);
+  assert.match(ledger[2].tone, /急促/);
   assert.equal(ledger.some(item => /第1场|客厅/.test(item.speaker)), false);
 });
 

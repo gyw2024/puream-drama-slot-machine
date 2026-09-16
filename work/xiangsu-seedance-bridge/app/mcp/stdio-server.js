@@ -36,6 +36,16 @@ function mutationAnnotations({ destructive = false, idempotent = false, openWorl
 }
 
 function registerTools(server) {
+  const agentId = z.enum(["workbuddy", "antigravity", "codex", "deepseek-harness", "grokbuild"]);
+  const agentScope = z.enum(["workbench", "simple"]).default("workbench");
+  registerAppTool(server,'submit_agent_job_data',{title:'通过 MCP 保存阶段数据',description:'Agent 直接提交已组织的数据，软件保存并返回回执；needs_revision 时在同一任务修正后再次提交，不能把聊天正文作为已保存结果。',inputSchema:z.object({scope:agentScope,jobId:z.string(),workerId:z.string(),claimToken:z.string(),data:z.unknown()}),annotations:mutationAnnotations({idempotent:true})});
+  registerAppTool(server, "list_local_agents", { title: "本地 Agent 能力", description: "读取写作/生图工作端状态；已发现不等于已登录或已生图验收。", inputSchema: z.object({ scope: agentScope }), annotations: readOnlyAnnotations() });
+  registerAppTool(server, "register_agent_worker", { title: "登记 Agent 工作端及心跳", description: "以当前软件身份登记写作/生图能力；每60秒再次登记保持在线。image=true 必须有真实可调用的生图工具，不能把看图当生图。不得伪造另一个软件身份。", inputSchema: z.object({ scope:agentScope, agentId, workerId:z.string().min(1).max(80), capabilities:z.object({text:z.boolean().default(true),image:z.boolean().default(false),imageTool:z.string().max(100).optional()}) }), annotations: mutationAnnotations({idempotent:true}) });
+  registerAppTool(server, "list_agent_jobs", { title: "读取待领取写作或生图任务", description: "只列状态与归属，不启动模型。仅领取用户已在短剧应用授权提交的任务；等待期间可用当前 Agent 自身等待机制，不创建循环付费请求。", inputSchema:z.object({scope:agentScope,agentId:agentId.optional()}),annotations:readOnlyAnnotations() });
+  registerAppTool(server, "claim_agent_job", { title:"领取单个 Agent 任务",description:"原子领取任务并获得完整提示词与本地输出目录；同一任务只允许一个工作端领取。严格按 request.messages 各角色与 constraints 执行，不改写上游模板。",inputSchema:z.object({scope:agentScope,jobId:z.string(),workerId:z.string()}),annotations:mutationAnnotations() });
+  registerAppTool(server, "report_agent_progress", {title:"回传阶段进度",description:"用领取令牌及递增sequence回传当前进度。软件同步界面；重复或乱序消息忽略。完成内容仍用complete_agent_job提交校验，不能自行批准生成。",inputSchema:z.object({scope:agentScope,jobId:z.string(),workerId:z.string(),claimToken:z.string(),sequence:z.number().int().positive(),phase:z.enum(["waiting","thinking","output","tool","saving"]).optional().describe("当前真实阶段：等待、思考、输出、工具或保存；不能根据配置强度猜测"),message:z.string().min(1).max(1500)}),annotations:mutationAnnotations({idempotent:true})});
+  registerAppTool(server, "complete_agent_job", { title:"交付 Agent 文本或图片",description:"使用领取所得 claimToken 交付完整文本，或任务目录内真实生成的 PNG/JPEG/WebP 图片及工具来源。禁止占位图、旧图冒充生成、编造路径；业务校验由应用继续执行。",inputSchema:z.object({scope:agentScope,jobId:z.string(),workerId:z.string(),claimToken:z.string(),text:z.string().max(8*1024*1024).optional(),imagePath:z.string().optional(),imageTool:z.string().optional(),error:z.string().optional()}),annotations:mutationAnnotations() });
+  registerAppTool(server, "cancel_agent_job", { title:"取消 Agent 任务",description:"取消本地等待或执行，拒绝迟到结果；外部工作端应停止相应任务，不自动换供应商。",inputSchema:z.object({scope:agentScope,jobId:z.string()}),annotations:mutationAnnotations({idempotent:true}) });
   registerAppTool(server, "app_status", {
     title: "读取应用状态",
     description: "读取纯梦短剧老虎机版本、运行状态、数据位置、项目数和后台授权并发额度；不返回令牌或密钥。",
@@ -46,8 +56,8 @@ function registerTools(server) {
     inputSchema: z.object({}), annotations: readOnlyAnnotations()
   });
   registerAppTool(server, "get_project", {
-    title: "读取完整项目", description: "读取剧本、角色、场景、分镜、资产候选和生产状态。",
-    inputSchema: z.object({ project_id: projectId }), annotations: readOnlyAnnotations()
+    title: "读取项目或指定字段", description: "读取剧本、角色、场景、分镜、资产候选和生产状态。大项目请用 fields 选择顶层字段；数组按 offset/limit 分页并返回总数与下一页，避免将所有提示词历史一次传回。省略 fields 保持完整项目兼容。",
+    inputSchema: z.object({ project_id: projectId,fields:z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9_]*$/)).min(1).max(50).optional(),offset:z.number().int().min(0).optional(),limit:z.number().int().min(1).max(100).optional() }), annotations: readOnlyAnnotations()
   });
   registerAppTool(server, "get_production_status", {
     title: "读取生产进度", description: "读取六阶段状态、逐项进度、后台视频任务与最终成片状态。",
@@ -80,7 +90,7 @@ function registerTools(server) {
   });
   registerAppTool(server, "update_project", {
     title: "更新项目", description: "更新项目可编辑内容；应用仍负责版本失效、运行冲突和数据一致性检查。",
-    inputSchema: z.object({ project_id: projectId, patch: z.record(z.string(), z.unknown()) }), annotations: mutationAnnotations()
+    inputSchema: z.object({ project_id: projectId, expected_updated_at:z.string().optional(), patch: z.record(z.string(), z.unknown()) }), annotations: mutationAnnotations()
   });
   registerAppTool(server, "archive_project", {
     title: "归档项目", description: "把项目移动到应用回收区，可恢复；运行中的项目会拒绝归档。",
@@ -101,6 +111,10 @@ function registerTools(server) {
   registerAppTool(server, "import_candidate_path", {
     title: "导入资产候选", description: "从本机绝对路径向人物、场景、分镜或资产库槽位导入图片、视频或音频。",
     inputSchema: z.object({ project_id: projectId, entity_type: z.enum(["character", "scene", "shot", "library"]), entity_id: z.string().min(1), stage: z.string().min(1), file_path: z.string().min(1) }), annotations: mutationAnnotations()
+  });
+  registerAppTool(server,'import_production_package_path',{
+    title:'导入完整生产资产包',description:'从明确的本地文件路径调用与界面相同的完整资产包校验和导入流程，创建新项目、保留原项目；不调用图片或视频生成。失败不跳过校验。',
+    inputSchema:z.object({file_path:z.string().min(1)}),annotations:mutationAnnotations()
   });
   registerAppTool(server, "confirm_candidate", {
     title: "确认资产候选", description: "把候选设为当前使用版本，可选择是否淘汰同槽位其他候选。",
@@ -135,15 +149,27 @@ function registerTools(server) {
   billable("run_pipeline_from_stage", "从指定阶段运行", "从指定阶段执行当前阶段或后续全流程。", { from_stage: z.enum(["script", "assets", "shots", "videos", "final"]).default("assets") });
   billable("repair_media_quality", "修复音画质检问题", "定向重抽不合格媒体并复检。");
   billable("generate_character_video", "生成人物视频", "为指定角色生成人物视频。", { character_id: z.string().min(1), prompt: z.string().optional() });
-  billable("generate_shot_video", "生成单镜视频", "为指定镜头生成视频。", { shot_id: z.string().min(1), mode: z.string().optional() });
+  billable("generate_shot_video", "生成单镜视频", "为指定镜头生成视频。single_submission 仅约束本次调用，配合稳定 reroll_nonce 防止重试重复付费，不设置全局抽卡上限。", { shot_id: z.string().min(1), mode: z.string().optional(), single_submission:z.boolean().optional(), reroll_nonce:z.string().min(1).max(200).optional() });
 
   registerAppTool(server, "audit_media_quality", {
     title: "检查音画质量", description: "本地检查断声、时长和重复画面，不提交新的生成任务。",
     inputSchema: z.object({ project_id: projectId }), annotations: mutationAnnotations({ idempotent: true })
   });
+  registerAppTool(server, "audit_actual_media", {
+    title: "实际视频画面与语音审核", description: "读取已有分镜、参考资产和本地 ASR，交给所选审核 Agent 核对；保留不确定项，不生成图片或视频。使用所选 Agent 账号额度。",
+    inputSchema: z.object({ project_id: projectId, shot_ids:z.array(z.string()).optional(), python_path:z.string(), asr_model_path:z.string(), asr_device:z.enum(['cpu','cuda']).optional(), evidence_python_path:z.string().optional(), audio_model_path:z.string().optional(), active_speaker_repo_path:z.string().optional() }), annotations: mutationAnnotations()
+  });
   registerAppTool(server, "stitch_final_video", {
-    title: "拼接最终成片", description: "使用已经确认的分镜视频在本机拼接并执行交付检查，不新生成分镜视频。",
+    title: "本地净音粗剪", description: "仅处理已有分镜，音效和字幕不烧录到视频。不新生成媒体、不扣费。",
     inputSchema: z.object({ project_id: projectId }), annotations: mutationAnnotations()
+  });
+  registerAppTool(server, "export_jianying_draft", {
+    title: "生成剪映草稿", description: "将已有分镜、独立音效轨道和可编辑字幕导出为本地剪映草稿；不调用生成服务。",
+    inputSchema: z.object({ project_id: projectId, draft_root: z.string().optional() }), annotations: mutationAnnotations({ idempotent: true })
+  });
+  registerAppTool(server, "cancel_post_production", {
+    title: "取消本地后期", description: "取消本项目粗剪或草稿导出，保留原文件，可重新开始。",
+    inputSchema: z.object({ project_id: projectId }), annotations: mutationAnnotations({ idempotent: true })
   });
 }
 

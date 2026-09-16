@@ -7,34 +7,34 @@ const test = require("node:test");
 
 const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
 
-test("dialogue construction budgets fit the five-minute and ten-minute contracts", () => {
-  const spineMs = 40_000;
-  const segmentMs = 80_000;
-  const segmentUnits = 5;
-  const concurrency = 2;
-  const upperBound = unitCount => spineMs + Math.ceil(Math.ceil(unitCount / segmentUnits) / concurrency) * segmentMs;
-
-  assert.ok(upperBound(30) <= 5 * 60_000, "ordinary dialogue path must fit five minutes");
-  assert.ok(upperBound(60) <= 10 * 60_000, "complex ten-minute dialogue path must fit ten minutes");
-  assert.match(workflowSource, /const SCRIPT_DIRECT_SPINE_TIMEOUT_MS = 40_000/);
-  assert.match(workflowSource, /const SCRIPT_DIRECT_SEGMENT_TIMEOUT_MS = 80_000/);
+test("every AI text generation path shares the twenty-minute attempt window", () => {
+  assert.match(workflowSource, /const TEXT_GENERATION_ATTEMPT_TIMEOUT_MS = 20 \* 60_000/);
+  assert.match(workflowSource, /const SCRIPT_FAST_ATTEMPT_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflowSource, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflowSource, /const TEXT_STAGE_ATTEMPT_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflowSource, /const SCRIPT_DIRECT_SPINE_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflowSource, /const SCRIPT_DIRECT_SEGMENT_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflowSource, /const UPLOADED_ANALYSIS_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflowSource, /const PROMPT_COMPILER_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
   assert.match(workflowSource, /const SCRIPT_DIRECT_SEGMENT_UNITS = 5/);
   assert.match(workflowSource, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 2/);
-  assert.match(workflowSource, /maxReconnectAttempts:\s*1/);
   assert.match(workflowSource, /buildDirectFastFallbackSpine/);
   assert.match(workflowSource, /buildDirectFastFallbackSegment/);
 });
 
-test("analysis is bounded, fails closed without AI, and prompt compilers preserve local technical output", () => {
-  assert.match(workflowSource, /const UPLOADED_ANALYSIS_TIMEOUT_MS = 60_000/);
+test("analysis is bounded, auto-recovers incomplete AI structure, and prompt compilers preserve local technical output", () => {
   assert.match(workflowSource, /localUploadedAnalysisChunk/);
-  assert.match(workflowSource, /source:\s*"agent-structured-result"/);
+  assert.match(workflowSource, /agent-plus-source-ledger-format-recovery/);
   assert.match(workflowSource, /localFallbackCount:\s*0/);
-  assert.match(workflowSource, /未写入本地兜底资产/);
+  assert.doesNotMatch(workflowSource, /未写入本地兜底资产/);
   assert.doesNotMatch(workflowSource, /agent-plus-local-auto-repair/);
-  assert.match(workflowSource, /const PROMPT_COMPILER_TIMEOUT_MS = 90_000/);
-  assert.match(workflowSource, /const maxCompileAttempts = promptQualityEnabled \? 2 : 1/);
+  assert.match(workflowSource, /const maxCompileAttempts = 1/);
   assert.match(workflowSource, /buildFallbackHailuoPromptSpec/);
   assert.match(workflowSource, /compileSource = "deterministic-local-preservation"/);
-  assert.ok(2 * 90_000 <= 5 * 60_000, "prompt compiler must fall back within five minutes");
+});
+
+test("timeout resume preserves the paid logical session id", () => {
+  assert.match(workflowSource, /const preserveSessionForTimeout = Boolean\(previousSessionId\) && resumedFailures\.some/);
+  assert.match(workflowSource, /\/TIMEOUT\/\.test\(String\(failure\?\.code \|\| failure\?\.causeCode \|\| ""\)\.toUpperCase\(\)\)/);
+  assert.match(workflowSource, /sessionId: preserveSessionForTimeout \? previousSessionId : `script-\$\{projectId\}-\$\{Date\.now\(\)\}`/);
 });

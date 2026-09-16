@@ -26,13 +26,32 @@ test("dialogue binding collapses duplicated shot/subshot views to one authored l
   assert.deepEqual(normalized.shots.flatMap(shot => shot.sourceDialogueIds), ["D001", "D002"]);
 });
 
-test("production text attempts are bounded inside the five-minute stage SLA", () => {
+test("production text attempts use twenty minutes and one receipt-aware recovery", () => {
   const options = WorkbenchWorkflow.prototype.productionTextOptions.call({
     operationControls: new Map(),
     setAutomation() {}
-  }, "project-test", "asset_prompt");
-  assert.equal(options.timeoutMs, 240_000);
-  assert.equal(options.maxReconnectAttempts, 1);
+  }, "project-test", "asset_prompt", { timeoutMs: 90_000, maxReconnectAttempts: 1 });
+  assert.equal(options.timeoutMs, 20 * 60_000);
+  assert.equal(options.maxReconnectAttempts, 2);
+});
+
+test("production text rate-limit recovery exposes the provider wait without changing the logical task", () => {
+  const updates = [];
+  const options = WorkbenchWorkflow.prototype.productionTextOptions.call({
+    operationControls: new Map(),
+    setAutomation(_projectId, update) { updates.push(update); }
+  }, "project-rate-limit", "topics", {});
+  options.onAttemptFailure({
+    retrying: true,
+    attempt: 2,
+    status: 429,
+    code: "RESOURCE_EXHAUSTED",
+    waitMs: 13_250
+  });
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].status, "running");
+  assert.match(updates[0].message, /14 秒后自动续接同一请求/);
+  assert.match(updates[0].message, /任务标识保持不变/);
 });
 
 test("PUREAM text reconnects rejected pre-response requests using one logical id", async () => {
@@ -149,6 +168,44 @@ test("PUREAM settled outputTokens zero is checkpointable failure and never repla
   }
 });
 
+test("PUREAM retries one empty uncharged completion with the same idempotency key", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (_url, init = {}) => {
+    calls.push({ headers: init.headers, body: JSON.parse(init.body) });
+    if (calls.length === 1) {
+      return new Response('event: done\ndata: {}\n\n', {
+        status: 200,
+        headers: { "content-type": "text/event-stream" }
+      });
+    }
+    return new Response([
+      'event: delta\ndata: {"text":"重试成功"}',
+      'event: done\ndata: {"usage":{"inputTokens":4,"outputTokens":4}}',
+      ""
+    ].join("\n\n"), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    const result = await generateText({
+      kind: "puream-relay",
+      baseUrl: "https://puream.cn",
+      apiKey: "TEST-AUTH-CODE",
+      model: "gpt-5-6-sol",
+      maxTokens: 512
+    }, [{ role: "user", content: "test" }], {
+      sessionId: "logical-empty-uncharged",
+      maxReconnectAttempts: 2,
+      retryBaseDelayMs: 1
+    });
+    assert.equal(result, "重试成功");
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.headers["idempotency-key"] === "logical-empty-uncharged"));
+    assert.ok(calls.every(call => call.body.clientRequestId === "logical-empty-uncharged"));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("PUREAM timeout covers a stalled SSE body after response headers", async () => {
   const originalFetch = global.fetch;
   let calls = 0;
@@ -170,6 +227,7 @@ test("PUREAM timeout covers a stalled SSE body after response headers", async ()
     }, [{ role: "user", content: "test" }], {
       sessionId: "logical-stalled-sse",
       timeoutMs: 30,
+      __testOnlyTimeoutMs: 30,
       maxReconnectAttempts: 1
     }), error => error?.code === "PROVIDER_TIMEOUT");
     assert.equal(calls, 1);

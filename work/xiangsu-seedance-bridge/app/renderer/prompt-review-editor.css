@@ -1,0 +1,20 @@
+/* Shared by both workbenches: extra review states stay inside one status row. */
+.prompt-review-status-area { min-height:0; max-height:min(200px,24vh); overflow:auto; overflow-wrap:anywhere; scrollbar-gutter:stable; }
+.prompt-review-status-area > .settings-note { margin:0; padding:8px 20px; color:#d8c8ae; font-size:12px; line-height:1.6; }
+.prompt-review-status-area details > summary { cursor:pointer; min-height:32px; }
+.prompt-review-status-area button { min-height:40px; white-space:normal; }
+.prompt-review-dialog .prompt-review-item { display:flex; flex-direction:column; }
+.prompt-review-dialog .prompt-review-item[hidden] { display:none; }
+.prompt-review-dialog .prompt-review-item > .settings-note { flex:0 0 auto; max-height:80px; overflow:auto; margin:0 0 8px; color:#d8c8ae; line-height:1.5; }
+.prompt-review-dialog .prompt-review-item > .prompt-review-language,
+.prompt-review-dialog .prompt-review-item-head,
+.prompt-review-dialog .prompt-review-item-actions,
+.prompt-review-dialog .prompt-review-item > .prompt-review-execution { flex-shrink:0; }
+.prompt-review-dialog .prompt-review-editor-label { flex:1 1 auto; min-height:60px; }
+.prompt-review-dialog textarea[readonly] { cursor:text; opacity:.9; }
+.prompt-review-dialog button:focus-visible,.prompt-review-dialog summary:focus-visible { outline:2px solid #ffd25a; outline-offset:2px; }
+@media (max-height:650px) {
+ .prompt-review-dialog { overflow:auto !important; }
+ .prompt-review-dialog .prompt-review-shell { height:auto; min-height:100%; }
+ .prompt-review-dialog .prompt-review-list { min-height:260px; max-height:60vh; }
+}

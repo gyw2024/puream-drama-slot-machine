@@ -8,7 +8,7 @@ const path = require("node:path");
 const { WorkbenchStore } = require("../app/workbench-store");
 const { WorkbenchWorkflow } = require("../app/workbench-workflow");
 
-test("blueprint master off never enters the cloud prompt recompile loop", async t => {
+test("blueprint master off reuses Agent delivery and never enters legacy local compilation", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-blueprint-off-compiler-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -73,11 +73,12 @@ test("blueprint master off never enters the cloud prompt recompile loop", async 
     }
   });
 
+  workflow.authorAgentProductionDecisions=async(id)=>{compileCalls++;const p=store.getProject(id);p.shots[0].finalPromptEditing={status:'authored',detailedDescriptionEn:'[Shot 1]\nFrom 0.00 to 10.00 seconds, the door opens, evidence lands on the fixed wooden table, and the door closes. Maintain the source sequence, room geography and synchronized contact sounds. No dialogue or extra events.',detailedDescriptionZh:'门开，证据落桌，门关。',summaryEn:'The evidence arrives.',soundscapeEn:'Room ambience.'};p.shots[0].finalPromptEditing.fingerprint=require('../app/h3-final-prompt-editor').fingerprint(p.shots[0]);store.saveProject(p);return p;};
   const spec = await workflow.ensureHailuoPromptSpec(created.id, "S01", "keyframe", store.getSettings());
-  assert.equal(compileCalls, 0);
-  assert.equal(spec.subshots.length, 3);
+  assert.equal(compileCalls, 1);
+  assert.match(spec.detailedDescriptionEn,/evidence lands/);
   const second = await workflow.ensureHailuoPromptSpec(created.id, "S01", "keyframe", store.getSettings());
-  assert.equal(compileCalls, 0, "stored ungated spec must not be recompiled");
+  assert.equal(compileCalls, 1, "stored Agent delivery must not be recompiled");
   assert.equal(second.fingerprint, spec.fingerprint);
 
   const project = store.getProject(created.id);

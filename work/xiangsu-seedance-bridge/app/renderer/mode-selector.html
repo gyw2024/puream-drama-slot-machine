@@ -19,20 +19,20 @@
     <section class="mode-intro" aria-labelledby="modeTitle">
       <span class="eyebrow">CHOOSE YOUR WORKSPACE</span>
       <h1 id="modeTitle">这次想怎样做剧？</h1>
-      <p>两个模式使用同一套人物、场景、道具、商品和音色资产库；项目、任务、费用、设置与成片彼此独立，随时可在设置里切换。</p>
+      <p>三个入口使用同一套人物、场景、道具和商品资产库；项目、任务、费用、设置与成片彼此独立，随时可在设置里切换。</p>
     </section>
 
     <section class="mode-grid" aria-label="工作模式">
       <button class="mode-card simple-card" type="button" data-mode="simple" aria-describedby="simpleDescription">
         <span class="mode-number">01</span>
-        <span class="mode-badge">推荐新用户</span>
+        <span class="mode-badge">资产与视频制作</span>
         <span class="mode-icon" aria-hidden="true">▶</span>
         <span class="mode-copy">
           <strong>简易模式</strong>
-          <small id="simpleDescription">像短剧工作台一样，从剧本、角色、分镜到成片按步骤推进，也可一键完成。</small>
+          <small id="simpleDescription">不经过选题和写剧本：创建、上传或复用资产，手动建立分镜，再生成分镜合图与逐镜视频。</small>
         </span>
         <span class="feature-list" aria-hidden="true">
-          <i>分集与剧本</i><i>角色场景道具</i><i>分镜准备</i><i>分镜视频</i><i>成片导出</i>
+          <i>创建与上传资产</i><i>共享资产库</i><i>分镜合图</i><i>逐镜视频</i><i>不调用文本模型</i>
         </span>
         <span class="enter-label">进入简易工作台 <b>→</b></span>
       </button>
@@ -49,6 +49,20 @@
           <i>导演 Agent</i><i>全流程编排</i><i>多模式控制</i><i>高级提示词</i><i>跨项目总控</i>
         </span>
         <span class="enter-label">进入 Agent 工作台 <b>→</b></span>
+      </button>
+
+      <button class="mode-card package-card" type="button" data-mode="package" aria-describedby="packageDescription">
+        <span class="mode-number">03</span>
+        <span class="mode-badge">严格导入 · 直接抽卡</span>
+        <span class="mode-icon package-icon" aria-hidden="true">⇧</span>
+        <span class="mode-copy">
+          <strong>Codex 资产包直抽</strong>
+          <small id="packageDescription">导入已校验的 .pdramapack，跳过选题、写剧本、拆镜、提示词和资产生成，按包内英文提示词与图片顺序逐镜生成。</small>
+        </span>
+        <span class="feature-list" aria-hidden="true">
+          <i>严格校验</i><i>原提示词直送</i><i>锁定图片顺序</i><i>不参考音频</i><i>每镜只提交一次</i>
+        </span>
+        <span class="enter-label">进入资产包工作台 <b>→</b></span>
       </button>
     </section>
 

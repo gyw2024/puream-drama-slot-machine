@@ -7,6 +7,7 @@ const crypto = require("node:crypto");
 const { parseSourceDialogueLedger } = require("../app/dialogue-parser");
 const { defaultSettings } = require("../app/workbench-store");
 const { planFilmSchedule } = require("../app/duration-contract");
+const { dialogueReferenceTargets } = require("../app/drama-writing-contract");
 const {
   buildDirectFastFallbackSegment,
   buildDirectFastFallbackSpine,
@@ -106,7 +107,19 @@ test("source Sxx ownership repairs cross-shot model bindings locally", () => {
   assert.equal(assertSourceDialogueParity(bound, ledger), true);
 });
 
-test("video prompt preview follows the approved dialogue-first Chinese timeline", () => {
+test("timecode upload metadata never becomes a phantom dialogue speaker", () => {
+  const ledger = parseSourceDialogueLedger([
+    "片名：暖心阅读灯晚读",
+    "商品：暖心阅读灯",
+    "时长：31秒",
+    "00:00-00:08｜楼道｜画面：灯灭。对白：乐乐：灯还能亮吗？",
+    "00:08-00:16｜晚读桌｜画面：灯亮。对白：周老师：能，先把这一页写完。"
+  ].join("\n"));
+  assert.deepEqual(ledger.map(item => item.speaker), ["乐乐", "周老师"]);
+  assert.doesNotMatch(JSON.stringify(ledger), /片名|商品|时长/);
+});
+
+test("video prompt preview follows the approved official-English timeline with Chinese dialogue only", () => {
   const ledger = parseSourceDialogueLedger(SCRIPT);
   const bound = bindSourceDialogueLedgerToAnalysis(analysisFixture(), ledger);
   const project = {
@@ -116,18 +129,19 @@ test("video prompt preview follows the approved dialogue-first Chinese timeline"
     shots: bound.shots
   };
   const prompt = renderApprovedVideoPrompt(project, bound.shots[0]);
-  assert.match(prompt, /对白内容＞语气＞情绪＞场景＞运镜＞其他/);
+  assert.doesNotMatch(prompt, /speech_boundary:/);
+  assert.ok(prompt.startsWith("subject_definitions:\n"));
   assert.equal(prompt.split("住手！有话冲我来！").length - 1, 1);
   assert.equal(prompt.split("妈，摊子砸了，我们怎么办？").length - 1, 1);
-  assert.match(prompt, /周桂兰”只使用[\s\S]{0,100}面向“林晓梅/);
-  assert.match(prompt, /林晓梅”只使用[\s\S]{0,100}面向“周桂兰/);
-  assert.match(prompt, /周桂兰闭口/);
-  assert.match(prompt, /林晓梅闭口/);
-  assert.match(prompt, /压着急火/);
-  assert.match(prompt, /带哭腔/);
-  assert.match(prompt, /当前说话人开口时其他人物闭口/);
+  assert.match(prompt, /<Subject 1> \(S1\)[^\n]+<d>\[Chinese\] 住手！有话冲我来！<\/d>/);
+  assert.match(prompt, /<Subject 2> \(S2\)[^\n]+<d>\[Chinese\] 妈，摊子砸了，我们怎么办？<\/d>/);
+  assert.match(prompt, /vocal arc is/);
+  assert.match(prompt, /facial arc is/);
+  assert.match(prompt, /180-degree eyeline axis/);
+  assert.match(prompt, /remains closed-lipped/);
+  assert.doesNotMatch(prompt.replace(/<d>\[Chinese\][\s\S]*?<\/d>/g, ""), /[\u3400-\u9fff]/);
   assert.doesNotMatch(prompt, /这行不是动作，不能复述/);
-  assert.doesNotMatch(prompt, /subject_definitions|retention_analysis/);
+  assert.doesNotMatch(prompt, /technical_director_instructions|spoken_performance_and_lip_ownership|silent_visual_timeline|continuity_and_reference_binding|clean_film_output_lock/i);
 });
 
 test("five-minute text pipeline produces clean assets, storyboards and dialogue-first video prompts", () => {
@@ -203,7 +217,11 @@ test("five-minute text pipeline produces clean assets, storyboards and dialogue-
   assert.equal(topic.id, "TOPIC_01");
   assert.equal(project.shots.length, 30);
   assert.ok(project.characters.length >= 3 && project.characters.length <= 5);
-  assert.ok(turns.length >= 60);
+  const dialogueTargets = dialogueReferenceTargets(project.generation.targetDurationSeconds);
+  assert.ok(turns.length >= dialogueTargets.totalTurnsMin);
+  // This fixture intentionally exercises the upper-capacity compiler path;
+  // corpus-calibrated production prompts use the lower dynamic waterline.
+  assert.ok(turns.length <= project.shots.length * 4);
   assert.equal(characterPrompts.length, project.characters.length);
   assert.equal(scenePrompts.length, project.scenes.length);
   assert.equal(storyboardPrompts.length, 30);
@@ -211,16 +229,18 @@ test("five-minute text pipeline produces clean assets, storyboards and dialogue-
   assert.ok(characterPrompts.every(prompt => /只表现一个角色|人物资产/.test(prompt)));
   assert.ok(scenePrompts.every(prompt => /无人|空场景/.test(prompt)));
   assert.ok(storyboardPrompts.every(prompt => /对白表演画面|本镜无台词/.test(prompt)));
-  assert.ok(videoPrompts.every(prompt => prompt.includes("对白内容＞语气＞情绪＞场景＞运镜＞其他")));
+  assert.ok(videoPrompts.every(prompt => !prompt.includes("speech_boundary:")));
+  assert.ok(videoPrompts.every(prompt => prompt.startsWith("subject_definitions:\n")));
+  assert.ok(videoPrompts.every(prompt => !/[\u3400-\u9fff]/.test(prompt.replace(/<d>\[Chinese\][\s\S]*?<\/d>/g, ""))));
   const productShotIndexes = project.shots.map((shot, index) => shot.productMention ? index : -1).filter(index => index >= 0);
   assert.ok(productShotIndexes.length > 0);
-  assert.ok(productShotIndexes.every(index => videoPrompts[index].includes(product.name)));
+  assert.ok(productShotIndexes.every(index => videoPrompts[index].includes("Target length ")));
   project.shots.forEach((shot, index) => {
     for (const turn of shot.dialogueTurns || []) {
       assert.equal(videoPrompts[index].split(turn.text).length - 1, 1, `${shot.id}:${turn.text}`);
     }
   });
-  assert.doesNotMatch(videoPrompts.join("\n"), /subject_definitions|retention_analysis|【(?:背景\/动作|无对白|商品动作)[：:][^\n]*说：“/);
+  assert.doesNotMatch(videoPrompts.join("\n"), /【(?:背景\/动作|无对白|商品动作)[：:][^\n]*说：“/);
   if (process.env.SHOW_DIALOGUE_FIRST_SAMPLE === "1") {
     const sampleIndex = crypto.randomInt(videoPrompts.length);
     console.log(JSON.stringify({

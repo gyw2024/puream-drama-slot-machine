@@ -235,63 +235,22 @@ function pureamImageCost(referenceCount = 0) {
   return money(0.1 * (1 + Math.max(0, tokenCount(referenceCount))));
 }
 
-/** Official PureAM Qingbo (Grok/Gemini) and Seedance cloud rate: ¥0.15 per billed second. */
-function pureamVideoCostPerSecond(durationSeconds = 0) {
-  const seconds = Math.max(0, Number(durationSeconds) || 0);
-  return money(0.15 * seconds);
-}
-
 /** MiniMax Hailuo H3 public 2K list price ≈ ¥0.80 / second (estimate until upstream settles). */
 function hailuoVideoCost(durationSeconds = 0) {
   const seconds = Math.max(0, Number(durationSeconds) || 0);
   return money(0.8 * seconds);
 }
 
-const qingboVideoCost = pureamVideoCostPerSecond;
-const seedanceVideoCost = pureamVideoCostPerSecond;
-
-function inferVideoProviderKind(entry = {}, fallback = "") {
-  const provider = String(entry.provider || fallback || "");
-  const model = String(entry.model || "");
-  const blob = `${provider} ${model}`;
-  if (["puream-hailuo-h3", "puream-seedance", "puream-grok", "puream-gemini", "local-xiangsu"].includes(provider)) {
-    return provider;
-  }
-  if (/hailuo|海螺/i.test(blob)) return "puream-hailuo-h3";
-  if (/seedance/i.test(blob)) return "puream-seedance";
-  if (/gemini/i.test(blob)) return "puream-gemini";
-  if (/grok|清波/i.test(blob)) return "puream-grok";
-  if (/xiangsu|像塑/i.test(blob)) return "local-xiangsu";
-  return provider || fallback || "";
+function inferVideoProviderKind() {
+  return "puream-hailuo-h3";
 }
 
-function estimateVideoCost(providerKind = "", durationSeconds = 0) {
-  const kind = String(providerKind || "");
-  if (kind === "local-xiangsu") {
-    return { amountYuan: 0, status: "not_charged", basis: "本地像塑登录态未返回人民币结算" };
-  }
-  if (["puream-grok", "puream-gemini"].includes(kind)) {
-    return {
-      amountYuan: qingboVideoCost(durationSeconds),
-      status: "estimated",
-      basis: `纯梦清波按官网 ¥0.15/秒预估 ${Number(durationSeconds) || 0} 秒`
-    };
-  }
-  if (kind === "puream-seedance") {
-    return {
-      amountYuan: seedanceVideoCost(durationSeconds),
-      status: "estimated",
-      basis: `PUREAM Seedance 暂按 ¥0.15/秒预估 ${Number(durationSeconds) || 0} 秒`
-    };
-  }
-  if (kind === "puream-hailuo-h3") {
-    return {
-      amountYuan: hailuoVideoCost(durationSeconds),
-      status: "estimated",
-      basis: `纯梦云端算力按公开价 ¥0.80/秒预估 ${Number(durationSeconds) || 0} 秒（上游未结算时）`
-    };
-  }
-  return { amountYuan: null, status: "unpriced", basis: "未知视频供应商，无法估算" };
+function estimateVideoCost(_providerKind = "", durationSeconds = 0) {
+  return {
+    amountYuan: hailuoVideoCost(durationSeconds),
+    status: "estimated",
+    basis: `纯梦 H3 云端视频按公开价 ¥0.80/秒预估 ${Number(durationSeconds) || 0} 秒（上游未结算时）`
+  };
 }
 
 function repriceCostEntries(entries = [], options = {}) {
@@ -371,13 +330,13 @@ function backfillProjectCosts(project = {}, options = {}) {
   for (const job of jobs) {
     if (!["shot_video", "character_video"].includes(job?.type)) continue;
     const sourceKey = `video:${job.taskId || job.id}`;
-    const providerKind = job.providerKind || "local-xiangsu";
+    const providerKind = "puream-hailuo-h3";
     const duration = Number(job.duration) || 5;
     const rawCharge = job.chargeYuan ?? job.charge_yuan;
     const hasActual = rawCharge !== null && rawCharge !== undefined && rawCharge !== "" && Number.isFinite(Number(rawCharge));
     const settlement = String(job.settlementStatus || job.settlement_status || job.billingStatus || "").toLowerCase();
     const reserved = ["reserved", "pending", "processing", "billing_pending"].includes(settlement);
-    const notCharged = ["not_charged", "refunded", "free"].includes(settlement) || providerKind === "local-xiangsu";
+    const notCharged = ["not_charged", "refunded", "free"].includes(settlement);
     // Never invent local rate estimates for video.
     if (!hasActual && !notCharged) continue;
 
@@ -386,7 +345,7 @@ function backfillProjectCosts(project = {}, options = {}) {
       : (reserved ? "pending" : "settled");
     const amountYuan = notCharged ? 0 : Number(rawCharge);
     const pricingBasis = notCharged
-      ? "本地像塑或上游标明不计费 · 历史任务回填"
+      ? "H3 上游标明不计费 · 历史任务回填"
       : "视频上游返回的实际人民币结算 · 历史任务回填";
 
     const existing = (job.taskId && byTask.get(job.taskId)) || (job.id && byJob.get(job.id)) || bySource.get(sourceKey) || null;
@@ -447,11 +406,8 @@ module.exports = {
   normalizeCostEntry,
   normalizeCostLedger,
   pureamImageCost,
-  pureamVideoCostPerSecond,
-  qingboVideoCost,
   repriceCostEntries,
   resolveTextPricing,
-  seedanceVideoCost,
   summarizeCostEntries,
   supersedeResolvedUnknownAttempts,
   textPricingBasis

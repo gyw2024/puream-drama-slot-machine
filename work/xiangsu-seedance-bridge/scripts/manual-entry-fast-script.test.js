@@ -6,7 +6,14 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { WorkbenchStore, defaultSettings } = require("../app/workbench-store");
-const { WorkbenchWorkflow, isQualityGatesEnabled, shotUsesManualVideoPrompt } = require("../app/workbench-workflow");
+const {
+  WorkbenchWorkflow,
+  PROMPT_REVIEW_BUNDLE_VERSION,
+  isQualityGatesEnabled,
+  promptReviewSettingsFingerprint,
+  promptReviewSourceFingerprint,
+  shotUsesManualVideoPrompt
+} = require("../app/workbench-workflow");
 
 const root = path.resolve(__dirname, "..");
 const source = relativePath => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -27,7 +34,7 @@ test("every production stage exposes an explicit manual entry", () => {
   for (const label of ["人物图", "场景图", "通用图片", "资产视频", "资产音频"]) assert.match(html, new RegExp(label));
 
   const renderer = source("app/renderer/workbench.js");
-  for (const label of ["上传人物四视图", "上传身份参考图", "上传人物视频", "上传音色", "上传服装图", "上传道具图", "上传场景四视图", "上传本镜视频"]) {
+  for (const label of ["上传身份参考图", "上传音频资产", "上传服装图", "上传道具图", "上传场景四视图", "上传本镜视频"]) {
     assert.match(renderer, new RegExp(label));
   }
 });
@@ -129,10 +136,19 @@ test("manual reroll reaches video submission even when the old storyboard audit 
       qualityAudit: { ok: false, failures: [{ message: "旧审核失败" }] }
     }],
     jobs: [],
+    promptReview: {
+      version: PROMPT_REVIEW_BUNDLE_VERSION,
+      productionRevision: "",
+      status: "approved",
+      counts: { total: 1, confirmed: 1 },
+      items: [{ id: "shot:S01:shot_video", entityType: "shot", entityId: "S01", stage: "shot_video", prompt: "用户手动改写后的最终视频提示词", displayPrompt: "用户手动改写后的最终视频提示词", status: "confirmed" }]
+    },
     automation: {}
   };
   const settings = defaultSettings();
   settings.generation.qualityGatesEnabled = true;
+  project.promptReview.sourceFingerprint = promptReviewSourceFingerprint(project);
+  project.promptReview.settingsFingerprint = promptReviewSettingsFingerprint(settings);
   const store = {
     getProject: () => project,
     getSettings: () => settings,
@@ -160,7 +176,7 @@ test("manual reroll reaches video submission even when the old storyboard audit 
     submittedPrompt = prompt;
     return { id: "video-2", entityType: "shot", entityId: "S01", stage: "shot_video", filePath: path.join(tempRoot, "video.mp4") };
   };
-  const result = await workflow.generateShotVideo(project.id, shot.id, project.generation.mode, { track: false, audit: false });
+  const result = await workflow.generateShotVideo(project.id, shot.id, project.generation.mode, { track: false, audit: false, promptPrepared: true });
   assert.equal(result.id, "video-2");
   assert.equal(submittedPrompt, shot.manualVideoPrompt);
 });
@@ -282,16 +298,17 @@ test("five to ten minute script path matches relay slots and preserves failed se
   assert.match(workflow, /const SCRIPT_FAST_TARGET_SECONDS = 600/);
   assert.match(workflow, /const SCRIPT_FAST_CONCURRENCY = 2/);
   assert.match(workflow, /const SCRIPT_UNIT_BATCH_SIZE = 5/);
-  assert.match(workflow, /const SCRIPT_FAST_ATTEMPT_TIMEOUT_MS = 300_000/);
+  assert.match(workflow, /const TEXT_GENERATION_ATTEMPT_TIMEOUT_MS = 20 \* 60_000/);
+  assert.match(workflow, /const SCRIPT_FAST_ATTEMPT_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
   assert.match(workflow, /const SCRIPT_FAST_PUREAM_MODEL = "gpt-5-6-sol"/);
   assert.match(workflow, /const SCRIPT_DIRECT_SEGMENT_UNITS = 5/);
   assert.match(workflow, /const SCRIPT_DIRECT_MAX_CONCURRENCY = 2/);
-  assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = NO_TOTAL_DEADLINE_MS/);
-  assert.match(workflow, /const TEXT_STAGE_SLA_MS = 5 \* 60_000/);
-  assert.match(workflow, /const TEXT_STAGE_ATTEMPT_TIMEOUT_MS = 240_000/);
-  assert.match(workflow, /const TEXT_STAGE_MAX_ATTEMPTS = 1/);
-  assert.match(workflow, /timeoutMs: options\.timeoutMs \?\? TEXT_STAGE_ATTEMPT_TIMEOUT_MS/);
-  assert.match(workflow, /maxReconnectAttempts: options\.maxReconnectAttempts \?\? TEXT_STAGE_MAX_ATTEMPTS/);
+  assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflow, /const TEXT_STAGE_SLA_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflow, /const TEXT_STAGE_ATTEMPT_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflow, /const TEXT_STAGE_MAX_ATTEMPTS = 2/);
+  assert.match(workflow, /timeoutMs: Math\.max\(TEXT_STAGE_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflow, /maxReconnectAttempts: Math\.max\(TEXT_STAGE_MAX_ATTEMPTS/);
   assert.match(workflow, /model: configuredFastModel \|\| SCRIPT_FAST_PUREAM_MODEL/);
   assert.match(workflow, /directFastSegmentRanges\(unitCount, SCRIPT_DIRECT_SEGMENT_UNITS\)/);
   assert.match(workflow, /mapWithConcurrency\(pending, SCRIPT_DIRECT_MAX_CONCURRENCY/);
@@ -307,7 +324,8 @@ test("five to ten minute script path matches relay slots and preserves failed se
   assert.match(workflow, /fastUnitResultCache/);
   assert.match(workflow, /let fastUnitWaveFailed = false/);
   assert.match(workflow, /code: "SCRIPT_FAST_WAVE_FUSED"/);
-  assert.match(workflow, /useFastScriptPath\s*\?\s*\{/);
+  assert.match(workflow, /useFastScriptPath\s*\?\s*!this\.qualityGatesEnabled\(settings\)/);
+  assert.match(workflow, /skippedSemanticReview\("full", "审核蓝图已关闭：完整剧本继续生产，不虚构100分"\)/);
   assert.match(workflow, /path: useFastScriptPath \? "parallel-fast-v2"/);
   assert.match(workflow, /metTarget: scriptElapsedSeconds !== null \? scriptElapsedSeconds <= SCRIPT_FAST_TARGET_SECONDS/);
 });
@@ -334,7 +352,7 @@ test("step execution runs only the requested stage and explicit full pipeline ma
   assert.match(workflow, /await this\.generateCompleteScript\(projectId, \{ track: false \}\)/);
   assert.match(renderer, /pipeline_from_stage: "当前阶段续跑"/);
   assert.match(renderer, /不会自动提交视频/);
-  assert.match(renderer, /不会自动拼接/);
+  assert.match(renderer, /不会自动粗剪/);
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 });
 
@@ -358,6 +376,14 @@ test("step storyboard continuation cannot call video generation or stitching", a
   workflow.generateAllShotVideos = async () => { calls.push("videos"); return []; };
   workflow.stitchProject = async () => { calls.push("stitch"); return {}; };
 
+  await workflow.runPipelineFromStage(project.id, "shots", { track: false });
+  assert.deepEqual(calls, []);
+  assert.equal(project.automation.status, "awaiting_prompt_review");
+  await assert.rejects(workflow.confirmAllPromptReview(project.id, []), {code:'PROMPT_REVIEW_REQUIRED'});
+  // An empty source is no longer a valid approval fixture. Isolate stage routing
+  // after the separately tested approval boundary, without submitting media.
+  workflow.requestPromptReview = async () => ({required:false,project});
+  workflow.assertPromptReviewApproved = () => project;
   await workflow.runPipelineFromStage(project.id, "shots", { track: false });
   assert.deepEqual(calls, ["storyboards"]);
 
@@ -427,7 +453,7 @@ test("historical project deletion is recoverable and preserves other projects an
   assert.match(html, /id="deleteProject"/);
 });
 
-test("fresh installs and projects default to PUREAM cloud while local Xiangsu remains selectable", t => {
+test("fresh installs and projects expose only the PUREAM cloud video surface", t => {
   const defaults = defaultSettings();
   assert.equal(defaults.videoProvider.kind, "puream-hailuo-h3");
   assert.equal(defaults.videoProvider.baseUrl, "https://puream.cn");
@@ -442,7 +468,6 @@ test("fresh installs and projects default to PUREAM cloud while local Xiangsu re
 
   const html = source("app/renderer/workbench.html");
   assert.match(html, /value="puream-hailuo-h3"/);
-  assert.match(html, /value="local-xiangsu"/);
-  assert.match(html, /纯梦云端算力/);
-  assert.match(html, /本地像塑/);
+  assert.doesNotMatch(html, /local-xiangsu|puream-seedance|seedance|像塑/i);
+  assert.match(html, /纯梦云端视频/);
 });

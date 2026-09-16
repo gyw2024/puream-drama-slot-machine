@@ -12,13 +12,12 @@ const RULES = {
 };
 
 const PROVIDER_RULES = Object.freeze({
-  "local-xiangsu": Object.freeze({ videoMax: 1, videoDurationMax: 10, audioTotalMax: 15, generationMin: 5, generationMax: 10 }),
-  "puream-seedance": Object.freeze({ videoMax: 3, audioTotalMax: null, referenceMax: 12, generationMin: 5, generationMax: 15, maxFileBytes: 300 * 1024 * 1024 }),
   "puream-hailuo-h3": Object.freeze({ videoMax: 3, pairedAudioMax: 3, audioTotalMax: null, generationMin: 5, generationMax: 15, maxFileBytes: 300 * 1024 * 1024 })
 });
 
 function providerRules(payload) {
-  return PROVIDER_RULES[payload?.providerKind] || PROVIDER_RULES["local-xiangsu"];
+  void payload;
+  return PROVIDER_RULES["puream-hailuo-h3"];
 }
 
 function normalizedVideos(payload) {
@@ -36,19 +35,12 @@ function validateSubmission(payload) {
   if (audios.length > RULES.audio.maxCount) throw Object.assign(new Error("独立参考音频最多 3 段"), { code: "AUDIO_COUNT_INVALID" });
   if (videoAudios.length > (provider.pairedAudioMax || 0)) throw Object.assign(new Error("当前视频上游不支持这么多视频配套音轨"), { code: "VIDEO_AUDIO_COUNT_INVALID" });
   if (videoAudios.length > videos.length) throw Object.assign(new Error("视频配套音轨必须与参考视频按下标对应"), { code: "VIDEO_AUDIO_ALIGNMENT_INVALID" });
-  if (provider.videoDurationMax && videos.some(item => Number(item?.duration) > provider.videoDurationMax + 0.05)) {
-    throw Object.assign(new Error(`本地像塑参考视频最长 ${provider.videoDurationMax} 秒`), { code: "VIDEO_DURATION_INVALID" });
-  }
   const audioDuration = audios.reduce((sum, item) => sum + Math.max(0, Number(item.duration) || 0), 0);
-  if (provider.audioTotalMax && audioDuration > provider.audioTotalMax + 0.05) {
-    throw Object.assign(new Error(`本地像塑参考音频合计最长 ${provider.audioTotalMax} 秒`), { code: "AUDIO_DURATION_INVALID" });
-  }
+  void audioDuration;
   if (provider.referenceMax && images.length + videos.length + audios.length > provider.referenceMax) {
     throw Object.assign(new Error(`当前视频上游参考素材合计最多 ${provider.referenceMax} 个`), { code: "REFERENCE_COUNT_INVALID" });
   }
-  if (payload?.providerKind === "puream-hailuo-h3") {
-    validateHailuoModeMedia(payload.hailuoApiMode || payload.mode, { images, videos, audios, videoAudios });
-  }
+  validateHailuoModeMedia(payload.hailuoApiMode || payload.mode, { images, videos, audios, videoAudios });
   if (payload?.duration !== undefined) {
     const duration = Number(payload.duration);
     if (!Number.isInteger(duration) || duration < provider.generationMin || duration > provider.generationMax) {
@@ -59,7 +51,7 @@ function validateSubmission(payload) {
     }
   }
   if (payload?.aspectRatio && !["9:16", "16:9", "4:3", "1:1", "3:4", "21:9"].includes(payload.aspectRatio)) {
-    throw Object.assign(new Error("Seedance 画幅比例不受支持"), { code: "ASPECT_RATIO_INVALID" });
+    throw Object.assign(new Error("H3 画幅比例不受支持"), { code: "ASPECT_RATIO_INVALID" });
   }
 }
 

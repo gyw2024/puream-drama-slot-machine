@@ -2,21 +2,35 @@
 
 const crypto = require("node:crypto");
 const { parseCompiledDialogueSegments } = require("./dialogue-parser");
-const { buildApprovedHailuoPrompt } = require("./hailuo-h3-natural-prompt");
+const {
+  buildApprovedHailuoPrompt,
+  HAILUO_FINAL_OUTPUT_LOCK,
+  HAILUO_INTEGRATED_PROMPT_HEADER,
+  HAILUO_INTEGRATED_OUTPUT_LOCK_ZH,
+  authoredEnsembleReaction
+} = require("./hailuo-h3-natural-prompt");
+const { dialogueFirstActionContractEn } = require("./drama-writing-contract");
 
-const HAILUO_PROMPT_SPEC_VERSION = "minimax-h3-dialogue-first-natural-language-2026-08-v29.0";
+const HAILUO_PROMPT_SPEC_VERSION = "minimax-h3-official-six-section-en-staging-source-sound-2026-09-v41";
 const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
 const REQUIRED_SECTIONS = [
-  "【生成规格】",
-  "【素材绑定】",
-  "【核心表演】",
-  "【逐秒镜头与对白】",
-  "【连续性】",
-  "【声音】",
-  "【禁止项】"
+  "subject_definitions:",
+  "summary:",
+  "retention_analysis:",
+  "detailed_description:",
+  "overall_soundscape:",
+  "non_diegetic_music:"
 ];
+const BASE_REQUIRED_SECTIONS = [
+  "integrated_multimodal_description:",
+  "overall_soundscape:",
+  "non_diegetic_music:"
+];
+// Legacy full-reference prompts keep the documented advisory budget. The
+// integrity compiler never truncates a valid payload; Agent two-line blocks use
+// their own richer 5200-character budget in agent-director.js.
 const HAILUO_PROMPT_MAX_LENGTH = 1900;
-const HAILUO_FINAL_OUTPUT_LOCK_EN = "最终输出锁：只生成连续剧情画面、完整对白、现场环境声和可见动作同步音效；禁止字幕、标题、旁白文字、人物介绍、角色卡、分镜网格、参考素材展示、Logo、水印、UI、BGM、配乐和歌曲。";
+const HAILUO_FINAL_OUTPUT_LOCK_EN = HAILUO_FINAL_OUTPUT_LOCK;
 
 function clean(value) {
   return String(value || "").replace(/\r/g, "").trim();
@@ -61,6 +75,7 @@ function normalizeCompilerMode(project, shot, mode) {
   if (requested === "storyboard_sheet" || projectMode === "storyboard_sheet" || reason === "project_storyboard_sheet" || hasSheetPlan) {
     return "storyboard_sheet";
   }
+  if (requested === "asset_direct" || projectMode === "asset_direct" || reason === "project_asset_direct") return "asset_direct";
   if (requested === "continuation") return Number(shot?.number || 0) > 1 ? "continuation" : "keyframe";
   return "keyframe";
 }
@@ -139,7 +154,15 @@ function normalizeDialogueTurnForCompiler(project, turn, subshotNumber) {
     text,
     onScreen: source.onScreen !== false,
     metadata,
-    subshotNumber: Number(source.subshotNumber) || subshotNumber
+    subshotNumber: Number(source.subshotNumber) || subshotNumber,
+    startSecond: Number.isFinite(Number(source.start ?? source.startSecond)) ? Number(source.start ?? source.startSecond) : undefined,
+    endSecond: Number.isFinite(Number(source.end ?? source.endSecond)) ? Number(source.end ?? source.endSecond) : undefined,
+    plannedSpeechSeconds: Number.isFinite(Number(source.plannedSpeechSeconds ?? source.speechSeconds))
+      ? Number(source.plannedSpeechSeconds ?? source.speechSeconds)
+      : undefined,
+    plannedAfterBeatSeconds: Number.isFinite(Number(source.plannedAfterBeatSeconds ?? source.afterBeatSeconds))
+      ? Number(source.plannedAfterBeatSeconds ?? source.afterBeatSeconds)
+      : undefined
   };
 }
 
@@ -337,7 +360,7 @@ function visibleShotCharacterCast(project, shot) {
     ...uniqueStrings(shot?.visibleCharacterIds),
     ...list(shot?.subshots).flatMap(item => uniqueStrings(item?.visibleCharacterIds))
   ]).filter(id => !knownIds.size || knownIds.has(id));
-  if (ids.length || isCleanProductInsert) return ids.slice(0, 2);
+  if (ids.length || isCleanProductInsert) return ids;
 
   // Empty arrays are a common legacy/normalization artefact, not an authored
   // instruction to remove every actor.  Derive the rendered cast from the
@@ -349,8 +372,8 @@ function visibleShotCharacterCast(project, shot) {
     ...list(shot?.subshots).flatMap(item => list(item?.dialogueTurns)
       .map(turn => characterIdForSpeaker(project, turn?.speakerId || turn?.characterId || turn?.speaker)))
   ]).filter(id => !knownIds.size || knownIds.has(id));
-  if (speakingIds.length) return speakingIds.slice(0, 2);
-  return uniqueStrings(shot?.characterIds).filter(id => !knownIds.size || knownIds.has(id)).slice(0, 2);
+  if (speakingIds.length) return speakingIds;
+  return uniqueStrings(shot?.characterIds).filter(id => !knownIds.size || knownIds.has(id));
 }
 
 function expandShotCharacterCast(project, shot) {
@@ -390,14 +413,29 @@ function expandShotCharacterCast(project, shot) {
   for (const turn of structuredTurns) {
     const speakerId = characterIdForSpeaker(project, turn?.speakerId || turn?.characterId || turn?.speaker);
     if (knownIds.has(speakerId)) ids.add(speakerId);
-    // Listener identity is added only when that listener is actually visible.
-    // Scene presence must never silently become rendered cast.
-  }
-  if (!hasDirectorCast) {
-    const actionText = `${clean(shot?.action)} ${clean(shot?.visualBeat)} ${clean(shot?.performance)}`;
-    for (const character of characters) {
-      if (character?.id && clean(character.name) && actionText.includes(clean(character.name))) ids.add(character.id);
+    // A named listener is an active performance participant: even with closed
+    // lips H3 needs that person's identity reference for the reaction shot.
+    // This does not promote unrelated scene-presence extras.
+    for (const listener of uniqueStrings(turn?.listenerIds)) {
+      const listenerId = characterIdForSpeaker(project, listener);
+      if (knownIds.has(listenerId)) ids.add(listenerId);
     }
+  }
+  // Physical action can involve a non-speaking person (an object is taken from
+  // them, they are embraced, pushed, or receive an apology). Always bind a
+  // character explicitly named in action/performance metadata, regardless of
+  // whether a Director cast array already exists.
+  const actionText = [
+    shot?.action,
+    shot?.visualBeat,
+    shot?.performance,
+    shot?.stateBefore,
+    shot?.stateAfter,
+    ...structuredTurns.flatMap(turn => [turn?.body, turn?.listenerBeat, turn?.metadata?.body, turn?.metadata?.listenerBeat]),
+    ...list(shot?.subshots).flatMap(item => [item?.action, item?.visualBeat, item?.stateBefore, item?.stateAfter])
+  ].map(clean).filter(Boolean).join(" ");
+  for (const character of characters) {
+    if (character?.id && clean(character.name) && actionText.includes(clean(character.name))) ids.add(character.id);
   }
   return [...ids];
 }
@@ -516,7 +554,8 @@ function validatePromptSpec(spec, shot, expectedFingerprint = "", options = {}) 
       }
     }
     const knownIds = new Set(shot?.characterIds || []);
-    if ((item.visibleCharacterIds || []).length > 2) failures.push(`Shot ${item.number || "?"} has more than two visible characters`);
+    // H3 supports authored multi-person blocking.  Limit simultaneous speech,
+    // not the number of independently referenced silent/acting characters.
     if ((item.speakerIds || []).length > 2) failures.push(`Shot ${item.number || "?"} has more than two speaking characters`);
     for (const characterId of [...(item.visibleCharacterIds || []), ...(item.offscreenSpeakerIds || []), ...(item.speakerIds || [])]) {
       if (!knownIds.has(characterId)) failures.push(`Shot ${item.number || "?"} uses unknown character ID ${characterId}`);
@@ -529,8 +568,10 @@ function validatePromptSpec(spec, shot, expectedFingerprint = "", options = {}) 
   if (!/^\s*N\/?A\s*$/i.test(clean(spec?.nonDiegeticMusicEn))) {
     failures.push("nonDiegeticMusicEn must be N/A (SFX-only policy: no background music)");
   }
-  const descriptionWords = englishWordCount([spec?.styleEn, spec?.summaryEn, ...(spec?.subshots || []).map(item => item.visualEn), spec?.overallSoundscapeEn].join(" "));
-  if (descriptionWords < Math.max(70, expectedCount * 18)) failures.push(`English visual description is too sparse (${descriptionWords} words)`);
+  // Do not impose a global prose-length floor. It made a correct simple beat
+  // fail validation and encouraged the compiler to pad prompts with invented
+  // hand, body and furniture choreography. Required fields are validated above;
+  // concise authored action is a valid production result.
   if (failures.length) {
     throw Object.assign(new Error(`Hailuo H3 English prompt compilation failed: ${failures.join("; ")}`), {
       code: "HAILUO_H3_PROMPT_SPEC_INVALID",
@@ -607,11 +648,18 @@ function compilerMessages(systemPrompt, project, shot, mode) {
       silenceBeat: item?.silenceBeat || (subshotHasDesignedSilence(shot, item, index) ? normalizeSilenceBeat(shot) : null)
     };
   });
+  const ensembleReaction = authoredEnsembleReaction(shot, planned);
+  const ensembleRequired = Boolean(ensembleReaction);
   const modeContract = compilerMode === "storyboard_sheet"
-    ? "Treat the storyboard contact sheet as an ordered multi-panel timeline. Each panel must show a DIFFERENT visible action/face/body beat and advance irreversible information. Never treat one panel, the full sheet, its grid, gutters, labels, or UI as a literal rendered keyframe. Speakers look at listeners, never the camera. Sound = continuous bed + synced SFX only; nonDiegeticMusicEn = N/A."
+    ? "Treat the storyboard contact sheet as an ordered multi-panel timeline. Panels may advance through speaker ownership, framing, composition, expression, eyeline, evidence or one essential state-changing action. Never force a new body action per panel. Never treat one panel, the full sheet, its grid, gutters, labels, or UI as a literal rendered keyframe. Speakers look at listeners, never the camera. Sound = continuous bed + synced SFX only; nonDiegeticMusicEn = N/A."
     : compilerMode === "continuation"
-      ? "Continue only from the previous confirmed video's final temporal state. Never replay its opening, reset blocking, or invent a second opening. Keep unequal editorial beats with distinct face/body/action per subshot. Speakers look at listeners, never the camera. Sound bed must continue without head/tail dropout; nonDiegeticMusicEn = N/A."
-      : "Use the first and last narrative images as exact temporal endpoints, then create one causally continuous action chain between them. Keep unequal editorial beats with distinct face/body/action per subshot. Speakers look at listeners, never the camera. Sound = continuous bed + synced SFX only; nonDiegeticMusicEn = N/A.";
+      ? "Continue only from the previous confirmed video's final temporal state. Never replay its opening, reset blocking, or invent a second opening. Let editorial beats differ through speaker ownership, framing, expression or eyeline; add physical action only when it changes the authored state. Speakers look at listeners, never the camera. Sound bed must continue without head/tail dropout; nonDiegeticMusicEn = N/A."
+      : compilerMode === "asset_direct"
+        ? "Asset-direct mode has no storyboard image. The compiled text must therefore state exact screen-left/screen-right or foreground/background blocking, facing, eyelines, camera side of the 180-degree axis, shot size and motivated return cut for every beat. Preserve these positions across the whole shot. Sound = continuous bed + synced SFX only; nonDiegeticMusicEn = N/A."
+        : "Use the first and last narrative images as exact temporal endpoints, then preserve the shortest causally complete bridge between them. Let editorial beats differ through speaker ownership, framing, expression or eyeline; never add body action merely for variety. Speakers look at listeners, never the camera. Sound = continuous bed + synced SFX only; nonDiegeticMusicEn = N/A.";
+  const castContract = ensembleRequired
+    ? "Preserve every supplied named character ID. The authored collective beat requires one motivated medium-wide cutaway containing anonymous silent extras performing only that supplied group reaction; extras receive no IDs, no dialogue and no speaking mouth. Return to the named principals on the same 180-degree axis. A dialogue composition may focus on one speaker and one listener while every additionally authored visible entrant or reactor remains uniquely identifiable, correctly blocked and closed-lipped."
+    : "Preserve each subshot's supplied visibleCharacterIds, offscreenSpeakerIds and speakerIds exactly. Every authored visible character may appear, including a required third entrant or silent reactor. Never add a bystander, duplicate a person, or give a non-speaker a moving mouth.";
   const payload = {
     engine: "MiniMax H3 full-reference audio-video generation",
     mode: compilerMode,
@@ -670,7 +718,11 @@ function compilerMessages(systemPrompt, project, shot, mode) {
       propBindings,
       silenceBeat: normalizeSilenceBeat(shot),
       authorIntent: shot?.promptMode === "manual" ? shot?.manualVideoPrompt || "" : shot?.systemVideoPrompt || "",
-      directorFramingRule: "Never expand scene presence into the rendered cast. Each subshot uses only its supplied zero-to-two visibleCharacterIds. Prefer one-person performance close-ups or two-person counter-shots; no third face or group master.",
+      authoredEnsembleReactionRequired: ensembleRequired,
+      authoredEnsembleReaction: ensembleReaction,
+      directorFramingRule: ensembleRequired
+        ? "Use one-person performance close-ups or two-person counter-shots for dialogue, plus exactly one motivated medium-wide anonymous silent ensemble reaction cutaway, then return to the unchanged principal axis."
+        : "Never expand scene presence into the rendered cast. Each subshot preserves every supplied visibleCharacterId, including an authored third entrant, kneeling actor, recipient or silent reactor. Prefer one-person performance close-ups or two-person counter-shots for dialogue while keeping any additional authored visible principal uniquely blocked and closed-lipped.",
       transitionRule: "Every composition change is motivated by dialogue handoff, eyeline, matched action, object reveal, entrance, or a sound bridge. Preserve breathing, blinking, fabric and hand micro-motion through the final frame; never freeze or reset.",
       productFramingRule: shot?.productMention ? "Product packshot/detail beats keep the exact referenced product unobscured at 45-75% of frame with no unrelated face or extra hand; use/result beats show only the necessary operator or beneficiary." : "No product may appear.",
       locationContinuityRule: "Keep every subshot inside the same interior or exterior space; never teleport a fall or fight across indoor/outdoor cuts.",
@@ -683,13 +735,13 @@ function compilerMessages(systemPrompt, project, shot, mode) {
       summaryEn: "one English irreversible-task paragraph: because X, character does Y, leaving visible new state Z; not a process checklist",
       mode: compilerMode,
       propStateBindings: [{ propId: "P01", stateBeforeEn: "literal concise English translation of the authored physical before-state", stateAfterEn: "literal concise English translation of the authored physical after-state", purposeEn: "literal concise English translation of the authored physical purpose" }],
-      subshots: [{ number: 1, visualEn: "English shot-type + framing + concrete face/body performance from emotionBeat/faceAction/bodyAction/voiceDelivery + action chain + camera + cutReason bridge + wardrobe/prop/state; no unlisted face", soundEn: "English continuous ambience/room tone + synced SFX on visible actions; required unless this exact subshot declares silenceBeat; never BGM/underscore", visibleCharacterIds: ["C01"], offscreenSpeakerIds: ["C02"], speakerIds: ["C01"] }],
+      subshots: [{ number: 1, visualEn: "concise English speaker/listener performance + start-trigger-peak-aftershock vocal/facial arc + stable blocking/facing/eyeline + its assigned phase of one two-to-four-beat causal action chain + motivated camera/cut + continuity; no invented business or unlisted face", soundEn: "English continuous ambience/room tone + synced SFX on visible actions; required unless this exact subshot declares silenceBeat; never BGM/underscore", visibleCharacterIds: ["C01"], offscreenSpeakerIds: ["C02"], speakerIds: ["C01"] }],
       overallSoundscapeEn: "one to four English sentences with continuous matching ambience + synced SFX and no dry-speech holes; never BGM/underscore",
       nonDiegeticMusicEn: "N/A"
     }
   };
   return [
-    { role: "system", content: `${clean(systemPrompt)}\n\nHARD COMPILER CONTRACT: output mode must be exactly ${compilerMode}. ${modeContract} Drama-first: summaryEn must be an irreversible unit task (cause→action→visible new state), never a flat process synopsis. Every visualEn must translate the supplied emotionBeat, faceAction, bodyAction, voiceDelivery and cutReason into concrete English muscle/body/voice/cut bridges before composition boilerplate. Preserve each subshot's supplied visibleCharacterIds, offscreenSpeakerIds and speakerIds exactly; never add scene bystanders and never show more than two people. A visible speaking beat focuses the matching speaker; a listener beat keeps the listener's mouth closed. Keep wardrobe bindings attached to their characterId; never swap clothing between characters. Keep every prop attached to its propId and holderCharacterId. For every supplied prop binding, copy propId and translate each non-empty stateBefore, stateAfter and purpose literally into concise physical English in propStateBindings; never replace a concrete state with generic words such as supplied state. Product packshot/detail beats show the unobscured referenced product as the dominant subject with no unrelated face or extra hand. Every cut is motivated by the supplied dialogue, eyeline, action, object, entrance or sound bridge, and the final frame keeps natural micro-motion instead of freezing. Every non-silence subshot requires concrete English soundEn covering its continuous location bed and synchronized physical SFX only. nonDiegeticMusicEn must always be exactly N/A. Never write BGM, underscore, score, soundtrack, or non-diegetic music (except the literal N/A value). Do not put dialogue or any dialogue metadata in visualEn or soundEn.`.trim() },
+    { role: "system", content: `${clean(systemPrompt)}\n\n${dialogueFirstActionContractEn()}\n\nHARD COMPILER CONTRACT: output mode must be exactly ${compilerMode}. ${modeContract} Drama-first: summaryEn must be one concise irreversible unit task (cause→action chain→visible new state), never a flat process synopsis. Every 10-15 second unit must use two to four causal performance beats across its subshots: opening state or visible entrance/trigger, motivated action during dialogue, closed-mouth listener reaction, and visible consequence/handoff. Do not invent meaningless business or repeat a completed action. Every visualEn prioritizes the exact speaker/listener, voiceDelivery, facial expression, blocking, facing, eyeline and cutReason. ${castContract} A visible speaking beat focuses the matching speaker, shows a readable three-quarter speaking face with eyes and torso toward the listener, and keeps the camera on the established 180-degree axis; a listener beat keeps the listener's mouth closed. Preserve stable scene screenSide/depth assignments from the supplied cast state; never swap left/right by subshot number, and require a visible crossing or explicit axis reset before any side change. Every speaking beat must state the start-to-trigger-to-peak-to-aftershock changes in volume, pitch contour, pace, pause, stress, breath and facial expression; conflict cannot be calm, flat, neutral, or generically angry/sad/firm. The first phrase must be caused by the immediately preceding fact or reaction, and the final phrase must produce the authored consequence. Camera design must include at least one motivated composition change unless uninterrupted physical contact requires a continuous take, and must return to the same axis without empty drift. Keep wardrobe bindings attached to their characterId; never swap clothing between characters. Keep every prop attached to its propId and holderCharacterId. One characterId always means one physical person and one propId always means one physical object; never clone, duplicate or reuse a principal face on an extra. One sceneId is one continuous physical location, never several unrelated rooms. For every supplied prop binding, copy propId and translate each non-empty stateBefore, stateAfter and purpose literally into concise physical English in propStateBindings; never replace a concrete state with generic words such as supplied state. Product detail beats must originate from and return to the same named actor's same hand in the same story space, with the exact referenced packaging unobscured; never jump to a detached advertisement set or altered package. Every cut is motivated by a completed-line speaker handoff, eyeline, essential action, object, authored group reaction, entrance or sound bridge. The final frame keeps natural micro-motion instead of freezing. Every non-silence subshot requires concrete English soundEn covering its continuous location bed and synchronized physical SFX only. nonDiegeticMusicEn must always be exactly N/A. Never write BGM, underscore, score, soundtrack, or non-diegetic music (except the literal N/A value). Do not put dialogue or any dialogue metadata in visualEn or soundEn.`.trim() },
     { role: "user", content: `Compile this production shot into the required JSON. Do not translate, paraphrase, or emit the dialogue; the application inserts only the exact spoken Chinese text separately inside <d>[Chinese] ...</d>. Dialogue metadata is context for English performance instructions only and must never appear inside <d>. Use character IDs such as C01 in the English visual fields, never Chinese names.\n${JSON.stringify(payload)}` }
   ];
 }
@@ -718,9 +770,18 @@ function collectDialogue(project, shot) {
       listenerIds: uniqueStrings(turn.listenerIds || turn.listeners).map(item => characterIdForSpeaker(project, item)),
       text,
       spokenText: text,
+      sourceTone: clean(turn.sourceTone || metadata.sourceTone || ""),
       metadata,
       onScreen: turn.onScreen !== false,
-      subshotNumber: Number(turn.subshotNumber) || subshotNumber
+      subshotNumber: Number(turn.subshotNumber) || subshotNumber,
+      startSecond: Number.isFinite(Number(turn.start ?? turn.startSecond)) ? Number(turn.start ?? turn.startSecond) : undefined,
+      endSecond: Number.isFinite(Number(turn.end ?? turn.endSecond)) ? Number(turn.end ?? turn.endSecond) : undefined,
+      plannedSpeechSeconds: Number.isFinite(Number(turn.plannedSpeechSeconds ?? turn.speechSeconds))
+        ? Number(turn.plannedSpeechSeconds ?? turn.speechSeconds)
+        : undefined,
+      plannedAfterBeatSeconds: Number.isFinite(Number(turn.plannedAfterBeatSeconds ?? turn.afterBeatSeconds))
+        ? Number(turn.plannedAfterBeatSeconds ?? turn.afterBeatSeconds)
+        : undefined
     });
   };
   if (Object.prototype.hasOwnProperty.call(shot || {}, "videoPromptDialogueOverride")) {
@@ -743,6 +804,12 @@ function collectDialogue(project, shot) {
     for (const turn of shot.dialogueTurns) push(turn, Number(turn?.subshotNumber) || 1);
     return items;
   }
+  // A generation-block shot owns only the turns copied from its locked takes.
+  // An empty array is meaningful for a silent block. After JSON persistence an
+  // `undefined` videoPromptDialogueOverride property disappears, so falling
+  // through to the parent shot's legacy dialogue string would re-inject every
+  // line from the whole scene into this one paid block.
+  if (shot?.dialogueTurnsAuthoritative === true || shot?.agentGenerationBlock) return items;
   for (const turn of parseDialogueSegments(shot?.dialogue || "", names)) push(turn, 1);
   return items;
 }
@@ -1150,10 +1217,10 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
   return buildApprovedHailuoPrompt({
     project,
     shot,
-    references,
+    references: { ...references, promptMode: compilerMode },
     dialogueTurns: collectDialogue(project, shot),
     qualityRepair,
-    parityInstruction
+    spec
   });
 
   /* Legacy assembler retained temporarily for loading historical prompt specs. */
@@ -1176,8 +1243,8 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
   const modeInstruction = compilerMode === "storyboard_sheet"
     ? "Storyboard-sheet mode: use the contact-sheet panels only as an ordered timeline with distinct per-panel performance; never render the grid, gutters, labels, UI, or the whole sheet as a frame. Speakers look at listeners, never the camera. Continuous bed + synced SFX only; non-diegetic music N/A."
     : compilerMode === "continuation"
-      ? "Continuation mode: start only from the previous confirmed video's final temporal state, without replay, reset, or a second opening. Keep unequal beats and distinct face/body/action per subshot. Speakers look at listeners, never the camera. Continuous bed + synced SFX only; non-diegetic music N/A."
-      : "Keyframe mode: preserve the supplied first and last narrative frames as exact temporal endpoints of one causally continuous action chain. Keep unequal beats and distinct face/body/action per subshot. Speakers look at listeners, never the camera. Continuous bed + synced SFX only; non-diegetic music N/A.";
+      ? "Continuation mode: start only from the previous confirmed video's final temporal state, without replay, reset, or a second opening. Let beats differ through speaker ownership, framing, expression or eyeline; use physical action only for authored state change. Speakers look at listeners, never the camera. Continuous bed + synced SFX only; non-diegetic music N/A."
+      : "Keyframe mode: preserve the supplied first and last narrative frames as exact temporal endpoints of the shortest causally complete bridge. Let beats differ through speaker ownership, framing, expression or eyeline; never add body action merely for variety. Speakers look at listeners, never the camera. Continuous bed + synced SFX only; non-diegetic music N/A.";
   const description = [
     // 首行就是标准 FINAL OUTPUT LOCK：让 compactFullReferencePrompt 的快路径
     // （原样保留）能真正命中，未超长的提示词不再被重渲染丢掉表演/音频洁净/
@@ -1226,7 +1293,7 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
       ? "Visible cast: none; no face, reflection, portrait, or extra hand."
       : visibleSubjects.length === 1
         ? `Visible cast: ${visibleSubjects[0]} only; no second face.`
-        : `Visible cast: ${visibleSubjects.slice(0, 2).join(" and ")} only; no third face.`;
+        : `Visible cast: ${visibleSubjects.join(" and ")} only; one physical instance per listed identity, no unlisted face.`;
     const authoredShotType = clean(plannedItem?.shotType || shot?.productShotType || shot?.shotFunction).toLowerCase();
     const productFraming = /product_(?:packshot|detail)/.test(authoredShotType)
       ? "The exact referenced product is the unobscured dominant subject, occupying roughly 45–75 percent of the frame; no unrelated face, extra hand, overlay, or packaging mutation."
@@ -1253,6 +1320,8 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
   });
   const repair = repairInstructionEnglish(qualityRepair);
   description.push(`Drama performance lock: execute the authored facial-muscle, breath, body-weight, hand-tension, tear or vocal-break change at stage intensity; never flatten to neutral acting. Speakers look at listeners (not the camera); only the matching speaker moves lips; listeners stay silent and react. Vocal delivery ${context.deliveryTone}.`);
+  description.push("Entity uniqueness lock: each named subject and bound prop is one physical instance in every frame; never clone, split, duplicate or reuse a principal face on a background extra. Any mirror image remains only the same person's optical reflection.");
+  description.push("Spatial causality lock: remain inside the one bound physical location, preserve its geometry and axis, and execute opening state, causative action and visible consequence in that order. Every camera change must reveal a dialogue, eyeline, action, object, entrance, sound or group-reaction cause.");
   if (list(shot?.criticalOnScreenText).length) {
     description.push("Critical-text carrier lock: keep the authored document, sign, label or screen surface clean, front-facing and unobscured, but render no invented or pseudo-readable glyphs; the application adds the exact verified Chinese text during deterministic final compositing.");
   }
@@ -1268,7 +1337,7 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
   if ((references?.images || []).length) taskTypes.push("image reference");
   if ((references?.audios || []).length || (references?.videoAudios || []).some(Boolean)) taskTypes.push("audio reference");
   const summaryBody = replaceCharacterIds(spec.summaryEn, context.subjectByCharacterId);
-  const summary = `[${taskTypes.join(" + ")}] ${stageTaskLabel(shot?.mainlineStage)}: ${summaryBody} End on an irreversible new state the viewer can see. Target length ${duration.toFixed(2)}s, ${project?.generation?.aspectRatio || "9:16"}, live-action.`;
+  const summary = `[${apiMode === "reference_to_video" ? "reference generation" : taskTypes.join(" + ")}] ${stageTaskLabel(shot?.mainlineStage)}: ${summaryBody} End on an irreversible new state the viewer can see. Target length ${duration.toFixed(2)}s, ${project?.generation?.aspectRatio || "9:16"}, live-action.`;
   const values = {
     subjectDefinitions: context.definitions.join("\n"),
     summary,
@@ -1289,28 +1358,129 @@ function buildFullReferencePrompt({ project, shot, mode, references, spec, templ
 
 function hasHailuoFinalOutputLock(prompt = "") {
   const text = clean(prompt);
-  return /最终输出锁/.test(text)
-    && /禁止字幕/.test(text)
-    && /人物介绍/.test(text)
-    && /角色卡/.test(text)
-    && /分镜网格/.test(text)
-    && /参考素材展示/.test(text)
-    && /BGM/.test(text);
+  return text.includes(HAILUO_INTEGRATED_OUTPUT_LOCK_ZH) || text.includes(HAILUO_FINAL_OUTPUT_LOCK_EN)
+    || text.includes(require('./hailuo-h3-natural-prompt').HAILUO_LEGACY_FINAL_OUTPUT_LOCK)
+    || text.includes('成片始终是完整、连续的真人剧情摄影画面；画面内每个可见元素都属于剧情世界，人物对白只以对应角色的同步声音和口型出现。');
 }
 
-function assertHailuoFinalPromptIntegrity(prompt = "", maxLength = HAILUO_PROMPT_MAX_LENGTH) {
+function incompleteEnglishFragments(prompt = "") {
+  const source = withoutDialogue(clean(prompt));
+  const fragments = [];
+  const patterns = [
+    /\b(?:a|an|and|or|because|that|which|while)$/i,
+    /\bwith\s+(?:his|her|their)$/i,
+    /\bbetween\b[\s\S]*\band$/i,
+    /\breminding\b[\s\S]*\bto\s+stop\s+in$/i,
+    /\b(?:that|which)\s+(?:keeps?|holds?|shows?|follows?|frames?|reveals?)$/i
+  ];
+  for (const line of source.split(/\n+/)) {
+    for (const part of line.split(/\s*;\s*/)) {
+      const clause = part.replace(/[.:,!?\s]+$/g, "").trim();
+      if (!clause || /^N\/A$/i.test(clause)) continue;
+      if (patterns.some(pattern => pattern.test(clause))) fragments.push(clause.slice(-180));
+    }
+  }
+  return [...new Set(fragments)];
+}
+
+function dialogueVocalEventSpeakerIds(detailed = "") {
+  const source = String(detailed || "");
+  const events = [];
+  let previousDialogueEnd = 0;
+  for (const block of source.matchAll(/<d>\s*\[Chinese\][\s\S]*?<\/d>/gi)) {
+    const prefix = source.slice(previousDialogueEnd, block.index);
+    // Camera targets and listeners can precede the speaking actor. Bind a line
+    // to an affirmative vocal verb, never to the first nearby speaker label.
+    const labels = [...prefix.matchAll(/<Subject\s+\d+>\s*\(S(\d+)\)|\(S(\d+)\)|\bS(\d+)\b/gi)];
+    let speaker = null;
+    for (let index = 0; index < labels.length; index += 1) {
+      const label = labels[index];
+      const before = prefix.slice(Math.max(0, label.index - 80), label.index);
+      if (/\b(?:at|to|towards?|facing|behind|beside|from|with|of|for)\s*(?:<Subject\s+\d+>\s*)?$/i.test(before)) continue;
+      const clause = prefix.slice(label.index + label[0].length, labels[index + 1]?.index ?? prefix.length);
+      const verbs = [...clause.matchAll(/\b(?:says?|speaks?|asks?|replies|answers?|shouts?|whispers?|cries|declares?|utters?|delivers?)\b/gi)];
+      if (verbs.some(verb => !/\b(?:not|never|without|no)\b[^.;:!?]{0,55}$/i.test(clause.slice(Math.max(0, verb.index - 65), verb.index)))) {
+        speaker = Number(label[1] || label[2] || label[3]);
+      }
+    }
+    events.push(speaker);
+    previousDialogueEnd = block.index + block[0].length;
+  }
+  return events;
+}
+
+function assertHailuoFinalPromptIntegrity(prompt = "", maxLength = HAILUO_PROMPT_MAX_LENGTH, options = {}) {
   const text = clean(prompt);
-  const limit = Math.max(800, Math.min(1990, Number(maxLength) || HAILUO_PROMPT_MAX_LENGTH));
+  const limit = Math.max(800, Number(maxLength) || HAILUO_PROMPT_MAX_LENGTH);
   const failures = [];
   if (!text) failures.push("prompt is empty");
-  if (text.length > limit) failures.push(`prompt length ${text.length} exceeds ${limit}`);
-  for (const sectionName of REQUIRED_SECTIONS) {
+  if (text.length > 10000) failures.push(`provider prompt exceeds MiniMax H3's 10000-character request limit (${text.length})`);
+  const fullReferenceSchema = text.includes("subject_definitions:");
+  const baseSchema = text.includes("integrated_multimodal_description:");
+  if (fullReferenceSchema && baseSchema) failures.push("official full-reference and base prompt schemas are mixed");
+  if (!fullReferenceSchema && !baseSchema) failures.push("official prompt schema is missing");
+  const requiredSections = fullReferenceSchema ? REQUIRED_SECTIONS : BASE_REQUIRED_SECTIONS;
+  for (const sectionName of requiredSections) {
     if (!text.includes(sectionName)) failures.push(`missing ${sectionName}`);
   }
+  const sectionPositions = requiredSections.map(sectionName => text.indexOf(sectionName));
+  if (sectionPositions.some((position, index) => position < 0 || (index > 0 && position <= sectionPositions[index - 1]))) {
+    failures.push("official prompt sections are not in the required order");
+  }
+  if (fullReferenceSchema && (text.match(/^(?:subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music):\s*$/gmi) || []).length !== REQUIRED_SECTIONS.length) {
+    failures.push("official full-reference prompt must contain exactly six section headers");
+  }
   if (!hasHailuoFinalOutputLock(text)) failures.push("final output lock is incomplete");
-  if (!text.includes("对白内容＞语气＞情绪＞场景＞运镜＞其他")) failures.push("dialogue priority is missing");
-  if (/subject_definitions:|retention_analysis:|detailed_description:|<Subject\s+\d+>|<d>\[Chinese\]/i.test(text)) {
-    failures.push("legacy internal prompt syntax leaked into final prompt");
+  // Whether prose requests or prohibits subtitles is a semantic decision for
+  // the independent Agent audit. A keyword occurrence (e.g. "without subtitles")
+  // is not a malformed provider request and must not block compilation.
+  if (!/\[Shot\s+1\](?!\s+At\b)/i.test(text)) failures.push("official [Shot 1] must exist without a timestamp in its header");
+  const laterShotHeaders = [...text.matchAll(/\[Shot\s+(\d+)\]([^\n]*)/gi)].filter(match => Number(match[1]) > 1);
+  if (laterShotHeaders.some(match => !/^\s+At\s+\d{2}:\d{2}\.\d{3},/i.test(match[2]))) {
+    failures.push("every shot after [Shot 1] must use '[Shot N] At MM:SS.mmm,'");
+  }
+  if (!/\bFrom\s+\d+(?:\.\d+)?\s+to\s+\d+(?:\.\d+)?\s+seconds?\b/i.test(text)) failures.push("official detailed description has no executable time window");
+  if (containsCjkOutsideDialogue(text)) failures.push("CJK text exists outside <d>[Chinese] dialogue tags");
+  const incompleteFragments = incompleteEnglishFragments(text);
+  if (incompleteFragments.length) failures.push(`incomplete English control clause: ${incompleteFragments.join(" | ")}`);
+  const dialogueBlocks = [...text.matchAll(/<d>\s*\[Chinese\]\s*([\s\S]*?)<\/d>/gi)];
+  if ((text.match(/<d>/gi) || []).length !== dialogueBlocks.length) failures.push("dialogue tags are not balanced");
+  if (dialogueBlocks.some(match => !clean(match[1]))) failures.push("dialogue block is empty");
+  if (fullReferenceSchema) {
+    const retentionStart = text.indexOf("retention_analysis:") + "retention_analysis:".length;
+    const retentionEnd = text.indexOf("detailed_description:");
+    const retentionLines = text.slice(retentionStart, retentionEnd).split(/\n+/).map(clean).filter(Boolean);
+    const detailedStart = text.indexOf("detailed_description:") + "detailed_description:".length;
+    const detailedEnd = text.indexOf("overall_soundscape:");
+    const detailed = text.slice(detailedStart, detailedEnd);
+    // New authoring explicitly requests the official checks. Compatibility
+    // for older imported/manual prompts must not depend on new editors
+    // retaining one incidental English sentence to activate validation.
+    const strictGeneratedOfficial = options.strictOfficial === true
+      || /Speak\s+only\s+the\s+(?:one\s+tagged\s+Chinese\s+line|two\s+tagged\s+Chinese\s+lines),\s+each\s+once\s+and\s+complete/i.test(detailed);
+    if (strictGeneratedOfficial && retentionLines.some(line => /\(S\d+\)/i.test(line))) failures.push("speaker IDs must not appear in retention_analysis");
+    const visibleMarker = /:\s*(?:fully_preserved|partially_preserved|attribute_transfer|weak_reference)\s*-/i;
+    const audioMarker = /:\s*(?:fully_copy|partially_copy|reference|weak_reference)\s*-/i;
+    if (strictGeneratedOfficial && retentionLines.some(line => /^<Audio\s+\d+>/i.test(line) ? !audioMarker.test(line) : !visibleMarker.test(line))) {
+      failures.push("retention_analysis must use one official relationship marker for every label");
+    }
+    // Official ref-en.txt section 5.2 gives a NORMAL authoring range, not an
+    // API ceiling. Preserve complete dialogue/action and validate their actual
+    // semantics below; exceeding a writing recommendation is not corruption.
+    if (/DIALOGUE\s+PRIORITY|TONE\s+PRIORITY|EMOTION\s+PRIORITY|ACTION\s+PRIORITY|BLOCKING\s+PRIORITY/i.test(detailed)) {
+      failures.push("internal priority labels leaked into the official natural-language prompt");
+    }
+    const dialogueEvents = dialogueVocalEventSpeakerIds(detailed);
+    if (dialogueEvents.some(speakerNumber => speakerNumber == null)) {
+      failures.push("each dialogue line must identify an explicit speaker ID performing the vocal action");
+    }
+    const firstSeen = [];
+    for (const speakerNumber of dialogueEvents) {
+      if (speakerNumber != null && !firstSeen.includes(speakerNumber)) firstSeen.push(speakerNumber);
+    }
+    if (firstSeen.some((speakerNumber, index) => speakerNumber !== index + 1)) {
+      failures.push("speaker IDs must be assigned S1, S2, ... by first actual vocal event in this target video");
+    }
   }
   if (failures.length) {
     throw Object.assign(new Error(`Hailuo H3 final prompt integrity failed: ${failures.join("; ")}`), {
@@ -1344,70 +1514,21 @@ function compactHailuoDialogueContract(value, aggressive = false) {
 
 function compactFullReferencePrompt(prompt, maxLength = HAILUO_PROMPT_MAX_LENGTH) {
   const original = clean(prompt);
-  const limit = Math.max(800, Math.min(1990, Number(maxLength) || HAILUO_PROMPT_MAX_LENGTH));
-  if (original.length <= limit && hasHailuoFinalOutputLock(original)) {
-    assertHailuoFinalPromptIntegrity(original, limit);
-    return original;
-  }
-  const section = name => {
-    const start = original.indexOf(name);
-    if (start < 0) return "";
-    const bodyStart = start + name.length;
-    const later = REQUIRED_SECTIONS.map(item => original.indexOf(item, bodyStart)).filter(index => index >= 0);
-    return original.slice(bodyStart, later.length ? Math.min(...later) : original.length).trim();
-  };
-  const specification = section("【生成规格】");
-  const binding = section("【素材绑定】");
-  const timeline = section("【逐秒镜头与对白】");
-  const compactBinding = binding
-    .replace(/，只采用与本镜相关的身份、场景或构图信息/g, "")
-    .replace(/，其他角色禁止借用/g, "，禁止串用")
-    .replace(/，只参考音色、音质和说话质感，不复制原音频台词/g, "，只锁声线不复制原词")
-    .replace(/本镜剧情/g, "剧情")
-    .replace(/人物状态/g, "状态");
-  const render = (bindingText, timelineText) => [
-    "【生成规格】",
-    specification,
-    "【素材绑定】",
-    bindingText,
-    "【核心表演】",
-    "每句对白逐字完整且只说一次；对白内容＞语气＞情绪＞场景＞运镜＞其他。当前说话人开口时其他人闭口反应；换说话人时按视线轴切镜；禁止抢话、串台、复读、平声念稿和声线互换。",
-    "【逐秒镜头与对白】",
-    timelineText,
-    "【连续性】",
-    "人物脸、年龄、发型、体型、服装、站位、持物手、视线轴、场景布局和主光连续；不新增人物、不换场、不冻结尾帧。参考视频只参考动作/运镜/节奏，不参考脸、服装、场景、原声、字幕。",
-    "【声音】",
-    "对白清晰；声线按音频编号一一对应；连续现场底噪和可见动作同步音效；禁止BGM、配乐、歌曲、旁白和随机装饰音。",
-    "【禁止项】",
-    HAILUO_FINAL_OUTPUT_LOCK_EN
-  ].join("\n").trim();
-  let compact = render(compactBinding, timeline);
-  if (compact.length > limit) {
-    const withoutTail = timeline.split("\n").filter(line => !/对白结束，所有人物闭口/.test(line)).join("\n");
-    compact = render(compactBinding, withoutTail);
-  }
-  if (compact.length > limit) {
-    const shortTimeline = timeline.split("\n").map(line => line
-      .replace(/角色“([^”]+)”使用音频(\d+)/g, "$1用音频$2")
-      .replace(/角色“([^”]+)”/g, "$1")
-      .replace(/，面向“([^”]+)”/g, "→$1")
-      .replace(/，语气“([^”]{18,})”/g, (_match, tone) => `，语气“${tone.slice(0, 16)}”`)
-      .replace(/，情绪“([^”]{14,})”/g, (_match, emotion) => `，情绪“${emotion.slice(0, 12)}”`)
-      .replace(/说话时仅“[^”]+”动嘴，/g, "")
-      .replace(/只使用该角色自己的声线，禁止借用其他角色音频/g, "只用本角色声线")
-    ).join("\n");
-    compact = render(compactBinding, shortTimeline);
-  }
-  if (compact.length > limit) {
-    throw Object.assign(new Error(`Hailuo H3 dialogue contracts require ${compact.length} characters but the provider limit is ${limit}; refusing to truncate dialogue or output policy`), {
-      code: "HAILUO_PROMPT_DIALOGUE_BUDGET_EXCEEDED",
-      promptLength: compact.length,
-      limit,
-      dialogueCount: timeline.split("\n").filter(Boolean).length
-    });
-  }
-  assertHailuoFinalPromptIntegrity(compact, limit);
-  return compact;
+  const limit = Math.max(800, Number(maxLength) || HAILUO_PROMPT_MAX_LENGTH);
+  // The compiler already emits a compact, provider-facing prompt. Never turn an
+  // advisory character budget into a production dead-end or truncate dialogue.
+  assertAgentHailuoDelivery(original);
+  return original;
+}
+
+// Transport checks do not reinterpret natural language or rewrite Agent output.
+// Content, performance and source fidelity are reviewed by the authoring Agent.
+function assertAgentHailuoDelivery(prompt) {
+  const failures=[];
+  if(typeof prompt!=='string'||!prompt.trim())failures.push('missing prompt payload');
+  if(typeof prompt==='string'&&prompt.length>10000)failures.push('prompt exceeds the 10000-character provider payload limit');
+  if(failures.length)throw Object.assign(new Error('Agent delivery needs a complete provider-sized payload'),{code:'HAILUO_PROMPT_FINAL_INTEGRITY_FAILED',failures,promptLength:typeof prompt==='string'?prompt.length:0,limit:10000,requestPreview:prompt});
+  return true;
 }
 
 function stripCjkForEnglishField(value, fallback = "") {
@@ -1481,7 +1602,7 @@ function buildFallbackHailuoPromptSpec(shot = {}, options = {}) {
     mode: clean(options.mode),
     fingerprint: "",
     styleEn: "Realistic Chinese vertical short-drama live action, naturalistic daylight, medium close-ups, shallow depth of field, intense facial performance.",
-    summaryEn: `In ${Number(shot.duration) || 10} seconds, execute this exact supplied action chain with no invented or substituted beat: ${actionSummary}`,
+    summaryEn: `Preserve the concise authored dramatic event and its visible state change without inventing or expanding physical business: ${actionSummary}`,
     subshots: compiledSubshots,
     overallSoundscapeEn: soundSummary || "The declared designed silence is the only intentional sound reduction in this unit.",
     nonDiegeticMusicEn: "N/A",
@@ -1490,17 +1611,22 @@ function buildFallbackHailuoPromptSpec(shot = {}, options = {}) {
 }
 
 module.exports = {
+  assertAgentHailuoDelivery,
   HAILUO_PROMPT_SPEC_VERSION,
   HAILUO_PROMPT_MAX_LENGTH,
   HAILUO_FINAL_OUTPUT_LOCK_EN,
   REQUIRED_SECTIONS,
+  BASE_REQUIRED_SECTIONS,
   assertHailuoFinalPromptIntegrity,
   buildFallbackHailuoPromptSpec,
   buildFullReferencePrompt,
+  collectDialogue,
   compactFullReferencePrompt,
   compilerMessages,
   containsCjkOutsideDialogue,
+  dialogueVocalEventSpeakerIds,
   hasHailuoFinalOutputLock,
+  incompleteEnglishFragments,
   englishWordCount,
   expandShotCharacterCast,
   visibleShotCharacterCast,

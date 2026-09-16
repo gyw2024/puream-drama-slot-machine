@@ -7,11 +7,11 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { BridgeClient, safeRemoteTaskFilename } = require("../app/bridge-client");
-const { buildCloudSubmit, createConcurrencyLimiter, openUploadBody } = require("../app/puream-video-adapters");
+const { buildCloudSubmit, createConcurrencyLimiter, openUploadBody, DEFAULT_REFERENCE_TTL_SECONDS } = require("../app/puream-video-adapters");
+const { normalizeVideoProvider } = require("../app/video-provider-policy");
 const { hydratePureamDefaults } = require("../app/puream-auth-config");
 const { WorkbenchStore, isPathInside, mergeAutomationState } = require("../app/workbench-store");
 const { WorkbenchWorkflow, executeShotVideoBatch, imageBatchConcurrency } = require("../app/workbench-workflow");
-const XiangsuPlugin = require("../plugin/lib/plugin/index");
 
 function temporaryDirectory(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -41,6 +41,85 @@ test("stale project snapshots preserve concurrent records while explicit deletio
     staleAfterCandidate.status = "updated-from-stale";
     store.saveProject(staleAfterCandidate);
     assert.deepEqual(store.getProject(created.id).candidates, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a newer Foundry mirror with collapsed H3 block ids cannot override valid project JSON", () => {
+  const root = temporaryDirectory("puream-foundry-shot-id-recovery-");
+  try {
+    const seedStore = new WorkbenchStore(root);
+    const created = seedStore.createProject("分块身份恢复");
+    const disk = seedStore.getProject(created.id);
+    disk.shots = [
+      { id: "S02-B01", number: 1, duration: 5 },
+      { id: "S02-B02", number: 2, duration: 6 }
+    ];
+    seedStore.saveProject(disk);
+    const corruptRuntime = structuredClone(seedStore.getProject(created.id));
+    corruptRuntime.updatedAt = "2099-01-01T00:00:00.000Z";
+    corruptRuntime.shots = corruptRuntime.shots.map(shot => ({ ...shot, id: "S02" }));
+    const commits = [];
+    const foundryKernel = {
+      loadProject: () => structuredClone(corruptRuntime),
+      commitProject: project => commits.push(structuredClone(project))
+    };
+    const store = new WorkbenchStore(root, { foundryKernel });
+    const recovered = store.getProject(created.id);
+    assert.deepEqual(recovered.shots.map(shot => shot.id), ["S02-B01", "S02-B02"]);
+    const saved = store.saveProject(recovered);
+    assert.deepEqual(saved.shots.map(shot => shot.id), ["S02-B01", "S02-B02"]);
+    assert.deepEqual(commits.at(-1).shots.map(shot => shot.id), ["S02-B01", "S02-B02"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("saveProject keeps a newer repaired JSON instead of merging stale Foundry dialogue back in", () => {
+  const root = temporaryDirectory("puream-foundry-repaired-json-authority-");
+  try {
+    const seedStore = new WorkbenchStore(root);
+    const created = seedStore.createProject("生产包对白修复");
+    const current = seedStore.getProject(created.id);
+    current.shots = [{
+      id: "S01-B01",
+      number: 1,
+      duration: 10,
+      dialogueTurns: [{ id: "D001", sourceDialogueId: "D001", speakerId: "C01", text: "正确台词" }]
+    }];
+    seedStore.saveProject(current);
+
+    const staleRuntime = structuredClone(seedStore.getProject(created.id));
+    staleRuntime.updatedAt = "2026-09-03T00:00:00.000Z";
+    staleRuntime.shots[0].dialogueTurns[0] = {
+      ...staleRuntime.shots[0].dialogueTurns[0],
+      speakerId: "C02",
+      text: "旧运行时错误台词"
+    };
+
+    const repairedFile = JSON.parse(fs.readFileSync(seedStore.projectPath(created.id), "utf8"));
+    repairedFile.updatedAt = "2026-09-03T00:01:00.000Z";
+    repairedFile.shots[0].dialogueTurns[0] = {
+      ...repairedFile.shots[0].dialogueTurns[0],
+      speakerId: "C01",
+      text: "正确台词"
+    };
+    fs.writeFileSync(seedStore.projectPath(created.id), JSON.stringify(repairedFile, null, 2));
+
+    const commits = [];
+    const foundryKernel = {
+      loadProject: () => structuredClone(staleRuntime),
+      commitProject: project => commits.push(structuredClone(project))
+    };
+    const store = new WorkbenchStore(root, { foundryKernel });
+    const repaired = store.getProject(created.id);
+    assert.equal(repaired.shots[0].dialogueTurns[0].text, "正确台词");
+    repaired.status = "prompt_review_confirmed";
+    const saved = store.saveProject(repaired);
+    assert.equal(saved.shots[0].dialogueTurns[0].speakerId, "C01");
+    assert.equal(saved.shots[0].dialogueTurns[0].text, "正确台词");
+    assert.equal(commits.at(-1).shots[0].dialogueTurns[0].text, "正确台词");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -154,7 +233,7 @@ test("damaged deleted-project archives remain visible and are never silently dis
   }
 });
 
-test("task queries use the provider recorded at submission instead of the current global provider", async () => {
+test("task queries always preserve the recorded H3 task identity", async () => {
   const root = temporaryDirectory("puream-provider-scope-");
   const calls = [];
   try {
@@ -162,19 +241,14 @@ test("task queries use the provider recorded at submission instead of the curren
       tokenPath: path.join(root, "bridge-token"),
       fetchImpl: async (url, options) => {
         calls.push({ url: String(url), options });
-        if (String(url).startsWith("http://127.0.0.1")) return jsonResponse({ taskId: "local-task", status: "running" });
         return jsonResponse({ task_id: "cloud-task", status: "processing", progress: 12 });
       }
     });
-    client.saveRemoteTask("local-task", { providerKind: "local-xiangsu", outputDir: root });
+    client.saveRemoteTask("cloud-task", { providerKind: "puream-hailuo-h3", outputDir: root, requestedMode: "multimodal_to_video" });
     client.configure({ kind: "puream-hailuo-h3", baseUrl: "https://puream.cn", apiKey: "test-key" });
-    await client.query("local-task");
-    assert.match(calls.at(-1).url, /^http:\/\/127\.0\.0\.1:/);
-
-    client.saveRemoteTask("cloud-task", { providerKind: "puream-hailuo-h3", outputDir: root, requestedMode: "auto" });
-    client.configure({ kind: "local-xiangsu", apiKey: "test-key" });
     await client.query("cloud-task");
     assert.match(calls.at(-1).url, /^https:\/\/(?:[a-z0-9.-]+\.)?puream\.cn\//i);
+    assert.equal(client.readRemoteTasks()["cloud-task"].providerKind, "puream-hailuo-h3");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -184,12 +258,12 @@ test("video task registry recovers the last valid atomic backup", () => {
   const root = temporaryDirectory("puream-task-registry-");
   try {
     const client = new BridgeClient({ tokenPath: path.join(root, "bridge-token"), fetchImpl: async () => jsonResponse({}) });
-    client.saveRemoteTask("task-a", { providerKind: "local-xiangsu", outputDir: root });
+    client.saveRemoteTask("task-a", { providerKind: "puream-hailuo-h3", outputDir: root });
     client.saveRemoteTask("task-b", { providerKind: "puream-hailuo-h3", outputDir: root });
     fs.writeFileSync(client.remoteTasksPath, "{broken", "utf8");
     const recovered = client.readRemoteTasks();
-    assert.equal(recovered["task-a"].providerKind, "local-xiangsu");
-    assert.equal(JSON.parse(fs.readFileSync(client.remoteTasksPath, "utf8"))["task-a"].providerKind, "local-xiangsu");
+    assert.equal(recovered["task-a"].providerKind, "puream-hailuo-h3");
+    assert.equal(JSON.parse(fs.readFileSync(client.remoteTasksPath, "utf8"))["task-a"].providerKind, "puream-hailuo-h3");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -207,12 +281,11 @@ test("remote task identifiers cannot escape the configured video output director
 test("generated asset paths slug external identifiers and add collision-resistant suffixes", () => {
   const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
   const storeSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-store.js"), "utf8");
-  assert.match(workflowSource, /facegrid-\$\{slug\(source\.entityId\)\}-\$\{Date\.now\(\)\}-\$\{crypto\.randomUUID\(\)\.slice\(0, 8\)\}/);
-  assert.doesNotMatch(workflowSource, /facegrid-\$\{source\.entityId\}/);
+  assert.doesNotMatch(workflowSource, /facegrid|xiangsu|seedance/i);
   assert.match(storeSource, /stage\}-library-\$\{safeEntityId\}-\$\{Date\.now\(\)\}-\$\{crypto\.randomUUID\(\)\.slice\(0, 8\)\}/);
 });
 
-test("same-project operations are rejected while different projects still run concurrently", async () => {
+test("same-project and different-project operations run concurrently without a project admission lock", async () => {
   const root = temporaryDirectory("puream-operation-lock-");
   try {
     const store = new WorkbenchStore(root);
@@ -222,7 +295,8 @@ test("same-project operations are rejected while different projects still run co
     let release;
     const blocker = new Promise(resolve => { release = resolve; });
     const running = workflow.runTrackedOperation(first.id, "test-a", "", () => blocker);
-    await assert.rejects(() => workflow.runTrackedOperation(first.id, "test-b", "", async () => true), error => error.code === "PROJECT_OPERATION_BUSY");
+    assert.equal(await workflow.runTrackedOperation(first.id, "test-b", "", async () => true), true);
+    assert.equal(workflow.hasActiveOperation(first.id), true);
     const parallel = workflow.runTrackedOperation(second.id, "test-c", "", async () => "ok");
     assert.equal(await parallel, "ok");
     release("done");
@@ -251,14 +325,24 @@ test("desktop image and video batches have bounded local concurrency", async () 
 
 test("cloud reference uploads use file-backed bodies and a shared concurrency ceiling", async () => {
   let bufferedRead = false;
+  let streamedRead = false;
   const body = await openUploadBody({
-    openAsBlob: async (_filePath, options) => new Blob(["streamed"], options),
-    readFileSync: () => { bufferedRead = true; return Buffer.alloc(0); },
+    openAsBlob: async (_filePath, options) => { streamedRead = true; return new Blob(["streamed"], options); },
+    readFileSync: () => { bufferedRead = true; return Buffer.from("bounded"); },
     statSync: () => ({ size: 8 })
   }, "C:\\media\\reference.mp4", "video/mp4");
-  assert.equal(body instanceof Blob, true);
-  assert.equal(body.type, "video/mp4");
-  assert.equal(bufferedRead, false);
+  assert.equal(Buffer.isBuffer(body), true);
+  assert.equal(body.toString("utf8"), "bounded");
+  assert.equal(bufferedRead, true);
+  assert.equal(streamedRead, false);
+
+  const largeBody = await openUploadBody({
+    openAsBlob: async (_filePath, options) => { streamedRead = true; return new Blob(["streamed"], options); },
+    readFileSync: () => { throw new Error("large files must not be buffered"); },
+    statSync: () => ({ size: 33 * 1024 * 1024 })
+  }, "C:\\media\\large-reference.mp4", "video/mp4");
+  assert.equal(largeBody instanceof Blob, true);
+  assert.equal(streamedRead, true);
 
   const limited = createConcurrencyLimiter(3);
   let active = 0;
@@ -276,7 +360,11 @@ test("manual import boundaries and background poll guard remain wired", () => {
   const main = fs.readFileSync(path.join(__dirname, "..", "app", "main.js"), "utf8");
   const renderer = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.js"), "utf8");
   assert.match(main, /TEXT_IMPORT_MAX_BYTES = 2 \* 1024 \* 1024/);
-  assert.match(main, /AV_PROBE_TIMEOUT_MS = 20_000/);
+  assert.match(main, /LOCAL_MEDIA_IMPORT_TIMEOUT_MS = 20 \* 60_000/);
+  assert.match(main, /AV_PROBE_TIMEOUT_MS = LOCAL_MEDIA_IMPORT_TIMEOUT_MS/);
+  assert.match(main, /MEDIA_PROBE_TIMEOUT[\s\S]{0,240}AV_PROBE_TIMEOUT_MS/);
+  assert.match(main, /IMAGE_NORMALIZE_TIMEOUT[\s\S]{0,240}LOCAL_MEDIA_IMPORT_TIMEOUT_MS/);
+  assert.doesNotMatch(main, /IMAGE_NORMALIZE_TIMEOUT[\s\S]{0,240}\}, 60_000\)/);
   assert.match(main, /if \(!safeStorage\.isEncryptionAvailable\(\)\) return "";/);
   assert.match(main, /image\.isEmpty\(\)/);
   assert.match(main, /VIDEO_DECODE_FAILED/);
@@ -286,7 +374,8 @@ test("manual import boundaries and background poll guard remain wired", () => {
   const chooseProductStart = main.indexOf('ipcMain.handle("workbench:choose-product"');
   const chooseProductEnd = main.indexOf('ipcMain.handle("workbench:import-text-file"', chooseProductStart);
   const chooseProduct = main.slice(chooseProductStart, chooseProductEnd);
-  assert.equal(chooseProduct.indexOf("importProductFromPath") < chooseProduct.indexOf("resolveHttpsReferenceInputs"), true);
+  assert.match(chooseProduct, /importProductFromPath/);
+  assert.doesNotMatch(chooseProduct, /resolveHttpsReferenceInputs/);
   assert.equal(chooseProduct.indexOf("describeMedia") === -1, true);
 });
 
@@ -308,7 +397,10 @@ test("settings and shared libraries recover from their last valid backup", () =>
     store.saveVoiceLibrary([{ id: "voice-a", filePath: voiceFile }]);
     store.saveVoiceLibrary([{ id: "voice-a", filePath: voiceFile }, { id: "voice-b", filePath: voiceFile }]);
     fs.writeFileSync(store.voiceLibraryIndexPath, "{broken", "utf8");
-    assert.deepEqual(store.listVoiceLibrary().map(item => item.id), ["voice-a"]);
+    const recoveredVoices = store.listVoiceLibrary();
+    assert.equal(recoveredVoices.some(item => item.id === "voice-a"), true);
+    assert.equal(recoveredVoices.some(item => item.id === "voice-b"), false);
+    assert.equal(recoveredVoices.filter(item => item.builtIn === true).length, 40);
 
     const assetFile = path.join(store.reusableAssetLibraryFilesDir, "asset.png");
     fs.writeFileSync(assetFile, "asset");
@@ -384,11 +476,11 @@ test("direct OSS mode uploads local references to the selected bucket without us
       ossBucket: "puream-user-media",
       ossEndpoint: "oss-cn-hangzhou.aliyuncs.com",
       referenceUrlTtlSeconds: 7200,
-      hailuoApiMode: "image_to_video",
+      hailuoApiMode: "reference_to_video",
       hailuoRefImageSize: "match"
     }, {
       prompt: "测试镜头",
-      duration: 5,
+      duration: 10,
       aspectRatio: "9:16",
       images: [{ path: imagePath }],
       clientRequestId: "../../direct-oss-test?secret=1"
@@ -400,6 +492,9 @@ test("direct OSS mode uploads local references to the selected bucket without us
     assert.match(requests[0].url, /^https:\/\/puream-user-media\.oss-cn-hangzhou\.aliyuncs\.com\//);
     assert.equal(requests[0].options.method, "PUT");
     assert.match(String(requests[0].options.headers.authorization || ""), /^OSS LTAI-test-id:/);
+    assert.equal(requests[0].options.headers["x-oss-meta-puream-retention-seconds"], "7200");
+    assert.match(String(requests[0].options.headers["x-oss-meta-puream-expires-at"] || ""), /^20\d\d-/);
+    assert.equal(requests[0].options.headers["x-oss-meta-puream-cleanup"], "required");
     assert.equal(requests[0].url.includes("puream.cn/api/desktop/media/upload"), false);
     assert.equal(requests[0].url.includes(".."), false);
     assert.equal(requests[0].url.includes("secret"), false);
@@ -410,15 +505,18 @@ test("direct OSS mode uploads local references to the selected bucket without us
   }
 });
 
-test("project bridges are immutable per project and never reconfigure the shared client", () => {
+test("云端临时引用默认采用24小时生命周期且允许显式缩短", () => {
+  assert.equal(DEFAULT_REFERENCE_TTL_SECONDS, 86400);
+  assert.equal(normalizeVideoProvider({ kind: "puream-hailuo-h3" }).referenceUrlTtlSeconds, 86400);
+  assert.equal(normalizeVideoProvider({ kind: "puream-hailuo-h3", referenceUrlTtlSeconds: 7200 }).referenceUrlTtlSeconds, 7200);
+});
+
+test("H3 project bridges are immutable per project and never reconfigure the shared client", () => {
   const root = temporaryDirectory("puream-project-bridge-");
   try {
     const store = new WorkbenchStore(root);
     const cloud = store.createProject("云端项目");
     const local = store.createProject("本地项目");
-    store.patchProject(local.id, {
-      generation: { ...local.generation, engine: "seedance", videoProviderKind: "local-xiangsu", modeConfirmed: true }
-    });
     const forks = [];
     const sharedBridge = {
       marker: "unchanged",
@@ -432,7 +530,7 @@ test("project bridges are immutable per project and never reconfigure the shared
     const cloudBridge = workflow.videoBridgeForProject(cloud.id);
     const localBridge = workflow.videoBridgeForProject(local.id);
     assert.equal(cloudBridge.config.kind, "puream-hailuo-h3");
-    assert.equal(localBridge.config.kind, "local-xiangsu");
+    assert.equal(localBridge.config.kind, "puream-hailuo-h3");
     assert.notEqual(cloudBridge, localBridge);
     assert.equal(sharedBridge.marker, "unchanged");
     assert.equal(Object.prototype.hasOwnProperty.call(sharedBridge, "config"), false);
@@ -451,18 +549,6 @@ test("remote image payloads are bounded before and after base64 decoding", () =>
   assert.match(source, /REMOTE_IMAGE_TOO_LARGE/);
 });
 
-test("local plugin blocks private, carrier-grade, documentation and mapped download targets at connection lookup", () => {
-  for (const address of ["127.0.0.1", "10.0.0.1", "100.64.0.1", "169.254.1.2", "172.31.1.2", "192.168.1.2", "192.0.2.10", "198.18.0.1", "198.51.100.2", "203.0.113.3", "224.0.0.1", "::1", "fc00::1", "fe80::1", "2001:db8::1", "::ffff:7f00:1"]) {
-    assert.equal(XiangsuPlugin.isPrivateAddress(address), true, `${address} must remain blocked`);
-  }
-  assert.equal(XiangsuPlugin.isPrivateAddress("8.8.8.8"), false);
-  assert.equal(XiangsuPlugin.isPrivateAddress("2606:4700:4700::1111"), false);
-  const source = fs.readFileSync(path.join(__dirname, "..", "plugin", "lib", "plugin", "index.js"), "utf8");
-  assert.match(source, /transport\.get\(parsed, \{ timeout: 60_000, lookup: publicHttpsLookup \}/);
-  assert.match(source, /VIDEO_DOWNLOAD_CONTENT_TYPE_INVALID/);
-  assert.match(source, /declaredSize > 500 \* 1024 \* 1024/);
-});
-
 test("manual text limits fail before persistence and renderer never rewrites user input", () => {
   const root = temporaryDirectory("puream-text-limits-");
   try {
@@ -478,7 +564,8 @@ test("manual text limits fail before persistence and renderer never rewrites use
     const renderer = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.js"), "utf8");
     assert.doesNotMatch(renderer, /if \(masked !== value\) control\.value = masked/);
     assert.match(renderer, /text\.value = preview\.promptMode === "manual"/);
-    assert.match(renderer, /\? \(preview\.manualVideoPrompt \|\| compiledText\)/);
+    assert.match(renderer, /preview\.manualVideoPromptDisplayZh/);
+    assert.match(renderer, /\? preview\.manualVideoPrompt : displayCompiledText/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

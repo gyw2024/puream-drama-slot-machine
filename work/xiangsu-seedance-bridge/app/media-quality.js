@@ -1,7 +1,33 @@
 "use strict";
 
 const fs = require("node:fs");
-const { spawn } = require("node:child_process");
+const { runLocalMediaProcess, throwIfLocalMediaAborted } = require("./local-media-context");
+const LOCAL_MEDIA_PROCESS_TIMEOUT_MS = 20 * 60_000;
+
+async function yieldVisualAnalysis() {
+  throwIfLocalMediaAborted();
+  await new Promise(resolve => setImmediate(resolve));
+  throwIfLocalMediaAborted();
+}
+
+// The old synchronous N*N hash scan stalls Electron for several seconds on
+// a ten-minute film. Preserve the exact comparison and threshold, but bound
+// each uninterrupted batch so repaint, cancel and other projects can run.
+async function countRepeatedFrames(hashes, sampleFps) {
+  let repeated = 0;
+  let comparisons = 0;
+  for (let index = 0; index < hashes.length; index += 1) {
+    for (let otherIndex = 0; otherIndex < hashes.length; otherIndex += 1) {
+      if (++comparisons % 1024 === 0) await yieldVisualAnalysis();
+      if (Math.abs(otherIndex - index) > Math.max(3, sampleFps * 3)
+        && hashSimilarity(hashes[index], hashes[otherIndex]) >= 0.984375) {
+        repeated += 1;
+        break;
+      }
+    }
+  }
+  return repeated;
+}
 
 // Calibrated from the ten supplied realistic vertical-drama reference films.
 // The limits intentionally leave production headroom, but reject the latest
@@ -84,20 +110,10 @@ function parseAudioAnalysis(stderr, duration = 0) {
   };
 }
 
-function spawnText(executable, args, timeoutMs = 180_000) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => child.kill(), timeoutMs);
-    child.stdout.on("data", chunk => { if (stdout.length < 1_000_000) stdout += chunk.toString("utf8"); });
-    child.stderr.on("data", chunk => { if (stderr.length < 1_000_000) stderr += chunk.toString("utf8"); });
-    child.on("error", error => { clearTimeout(timer); reject(error); });
-    child.on("close", code => {
-      clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(Object.assign(new Error(stderr.slice(-1200) || `媒体检测失败：退出码 ${code}`), { code: "MEDIA_QUALITY_ANALYSIS_FAILED" }));
-    });
+function spawnText(executable, args, timeoutMs = LOCAL_MEDIA_PROCESS_TIMEOUT_MS) {
+  return runLocalMediaProcess(executable, args, { timeoutMs, maxBytes: 1_000_000 }).then(result => {
+    if (result.code !== 0) throw Object.assign(new Error(result.stderr.slice(-1200) || `媒体检测失败：退出码 ${result.code}`), { code: "MEDIA_QUALITY_ANALYSIS_FAILED" });
+    return { stdout: result.stdout.toString("utf8"), stderr: result.stderr };
   });
 }
 
@@ -208,6 +224,7 @@ async function auditVoiceReferenceFile(ffmpeg, filePath, expectedDuration = 0) {
       "-f", "null", "-"
     ]);
   } catch (error) {
+    throwIfLocalMediaAborted();
     const detail = String(error?.message || "");
     const noTrack = /matches no streams|does not contain any stream|stream map.*audio|audio stream.*not found/i.test(detail);
     return fail(noTrack ? "AUDIO_TRACK_MISSING" : "AUDIO_DECODE_FAILED",
@@ -247,27 +264,10 @@ async function auditVoiceReferenceFile(ffmpeg, filePath, expectedDuration = 0) {
   return { ok: true, ...base, ...metrics, codecVerified: true };
 }
 
-function spawnBuffer(executable, args, timeoutMs = 180_000, maxBytes = 8_000_000) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    const chunks = [];
-    let bytes = 0;
-    let stderr = "";
-    const timer = setTimeout(() => child.kill(), timeoutMs);
-    child.stdout.on("data", chunk => {
-      if (bytes >= maxBytes) return;
-      const remaining = maxBytes - bytes;
-      const kept = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
-      chunks.push(kept);
-      bytes += kept.length;
-    });
-    child.stderr.on("data", chunk => { if (stderr.length < 500_000) stderr += chunk.toString("utf8"); });
-    child.on("error", error => { clearTimeout(timer); reject(error); });
-    child.on("close", code => {
-      clearTimeout(timer);
-      if (code === 0) resolve(Buffer.concat(chunks));
-      else reject(Object.assign(new Error(stderr.slice(-1200) || `画面检测失败：退出码 ${code}`), { code: "VISUAL_QUALITY_ANALYSIS_FAILED" }));
-    });
+function spawnBuffer(executable, args, timeoutMs = LOCAL_MEDIA_PROCESS_TIMEOUT_MS, maxBytes = 8_000_000) {
+  return runLocalMediaProcess(executable, args, { timeoutMs, maxBytes }).then(result => {
+    if (result.code !== 0) throw Object.assign(new Error(result.stderr.slice(-1200) || `画面检测失败：退出码 ${result.code}`), { code: "VISUAL_QUALITY_ANALYSIS_FAILED" });
+    return result.stdout;
   });
 }
 
@@ -280,6 +280,7 @@ async function analyzeAudioFile(ffmpeg, filePath, duration) {
     ]);
     return { ok: true, ...parseAudioAnalysis(result.stderr, duration) };
   } catch (error) {
+    throwIfLocalMediaAborted();
     return {
       ok: false,
       meanVolumeDb: -Infinity,
@@ -397,6 +398,7 @@ async function analyzeImageFile(ffmpeg, filePath) {
     if (frame.length !== width * height) throw new Error("图片解码后没有完整画面");
     return { ok: true, hash: frameHash(frame, width, height) };
   } catch (error) {
+    throwIfLocalMediaAborted();
     return { ok: false, hash: "", error: error.message };
   }
 }
@@ -430,6 +432,7 @@ async function analyzeSceneFourViewLayout(ffmpeg, filePath) {
       const frame = output.subarray(0, width * height);
       return frame.length === width * height ? frameHash(frame, width, height) : "";
     } catch {
+      throwIfLocalMediaAborted();
       return "";
     }
   }));
@@ -464,11 +467,12 @@ async function analyzeImageDimensions(ffmpeg, filePath) {
     const height = Number(match[2]);
     return { ok: width > 0 && height > 0, width, height, aspectRatio: width / height };
   } catch (error) {
+    throwIfLocalMediaAborted();
     return { ok: false, width: 0, height: 0, aspectRatio: 0, error: error.message };
   }
 }
 
-async function analyzeStoryboardSheetGrid(ffmpeg, filePath, panelCount = 10) {
+async function analyzeStoryboardSheetGrid(ffmpeg, filePath, panelCount = 10, expectedGrid = null) {
   const dimensions = await analyzeImageDimensions(ffmpeg, filePath);
   if (!dimensions.ok) return { ok: false, dimensions, columns: 0, rows: 0, cells: [], error: dimensions.error || "无法读取合图尺寸" };
   const maxSide = 512;
@@ -692,8 +696,14 @@ async function analyzeStoryboardSheetGrid(ffmpeg, filePath, panelCount = 10) {
     // gutters because the labels/content dilute a row sample. If every
     // expected full-canvas separator is still present at the mathematically
     // expected position, use that deterministic grid as a verified fallback.
-    const expectedColumns = requested >= 13 ? 5 : (requested >= 7 && requested <= 8) || (requested >= 10 && requested <= 12) ? 4 : 3;
-    const expectedRows = Math.max(1, Math.ceil(requested / expectedColumns));
+    const declaredColumns = Math.max(0, Math.round(Number(expectedGrid?.columns) || 0));
+    const declaredRows = Math.max(0, Math.round(Number(expectedGrid?.rows) || 0));
+    const expectedColumns = declaredColumns > 0 && declaredRows > 0 && declaredColumns * declaredRows >= requested
+      ? declaredColumns
+      : requested >= 13 ? 5 : (requested >= 7 && requested <= 8) || (requested >= 10 && requested <= 12) ? 4 : 3;
+    const expectedRows = declaredColumns > 0 && declaredRows > 0 && declaredColumns * declaredRows >= requested
+      ? declaredRows
+      : Math.max(1, Math.ceil(requested / expectedColumns));
     const nearestSeparator = (records, position, extent) => records
       .filter(item => item.strength >= 0.58)
       .map(item => ({ item, distance: Math.abs(item.position - position) / Math.max(1, extent) }))
@@ -747,6 +757,7 @@ async function analyzeStoryboardSheetGrid(ffmpeg, filePath, panelCount = 10) {
       error: acceptedCells.length >= requested ? "" : `无法从合图安全识别 ${requested} 个分镜画格`
     };
   } catch (error) {
+    throwIfLocalMediaAborted();
     return { ok: false, dimensions, columns: 0, rows: 0, cells: [], error: error.message };
   }
 }
@@ -795,6 +806,7 @@ async function analyzeImageSkinOccupancy(ffmpeg, filePath) {
       centerSkinRatio: round(centerSkin / Math.max(1, centerTotal), 4)
     };
   } catch (error) {
+    throwIfLocalMediaAborted();
     return { ok: false, skinRatio: 0, centerSkinRatio: 0, error: error.message };
   }
 }
@@ -973,6 +985,7 @@ async function analyzeVideoEndpointFrames(ffmpeg, filePath) {
     ]);
     return { ok: true, firstHash, lastHash };
   } catch (error) {
+    throwIfLocalMediaAborted();
     return { ok: false, firstHash: "", lastHash: "", error: error.message };
   }
 }
@@ -1252,7 +1265,11 @@ async function analyzeOverlayVisualFile(ffmpeg, filePath, duration, sampleFps = 
     ], Math.max(180_000, Math.ceil(Number(duration) || 10) * 1000 + 60_000), Math.ceil(Math.max(1, Number(duration) || 10) * sampleFps + 2) * frameBytes);
     const frameCount = Math.floor(output.length / frameBytes);
     const frames = Array.from({ length: frameCount }, (_, index) => output.subarray(index * frameBytes, (index + 1) * frameBytes));
-    const records = frames.map((frame, index) => overlayTextFrameMetrics(frame, width, height, index, sampleFps));
+    const records = [];
+    for (let index = 0; index < frames.length; index += 1) {
+      if (index % 4 === 0) await yieldVisualAnalysis();
+      records.push(overlayTextFrameMetrics(frames[index], width, height, index, sampleFps));
+    }
     const likelyFrames = records.filter(item => item.likelyText);
     const clusters = new Map();
     for (const item of likelyFrames) {
@@ -1274,6 +1291,7 @@ async function analyzeOverlayVisualFile(ffmpeg, filePath, duration, sampleFps = 
       samples: likelyFrames.slice(0, 24)
     };
   } catch (error) {
+    throwIfLocalMediaAborted();
     return { ok: false, sampleFps, frameCount: 0, detected: false, likelyFrameCount: 0, persistentFrameCount: 0, persistentCenterY: 0, samples: [], error: error.message };
   }
 }
@@ -1297,6 +1315,7 @@ async function analyzeVisualFile(ffmpeg, filePath, duration, sampleFps = 2) {
     let currentNearFreezeFrames = 0;
     let sceneChangeCount = 0;
     for (let index = 1; index < frames.length; index += 1) {
+      if (index % 64 === 0) await yieldVisualAnalysis();
       const difference = meanAbsoluteDifference(frames[index - 1], frames[index]);
       motion.push(difference);
       if (difference <= 1.2) {
@@ -1307,15 +1326,16 @@ async function analyzeVisualFile(ffmpeg, filePath, duration, sampleFps = 2) {
       if (difference >= 10) sceneChangeCount += 1;
     }
     const sortedMotion = motion.slice().sort((a, b) => a - b);
-    const hashes = frames.map(frame => frameHash(frame, width, height));
-    const technicalFrames = frames.map((frame, index) => frameTechnicalIntegrity(frame, width, height, index, sampleFps));
+    const hashes = [];
+    const technicalFrames = [];
+    for (let index = 0; index < frames.length; index += 1) {
+      if (index % 32 === 0) await yieldVisualAnalysis();
+      hashes.push(frameHash(frames[index], width, height));
+      technicalFrames.push(frameTechnicalIntegrity(frames[index], width, height, index, sampleFps));
+    }
     const nearSolidFrames = technicalFrames.filter(item => item.nearSolid);
     const solidEdgeBandFrames = technicalFrames.filter(item => item.solidEdgeBand);
-    let repeated = 0;
-    for (let index = 0; index < hashes.length; index += 1) {
-      const hasNonAdjacentMatch = hashes.some((hash, otherIndex) => Math.abs(otherIndex - index) > Math.max(3, sampleFps * 3) && hashSimilarity(hashes[index], hash) >= 0.984375);
-      if (hasNonAdjacentMatch) repeated += 1;
-    }
+    const repeated = await countRepeatedFrames(hashes, sampleFps);
     const signatureIndexes = frameCount ? [0.2, 0.5, 0.8].map(ratio => Math.min(frameCount - 1, Math.max(0, Math.floor((frameCount - 1) * ratio)))) : [];
     const overlayText = await analyzeOverlayVisualFile(ffmpeg, filePath, duration, QUALITY_LIMITS.technicalVisual.overlaySampleFps);
     return {
@@ -1344,6 +1364,7 @@ async function analyzeVisualFile(ffmpeg, filePath, duration, sampleFps = 2) {
       technicalFailureSamples: technicalFrames.filter(item => item.nearSolid || item.solidEdgeBand).slice(0, 24)
     };
   } catch (error) {
+    throwIfLocalMediaAborted();
     return { ok: false, sampleFps, frameCount: 0, meanMotion: 0, medianMotion: 0, nearFreezeRatio: 1, longestNearFreezeSeconds: Number(duration) || 0, repeatedFrameRatio: 1, sceneChangeCount: 0, sceneChangesPerMinute: 0, signatures: [], sampleHashes: [], technicalIntegrityVersion: TECHNICAL_VISUAL_AUDIT_VERSION, overlayText: { ok: false, detected: false, samples: [] }, nearSolidFrameCount: 0, nearSolidFrameRatio: 0, solidEdgeBandFrameCount: 0, solidEdgeBandFrameRatio: 0, maxSolidEdgeFraction: 0, technicalFailureSamples: [], error: error.message };
   }
 }
@@ -1395,6 +1416,7 @@ async function analyzeTimedHardCuts(ffmpeg, filePath, boundaries = [], duration 
       boundaries: records
     };
   } catch (error) {
+    throwIfLocalMediaAborted();
     return { ok: false, expected: boundaries.length, detected: 0, cutsPresent: false, boundaries: [], error: error.message };
   }
 }
@@ -1568,6 +1590,7 @@ module.exports = {
   sceneDescriptionImpliesPeople,
   frameHash,
   hashSimilarity,
+  countRepeatedFrames,
   signatureSimilarity,
   findDuplicateShotPairs,
   buildRepairDirective

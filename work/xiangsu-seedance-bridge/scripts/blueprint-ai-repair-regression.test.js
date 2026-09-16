@@ -66,7 +66,7 @@ test("asset generation records production warnings without blocking asset work",
   assert.match(workflow, /Contract findings are available for targeted AI repair, but are not an[\s\S]*?execution lock/);
   assert.doesNotMatch(workflow, /if \(productionStructureGateEnabled\(settings, contractProject\)[\s\S]{0,500}?assertProductionHardContracts\(contractProject, contractOptions\);/);
   assert.doesNotMatch(workflow, /await this\.repairProductionContracts\(projectId, \{ track: false, automatic: true \}\)/);
-  assert.match(workflow, /for \(let attempt = 1; attempt <= 2 && failures\.length; attempt \+= 1\)/);
+  assert.match(workflow, /for \(let attempt = 1; attempt <= 1 && failures\.length; attempt \+= 1\)/);
   assert.match(workflow, /changedShotIds: \[\.\.\.changedShotIds\]/);
   assert.match(workflow, /sourcePreserved: true/);
 });

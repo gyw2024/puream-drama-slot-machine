@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { bindAgentSettings, normalizeSettings: normalizeLocalAgents } = require("./local-agent-runtime");
 const { PROMPT_LIBRARY_VERSION, defaultPromptTemplates } = require("./prompt-library");
 const { isActiveVideoJob } = require("./workbench-status");
 const { DEFAULT_BLUEPRINT_AUDIT_CHECKS, normalizeBlueprintAuditChecks } = require("./quality-blueprint");
@@ -19,10 +20,22 @@ const {
   normalizeCostEntry,
   normalizeCostLedger
 } = require("./project-costs");
-const { TEXT_PROVIDER_CATALOG, providerPreset, providerTemperature } = require("./text-provider-catalog");
+const { TEXT_PROVIDER_CATALOG, providerPreset, providerTemperature, providerModelCapability } = require("./text-provider-catalog");
+const {
+  ASSET_METADATA_CONTRACT_VERSION,
+  CASTING_LABELS,
+  characterAgeBand,
+  deactivateIneligibleProjectAssetBindings,
+  decorateProjectAssetMetadata,
+  explicitCharacterGender,
+  normalizeAgeBand: normalizeCharacterAgeBand,
+  normalizeGender: normalizeCharacterGender
+} = require("./asset-eligibility");
+const { VOICE_PROFILE_AUDIT_VERSION, auditVoiceFile } = require("./voice-profile-audit");
+const { PRODUCTION_PACKAGE_MODE } = require("./production-mode-matrix");
 
-const PROJECT_VERSION = 13;
-const SETTINGS_VERSION = 17;
+const PROJECT_VERSION = 19;
+const SETTINGS_VERSION = 22;
 const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const ARCHIVE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/;
 const MAX_SCRIPT_CHARS = 500_000;
@@ -36,6 +49,35 @@ const DEFAULT_QUALITY_GATE_MODULES = Object.freeze({
   videos: false,
   delivery: false
 });
+
+function readJsonIntegerFieldFromFile(filePath, fieldName) {
+  const token = `"${String(fieldName || "")}"`;
+  if (!token || !fs.existsSync(filePath)) return 0;
+  const chunkSize = 64 * 1024;
+  const overlapSize = token.length + 256;
+  const buffer = Buffer.allocUnsafe(chunkSize);
+  let descriptor = null;
+  let carry = "";
+  try {
+    descriptor = fs.openSync(filePath, "r");
+    while (true) {
+      const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (bytesRead <= 0) break;
+      const text = carry + buffer.subarray(0, bytesRead).toString("utf8");
+      const tokenIndex = text.indexOf(token);
+      if (tokenIndex >= 0) {
+        const match = text.slice(tokenIndex, tokenIndex + overlapSize).match(new RegExp(`${token}\\s*:\\s*(\\d+)`));
+        if (match) return Number(match[1]) || 0;
+      }
+      carry = text.slice(-overlapSize);
+    }
+  } catch {
+    return 0;
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+  return 0;
+}
 
 function assertTextLimit(value, maximum, label, code) {
   if (typeof value !== "string" || value.length <= maximum) return;
@@ -201,7 +243,7 @@ function promptValueHash(value) {
 function mergeStoredPromptDefaults(defaults = {}, saved = {}, legacyHashes = LEGACY_DEFAULT_PROMPT_HASHES) {
   const merged = { ...defaults };
   for (const [key, value] of Object.entries(saved || {})) {
-    const knownLegacyHashes = new Set(legacyHashes?.[key] || []);
+    const knownLegacyHashes = new Set([...(legacyHashes?.[key] || []),...(require('./legacy-prompt-hashes-v338.json')[key]||[])]);
     if (knownLegacyHashes.has(promptValueHash(value))) continue;
     merged[key] = value;
   }
@@ -216,9 +258,10 @@ function normalizePromptModes(defaults = {}, saved = {}, storedModes = {}, legac
       modes[key] = "custom";
       continue;
     }
+    if (storedModes?.[key] === "custom" && Object.prototype.hasOwnProperty.call(saved || {}, key)) { modes[key] = "custom"; continue; }
     const value = String(saved?.[key] ?? defaults?.[key] ?? "");
     const systemValue = String(defaults?.[key] ?? "");
-    const knownLegacy = new Set(legacyHashes?.[key] || []);
+    const knownLegacy = new Set([...(legacyHashes?.[key] || []),...(require('./legacy-prompt-hashes-v338.json')[key]||[])]);
     if (value === systemValue || knownLegacy.has(promptValueHash(value))) {
       modes[key] = "system";
       continue;
@@ -235,12 +278,48 @@ function normalizePureamTextModel(value) {
 const CANDIDATE_STAGES = Object.freeze({
   character: new Set(["character_sheet", "character_three_view", "character_intro", "character_video", "character_voice"]),
   scene: new Set(["scene_asset"]),
-  shot: new Set(["storyboard_start", "storyboard_end", "storyboard_sheet", "shot_video"]),
+  shot: new Set(["shot_anchor", "storyboard_start", "storyboard_end", "storyboard_sheet", "shot_video"]),
   library: new Set(["prop_asset", "wardrobe_asset", "voice_asset"])
 });
 
 function defaultAssetLibraries() {
   return { props: [], wardrobes: [], voices: [] };
+}
+
+function normalizeReusableAssetTags(value) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(/[，,;；\n\r]+/);
+  return [...new Set(raw
+    .map(item => String(item || "").trim())
+    .filter(Boolean)
+    .slice(0, 32))];
+}
+
+function normalizeReusableAssetGender(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (["male", "man", "男", "男性"].includes(text)) return "male";
+  if (["female", "woman", "女", "女性"].includes(text)) return "female";
+  return "";
+}
+
+function normalizeReusableAssetAgeBand(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (["youth", "young", "teen", "少年", "青年", "年轻", "青少年", "儿童"].includes(text)) return "youth";
+  if (["middle", "middle-aged", "中年"].includes(text)) return "middle";
+  if (["senior", "elder", "elderly", "老年"].includes(text)) return "senior";
+  return "";
+}
+
+function normalizeReusableCastingTier(value) {
+  const text = String(value || "").trim().toLowerCase();
+  const aliases = {
+    lead: "lead", protagonist: "lead", main: "lead", "主角": "lead",
+    supporting: "supporting", support: "supporting", "配角": "supporting",
+    cameo: "cameo", guest: "cameo", "特约": "cameo",
+    extra: "extra", "龙套": "extra",
+    background: "background", "背景": "background",
+    offscreen: "offscreen", "画外": "offscreen"
+  };
+  return aliases[text] || "";
 }
 
 function now() {
@@ -419,7 +498,14 @@ function semanticDependencyCandidates(project, candidate = {}) {
   if (candidate.entityType === "character") {
     if (candidate.stage === "character_intro") addEffective("character", candidate.entityId, ["character_three_view", "character_sheet"]);
     if (candidate.stage === "character_video") addEffective("character", candidate.entityId, ["character_intro", "character_three_view", "character_sheet"]);
-    if (candidate.stage === "character_voice") addEffective("character", candidate.entityId, ["character_video"]);
+    // A voice copied from the independent voice library is not derived from a
+    // face/wardrobe image or character seed video. Keeping that false edge in
+    // the lineage graph made confirming a new portrait silently discard an
+    // already verified library voice and could trigger a paid character-video
+    // fallback on the next asset run.
+    if (candidate.stage === "character_voice" && candidate.source !== "voice-library") {
+      addEffective("character", candidate.entityId, ["character_video"]);
+    }
   }
   if (candidate.entityType === "library" && candidate.stage === "wardrobe_asset") {
     const entry = libraryEntry(project, candidate.entityId, candidate.stage);
@@ -523,11 +609,20 @@ function isSemanticDependent(project, candidate, root) {
     return String(libraryEntry(project, candidate.entityId, candidate.stage)?.characterId || "") === String(root.entityId || "");
   }
   if (root.entityType === "character" && String(candidate.entityId || "") === String(root.entityId || "")) {
+    const independentLibraryVoice = candidate.entityType === "character"
+      && candidate.stage === "character_voice"
+      && candidate.source === "voice-library";
     if (["character_sheet", "character_three_view"].includes(rootStage)) {
-      if (candidate.entityType === "character" && ["character_intro", "character_video", "character_voice"].includes(candidate.stage)) return true;
+      if (candidate.entityType === "character" && ["character_intro", "character_video", "character_voice"].includes(candidate.stage)) {
+        return !independentLibraryVoice;
+      }
     }
-    if (rootStage === "character_intro" && candidate.entityType === "character" && ["character_video", "character_voice"].includes(candidate.stage)) return true;
-    if (rootStage === "character_video" && candidate.entityType === "character" && candidate.stage === "character_voice") return true;
+    if (rootStage === "character_intro" && candidate.entityType === "character" && ["character_video", "character_voice"].includes(candidate.stage)) {
+      return !independentLibraryVoice;
+    }
+    if (rootStage === "character_video" && candidate.entityType === "character" && candidate.stage === "character_voice") {
+      return !independentLibraryVoice;
+    }
   }
   if (candidate.entityType !== "shot") return false;
   const shot = (project.shots || []).find(item => String(item.id || "") === String(candidate.entityId || ""));
@@ -542,7 +637,7 @@ function isSemanticDependent(project, candidate, root) {
     return shotImpactedByRoot(project, shot, root) && ["storyboard_start", "storyboard_end", "storyboard_sheet", "shot_video"].includes(candidate.stage);
   }
   if (root.entityType === "shot" && String(candidate.entityId || "") === String(root.entityId || "")) {
-    // Start/end frames are sibling anchors for Seedance submit, not image-gen parents.
+    // Start/end frames are sibling temporal anchors for video submit, not image-gen parents.
     // Only the shot video depends on either frame changing.
     if (rootStage === "storyboard_start" || rootStage === "storyboard_end" || rootStage === "storyboard_sheet") {
       return candidate.stage === "shot_video";
@@ -736,7 +831,7 @@ function defaultAccountSwitchState() {
     pendingJobs: [],
     previousAccountFingerprint: "",
     currentAccountFingerprint: "",
-    message: "像塑登录态与本地项目数据相互独立",
+    message: "H3 云端视频不需要本地账号切换",
     errorCode: "",
     updatedAt: now()
   };
@@ -758,7 +853,9 @@ function defaultIdeation() {
 }
 
 function defaultTextProviderProfiles() {
-  return Object.fromEntries(Object.entries(TEXT_PROVIDER_CATALOG).map(([kind, preset]) => [kind, {
+  return Object.fromEntries(Object.entries(TEXT_PROVIDER_CATALOG).map(([kind, preset]) => {
+    const capability = providerModelCapability(kind, preset.defaultModel || "") || null;
+    return [kind, {
     kind,
     baseUrl: preset.baseUrl || "",
     apiKey: "",
@@ -767,8 +864,18 @@ function defaultTextProviderProfiles() {
     authSource: preset.authSource || "user",
     temperature: Number(preset.temperature ?? 0.3),
     ...(preset.temperaturePolicy ? { temperaturePolicy: preset.temperaturePolicy } : {}),
-    maxTokens: 16384
-  }]));
+    // Long structured scripts must not inherit a tiny generic completion cap.
+    // Each provider adapter still clamps to a documented/provider-reported
+    // maximum before dispatch.
+    maxTokens: Number(capability?.outputTokenLimit) || 100000,
+    ...(capability ? {
+      modelInputTokenLimit: Number(capability.inputTokenLimit) || 0,
+      modelOutputTokenLimit: Number(capability.outputTokenLimit) || 0,
+      modelCategory: capability.category || "text",
+      modelLifecycle: capability.lifecycle || ""
+    } : {})
+  }];
+  }));
 }
 
 function defaultSettings() {
@@ -779,6 +886,7 @@ function defaultSettings() {
     promptLibraryVersion: PROMPT_LIBRARY_VERSION,
     textProvider: { ...textProviderProfiles["puream-relay"] },
     textProviderProfiles,
+    localAgents: normalizeLocalAgents(),
     imageProvider: {
       kind: "puream-relay",
       baseUrl: "https://puream.cn",
@@ -790,10 +898,10 @@ function defaultSettings() {
       maxTestImages: 100
     },
     digitalHumanProvider: {
-      kind: "puream-grok",
+      kind: "puream-hailuo-h3",
       baseUrl: "https://puream.cn",
       apiKey: "",
-      model: "auto",
+      model: "hailuo-h3",
       authSource: "official-desktop"
     },
     videoStageModels: {
@@ -816,19 +924,21 @@ function defaultSettings() {
       ossAccessKeySecret: "",
       ossBucket: "",
       ossEndpoint: "",
-      referenceUrlTtlSeconds: 21600,
+      referenceUrlTtlSeconds: 86400,
       cloudVideoResolution: "480",
       hailuoApiMode: "auto",
+      hailuoReferenceAudioMode: "image_only",
       hailuoRefImageSize: "match",
       hailuoSeed: ""
     },
     generation: {
-      mode: "continuation",
+      mode: "asset_direct",
       keyframeConcurrency: 2,
       maxVideoConcurrency: 4,
       shotDuration: 5,
       aspectRatio: "9:16",
       qualityGatesEnabled: false,
+      agentDecisionAuthority: true,
       qualityGateModules: { ...DEFAULT_QUALITY_GATE_MODULES },
       blueprintAuditChecks: { ...DEFAULT_BLUEPRINT_AUDIT_CHECKS },
       visualStyle: "写实真人影视短剧，现代中国生活质感，真实皮肤与布料，表演克制自然，有动机的电影光，清晰主体层次，竖屏安全构图，人物、服装、场景、道具和商品跨镜一致"
@@ -839,14 +949,51 @@ function defaultSettings() {
 }
 
 function normalizeGenerationMode(value) {
+  if (value === PRODUCTION_PACKAGE_MODE) return PRODUCTION_PACKAGE_MODE;
+  if (value === "asset_direct") return "asset_direct";
   if (value === "keyframe") return "keyframe";
   if (value === "smart") return "smart";
   if (value === "storyboard_sheet") return "storyboard_sheet";
-  return "continuation";
+  if (value === "continuation") return "continuation"; // Existing projects remain readable.
+  return "asset_direct";
 }
 
-function normalizeVideoEngine(value) {
-  return value === "hailuo-h3" ? "hailuo-h3" : "seedance";
+function normalizeProductionPackageLineage(project) {
+  if (!project?.importedProductionPackage) return project;
+  project.importedProductionPackage = {
+    ...project.importedProductionPackage,
+    workflowMode: PRODUCTION_PACKAGE_MODE,
+    referenceAudioMode: "image_only"
+  };
+  project.generation = {
+    ...(project.generation || {}),
+    mode: PRODUCTION_PACKAGE_MODE,
+    modeConfirmed: true
+  };
+  const anchorAssetIds = new Set();
+  project.shots = (project.shots || []).map(shot => {
+    for (const reference of shot?.promptReviewReferencePlan?.images || []) {
+      if (reference?.type === "shot_anchor" && reference.assetId) anchorAssetIds.add(String(reference.assetId));
+    }
+    return {
+      ...shot,
+      videoStrategy: PRODUCTION_PACKAGE_MODE,
+      videoStrategyReason: "codex-production-package",
+      videoFrameStages: []
+    };
+  });
+  project.candidates = (project.candidates || []).map(candidate => (
+    candidate?.entityType === "shot"
+      && candidate?.importedAssetId
+      && anchorAssetIds.has(String(candidate.importedAssetId))
+      ? { ...candidate, stage: "shot_anchor" }
+      : candidate
+  ));
+  return project;
+}
+
+function normalizeVideoEngine(_value) {
+  return "hailuo-h3";
 }
 
 function normalizeScriptFormat(value) {
@@ -856,11 +1003,11 @@ function normalizeScriptFormat(value) {
 
 function defaultProductionPlan(options = {}) {
   return {
+    simpleAssetOnly: options.simpleAssetOnly === true,
     executionMode: options.executionMode === "full" ? "full" : "step",
     inputMode: options.inputMode === "manual" ? "manual" : "ai",
     scriptFormat: normalizeScriptFormat(options.scriptFormat),
     scriptFormatConfirmed: options.scriptFormatConfirmed === true,
-    commerceShotCount: normalizeCommerceShotCount(options.commerceShotCount, 3),
     scriptHandling: ["respect", "optimize", "recreate"].includes(options.scriptHandling)
       ? options.scriptHandling
       : (options.inputMode === "manual" ? "respect" : "optimize"),
@@ -905,6 +1052,7 @@ function defaultProject(title = "未命名漫剧", options = {}) {
     },
     generation: {
       engine,
+      videoProviderKind: "puream-hailuo-h3",
       mode,
       modeConfirmed: options.modeConfirmed !== false,
       modeConfirmedAt: options.modeConfirmed === false ? null : timestamp,
@@ -912,6 +1060,8 @@ function defaultProject(title = "未命名漫剧", options = {}) {
       aspectRatio: "9:16",
       shotDuration: [5, 10, 15].includes(Number(options.shotDuration)) ? Number(options.shotDuration) : 10,
       targetDurationSeconds: Math.max(30, Math.round(Number(options.targetDurationSeconds) || 300)),
+      commerceTargetRatio: require('./commerce-target-policy').resolve(options),
+      commerceTargetSource: options.commerceTargetSource==='user'?'user':'reference',
       durationLocked: false,
       durationContract: null
     },
@@ -1054,6 +1204,57 @@ function invalidateProjectProductionPlan(project, reasons = []) {
   return reasonText;
 }
 
+function invalidateProjectVideoPlan(project, reasons = []) {
+  const revision = project.productionRevision || "";
+  const reasonText = `${reasons.join("、") || "视频算力"}已变化；已生成的图片资产与分镜帧继续复用，旧视频仅保留在历史中`;
+  archiveStoreFinalVideo(project, reasonText);
+  for (const candidate of project.candidates || []) {
+    if ((candidate.productionRevision || "") !== revision) continue;
+    if (!["character_video", "shot_video"].includes(String(candidate.stage || ""))) continue;
+    candidate.stale = true;
+    candidate.staleAt = now();
+    candidate.staleReason = reasonText;
+    candidate.selected = false;
+  }
+  for (const job of project.jobs || []) {
+    if ((job.productionRevision || "") !== revision) continue;
+    const kind = `${job.type || ""} ${job.stage || ""} ${job.category || ""}`;
+    if (!/video/i.test(kind)) continue;
+    job.staleByEdit = true;
+    job.staleReason = "视频算力切换后旧视频任务只保留历史，不进入当前成片";
+  }
+  for (const shot of project.shots || []) {
+    delete shot.hailuoPrompt;
+    delete shot.hailuoPromptSpec;
+    delete shot.agentCameraTakePlan;
+    if (shot.promptMode !== "manual") {
+      delete shot.systemVideoPrompt;
+      delete shot.systemVideoPromptDisplayZh;
+    }
+    delete shot.promptReviewReferencePlan;
+  }
+  // The visible Chinese edits remain on manual prompts. System video prompts
+  // must be rebuilt for the newly selected provider before any paid submit.
+  project.promptReview = null;
+  if (project.generation?.durationContract && typeof project.generation.durationContract === "object") {
+    project.generation.durationContract = {
+      ...project.generation.durationContract,
+      providerKind: String(project.generation.videoProviderKind || "")
+    };
+  }
+  project.finalVideoPath = "";
+  project.finalVideoSource = "";
+  project.finalVideoStale = false;
+  project.finalVideoStaleAt = "";
+  project.finalVideoStaleReason = "";
+  project.mediaQualityAudit = null;
+  project.audioQualityAudit = null;
+  project.finalQualityAudit = null;
+  project.finalAudioAudit = null;
+  project.finalVisualAudit = null;
+  project.finalDurationAudit = null;
+}
+
 function deepCloneJson(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
@@ -1111,10 +1312,13 @@ function mergeThreeWay(base, memory, disk) {
   return result;
 }
 
-function attachStoreBaseline(project, baseline = project) {
+function attachStoreBaseline(project, baseline = project, options = {}) {
   if (!project || typeof project !== "object") return project;
   Object.defineProperty(project, "__storeBaseline", {
-    value: deepCloneJson(baseline),
+    // getProject already creates a detached clone before normalizing the live
+    // object. Re-cloning multi-megabyte projects here doubled every project
+    // open/switch cost without adding any isolation.
+    value: options.detached === true ? baseline : deepCloneJson(baseline),
     enumerable: false,
     configurable: true,
     writable: true
@@ -1354,6 +1558,12 @@ function mergeProjectForConcurrentSave(diskProject, memoryProject, baselineProje
   return merged;
 }
 
+function projectShotIdentitiesAreUnique(project) {
+  if (!project || !Array.isArray(project.shots)) return false;
+  const ids = project.shots.map(shot => String(shot?.id || "").trim());
+  return ids.every(Boolean) && new Set(ids).size === ids.length;
+}
+
 function activeVideoJobRecords(project = {}) {
   const latestByRevisionAndEntity = new Map();
   for (const job of project.jobs || []) {
@@ -1410,6 +1620,7 @@ class WorkbenchStore {
     // launch and repeatedly rewrite the whole JSON index.
     this.reusableAssetLibraryHydrated = fs.existsSync(this.reusableAssetLibraryIndexPath)
       || fs.existsSync(`${this.reusableAssetLibraryIndexPath}.bak`);
+    this.voiceLibraryHydrated = false;
     this.foundryKernel = secretCodec.foundryKernel || null;
     this.trashDir = path.join(rootDir, "trash");
     this.activeVideoJobsCache = null;
@@ -1445,7 +1656,179 @@ class WorkbenchStore {
     return result;
   }
 
+  readVoiceLibraryIndexUnsafe() {
+    return readJsonFile(this.voiceLibraryIndexPath, {
+      missingValue: { version: 2, voices: [] },
+      validate: value => Array.isArray(value?.voices),
+      errorCode: "VOICE_LIBRARY_INDEX_CORRUPTED",
+      errorMessage: "声音库索引已损坏，且没有可用备份；已停止写入以保护原文件"
+    });
+  }
+
+  sourceCharacterForVoice(entry = {}) {
+    const projectId = String(entry?.source?.projectId || "").trim();
+    const characterId = String(entry?.source?.characterId || "").trim();
+    if (!PROJECT_ID_PATTERN.test(projectId) || !characterId) return null;
+    const sourcePath = path.join(this.projectsDir, projectId, "project.json");
+    if (!fs.existsSync(sourcePath)) return null;
+    try {
+      const project = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
+      return (Array.isArray(project.characters) ? project.characters : []).find(item => String(item?.id || "") === characterId) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  voiceDisplayLabel(entry = {}) {
+    const name = String(entry.characterName || entry.label || entry.id || "音色")
+      .replace(/\s*·\s*(?:儿童|少年|青年|中年|老年|男声|女声|性别待确认|年龄待确认)\s*/gu, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+    const gender = normalizeCharacterGender(entry.gender);
+    const ageBand = normalizeCharacterAgeBand(entry.ageBand);
+    return [name, ageBand, gender === "female" ? "女声" : gender === "male" ? "男声" : "性别待确认"].filter(Boolean).join(" · ");
+  }
+
+  ensureVoiceLibraryHydrated() {
+    if (this.voiceLibraryHydrated) return;
+    this.voiceLibraryHydrated = true;
+    const index = this.readVoiceLibraryIndexUnsafe();
+    const voices = Array.isArray(index.voices) ? index.voices.map(item => ({ ...item })) : [];
+    const byId = new Map(voices.map(item => [String(item?.id || ""), item]).filter(([id]) => id));
+    let changed = Number(index?.version || 0) < 2;
+    const manifestPath = path.join(__dirname, "assets", "builtin-voices", "manifest.json");
+    if (fs.existsSync(manifestPath)) {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      const packId = String(manifest.packId || "puream-voice-pack-40-v1");
+      for (const preset of Array.isArray(manifest?.voices) ? manifest.voices : []) {
+        const id = String(preset?.id || "").trim();
+        const sourcePath = path.join(path.dirname(manifestPath), String(preset?.file || ""));
+        if (!id || !fs.existsSync(sourcePath)) continue;
+        const targetPath = path.join(this.voiceLibraryFilesDir, `${id}.wav`);
+        const previous = byId.get(id) || null;
+        const declaredGender = normalizeCharacterGender(preset.gender);
+        const cached = previous?.builtIn === true
+          && previous.packId === packId
+          && path.resolve(String(previous.filePath || "")) === path.resolve(targetPath)
+          && fs.existsSync(targetPath)
+          && Number(previous.audioProfileAudit?.version || 0) === VOICE_PROFILE_AUDIT_VERSION
+          && String(previous.audioProfileAudit?.declaredGender || "") === declaredGender
+          && String(previous.fingerprint || "").startsWith(`builtin|${id}|`);
+        let sourceSha256 = "";
+        let audit = previous?.audioProfileAudit || null;
+        if (cached) {
+          sourceSha256 = String(previous.fingerprint || "").split("|").pop() || "";
+        } else {
+          const sourceIdentity = fileDependencyIdentity(sourcePath);
+          const targetIdentity = fileDependencyIdentity(targetPath);
+          sourceSha256 = sourceIdentity.sha256;
+          if (!targetIdentity.sha256 || targetIdentity.sha256 !== sourceIdentity.sha256) fs.copyFileSync(sourcePath, targetPath);
+          audit = auditVoiceFile(targetPath, declaredGender);
+        }
+        const profileCompatible = !audit.acousticGender || audit.acousticGender === declaredGender;
+        const next = {
+          ...(previous || {}),
+          id,
+          label: String(preset.label || id),
+          characterName: String(preset.label || id).split("·")[0].trim(),
+          gender: declaredGender,
+          ageBand: normalizeCharacterAgeBand(preset.ageBand),
+          voiceDescription: String(preset.voiceDescription || "纯梦内置人物音色"),
+          identityHints: "内置人物音色，可跨项目直接试听与绑定",
+          tags: normalizeReusableAssetTags(["内置音色", "可跨项目", ...(preset.tags || [])]),
+          filePath: targetPath,
+          fileUrl: pathToFileURL(targetPath).href,
+          duration: audit.duration,
+          audioSpec: audit.audioSpec,
+          audioProfileAudit: audit,
+          mediaProbeVerified: audit.ok,
+          profileVerified: audit.ok && profileCompatible && audit.verified === true,
+          profileVerificationSource: audit.verified === true ? "curated-and-acoustic" : "curated-source-pending-acoustic",
+          builtIn: true,
+          lockedMetadata: true,
+          packId,
+          fingerprint: `builtin|${id}|${sourceSha256}`,
+          source: { type: "builtin-puream-voice-pack", packId, presetId: id },
+          useCount: Number(previous?.useCount || 0),
+          createdAt: previous?.createdAt || now(),
+          updatedAt: previous?.updatedAt || now()
+        };
+        if (JSON.stringify(next) !== JSON.stringify(previous)) {
+          next.updatedAt = now();
+          changed = true;
+        }
+        byId.set(id, next);
+      }
+    }
+    for (const [id, original] of [...byId.entries()]) {
+      if (original.builtIn === true || !original.filePath || !fs.existsSync(original.filePath)) continue;
+      let audit = original.audioProfileAudit;
+      try {
+        const identity = fileDependencyIdentity(original.filePath);
+        if (Number(audit?.version || 0) !== VOICE_PROFILE_AUDIT_VERSION || audit?.sha256 !== identity.sha256) {
+          audit = path.extname(original.filePath).toLowerCase() === ".wav" ? auditVoiceFile(original.filePath, "") : null;
+        }
+      } catch {
+        audit = null;
+      }
+      const sourceCharacter = this.sourceCharacterForVoice(original);
+      const declaredGender = explicitCharacterGender(sourceCharacter || {}) || normalizeCharacterGender(original.gender || original.voiceGender);
+      const acousticGender = audit?.confidence >= 0.7 ? normalizeCharacterGender(audit.acousticGender) : "";
+      const repairedGender = acousticGender || declaredGender;
+      const repairedAgeBand = characterAgeBand(sourceCharacter || {}) || normalizeCharacterAgeBand(original.ageBand || original.voiceAgeBand);
+      const mismatch = Boolean(declaredGender && acousticGender && declaredGender !== acousticGender);
+      const repaired = {
+        ...original,
+        gender: repairedGender,
+        ageBand: repairedAgeBand,
+        audioProfileAudit: audit,
+        audioSpec: audit?.audioSpec || original.audioSpec || null,
+        duration: audit?.duration || Number(original.duration) || null,
+        profileVerified: Boolean(audit?.ok && acousticGender),
+        profileVerificationSource: acousticGender ? "acoustic-profile" : "metadata-pending-audio-verification",
+        metadataRepair: mismatch || normalizeCharacterGender(original.gender) !== repairedGender || normalizeCharacterAgeBand(original.ageBand) !== repairedAgeBand
+          ? {
+            previousGender: normalizeCharacterGender(original.gender),
+            previousAgeBand: normalizeCharacterAgeBand(original.ageBand),
+            repairedGender,
+            repairedAgeBand,
+            reason: mismatch ? "declared_gender_conflicted_with_audio" : "normalized_from_source_character_and_audio",
+            repairedAt: now()
+          }
+          : original.metadataRepair || null,
+        tags: normalizeReusableAssetTags([
+          ...(original.tags || []),
+          repairedGender === "female" ? "女声" : repairedGender === "male" ? "男声" : "性别待确认",
+          repairedAgeBand || "年龄待确认",
+          acousticGender ? "音频画像已核验" : "待音频核验"
+        ]),
+        updatedAt: original.updatedAt || now()
+      };
+      repaired.label = this.voiceDisplayLabel(repaired);
+      if (JSON.stringify(repaired) !== JSON.stringify(original)) {
+        repaired.updatedAt = now();
+        changed = true;
+      }
+      byId.set(id, repaired);
+    }
+    if (changed) this.saveVoiceLibrary([...byId.values()]);
+  }
+
+  applyVerifiedVoiceProfilesToProject(project = {}) {
+    this.ensureVoiceLibraryHydrated();
+    const voices = this.readVoiceLibraryIndexUnsafe().voices || [];
+    const byId = new Map(voices.map(item => [String(item?.id || ""), item]));
+    for (const character of Array.isArray(project.characters) ? project.characters : []) {
+      const voice = byId.get(String(character.voiceLibraryId || ""));
+      if (!voice?.profileVerified) continue;
+      if (!explicitCharacterGender(character) && voice.gender) character.gender = normalizeCharacterGender(voice.gender);
+      if (!characterAgeBand(character) && voice.ageBand) character.ageBand = normalizeCharacterAgeBand(voice.ageBand);
+    }
+    return project;
+  }
+
   listVoiceLibrary() {
+    this.ensureVoiceLibraryHydrated();
     const parsed = readJsonFile(this.voiceLibraryIndexPath, {
       missingValue: { voices: [] },
       validate: value => Array.isArray(value?.voices),
@@ -1467,7 +1850,7 @@ class WorkbenchStore {
         updatedAt: item.updatedAt || now()
       }));
     atomicWriteJson(this.voiceLibraryIndexPath, {
-      version: 1,
+      version: 2,
       updatedAt: now(),
       voices: normalized
     });
@@ -1523,6 +1906,9 @@ class WorkbenchStore {
     const voices = this.listVoiceLibrary();
     const target = voices.find(item => item.id === id);
     if (!target) return null;
+    if (target.builtIn === true) {
+      throw Object.assign(new Error("纯梦内置音色属于软件基础资源，不能删除；可在项目里改绑其他音色"), { code: "BUILTIN_VOICE_DELETE_FORBIDDEN" });
+    }
     const next = voices.filter(item => item.id !== id);
     this.saveVoiceLibrary(next);
     this.moveFileToTrash(target.filePath, this.voiceLibraryFilesDir, "voice-library-delete");
@@ -1560,6 +1946,27 @@ class WorkbenchStore {
       assets: normalized
     });
     return normalized;
+  }
+
+  updateReusableAssetMetadata(assetId, metadata = {}) {
+    const id = String(assetId || "").trim();
+    if (!id) throw Object.assign(new Error("资产库条目 ID 不能为空"), { code: "REUSABLE_ASSET_ID_REQUIRED" });
+    const gender = normalizeReusableAssetGender(metadata.gender);
+    const ageBand = normalizeReusableAssetAgeBand(metadata.ageBand);
+    const castingTier = normalizeReusableCastingTier(metadata.castingTier || metadata.roleType);
+    const tags = normalizeReusableAssetTags(metadata.tags);
+    const voices = this.listVoiceLibrary();
+    const voiceIndex = voices.findIndex(item => item.id === id);
+    if (voiceIndex >= 0) {
+      const entry = this.upsertVoiceLibraryEntry({ ...voices[voiceIndex], gender, ageBand, castingTier, roleType: castingTier, tags, profileVerified: false, profileVerificationSource: "manual-metadata-edit" });
+      return { ...entry, kind: "voice", mediaType: "audio", stage: "character_voice", librarySource: "voice" };
+    }
+    const assets = this.readReusableAssetLibrary();
+    const index = assets.findIndex(item => item.id === id);
+    if (index < 0) throw Object.assign(new Error("资产库条目不存在"), { code: "REUSABLE_ASSET_NOT_FOUND" });
+    assets[index] = { ...assets[index], gender, ageBand, castingTier, roleType: castingTier, tags, updatedAt: now() };
+    this.saveReusableAssetLibrary(assets);
+    return assets[index];
   }
 
   importReusableAsset(sourcePath, options = {}) {
@@ -1603,6 +2010,11 @@ class WorkbenchStore {
       stage: String(options.stage || ({ character: "character_sheet", scene: "scene_asset", prop: "prop_asset", wardrobe: "wardrobe_asset", product: "product_asset" })[kind] || ""),
       label: String(options.label || path.basename(sourcePath, rawExtension) || entryId).trim(),
       description: String(options.description || "手动上传到独立资产库").trim(),
+      gender: normalizeReusableAssetGender(options.gender),
+      ageBand: normalizeReusableAssetAgeBand(options.ageBand),
+      castingTier: normalizeReusableCastingTier(options.castingTier || options.roleType),
+      roleType: normalizeReusableCastingTier(options.castingTier || options.roleType),
+      tags: normalizeReusableAssetTags([kind, ...(options.tags || [])]),
       filePath: targetPath,
       fileUrl: pathToFileURL(targetPath).href,
       fingerprint,
@@ -1676,6 +2088,15 @@ class WorkbenchStore {
     const project = options.project?.id === projectId ? options.project : this.getProject(projectId);
     const candidate = (project.candidates || []).find(item => item.id === candidateId);
     if (!candidate) throw Object.assign(new Error("待入库资产不存在"), { code: "CANDIDATE_NOT_FOUND" });
+    if (candidate.stage === "shot_video" && (
+      candidate.internalGenerationBlock === true
+      || candidate.recoveredInternalBlock === true
+      || candidate.incompleteShotVideo === true
+    )) {
+      throw Object.assign(new Error("分镜内部生成片段不是完整视频，禁止进入资产库"), {
+        code: "SHOT_VIDEO_INTERNAL_BLOCK_NOT_LIBRARY_ELIGIBLE"
+      });
+    }
     const characterStages = new Set(["character_sheet", "character_intro", "character_three_view"]);
     const mapping = candidate.entityType === "character" && characterStages.has(candidate.stage)
       ? { kind: "character", mediaType: "image", owner: (project.characters || []).find(item => item.id === candidate.entityId) }
@@ -1709,6 +2130,11 @@ class WorkbenchStore {
     }
     const { kind, mediaType, owner } = mapping;
     if (!owner) throw Object.assign(new Error("资产所属角色或场景不存在"), { code: "CANDIDATE_ENTITY_MISSING" });
+    if ((candidate.entityType === "character" && owner.assetRequired === false) || (kind === "prop" && owner.assetRequired === false)) {
+      throw Object.assign(new Error(owner.assetDecision?.reason || owner.assetDecisionReason || "该对象不需要独立资产，已跳过自动入库"), {
+        code: "ASSET_NOT_LIBRARY_ELIGIBLE"
+      });
+    }
     const fileIdentity = fileDependencyIdentity(candidate.filePath);
     if (!fileIdentity.sha256) throw Object.assign(new Error("无法读取资产文件指纹"), { code: "REUSABLE_ASSET_HASH_FAILED" });
     const fingerprint = hashStablePayload({ kind, stage: candidate.stage, sha256: fileIdentity.sha256 });
@@ -1730,7 +2156,22 @@ class WorkbenchStore {
       mediaType,
       stage: candidate.stage,
       label: owner.name || owner.label || candidate.entityId,
-      description: owner.identitySignature || owner.description || owner.atmosphere || "",
+      description: owner.appearanceDescription || owner.identitySignature || owner.description || owner.atmosphere || "",
+      gender: normalizeReusableAssetGender(owner.gender || owner.sex),
+      ageBand: normalizeReusableAssetAgeBand(owner.ageBand || owner.ageGroup),
+      castingTier: String(owner.castingTier || owner.roleType || ""),
+      roleType: String(owner.roleType || owner.castingTier || ""),
+      importance: String(owner.importance || ""),
+      assetRequired: owner.assetRequired !== false,
+      tags: normalizeReusableAssetTags([
+        kind,
+        ...(owner.tags || []),
+        ...(owner.assetTags || []),
+        owner.gender || owner.sex || "",
+        owner.ageBand || owner.ageGroup || "",
+        CASTING_LABELS[owner.castingTier] || "",
+        owner.role || ""
+      ]),
       filePath: targetPath,
       fileUrl: pathToFileURL(targetPath).href,
       fingerprint,
@@ -1752,6 +2193,39 @@ class WorkbenchStore {
     else assets.unshift(entry);
     if (options.deferSave !== true) this.saveReusableAssetLibrary(assets);
     return entry;
+  }
+
+  linkConfirmedProjectAssetsToLibrary(projectId) {
+    const project = this.getProject(projectId);
+    const assets = this.readReusableAssetLibrary();
+    const linked = [];
+    let projectChanged = false;
+    for (const candidate of project.candidates || []) {
+      if (candidate.selected !== true || candidate.stale === true || !candidate.filePath || !fs.existsSync(candidate.filePath)) continue;
+      const supported = (candidate.entityType === "character" && ["character_sheet", "character_intro", "character_three_view"].includes(candidate.stage))
+        || (candidate.entityType === "scene" && candidate.stage === "scene_asset")
+        || (candidate.entityType === "library" && ["prop_asset", "wardrobe_asset"].includes(candidate.stage));
+      if (!supported) continue;
+      try {
+        const entry = this.depositReusableAssetFromCandidate(projectId, candidate.id, {
+          project,
+          libraryAssets: assets,
+          deferSave: true
+        });
+        if (candidate.reusableAssetId !== entry.id) {
+          candidate.reusableAssetId = entry.id;
+          candidate.libraryDepositedAt = now();
+          candidate.libraryWarning = "";
+          projectChanged = true;
+        }
+        linked.push({ candidateId: candidate.id, reusableAssetId: entry.id, entityType: candidate.entityType, entityId: candidate.entityId, stage: candidate.stage });
+      } catch (error) {
+        if (error?.code !== "ASSET_NOT_LIBRARY_ELIGIBLE") throw error;
+      }
+    }
+    this.saveReusableAssetLibrary(assets);
+    if (projectChanged) this.saveProject(project);
+    return linked;
   }
 
   syncReusableAssetLibraryFromProjects() {
@@ -1794,6 +2268,7 @@ class WorkbenchStore {
       throw Object.assign(new Error("可复用资产类型无效"), { code: "REUSABLE_ASSET_KIND_INVALID" });
     }
     const assets = (this.reusableAssetLibraryHydrated ? this.readReusableAssetLibrary() : this.syncReusableAssetLibraryFromProjects())
+      .filter(item => item.assetRequired !== false)
       .filter(item => !normalizedKind || item.kind === normalizedKind)
       .sort((left, right) => String(right.lastUsedAt || right.updatedAt || right.createdAt || "").localeCompare(String(left.lastUsedAt || left.updatedAt || left.createdAt || "")));
     return assets;
@@ -1929,35 +2404,42 @@ class WorkbenchStore {
     atomicWriteJson(this.indexPath, index);
   }
 
+  refreshProjectSummary(project) {
+    if (!project?.id) return null;
+    const index = this.readIndex();
+    const summary = this.projectSummary(project);
+    const position = index.projects.findIndex(item => item.id === project.id);
+    if (position >= 0) {
+      if (JSON.stringify(index.projects[position]) === JSON.stringify(summary)) return summary;
+      index.projects[position] = summary;
+    } else {
+      index.projects.unshift(summary);
+    }
+    this.writeIndex(index);
+    return summary;
+  }
+
   listProjects() {
     const indexed = this.readIndex().projects.slice();
-    if (!this.foundryKernel?.runtime?.listProjectStates) return indexed.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    if (!this.foundryKernel?.runtime) return indexed.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
     const byId = new Map(indexed.map(item => [item.id, item]));
-    for (const row of this.foundryKernel.runtime.listProjectStates()) {
+    const rows = typeof this.foundryKernel.runtime.listProjectStateHeaders === "function"
+      ? this.foundryKernel.runtime.listProjectStateHeaders()
+      : this.foundryKernel.runtime.listProjectStates().map(({ project, ...row }) => row);
+    for (const row of rows) {
       // A real project folder is the lifecycle boundary. Deleted projects are
       // moved out of this directory, while a crash between the SQLite commit
       // and JSON mirror write still leaves the newly created folder recoverable.
       if (!row.projectId || !fs.existsSync(this.projectDir(row.projectId))) continue;
-      // Runtime snapshots can lag behind user-facing metadata after a rename
-      // while an automation is running. Keep runtime progress, but prefer the
-      // project file's title so an existing project is never shown as another one.
-      let diskProject = null;
+      // The project index is deliberately the user-facing summary cache. Do not
+      // parse every SQLite snapshot (or every JSON mirror) merely to populate a
+      // selector. Only recover the exceptional runtime-only row individually.
+      const indexedSummary = byId.get(row.projectId);
+      if (indexedSummary && indexedSummary.status !== "corrupted") continue;
       try {
-        diskProject = readJsonFile(this.projectPath(row.projectId), {
-          validate: value => value?.id === row.projectId,
-          errorCode: "PROJECT_FILE_CORRUPTED"
-        });
+        const runtimeProject = this.foundryKernel.runtime.loadProject(row.projectId);
+        if (runtimeProject) byId.set(row.projectId, this.projectSummary(runtimeProject, row.updatedAt));
       } catch {}
-      const runtimeProject = row.project || {};
-      const summaryProject = {
-        ...runtimeProject,
-        ...(diskProject || {}),
-        title: diskProject?.title || runtimeProject.title,
-        workspaceTitle: diskProject?.workspaceTitle || runtimeProject.workspaceTitle,
-        id: row.projectId,
-        updatedAt: row.updatedAt || runtimeProject.updatedAt || diskProject?.updatedAt
-      };
-      byId.set(row.projectId, this.projectSummary(summaryProject));
     }
     return [...byId.values()].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
@@ -1969,6 +2451,7 @@ class WorkbenchStore {
       status: project.status || "draft",
       updatedAt: project.updatedAt || project.createdAt || fallbackUpdatedAt,
       automationStatus: project.automation?.status || "idle",
+      assetMetadataContractVersion: Number(project.assetMetadataContractVersion || 0),
       activeVideoJobs: activeVideoJobRecords(project)
     };
   }
@@ -2145,7 +2628,14 @@ class WorkbenchStore {
     const diskTime = Date.parse(String(diskProject?.updatedAt || ""));
     const preferDisk = diskProject?.id === String(projectId || "")
       && Number.isFinite(diskTime)
-      && (!Number.isFinite(runtimeTime) || diskTime > runtimeTime);
+      && (
+        !Number.isFinite(runtimeTime)
+        || diskTime > runtimeTime
+        // Foundry is a recovery mirror, not permission to replace a valid
+        // 70-shot JSON project with a newer corrupt snapshot whose H3 block
+        // ids were collapsed (for example S02-B01/S02-B02 -> S02/S02).
+        || (projectShotIdentitiesAreUnique(diskProject) && !projectShotIdentitiesAreUnique(runtimeProject))
+      );
     const project = preferDisk ? diskProject : (runtimeProject || readJsonFile(filePath, {
         validate: value => value?.id === String(projectId || ""),
         errorCode: "PROJECT_FILE_CORRUPTED",
@@ -2162,6 +2652,7 @@ class WorkbenchStore {
     project.activity = Array.isArray(project.activity) ? project.activity : [];
     project.finalVideoHistory = Array.isArray(project.finalVideoHistory) ? project.finalVideoHistory : [];
     project.promptIntake = normalizePromptIntake(project.promptIntake);
+    normalizeProductionPackageLineage(project);
     project.assetLibraries = {
       ...defaultAssetLibraries(),
       ...(project.assetLibraries || {}),
@@ -2181,6 +2672,30 @@ class WorkbenchStore {
       ...(project.ideation || {}),
       topics: Array.isArray(project.ideation?.topics) ? project.ideation.topics : []
     };
+    const obsoleteTopicProductFailure = String(project.ideation?.errorCode || "") === "TOPIC_PRODUCT_CONTEXT_STALE"
+      || String(project.automation?.errorCode || "") === "TOPIC_PRODUCT_CONTEXT_STALE"
+      || /商品资料在选题生成后发生了变化|重新生成一轮适配当前商品的选题/.test(`${project.ideation?.message || ""} ${project.automation?.message || ""}`);
+    if (obsoleteTopicProductFailure) {
+      const selectedTopicId = String(project.ideation.selectedTopicId || "").trim();
+      const hasSelectedTopic = project.ideation.topics.some(item => String(item?.id || "") === selectedTopicId);
+      project.ideation = {
+        ...project.ideation,
+        status: hasSelectedTopic ? "topic_selected" : (project.ideation.topics.length ? "ready" : "draft"),
+        errorCode: "",
+        message: hasSelectedTopic
+          ? "商品资料会在写作开始时自动同步到已选题材，无需重新抽题"
+          : "商品资料已恢复为可继续状态"
+      };
+      project.automation = {
+        ...project.automation,
+        status: "idle",
+        operation: "",
+        stage: "",
+        message: "",
+        errorCode: "",
+        recoverableFailure: false
+      };
+    }
     const legacyProductionPlan = project.productionPlan && typeof project.productionPlan === "object"
       ? project.productionPlan
       : {};
@@ -2203,41 +2718,72 @@ class WorkbenchStore {
     const legacyGeneration = project.generation || {};
     const minimumProjectSeconds = project.productionPlan.inputMode === "manual" ? 1 : 30;
     project.generation = {
-      engine: normalizeVideoEngine(legacyGeneration.engine),
-      videoProviderKind: legacyGeneration.videoProviderKind
-        || (legacyGeneration.engine === "hailuo-h3" ? "puream-hailuo-h3" : ""),
-      mode: normalizeGenerationMode(legacyGeneration.mode),
+      engine: "hailuo-h3",
+      videoProviderKind: "puream-hailuo-h3",
+      mode: normalizeGenerationMode(project.importedProductionPackage ? PRODUCTION_PACKAGE_MODE : legacyGeneration.mode),
       modeConfirmed: legacyGeneration.modeConfirmed === true,
       modeConfirmedAt: legacyGeneration.modeConfirmedAt || null,
       keyframeConcurrency: Math.max(1, Math.min(999, Number(legacyGeneration.keyframeConcurrency) || 2)),
       aspectRatio: legacyGeneration.aspectRatio || "9:16",
       shotDuration: [5, 10, 15].includes(Number(legacyGeneration.shotDuration)) ? Number(legacyGeneration.shotDuration) : 10,
       targetDurationSeconds: Math.max(minimumProjectSeconds, Math.round(Number(legacyGeneration.targetDurationSeconds) || 300)),
+      commerceTargetRatio: require('./commerce-target-policy').resolve(legacyGeneration),
+      commerceTargetSource: legacyGeneration.commerceTargetSource==='user'?'user':'reference',
       durationLocked: legacyGeneration.durationLocked === true,
       durationSource: String(legacyGeneration.durationSource || ""),
       durationContract: legacyGeneration.durationContract && typeof legacyGeneration.durationContract === "object"
-        ? legacyGeneration.durationContract
+        ? { ...legacyGeneration.durationContract, providerKind: "puream-hailuo-h3" }
         : null
     };
     reconcilePersistedAssetProgress(project);
     applyPromptIntakeToMaterializedEntities(project);
-    return attachStoreBaseline(project, storeBaseline);
+    this.applyVerifiedVoiceProfilesToProject(project);
+    decorateProjectAssetMetadata(project);
+    return attachStoreBaseline(project, storeBaseline, { detached: true });
   }
 
   saveProject(project) {
+    normalizeProductionPackageLineage(project);
     if (!project?.id) throw Object.assign(new Error("漫剧项目数据无效"), { code: "PROJECT_INVALID" });
+    this.applyVerifiedVoiceProfilesToProject(project);
+    decorateProjectAssetMetadata(project);
     project.promptIntake = normalizePromptIntake(project.promptIntake);
     applyPromptIntakeToMaterializedEntities(project);
     const filePath = this.projectPath(project.id);
-    let diskProject = this.foundryKernel?.loadProject(project.id) || null;
-    if (!diskProject && fs.existsSync(filePath)) {
-      diskProject = readJsonFile(filePath, {
+    const runtimeProject = this.foundryKernel?.loadProject(project.id) || null;
+    let fileProject = null;
+    if (fs.existsSync(filePath)) {
+      fileProject = readJsonFile(filePath, {
         validate: value => value?.id === project.id,
         errorCode: "PROJECT_FILE_CORRUPTED",
         errorMessage: "项目文件已损坏，且没有可用备份；已停止保存以保护历史数据"
       });
     }
+    // Foundry is a recovery/concurrency mirror, but an externally repaired or
+    // freshly imported project file can legitimately be newer.  saveProject
+    // must use the same freshness rule as getProject; otherwise a harmless
+    // prompt-review confirmation can merge stale runtime dialogue back over
+    // the corrected per-shot package ledger.
+    const runtimeTime = Date.parse(String(runtimeProject?.updatedAt || ""));
+    const fileTime = Date.parse(String(fileProject?.updatedAt || ""));
+    const preferFileProject = fileProject?.id === String(project.id || "")
+      && Number.isFinite(fileTime)
+      && (
+        !Number.isFinite(runtimeTime)
+        || fileTime > runtimeTime
+        || (projectShotIdentitiesAreUnique(fileProject) && !projectShotIdentitiesAreUnique(runtimeProject))
+      );
+    const diskProject = preferFileProject ? fileProject : (runtimeProject || fileProject);
     const merged = mergeProjectForConcurrentSave(diskProject, project, project.__storeBaseline);
+    merged.generation = {
+      ...(merged.generation || {}),
+      engine: "hailuo-h3",
+      videoProviderKind: "puream-hailuo-h3",
+      mode: normalizeGenerationMode(merged.importedProductionPackage ? PRODUCTION_PACKAGE_MODE : merged.generation?.mode),
+      ...(merged.generation?.durationContract && typeof merged.generation.durationContract === "object"
+        ? { durationContract: { ...merged.generation.durationContract, providerKind: "puream-hailuo-h3" } }
+        : {})
+    };
     merged.costLedger = normalizeCostLedger(merged.costLedger || defaultCostLedger());
     merged.assetLibraries = {
       ...defaultAssetLibraries(),
@@ -2302,7 +2848,7 @@ class WorkbenchStore {
   migrateAssetProgressContracts() {
     let migrated = 0;
     const failures = [];
-    for (const summary of this.listProjects()) {
+    for (const summary of this.readIndex().projects) {
       try {
         const project = this.getProject(summary.id);
         const beforeAutomation = project.__storeBaseline?.automation || {};
@@ -2331,6 +2877,92 @@ class WorkbenchStore {
       }
     }
     return { migrated, failures };
+  }
+
+  migrateAssetMetadataContracts() {
+    this.ensureVoiceLibraryHydrated();
+    let migrated = 0;
+    const failures = [];
+    for (const summary of this.listProjects()) {
+      try {
+        const project = this.getProject(summary.id);
+        if (Number(project.__storeBaseline?.assetMetadataContractVersion || 0) >= ASSET_METADATA_CONTRACT_VERSION) continue;
+        deactivateIneligibleProjectAssetBindings(project);
+        this.saveProject(project);
+        migrated += 1;
+      } catch (error) {
+        failures.push({ projectId: summary.id, code: error?.code || "ASSET_METADATA_MIGRATION_FAILED", message: error?.message || String(error) });
+      }
+    }
+    const assets = this.readReusableAssetLibrary();
+    let reusableUpdated = 0;
+    for (let index = 0; index < assets.length; index += 1) {
+      const entry = assets[index];
+      const sourceProjectId = String(entry?.source?.projectId || "").trim();
+      const sourceEntityId = String(entry?.source?.entityId || "").trim();
+      if (!PROJECT_ID_PATTERN.test(sourceProjectId) || !sourceEntityId) continue;
+      try {
+        const sourceProject = this.getProject(sourceProjectId);
+        const owner = entry.kind === "character"
+          ? (sourceProject.characters || []).find(item => String(item?.id || "") === sourceEntityId)
+          : entry.kind === "prop"
+            ? (sourceProject.assetLibraries?.props || []).find(item => String(item?.id || "") === sourceEntityId)
+            : null;
+        if (!owner) continue;
+        const next = {
+          ...entry,
+          description: String(owner.appearanceDescription || owner.identitySignature || owner.description || entry.description || "").trim(),
+          gender: normalizeReusableAssetGender(owner.gender || entry.gender),
+          ageBand: normalizeReusableAssetAgeBand(owner.ageBand || entry.ageBand),
+          castingTier: String(owner.castingTier || entry.castingTier || ""),
+          roleType: String(owner.roleType || owner.castingTier || entry.roleType || ""),
+          importance: String(owner.importance || entry.importance || ""),
+          assetRequired: owner.assetRequired !== false,
+          tags: normalizeReusableAssetTags([
+            entry.kind,
+            ...(entry.tags || []),
+            ...(owner.assetTags || []),
+            CASTING_LABELS[owner.castingTier] || "",
+            owner.assetRequired === false ? "非独立资产角色" : "独立资产"
+          ]),
+          updatedAt: now()
+        };
+        if (JSON.stringify(next) !== JSON.stringify(entry)) {
+          assets[index] = next;
+          reusableUpdated += 1;
+        }
+      } catch {}
+    }
+    if (reusableUpdated) this.saveReusableAssetLibrary(assets);
+    let backfilled = 0;
+    if (migrated > 0) {
+      const beforeCount = this.readReusableAssetLibrary().length;
+      this.reusableAssetLibraryHydrated = false;
+      const synchronized = this.syncReusableAssetLibraryFromProjects();
+      backfilled = Math.max(0, synchronized.length - beforeCount);
+    }
+    return { migrated, reusableUpdated, backfilled, builtinVoices: this.listVoiceLibrary().filter(item => item.builtIn === true).length, failures };
+  }
+
+  assetMetadataContractsCurrent() {
+    const index = this.readIndex();
+    let summaryCacheChanged = false;
+    for (const summary of index.projects || []) {
+      if (summary?.status === "corrupted") continue;
+      const filePath = this.projectPath(summary.id);
+      if (!fs.existsSync(filePath)) continue;
+      let contractVersion = Number(summary.assetMetadataContractVersion || 0);
+      if (contractVersion < ASSET_METADATA_CONTRACT_VERSION) {
+        contractVersion = readJsonIntegerFieldFromFile(filePath, "assetMetadataContractVersion");
+      }
+      if (contractVersion < ASSET_METADATA_CONTRACT_VERSION) return false;
+      if (Number(summary.assetMetadataContractVersion || 0) !== contractVersion) {
+        summary.assetMetadataContractVersion = contractVersion;
+        summaryCacheChanged = true;
+      }
+    }
+    if (summaryCacheChanged) this.writeIndex(index);
+    return true;
   }
 
   beginCostEntry(projectId, entry) {
@@ -2375,6 +3007,16 @@ class WorkbenchStore {
 
   patchProject(projectId, patch) {
     const project = this.getProject(projectId);
+    if (project.importedProductionPackage) {
+      const lockedKeys = ["script", "product", "generation", "productionPlan", "promptIntake", "characters", "scenes", "shots", "assetLibraries"];
+      const attempted = lockedKeys.filter(key => Object.prototype.hasOwnProperty.call(patch || {}, key));
+      if (attempted.length) {
+        throw Object.assign(new Error(`Codex 资产包直抽项目已锁定${attempted.join("、")}；请重新导出并导入新的 .pdramapack`), {
+          code: "PRODUCTION_PACKAGE_CONTRACT_LOCKED",
+          lockedKeys: attempted
+        });
+      }
+    }
     const previousShots = Array.isArray(project.shots) ? project.shots.map(item => ({ ...item })) : [];
     const inputChangeReasons = productionInputChangeReasons(project, patch);
     if (inputChangeReasons.length && ["running", "pausing", "stopping"].includes(project.automation?.status)) {
@@ -2383,7 +3025,12 @@ class WorkbenchStore {
         reasons: inputChangeReasons
       });
     }
-    const shouldInvalidatePlan = inputChangeReasons.length > 0 && hasMaterializedProduction(project);
+    const videoPlanOnlyChange = inputChangeReasons.length > 0
+      && inputChangeReasons.every(reason => ["视频引擎", "视频上游"].includes(reason));
+    const shouldInvalidateVideoPlan = videoPlanOnlyChange && hasMaterializedProduction(project);
+    const shouldInvalidatePlan = inputChangeReasons.length > 0
+      && !videoPlanOnlyChange
+      && hasMaterializedProduction(project);
     let activitySummary = String(patch?.activitySummary || "项目已更新");
     const allowed = ["title", "status", "currentStage", "script", "ideation", "product", "generation", "productionPlan", "promptIntake", "characters", "scenes", "shots", "assetLibraries", "promptReview", "automation", "finalVideoPath", "finalVideoHistory"];
     for (const key of allowed) {
@@ -2398,13 +3045,19 @@ class WorkbenchStore {
       project.generation = {
         ...requested,
         engine: normalizeVideoEngine(requested.engine),
-        mode: normalizeGenerationMode(requested.mode),
+        videoProviderKind: "puream-hailuo-h3",
+        mode: normalizeGenerationMode(project.importedProductionPackage ? PRODUCTION_PACKAGE_MODE : requested.mode),
         modeConfirmed: requested.modeConfirmed === true,
         modeConfirmedAt: requested.modeConfirmed === true ? requested.modeConfirmedAt || now() : null,
         keyframeConcurrency: Math.max(1, Math.min(999, Number(requested.keyframeConcurrency) || 2)),
         aspectRatio: requested.aspectRatio || "9:16",
         shotDuration: [5, 10, 15].includes(Number(requested.shotDuration)) ? Number(requested.shotDuration) : 10,
-        targetDurationSeconds: Math.max(nextInputMode === "manual" ? 1 : 30, Math.round(Number(requested.targetDurationSeconds) || 300))
+        targetDurationSeconds: Math.max(nextInputMode === "manual" ? 1 : 30, Math.round(Number(requested.targetDurationSeconds) || 300)),
+        commerceTargetRatio: require('./commerce-target-policy').resolve(requested),
+      commerceTargetSource: requested.commerceTargetSource==='user'?'user':'reference',
+        ...(requested.durationContract && typeof requested.durationContract === "object"
+          ? { durationContract: { ...requested.durationContract, providerKind: "puream-hailuo-h3" } }
+          : {})
       };
     }
     if (Object.prototype.hasOwnProperty.call(patch || {}, "productionPlan")) {
@@ -2414,7 +3067,10 @@ class WorkbenchStore {
       project.promptIntake = normalizePromptIntake(project.promptIntake);
       applyPromptIntakeToMaterializedEntities(project);
     }
-    if (shouldInvalidatePlan) {
+    if (shouldInvalidateVideoPlan) {
+      invalidateProjectVideoPlan(project, inputChangeReasons);
+      activitySummary = `${activitySummary}（${inputChangeReasons.join("、")}已变化；剧本、人物/场景资产和分镜帧继续复用，仅重编视频链路）`;
+    } else if (shouldInvalidatePlan) {
       invalidateProjectProductionPlan(project, inputChangeReasons);
       activitySummary = `${activitySummary}（${inputChangeReasons.join("、")}已变化，旧生产计划转入历史，等待重新拆镜）`;
     }
@@ -2614,11 +3270,17 @@ class WorkbenchStore {
 
   assertVideoSubmissionsAllowed() {
     const state = this.getAccountSwitchState();
-    if (!state.videoSubmissionsPaused) return state;
-    const error = new Error("正在安全切换像塑账号：新的视频提交已暂停，项目、素材和已完成结果不会受影响");
-    error.code = "ACCOUNT_SWITCH_IN_PROGRESS";
-    error.accountSwitch = state;
-    throw error;
+    if (state.videoSubmissionsPaused) {
+      return this.saveAccountSwitchState({
+        status: "idle",
+        videoSubmissionsPaused: false,
+        pendingJobs: [],
+        previousAccountFingerprint: "",
+        message: "已迁移到 H3 云端视频，旧本地账号切换暂停状态已自动解除",
+        errorCode: ""
+      });
+    }
+    return state;
   }
 
   addCandidate(projectId, candidate) {
@@ -2651,6 +3313,29 @@ class WorkbenchStore {
       sourceScriptFingerprint: String(project.script?.sourceFingerprint || ""),
       ...candidate
     };
+    // A generated shot video is immediately usable. The newest result becomes
+    // the default unless the user has explicitly pinned another version.
+    if (record.entityType === "shot"
+      && record.stage === "shot_video"
+      && record.filePath
+      && record.internalGenerationBlock !== true
+      && record.recoveredInternalBlock !== true
+      && record.incompleteShotVideo !== true) {
+      const siblings = project.candidates.filter(item =>
+        item.entityType === record.entityType
+        && item.entityId === record.entityId
+        && item.stage === record.stage
+        && (item.productionRevision || "") === candidateRevision
+      );
+      const manualSelection = siblings.find(item => item.selected === true && item.manualSelectionOverride === true);
+      if (manualSelection) {
+        record.selected = false;
+      } else {
+        for (const item of siblings) item.selected = false;
+        record.selected = true;
+        record.defaultSelectedAt = now();
+      }
+    }
     record.selectionBaselineCandidateId = String(selectionBaseline?.id || "");
     record.contentFingerprint = candidateContentFingerprint(record);
     const snapshot = dependencySnapshot(project, record);
@@ -2685,6 +3370,15 @@ class WorkbenchStore {
     const settings = this.getSettings();
     let selected = project.candidates.find(item => item.id === candidateId);
     if (!selected) throw Object.assign(new Error("抽卡候选不存在"), { code: "CANDIDATE_NOT_FOUND" });
+    if (selected.stage === "shot_video" && (
+      selected.internalGenerationBlock === true
+      || selected.recoveredInternalBlock === true
+      || selected.incompleteShotVideo === true
+    )) {
+      throw Object.assign(new Error("该文件只是分镜内部生成片段，必须等全部片段齐备并在本地合成后才能确认"), {
+        code: "SHOT_VIDEO_INTERNAL_BLOCK_NOT_SELECTABLE"
+      });
+    }
     let selectedRevision = selected.productionRevision || "";
     if (selectedRevision !== (project.productionRevision || "")) {
       const collection = selected.entityType === "character" ? project.characters : selected.entityType === "scene" ? project.scenes : project.shots;
@@ -2842,10 +3536,26 @@ class WorkbenchStore {
         || (selected.entityType === "library" && ["prop_asset", "wardrobe_asset"].includes(selected.stage))
         || (selected.entityType === "shot" && ["storyboard_start", "storyboard_end", "storyboard_sheet", "shot_video"].includes(selected.stage)))) {
       try {
-        this.depositReusableAssetFromCandidate(projectId, selected.id);
+        const libraryEntry = this.depositReusableAssetFromCandidate(projectId, selected.id);
+        // Persist the reverse link as well as the library copy. The reusable
+        // asset card can now show that the confirmed project candidate is truly
+        // in the global library instead of displaying an empty asset marker.
+        const latestProject = this.getProject(projectId);
+        const latestSelected = (latestProject.candidates || []).find(item => item.id === selected.id);
+        if (latestSelected && latestSelected.reusableAssetId !== libraryEntry.id) {
+          latestSelected.reusableAssetId = libraryEntry.id;
+          latestSelected.libraryDepositedAt = now();
+          latestSelected.libraryWarning = "";
+          this.saveProject(latestProject);
+          selected.reusableAssetId = libraryEntry.id;
+          selected.libraryDepositedAt = latestSelected.libraryDepositedAt;
+          selected.libraryWarning = "";
+        }
       } catch (error) {
-        this.addActivity(projectId, "asset_library_warning", `${selected.stage} 已确认为项目资产；自动加入独立资产库失败：${String(error?.message || "未知错误")}`);
-        selected.libraryWarning = String(error?.message || "自动加入独立资产库失败");
+        if (error?.code !== "ASSET_NOT_LIBRARY_ELIGIBLE") {
+          this.addActivity(projectId, "asset_library_warning", `${selected.stage} 已确认为项目资产；自动加入独立资产库失败：${String(error?.message || "未知错误")}`);
+          selected.libraryWarning = String(error?.message || "自动加入独立资产库失败");
+        }
       }
     }
     return selected;
@@ -2973,13 +3683,16 @@ class WorkbenchStore {
         textProviderProfiles["puream-relay"].model = "gpt-5-6-sol";
         if (textProvider.kind === "puream-relay") textProvider.model = "gpt-5-6-sol";
       }
-      if (savedSettingsVersion < 17) {
+      if (savedSettingsVersion < SETTINGS_VERSION) {
         const currentDomesticDefaults = {
           "zhipu-native": { legacy: new Set(["", "glm-4.5"]), model: "glm-5.3" },
           "minimax-native": { legacy: new Set(["", "MiniMax-M2.1"]), model: "MiniMax-M3" },
           "qwen-native": { legacy: new Set(["", "qwen-plus"]), model: "qwen3.8-max" },
           "kimi-native": { legacy: new Set([""]), model: "kimi-k3" },
-          "doubao-native": { legacy: new Set(["", "doubao-seed-1-6-250615"]), model: "doubao-seed-1-8" },
+          "doubao-native": {
+            legacy: new Set(["", "doubao-seed-1-8", "doubao-seed-1-6-250615", "doubao-seed-1-6-thinking-250715", "doubao-seed-1-6-flash-250828", "doubao-1-5-pro-32k-250115", "doubao-lite-32k-240828", "doubao-seed-2-0-pro", "doubao-seed-2-0-lite-260215", "doubao-seed-2-1-pro"]),
+            model: "doubao-seed-2-1-pro-260628"
+          },
           "deepseek-native": { legacy: new Set(["", "deepseek-chat", "deepseek-v4"]), model: "deepseek-v4-flash" }
         };
         for (const [kind, migration] of Object.entries(currentDomesticDefaults)) {
@@ -2990,6 +3703,29 @@ class WorkbenchStore {
         if (currentDomesticDefaults[textProvider.kind]?.legacy.has(String(textProvider.model || ""))) {
           textProvider.model = currentDomesticDefaults[textProvider.kind].model;
         }
+      }
+      if (savedSettingsVersion < 20) {
+        const promoteTextBudget = profile => {
+          if (!profile?.kind) return;
+          if (Number(profile.maxTokens) <= 16384) profile.maxTokens = 100000;
+        };
+        Object.values(textProviderProfiles).forEach(promoteTextBudget);
+        promoteTextBudget(textProvider);
+      }
+      if (savedSettingsVersion < 21) {
+        const migrateGeminiProfile = profile => {
+          if (!profile || profile.kind !== "gemini-native") return;
+          if (["", "gemini-2.0-flash", "gemini-2.5-flash"].includes(String(profile.model || ""))) {
+            profile.model = "gemini-3.7-flash";
+          }
+          profile.maxTokens = Math.min(65536, Math.max(256, Number(profile.maxTokens) || 65536));
+          profile.modelInputTokenLimit = 1048576;
+          profile.modelOutputTokenLimit = 65536;
+          profile.modelCategory = "text";
+          profile.modelLifecycle = "ga";
+        };
+        migrateGeminiProfile(textProviderProfiles["gemini-native"]);
+        migrateGeminiProfile(textProvider);
       }
       textProviderProfiles[textProvider.kind] = {
         ...(textProviderProfiles[textProvider.kind] || {}),
@@ -3015,18 +3751,20 @@ class WorkbenchStore {
         videoProvider = normalizeVideoProvider(decodedVideoProvider);
       } catch (error) {
         videoProvider = {
-          ...decodedVideoProvider,
-          kind: "local-xiangsu",
+          ...defaults.videoProvider,
+          apiKey: decodedVideoProvider.apiKey,
+          kind: "puream-hailuo-h3",
           baseUrl: defaults.videoProvider.baseUrl,
           rejectedBaseUrl: decodedVideoProvider.baseUrl,
-          migrationNotice: `旧云端地址已停用：${error.message}`
+          migrationNotice: `旧视频配置已迁移为 H3：${error.message}`
         };
       }
       const savedPrompts = legacy ? {} : (saved.prompts || {});
       const promptModes = normalizePromptModes(defaults.prompts, savedPrompts, legacy ? {} : saved.promptModes || {});
       const prompts = legacy ? { ...defaults.prompts } : mergeStoredPromptDefaults(defaults.prompts, savedPrompts);
       for (const [key, mode] of Object.entries(promptModes)) {
-        if (mode === "system" && Object.prototype.hasOwnProperty.call(defaults.prompts, key)) prompts[key] = defaults.prompts[key];
+        if (mode === "custom" && Object.prototype.hasOwnProperty.call(savedPrompts, key)) prompts[key] = savedPrompts[key];
+        else if (mode === "system" && Object.prototype.hasOwnProperty.call(defaults.prompts, key)) prompts[key] = defaults.prompts[key];
       }
       textProviderProfiles["puream-relay"] = {
         ...textProviderProfiles["puream-relay"],
@@ -3035,7 +3773,7 @@ class WorkbenchStore {
         maxTokens: defaults.textProviderProfiles["puream-relay"].maxTokens
       };
       if (textProvider.kind === "puream-relay") Object.assign(textProvider, textProviderProfiles["puream-relay"]);
-      return {
+      return bindAgentSettings({
         ...defaults,
         ...saved,
         settingsVersion: SETTINGS_VERSION,
@@ -3047,11 +3785,14 @@ class WorkbenchStore {
         digitalHumanProvider: {
           ...defaults.digitalHumanProvider,
           ...(legacy ? {} : saved.digitalHumanProvider || {}),
+          kind: "puream-hailuo-h3",
+          baseUrl: "https://puream.cn",
+          model: "hailuo-h3",
           apiKey: legacy ? "" : this.decodeSecret(saved.digitalHumanProvider?.apiKey || (saved.textProvider?.kind === "puream-relay" ? saved.textProvider?.apiKey : "") || "")
         },
         videoStageModels: {
-          ...defaults.videoStageModels,
-          ...(legacy ? {} : saved.videoStageModels || {})
+          characterVideo: "inherit-project",
+          shotVideo: "inherit-project"
         },
         textPricing: {
           ...defaults.textPricing,
@@ -3068,10 +3809,17 @@ class WorkbenchStore {
         },
         prompts,
         promptModes
-      };
+      }, this.rootDir);
   }
 
   saveSettings(settings) {
+    // Runtime paths are derived from the real store, never trusted from an
+    // imported settings file or carried into another production mode.
+    settings = { ...settings, localAgents: normalizeLocalAgents(settings?.localAgents) };
+    for (const key of ["textProvider", "imageProvider"]) {
+      settings[key] = { ...(settings[key] || {}) };
+      delete settings[key].localAgent;
+    }
     const defaults = defaultSettings();
     const officialPureamBaseUrl = "https://puream.cn";
     const requestedProfiles = settings?.textProviderProfiles || {};
@@ -3082,6 +3830,14 @@ class WorkbenchStore {
       if (!String(mergedProfile.model || "").trim() && preset.defaultModel) mergedProfile.model = preset.defaultModel;
       if (kind === "deepseek-native" && String(mergedProfile.model || "").trim() === "deepseek-v4") mergedProfile.model = "deepseek-v4-flash";
       mergedProfile.temperature = providerTemperature(mergedProfile);
+      const capability = providerModelCapability(kind, mergedProfile.model, mergedProfile);
+      if (capability?.outputTokenLimit) {
+        mergedProfile.maxTokens = Math.max(256, Math.min(Number(capability.outputTokenLimit), Number(mergedProfile.maxTokens) || Number(capability.outputTokenLimit)));
+        mergedProfile.modelInputTokenLimit = Number(capability.inputTokenLimit) || Number(mergedProfile.modelInputTokenLimit) || 0;
+        mergedProfile.modelOutputTokenLimit = Number(capability.outputTokenLimit);
+        mergedProfile.modelCategory = capability.category || mergedProfile.modelCategory || "text";
+        mergedProfile.modelLifecycle = capability.lifecycle || mergedProfile.modelLifecycle || "";
+      }
       return [kind, mergedProfile];
     }));
     const activeTextProvider = { ...defaults.textProvider, ...(settings?.textProvider || {}) };
@@ -3103,10 +3859,18 @@ class WorkbenchStore {
     if (activePreset.managedEndpoint || activePreset.domestic) activeTextProvider.baseUrl = activePreset.baseUrl;
     if (activeTextProvider.kind === "deepseek-native" && String(activeTextProvider.model || "").trim() === "deepseek-v4") activeTextProvider.model = "deepseek-v4-flash";
     activeTextProvider.temperature = providerTemperature(activeTextProvider);
+    const activeCapability = providerModelCapability(activeTextProvider.kind, activeTextProvider.model, activeTextProvider);
+    if (activeCapability?.outputTokenLimit) {
+      activeTextProvider.maxTokens = Math.max(256, Math.min(Number(activeCapability.outputTokenLimit), Number(activeTextProvider.maxTokens) || Number(activeCapability.outputTokenLimit)));
+      activeTextProvider.modelInputTokenLimit = Number(activeCapability.inputTokenLimit) || Number(activeTextProvider.modelInputTokenLimit) || 0;
+      activeTextProvider.modelOutputTokenLimit = Number(activeCapability.outputTokenLimit);
+      activeTextProvider.modelCategory = activeCapability.category || activeTextProvider.modelCategory || "text";
+      activeTextProvider.modelLifecycle = activeCapability.lifecycle || activeTextProvider.modelLifecycle || "";
+    }
     const requestedVideoProvider = { ...defaults.videoProvider, ...(settings?.videoProvider || {}) };
-    requestedVideoProvider.baseUrl = requestedVideoProvider.kind === "local-xiangsu"
-      ? "http://127.0.0.1:28911"
-      : officialPureamBaseUrl;
+    requestedVideoProvider.kind = "puream-hailuo-h3";
+    requestedVideoProvider.model = "hailuo-h3";
+    requestedVideoProvider.baseUrl = officialPureamBaseUrl;
     const merged = {
       ...defaults,
       ...settings,
@@ -3114,8 +3878,8 @@ class WorkbenchStore {
       textProviderProfiles,
       imageProvider: { ...defaults.imageProvider, ...(settings?.imageProvider || {}), baseUrl: officialPureamBaseUrl, model: defaults.imageProvider.model },
       videoProvider: normalizeVideoProvider(requestedVideoProvider),
-      digitalHumanProvider: { ...defaults.digitalHumanProvider, ...(settings?.digitalHumanProvider || {}), baseUrl: officialPureamBaseUrl },
-      videoStageModels: { ...defaults.videoStageModels, ...(settings?.videoStageModels || {}) },
+      digitalHumanProvider: { ...defaults.digitalHumanProvider, ...(settings?.digitalHumanProvider || {}), kind: "puream-hailuo-h3", baseUrl: officialPureamBaseUrl, model: "hailuo-h3" },
+      videoStageModels: { characterVideo: "inherit-project", shotVideo: "inherit-project" },
       textPricing: { ...defaults.textPricing, ...(settings?.textPricing || {}) },
       generation: {
         ...defaults.generation,
@@ -3149,7 +3913,7 @@ class WorkbenchStore {
       digitalHumanProvider: { ...merged.digitalHumanProvider, apiKey: this.encodeSecret(merged.digitalHumanProvider.apiKey || "") }
     };
     atomicWriteJson(this.settingsPath, persisted);
-    return merged;
+    return bindAgentSettings(merged, this.rootDir);
   }
 
   resetSettings(options = {}) {

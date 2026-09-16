@@ -6,11 +6,17 @@ const crypto = require("node:crypto");
 const assert = require("node:assert/strict");
 const { _electron: electron } = require("playwright-core");
 const axeSource = require("axe-core").source;
+const { resolveUserDataDirectory } = require("../app/user-data-location");
 
 async function main() {
   const root = path.resolve(__dirname, "..");
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-  const executablePath = path.join(root, packageJson.build.directories.output, "win-unpacked", "纯梦短剧老虎机.exe");
+  const executablePath = path.join(
+    root,
+    packageJson.build.directories.output,
+    "win-unpacked",
+    `${packageJson.build.productName}.exe`
+  );
   const evidenceDir = process.env.DRAMA_SLOT_AUDIT_EVIDENCE_DIR
     ? path.resolve(process.env.DRAMA_SLOT_AUDIT_EVIDENCE_DIR)
     : path.resolve(root, "..", "..", "..", "..", "..", ".codex_tests", process.env.DRAMA_SLOT_AUDIT_TASK_ID || "TASK-DRAMA-PACKAGED-AUDIT", "packaged-ui");
@@ -47,7 +53,7 @@ async function main() {
     }]
   }, null, 2), "utf8");
   const licenseSource = process.env.DRAMA_SLOT_AUDIT_LICENSE_SOURCE
-    || path.join(process.env.APPDATA || "", packageJson.name, "drama-license.json");
+    || path.join(resolveUserDataDirectory({ appDataPath: process.env.APPDATA || "" }), "drama-license.json");
   if (!fs.existsSync(licenseSource)) throw new Error("packaged audit requires an existing local activation snapshot; set DRAMA_SLOT_AUDIT_LICENSE_SOURCE");
   fs.copyFileSync(licenseSource, path.join(userDataDir, "drama-license.json"));
   const sourceLocalState = path.join(path.dirname(licenseSource), "Local State");
@@ -62,6 +68,13 @@ async function main() {
 
   try {
     const page = await electronApp.firstWindow({ timeout: 20_000 });
+    const runtimeIssues = { consoleErrors: [], pageErrors: [] };
+    page.on("console", message => {
+      if (message.type() !== "error") return;
+      const value = message.text();
+      if (!/net::ERR_(?:ABORTED|FAILED).*puream\.cn/i.test(value)) runtimeIssues.consoleErrors.push(value);
+    });
+    page.on("pageerror", error => runtimeIssues.pageErrors.push(String(error?.stack || error)));
     await page.waitForLoadState("domcontentloaded");
     await electronApp.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
@@ -110,6 +123,7 @@ async function main() {
     };
     const auditViews = [
       { width: 1024, height: 720, zoom: 1 },
+      { width: 1280, height: 720, zoom: 1 },
       { width: 1280, height: 800, zoom: 1 },
       { width: 1440, height: 900, zoom: 1 },
       { width: 1920, height: 1080, zoom: 1 },
@@ -401,6 +415,25 @@ async function main() {
           return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
         };
         const panel = document.querySelector(`.stage-panel[data-panel="${currentStage}"]`);
+        const panelRect = panel?.getBoundingClientRect();
+        const overflowing = panelRect ? [...panel.querySelectorAll("*")]
+          .filter(visible)
+          .map(node => {
+            const rect = node.getBoundingClientRect();
+            return {
+              tag: node.tagName.toLowerCase(),
+              id: node.id || "",
+              className: typeof node.className === "string" ? node.className : "",
+              text: String(node.textContent || "").trim().replace(/\s+/g, " ").slice(0, 100),
+              left: Math.round(rect.left),
+              right: Math.round(rect.right),
+              width: Math.round(rect.width),
+              scrollWidth: node.scrollWidth,
+              clientWidth: node.clientWidth
+            };
+          })
+          .filter(item => item.right > Math.round(panelRect.right) + 1 || item.scrollWidth > item.clientWidth + 1)
+          .slice(0, 20) : [];
         const undersized = [...document.querySelectorAll(".topbar button,.pipeline-nav button,.stage-panel.active button,.stage-panel.active select,.stage-panel.active input:not([type='radio']):not([type='checkbox'])")]
           .filter(visible)
           .map(node => ({ label: (node.getAttribute("aria-label") || node.textContent || node.id).trim().slice(0, 80), width: Math.round(node.getBoundingClientRect().width), height: Math.round(node.getBoundingClientRect().height) }))
@@ -410,6 +443,9 @@ async function main() {
           stage: currentStage,
           active: Boolean(panel?.classList.contains("active")),
           horizontalOverflow: Boolean(panel && panel.scrollWidth > panel.clientWidth + 1),
+          panelWidth: panel?.clientWidth || 0,
+          panelScrollWidth: panel?.scrollWidth || 0,
+          overflowing,
           undersized,
           seriousAxe: result.violations.filter(item => ["critical", "serious"].includes(item.impact)).map(item => ({ id: item.id, impact: item.impact, nodes: item.nodes.map(node => ({ target: node.target, html: node.html, summary: node.failureSummary })) }))
         };
@@ -418,6 +454,96 @@ async function main() {
       await captureBackground(`stage-${stage}`);
     }
     fs.writeFileSync(path.join(runDir, "stage-matrix.json"), JSON.stringify(stageMatrix, null, 2));
+
+    await page.evaluate(() => {
+      document.querySelector('.stage-button[data-stage="settings"]')?.click();
+      const provider = document.querySelector("#textProviderKind");
+      if (provider) {
+        provider.value = "puream-relay";
+        provider.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    await page.waitForTimeout(200);
+    const textProviderUi = await page.evaluate(() => ({
+      providers: [...document.querySelectorAll("#textProviderKind option")].map(option => ({ value: option.value, label: option.textContent.trim() })),
+      officialModels: [...document.querySelectorAll("#textOfficialModel option")].map(option => ({ value: option.value, label: option.textContent.trim() })),
+      officialModelVisible: getComputedStyle(document.querySelector("#textOfficialModelField")).display !== "none",
+      helper: document.querySelector("#textOfficialLock")?.textContent?.replace(/\s+/g, " ").trim() || "",
+      genericProviderLabels: [...document.querySelectorAll("#textProviderKind option")].map(option => option.textContent.trim()).filter(label => label === "文本模型")
+    }));
+    const textProviderLayoutMatrix = [];
+    for (const view of auditViews.filter(item => item.width >= 1280)) {
+      await page.setViewportSize({ width: view.width, height: view.height });
+      await electronApp.evaluate(({ BrowserWindow }, size) => {
+        const win = BrowserWindow.getAllWindows()[0];
+        if (win) { win.setContentSize(size.width, size.height); win.webContents.setZoomFactor(size.zoom); }
+      }, view);
+      await page.locator("#textProviderSettingsCard").scrollIntoViewIfNeeded();
+      await page.waitForTimeout(150);
+      const snapshot = await page.evaluate(() => {
+        const card = document.querySelector("#textProviderSettingsCard");
+        const rect = card.getBoundingClientRect();
+        return {
+          clippedHorizontally: rect.left < -1 || rect.right > innerWidth + 1,
+          horizontalOverflow: card.scrollWidth > card.clientWidth + 1,
+          providerHeight: document.querySelector("#textProviderKind").getBoundingClientRect().height,
+          modelHeight: document.querySelector("#textOfficialModel").getBoundingClientRect().height
+        };
+      });
+      textProviderLayoutMatrix.push({ ...view, ...snapshot });
+      await captureBackground(`text-provider-settings-${view.width}x${view.height}-zoom${view.zoom * 100}`);
+    }
+
+    const packageImportUiMatrix = [];
+    for (const view of auditViews.filter(item => (
+      (item.width === 1280 && item.height === 720 && item.zoom === 1)
+      || (item.width === 1440 && item.height === 900 && item.zoom === 1)
+      || item.zoom === 2
+    ))) {
+      await page.setViewportSize({ width: view.width, height: view.height });
+      await electronApp.evaluate(({ BrowserWindow }, size) => {
+        const win = BrowserWindow.getAllWindows()[0];
+        if (win) { win.setContentSize(size.width, size.height); win.webContents.setZoomFactor(size.zoom); }
+      }, view);
+      await page.evaluate(() => document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close()));
+      await page.focus("#newProject");
+      await page.keyboard.press("Tab");
+      const importButton = await page.evaluate(() => {
+        const button = document.querySelector("#importProductionPackage");
+        const rect = button?.getBoundingClientRect();
+        const style = button ? getComputedStyle(button) : null;
+        return {
+          exists: Boolean(button),
+          visible: Boolean(button && style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0),
+          keyboardReached: document.activeElement === button,
+          ariaLabel: button?.getAttribute("aria-label") || "",
+          title: button?.getAttribute("title") || "",
+          width: rect?.width || 0,
+          height: rect?.height || 0,
+          clipped: Boolean(rect && (rect.left < -1 || rect.top < -1 || rect.right > innerWidth + 1 || rect.bottom > innerHeight + 1)),
+          apiAvailable: typeof window.dramaSlot?.workbench?.importProductionPackage === "function"
+        };
+      });
+      await page.evaluate(() => document.querySelector('.stage-button[data-stage="settings"]')?.click());
+      await page.locator("#hailuoFields").scrollIntoViewIfNeeded();
+      await page.waitForTimeout(150);
+      const videoSettings = await page.evaluate(async () => {
+        const card = document.querySelector("#hailuoFields");
+        const rect = card?.getBoundingClientRect();
+        const result = await window.axe.run(card, { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"] } });
+        return {
+          visible: Boolean(rect && rect.width > 0 && rect.height > 0),
+          clippedHorizontally: Boolean(rect && (rect.left < -1 || rect.right > innerWidth + 1)),
+          horizontalOverflow: Boolean(card && card.scrollWidth > card.clientWidth + 1),
+          referenceAudioMode: document.querySelector("#hailuoReferenceAudioMode")?.value || "",
+          referenceAudioOptions: [...document.querySelectorAll("#hailuoReferenceAudioMode option")].map(option => option.value),
+          officialLock: document.querySelector("#hailuoFields .official-endpoint-lock")?.textContent?.replace(/\s+/g, " ").trim() || "",
+          seriousAxe: result.violations.filter(item => ["critical", "serious"].includes(item.impact)).map(item => ({ id: item.id, impact: item.impact }))
+        };
+      });
+      packageImportUiMatrix.push({ ...view, importButton, videoSettings });
+      await captureBackground(`package-import-and-image-only-${view.width}x${view.height}-zoom${view.zoom * 100}`);
+    }
 
     const dialogMatrix = [];
     for (const dialogId of ["newProjectDialog", "projectStrategyDialog", "scriptFormatDialog", "rechargeDialog", "reusableAssetDialog", "candidateLibraryDialog", "restoreProjectDialog"]) {
@@ -573,6 +699,10 @@ async function main() {
       providerOptions: [...document.querySelectorAll("input[name='newVideoProvider']")].map(input => ({
         value: input.value,
         label: input.closest("label")?.innerText?.trim() || ""
+      })),
+      generationModes: [...document.querySelectorAll("input[name='newVideoMode']")].map(input => ({
+        value: input.value,
+        label: input.closest("label")?.innerText?.trim() || ""
       }))
     }));
     const durationModeUi = await page.evaluate(() => {
@@ -603,20 +733,20 @@ async function main() {
           .filter(visible)
           .map(node => node.value || "");
         const surface = [panel.innerText || "", ...fields].join("\n");
-        return { stage: currentStage, surfaceLength: surface.length, forbiddenMatches: surface.match(/(?:\bH3\b|Hailuo|海螺)/gi) || [] };
+        return { stage: currentStage, surfaceLength: surface.length, forbiddenMatches: surface.match(/(?:Hailuo|海螺)/gi) || [] };
       }, stage);
       visibilityAudit.surfaceLength += stageSurface.surfaceLength;
       visibilityAudit.forbiddenMatches.push(...stageSurface.forbiddenMatches);
       visibilityAudit.stages.push(stageSurface);
     }
     await page.evaluate(() => document.querySelector('.stage-button[data-stage="script"]')?.click());
-    const switched = await page.evaluate(async settingsValue => {
+    const retiredProviderMigration = await page.evaluate(async settingsValue => {
       const result = await window.dramaSlot.workbench.saveSettings({
         ...settingsValue,
         videoProvider: {
           ...settingsValue.videoProvider,
-          kind: "local-xiangsu",
-          baseUrl: "http://127.0.0.1:28911"
+          kind: "retired-provider-value",
+          baseUrl: "https://puream.cn"
         }
       });
       const persisted = await window.dramaSlot.workbench.getSettings();
@@ -814,7 +944,7 @@ async function main() {
         videoDisabled: Boolean(document.querySelector("#generateAllVideos")?.disabled),
         storyboardButtonText: document.querySelector("#generateAllStoryboards")?.innerText?.trim() || "",
         manualPrompt: prompt,
-        systemForbiddenMatches: systemSurface.match(/(?:\bH3\b|Hailuo|海螺)/gi) || [],
+        systemForbiddenMatches: systemSurface.match(/(?:Hailuo|海螺)/gi) || [],
         systemContainsRawPath: systemSurface.includes("D:\\Secret\\customer.mp4"),
         firstAutomationStatus: first.project?.automation?.status || "",
         hostileMarkupExecuted: window.__auditXss === 1,
@@ -872,6 +1002,10 @@ async function main() {
       blueprintOffState,
       pauseControlAudit,
       stageMatrix,
+      newProjectDefaults,
+      textProviderUi,
+      textProviderLayoutMatrix,
+      packageImportUiMatrix,
       dialogMatrix,
       visibilityAudit,
       runtime,
@@ -896,13 +1030,14 @@ async function main() {
       scriptHandling: defaultProject?.project?.productionPlan?.scriptHandling,
       commerceMode: defaultProject?.project?.productionPlan?.commerceMode,
       priorityProfile: defaultProject?.project?.productionPlan?.priorityProfile
-    }, { scriptHandling: "optimize", commerceMode: "none", priorityProfile: "balanced" }, "fresh projects without a product must fail closed to the no-commerce V2 contract");
+    }, { scriptHandling: "optimize", commerceMode: "natural", priorityProfile: "balanced" }, "fresh projects must preserve the selected commerce intent so product intake can gate topic generation");
     assert.equal(foundryRuntime.ok, true, "V2 runtime status IPC must respond");
     assert.equal(foundryRuntime.status?.ok, true, "V2 SQLite runtime must pass quick_check in the packaged app");
     assert.ok(foundryRuntime.status?.counts?.project_state >= 1, "V2 SQLite runtime must own the created current project state");
     assert.equal(newProjectDefaults.selectedProvider, "puream-hailuo-h3", "new-project dialog must preselect PUREAM cloud");
     assert.deepEqual({ scriptHandling: newProjectDefaults.scriptHandling, commerceMode: newProjectDefaults.commerceMode, priorityProfile: newProjectDefaults.priorityProfile }, { scriptHandling: "optimize", commerceMode: "natural", priorityProfile: "balanced" }, "new-project dialog must expose the recommended V2 intent defaults");
-    assert.ok(newProjectDefaults.providerOptions.some(item => item.value === "local-xiangsu" && /本地像塑/.test(item.label)), "local Xiangsu must remain selectable");
+    assert.deepEqual(newProjectDefaults.providerOptions.map(item => item.value), ["puream-hailuo-h3"], "new-project dialog must expose H3 as the only video provider");
+    assert.ok(newProjectDefaults.generationModes.some(item => item.value === "asset_direct"), "new-project dialog must expose the asset-direct mode");
     assert.deepEqual({
       detailControlCount: blueprintControls.detailControlCount,
       bulkControlCount: blueprintControls.bulkControlCount,
@@ -927,11 +1062,11 @@ async function main() {
     assert.match(durationModeUi.manualState.help, /自适应/, "uploaded-script mode must explain adaptive duration");
     assert.equal(durationModeUi.manualState.scriptHandling, "respect", "switching a fresh project dialog to uploaded script must default to respecting the source");
     assert.equal(durationModeUi.aiState.disabled, false, "AI mode must enable configured duration");
-    assert.equal(durationModeUi.aiState.required, true, "AI mode must require configured duration");
-    assert.match(durationModeUi.aiState.help, /严格/, "AI mode must explain the hard duration contract");
+    assert.equal(durationModeUi.aiState.required, false, "AI duration is an optional authoring reference");
+    assert.match(durationModeUi.aiState.help, /参考|自适应/, "AI mode must explain the advisory duration policy");
     assert.equal(durationModeUi.aiState.scriptHandling, "optimize", "switching back to AI writing must restore the recommended optimize intent when the user has not overridden it");
-    assert.deepEqual(visibilityAudit.forbiddenMatches, [], "user-visible flow must not expose H3/Hailuo/海螺");
-    assert.deepEqual(switched, { ok: true, kind: "local-xiangsu" }, "manual local switch must persist");
+    assert.deepEqual(visibilityAudit.forbiddenMatches, [], "user-visible flow must not expose the upstream Hailuo/海螺 brand");
+    assert.deepEqual(retiredProviderMigration, { ok: true, kind: "puream-hailuo-h3" }, "retired provider values must migrate to H3 instead of persisting");
     assert.equal(concurrencyUi.selectedProjectId, stateTransitions.secondId, "switching away from a running project must complete");
     assert.deepEqual({
       currentProjectCharacterCount: crossProjectCharacterLibrary.currentProjectCharacterCount,
@@ -957,6 +1092,7 @@ async function main() {
     assert.ok(crossProjectCharacterLibrary.preview?.naturalWidth > 0 && crossProjectCharacterLibrary.preview?.naturalHeight > 0, "packaged character preview must decode into real pixels");
     assert.match(crossProjectCharacterLibrary.preview?.src || "", /^puream-asset:\/\//, "packaged media must use the constrained application asset protocol");
     assert.deepEqual(deleted, { removalOk: true, archiveFound: true, restorationOk: true, restoredVisible: true }, "packaged project deletion must be recoverable");
+    fs.writeFileSync(path.join(runDir, "layout-debug.json"), JSON.stringify(layoutMatrix, null, 2), "utf8");
     assert.equal(layoutMatrix.some(item => item.pageHorizontalOverflow), false, "page must not horizontally overflow in the audited matrix");
     assert.equal(layoutMatrix.some(item => item.topbarHorizontalOverflow), false, "topbar must reflow without horizontal scrolling in the audited matrix");
     assert.equal(layoutMatrix.some(item => item.mainStageHorizontalOverflow), false, "main stage must reflow without horizontal scrolling in the audited matrix");
@@ -995,10 +1131,47 @@ async function main() {
     assert.equal(stageMatrix.some(item => !item.active || item.horizontalOverflow), false, "every production stage must activate without horizontal overflow");
     assert.equal(stageMatrix.some(item => item.undersized.length), false, "visible stage controls must keep a 44px minimum target");
     assert.equal(stageMatrix.some(item => item.seriousAxe.length), false, "production stages must have no serious accessibility violation");
+    assert.deepEqual(textProviderUi.genericProviderLabels, [], "provider choices must never be masked to a generic text-model label");
+    assert.ok(textProviderUi.providers.some(item => item.value === "puream-relay" && /GPT.*Claude/.test(item.label)), "PUREAM provider must explicitly expose its built-in GPT and Claude choices");
+    assert.ok(textProviderUi.providers.some(item => item.value === "gemini-native" && /Google.*Gemini/.test(item.label)), "Gemini provider must include both vendor and product names");
+    assert.deepEqual(textProviderUi.officialModels, [
+      { value: "gpt-5-6-sol", label: "GPT-5.6" },
+      { value: "claude-opus-5", label: "Claude Opus 5" }
+    ], "PUREAM official GPT and Claude models must both remain selectable");
+    assert.equal(textProviderUi.officialModelVisible, true, "PUREAM official model selector must be visible");
+    assert.match(textProviderUi.helper, /GPT.*Claude/, "PUREAM helper must explain both official model families");
+    assert.equal(textProviderLayoutMatrix.some(item => item.clippedHorizontally || item.horizontalOverflow), false, "text-provider settings must remain horizontally reachable in every audited viewport and zoom");
+    assert.equal(textProviderLayoutMatrix.some(item => item.providerHeight < 44 || item.modelHeight < 44), false, "text-provider and official-model selectors must keep 44px targets");
+    assert.equal(packageImportUiMatrix.some(item => (
+      !item.importButton.exists
+      || !item.importButton.visible
+      || !item.importButton.keyboardReached
+      || !item.importButton.apiAvailable
+      || item.importButton.width < 44
+      || item.importButton.height < 44
+      || item.importButton.clipped
+      || item.importButton.ariaLabel !== "导入 Codex 资产包直抽文件"
+      || !/\.pdramapack/.test(item.importButton.title)
+      || !/跳过选题、写作、拆镜、提示词和资产生成/.test(item.importButton.title)
+      || !/Codex 资产包直抽/.test(item.importButton.title)
+    )), false, "the direct package-import control must remain visible, keyboard reachable, labelled and touch-safe");
+    const videoSettingsFailures = packageImportUiMatrix.filter(item => (
+      !item.videoSettings.visible
+      || item.videoSettings.clippedHorizontally
+      || item.videoSettings.horizontalOverflow
+      || item.videoSettings.referenceAudioMode !== "image_only"
+      || item.videoSettings.referenceAudioOptions.join(",") !== "image_only,image_audio"
+      || !/整段参考模式使用 (?:H3|纯梦云端视频) 六段 full-reference 模板/.test(item.videoSettings.officialLock)
+      || !/文生\/首尾帧使用三段 T2VA\/FL2VA 模板/.test(item.videoSettings.officialLock)
+      || !/只有 <d> 标签里的(?:说话内容|对白)保留中文/.test(item.videoSettings.officialLock)
+      || item.videoSettings.seriousAxe.length
+    ));
+    assert.deepEqual(videoSettingsFailures, [], "image-only mode and the official English prompt contract must remain visible and accessible");
     assert.equal(dialogMatrix.some(item => !item.open || item.clipped || item.horizontalOverflow), false, "primary dialogs must remain visible and uncut");
     assert.equal(dialogMatrix.some(item => item.seriousAxe.length), false, "primary dialogs must have no serious accessibility violation");
     assert.equal(axe.violations.some(item => ["critical", "serious"].includes(item.impact)), false, "critical/serious accessibility violations are release blockers");
     assert.deepEqual(runtime.blankImages, [], "every image left in the packaged DOM must decode successfully");
+    assert.deepEqual(runtimeIssues, { consoleErrors: [], pageErrors: [] }, "packaged UI must not raise renderer script errors");
     assert.deepEqual(pauseControlAudit.map(item => ({
       name: item.name,
       text: item.text,
@@ -1025,7 +1198,7 @@ async function main() {
       blueprintControls,
       durationModeUi,
       visibilityAudit,
-      manualSwitch: switched,
+      retiredProviderMigration,
       selectedStoryboardMode,
       crossProjectCharacterLibrary,
       concurrencyUi,
@@ -1042,7 +1215,11 @@ async function main() {
       blueprintOffState,
       pauseControlAudit,
       stageMatrix,
+      textProviderUi,
+      textProviderLayoutMatrix,
+      packageImportUiMatrix,
       dialogMatrix,
+      runtimeIssues,
       axe: {
         violations: axe.violations.map(item => ({
           id: item.id,

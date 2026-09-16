@@ -59,6 +59,7 @@ test("H3 preflight turns a legacy 1.49-second voice into a selected provider-saf
       mediaProbeVerified: true
     }]
   };
+  const concurrentReferences = JSON.parse(JSON.stringify(references));
   const workflow = new WorkbenchWorkflow({
     store,
     bridge: {},
@@ -67,8 +68,12 @@ test("H3 preflight turns a legacy 1.49-second voice into a selected provider-saf
     textGenerator: async () => ({})
   });
 
-  await workflow.verifyHailuoVoiceReferences(project, project.shots[0], references);
+  await Promise.all([
+    workflow.verifyHailuoVoiceReferences(project, project.shots[0], references),
+    workflow.verifyHailuoVoiceReferences(project, project.shots[0], concurrentReferences)
+  ]);
   const prepared = references.audios[0];
+  assert.equal(concurrentReferences.audios[0].path, prepared.path, "concurrent shots reuse one normalized voice file");
   assert.notEqual(prepared.path, source);
   assert.ok(prepared.duration >= 3.05 && prepared.duration <= 3.25, `duration=${prepared.duration}`);
   const decoded = await auditVoiceReferenceFile(ffmpeg, prepared.path, prepared.duration);
@@ -77,6 +82,7 @@ test("H3 preflight turns a legacy 1.49-second voice into a selected provider-saf
   const saved = store.getProject(project.id);
   const selected = saved.candidates.filter(item => item.entityType === "character" && item.entityId === "C01" && item.stage === "character_voice" && item.selected);
   assert.equal(selected.length, 1);
+  assert.equal(saved.candidates.filter(item => item.h3VoiceNormalization?.sourceCandidateId === legacy.id).length, 1);
   assert.equal(selected[0].filePath, prepared.path);
   assert.equal(selected[0].h3VoiceNormalization.sourceCandidateId, legacy.id);
   assert.match(selected[0].prompt, /不进入成片音轨/);

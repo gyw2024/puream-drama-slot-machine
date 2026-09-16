@@ -1,6 +1,6 @@
 "use strict";
 
-const { isActiveVideoJob } = require("./workbench-status");
+const { isActiveVideoJob, hasCurrentFinal, projectDisplayStatus, automationDisplayState } = require("./workbench-status");
 
 function latestCandidate(project, entityType, entityId, stage) {
   const activeRevision = project.productionRevision || "";
@@ -86,7 +86,7 @@ function stageCounts(project = {}, settings = null) {
     videos: { ready: videoReady, total: shots.length },
     shots: shots.length,
     hasScript: Boolean(String(project.script?.raw || "").trim()),
-    hasFinal: Boolean(project.finalVideoPath),
+    hasFinal: hasCurrentFinal(project),
     costKnown: Number(project.costLedger?.summary?.totalKnownYuan || 0),
     costEstimated: Number(project.costLedger?.summary?.totalEstimatedYuan || 0),
     costUnpriced: Number(project.costLedger?.summary?.unpricedCount || 0),
@@ -112,6 +112,7 @@ function automationLabel(project = {}) {
     paused_account: "等切号",
     interrupted: "已中断",
     completed: "空闲",
+    final_pending: "成片待完成",
     idle: "空闲",
     failed: "可恢复断点",
     cancelled: "已取消"
@@ -120,12 +121,13 @@ function automationLabel(project = {}) {
 
 function automationTone(status = "") {
   const value = String(status || "");
-  if (["failed", "interrupted", "paused_user", "paused_account", "pausing", "stopping", "cancelled"].includes(value)) return "warn";
+  if (["failed", "interrupted", "paused_user", "paused_account", "pausing", "stopping", "cancelled", "final_pending"].includes(value)) return "warn";
   if (["running"].includes(value)) return "active";
   return "idle";
 }
 
 function summarizeProjectOverview(project = {}, settings = null) {
+  project = { ...project, status: projectDisplayStatus(project), automation: automationDisplayState(project) };
   const counts = stageCounts(project, settings);
   const nextStage = inferNextStage(project, counts);
   const jobs = Array.isArray(project.jobs) ? project.jobs : [];

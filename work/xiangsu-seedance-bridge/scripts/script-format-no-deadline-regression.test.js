@@ -44,7 +44,7 @@ test("legacy populated projects migrate to confirmed original format without int
   fs.writeFileSync(diskPath, JSON.stringify(legacy, null, 2));
 
   const migrated = store.getProject(project.id);
-  assert.equal(migrated.version, 13);
+  assert.equal(migrated.version, project.version);
   assert.equal(migrated.productionPlan.scriptFormat, "production");
   assert.equal(migrated.productionPlan.scriptFormatConfirmed, true);
   assert.equal(migrated.script.raw, legacy.script.raw);
@@ -158,24 +158,44 @@ test("all projects expose three persistent script examples with preview and TXT 
   assert.match(renderer, /纯梦老虎机-\$\{names\[normalized\]\}-示例\.txt/);
 });
 
-test("all production generation has no total deadline and keeps cancellation controls", () => {
+test("all production generation keeps a twenty-minute progress floor and cancellation controls", () => {
   const workflow = source("app/workbench-workflow.js");
   const provider = source("app/ai-provider.js");
   const bridge = source("app/bridge-client.js");
+  const metadata = source("app/video-metadata.js");
+  const mediaQuality = source("app/media-quality.js");
+  const main = source("app/main.js");
+  const status = source("app/workbench-status.js");
   assert.doesNotMatch(workflow, /SCRIPT_FAST_DEADLINE_REACHED/);
   assert.doesNotMatch(workflow, /scriptFastRequestBudgetMs/);
   assert.doesNotMatch(workflow, /const maxAttempts = providerLabel\(\)/);
-  assert.match(provider, /const timeoutMs = Math\.max\(0, Number\(options\.timeoutMs\) \|\| 0\)/);
+  assert.match(provider, /const MIN_GENERATION_TIMEOUT_MS = 20 \* 60_000/);
+  assert.match(provider, /return Math\.max\(MIN_GENERATION_TIMEOUT_MS,/);
+  assert.match(provider, /Math\.max\(MIN_GENERATION_TIMEOUT_MS, Number\(options\.geminiMaximumAutomaticAdmissionTotalWaitMs\) \|\| 0\)/);
   assert.match(provider, /resolveAttemptLimit\(options\.maxReconnectAttempts, 3\)/);
-  assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = NO_TOTAL_DEADLINE_MS/);
-  assert.match(workflow, /const TEXT_STAGE_SLA_MS = 5 \* 60_000/);
-  assert.match(workflow, /timeoutMs: options\.timeoutMs \?\? TEXT_STAGE_ATTEMPT_TIMEOUT_MS/);
-  assert.match(workflow, /maxReconnectAttempts: options\.maxReconnectAttempts \?\? TEXT_STAGE_MAX_ATTEMPTS/);
+  assert.match(workflow, /const TEXT_GENERATION_ATTEMPT_TIMEOUT_MS = 20 \* 60_000/);
+  assert.match(workflow, /const SCRIPT_TEXT_REQUEST_TIMEOUT_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflow, /const TEXT_STAGE_SLA_MS = TEXT_GENERATION_ATTEMPT_TIMEOUT_MS/);
+  assert.match(workflow, /timeoutMs: Math\.max\(TEXT_STAGE_ATTEMPT_TIMEOUT_MS,/);
+  assert.match(workflow, /maxReconnectAttempts: Math\.max\(TEXT_STAGE_MAX_ATTEMPTS,/);
   assert.doesNotMatch(workflow, /\battempts:\s*[1-9]\d*/);
   assert.doesNotMatch(provider, /Date\.now\(\) - startedAt < 600_000/);
   assert.doesNotMatch(provider, /纯梦 GPT Image 2 生成超时/);
   assert.doesNotMatch(provider, /纯梦清波视频等待超时/);
-  assert.match(bridge, /timeoutMs: 0/);
+  assert.match(bridge, /const AI_GENERATION_TIMEOUT_FLOOR_MS = 20 \* 60_000/);
+  assert.match(bridge, /return Math\.max\(AI_GENERATION_TIMEOUT_FLOOR_MS, Math\.floor\(requested\)\)/);
+  assert.match(bridge, /function generationRequestTimeoutMs\(value\)/);
+  assert.match(metadata, /const DEFAULT_TIMEOUT_MS = 20 \* 60_000/);
+  assert.match(mediaQuality, /const LOCAL_MEDIA_PROCESS_TIMEOUT_MS = 20 \* 60_000/);
+  assert.equal(fs.existsSync(path.join(__dirname, "..", "app", "face-grid-processor.js")), false);
+  assert.match(workflow, /const LOCAL_MEDIA_PROCESS_TIMEOUT_MS = 20 \* 60_000/);
+  assert.match(main, /const LOCAL_MEDIA_IMPORT_TIMEOUT_MS = 20 \* 60_000/);
+  assert.match(status, /const VIDEO_SUBMISSION_PHANTOM_AFTER_MS = 20 \* 60 \* 1000/);
+  assert.match(status, /const VIDEO_IDENTIFIED_SUBMISSION_PHANTOM_AFTER_MS = 30 \* 60 \* 1000/);
+  assert.match(status, /if \(hasActiveOperation\(context\)\) return false/);
+  assert.match(status, /hasStableSubmissionIdentity\(job\)/);
+  assert.doesNotMatch(status, /videoJobAgeMs\(job\) > 90_000/);
+  assert.equal(fs.existsSync(path.join(__dirname, "..", "app", "renderer", "renderer.js")), false);
   assert.doesNotMatch(source("app/puream-video-adapters.js"), /AbortSignal\.timeout\(600_000\)/);
   assert.doesNotMatch(provider, /AbortSignal\.timeout\(120_000\)/);
 });

@@ -1,0 +1,14 @@
+"use strict";
+const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
+const asar = require("@electron/asar");
+const root = path.resolve(__dirname, "..");
+const target = path.resolve(process.argv[2]);
+const files = ["app/drama-performance-timeline.js", "app/drama-timing.js", "app/drama-writing-contract.js", "app/drama-asset-package.js", "app/hailuo-h3-natural-prompt.js", "app/workbench-workflow.js", "app/direct-fast-script.js"];
+const sha = data => crypto.createHash("sha256").update(data).digest("hex");
+const results = files.map(file => ({file, source:sha(fs.readFileSync(path.join(root,file))), packaged:sha(asar.extractFile(target,file))}));
+if(results.some(r=>r.source!==r.packaged)) throw Error("Runtime/source hash mismatch");
+const version=JSON.parse(asar.extractFile(target,"package.json")).version;
+const sourceMetadata=JSON.parse(fs.readFileSync(path.join(root,"package.json")));
+const packagedMetadata=JSON.parse(asar.extractFile(target,"package.json"));
+for(const key of ["name","version","main","dependencies"]) if(JSON.stringify(sourceMetadata[key])!==JSON.stringify(packagedMetadata[key])) throw Error(`Package metadata mismatch: ${key}`);
+console.log(JSON.stringify({ok:true,version,asar:target,asarSha256:sha(fs.readFileSync(target)),files:results},null,2));

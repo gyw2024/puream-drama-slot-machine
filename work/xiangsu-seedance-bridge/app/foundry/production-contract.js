@@ -15,9 +15,7 @@ function normalizeScriptHandling(value, project = {}) {
 }
 
 function normalizeCommerceMode(value, project = {}) {
-  const requested = String(value || "").trim().toLowerCase();
-  if (COMMERCE_MODES.has(requested)) return requested;
-  return String(project?.product?.name || "").trim() ? "natural" : "none";
+  return require('../renderer/commerce-input-mode')(project);
 }
 
 function normalizePriorityProfile(value) {
@@ -36,7 +34,10 @@ function contractPayload(project = {}, settings = {}) {
     version: CONTRACT_VERSION,
     intent: {
       scriptHandling,
-      commerceMode: productName ? commerceMode : "none",
+      // The selected commerce intent must survive before product intake.  Product
+      // readiness is enforced by the topic/script stages; rewriting the intent
+      // to `none` here used to bypass that intake gate after every Foundry save.
+      commerceMode,
       priorityProfile,
       executionMode: plan.executionMode === "full" ? "full" : "step",
       inputMode: plan.inputMode === "manual" ? "manual" : "ai",
@@ -132,8 +133,12 @@ function assertAbsolutePolicies(contract = {}) {
   return true;
 }
 
-function contractPromptBlock(contract = {}) {
+function contractPromptBlock(contract = {}, stage = "") {
   assertAbsolutePolicies(contract);
+  if(["character_intro","character_sheet","character_three_view","scene_asset","prop_asset","wardrobe_asset"].includes(stage)){
+    const layout=stage==="scene_asset"?"一张16:9的2×2无人场景四视图，只展示同一个物理空间的四个角度，不加入人物资产板。":stage==="character_intro"?"只展示一位人物的一张单视角身份照片，不拼贴、不生成四视图，固定纯色 #E9E9E9 背景。":stage.startsWith("character_")?"只展示同一人物的既定多视图身份参考板，固定纯色 #E9E9E9 背景，不引入第二身份或剧情表演。":stage==="wardrobe_asset"?"只由绑定的同一人物以中性姿态展示指定服装，保持其脸、年龄与体型；允许必要正背面视图，不加入其他人物、家具或剧情动作。":"只展示当前物品资产，不加入真人、手或剧情场景。";
+    return `【V2分阶段资产合同 ${contract.fingerprint||""}】${layout}禁止额外字幕、标题、姓名条、价格字和水印。原商品包装不改字、不重绘。剧本因果、对白、音效与最终视频规则不作为这张静态资产的画面内容。`;
+  }
   const handling = { respect: "尊重原稿：锁定事实、关系、事件顺序、对白与结局，只做制作结构化", optimize: "优化原稿：不改核心事实与结局，允许定点优化对白、节奏和因果", recreate: "重新创作：保留用户确认的事实锁，其余可重建" }[contract.intent?.scriptHandling] || "尊重原稿";
   const commerce = { none: "无带货：不得出现商品导购、价格或购买引导", natural: "自然植入：商品只能因角色的真实任务与剧情因果出现", explicit: "明确带货：允许角色口头讲解用户提供的事实，但不允许字幕、价格字或虚构功效" }[contract.intent?.commerceMode] || "无带货";
   return [
@@ -142,7 +147,6 @@ function contractPromptBlock(contract = {}) {
     commerce,
     "绝对禁令：成片不得出现任何字幕、标题、姓名条、价格字、水印、背景音乐、人物介绍、人物小传或故事简介。",
     "只允许：剧中角色对白、与画面同步的动作声和场景环境声。",
-    "人物四视图必须是固定 #E9E9E9 纯色背景、四个等比例全身、无肖像插图、无烟雾渐变、无装饰、无文字。",
     `正式出片最低质量等级 L${contract.quality?.minimumFormalLevel || 2}；低质量本地机械补位只能做诊断，不得进入付费生成。`
   ].join("\n");
 }

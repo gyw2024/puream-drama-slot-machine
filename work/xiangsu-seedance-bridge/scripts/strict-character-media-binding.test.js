@@ -54,9 +54,16 @@ test("voice character id and character name can never disagree", () => {
   assert.throws(() => assertStrictCharacterMediaBindings(project, shot, references), error => error.code === "SHOT_VOICE_CHARACTER_METADATA_MISMATCH");
 });
 
-test("every speaking character must have exactly one voice and no extra voice", () => {
+test("speaker identity images remain strict while missing optional voice never blocks native H3 speech", () => {
   const { project, shot, references } = fixture();
   references.audios.pop();
+  assert.equal(assertStrictCharacterMediaBindings(project, shot, references), true);
+});
+
+test("an optional voice may only belong to a speaker in the current task", () => {
+  const { project, shot, references } = fixture();
+  references.audios.push({ characterId: "C03", characterName: "王五", path: "D:/voice/wang-wu.wav" });
+  project.characters.push({ id: "C03", name: "王五" });
   assert.throws(() => assertStrictCharacterMediaBindings(project, shot, references), error => error.code === "SHOT_DIALOGUE_VOICE_BIJECTION_FAILED");
 });
 

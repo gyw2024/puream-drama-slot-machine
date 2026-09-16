@@ -1,0 +1,6 @@
+'use strict';
+const VERSION='text-review-confirmation-edit-v1';
+const INSTRUCTION=`TEXT REVIEW LOCATION: Complete source writing/standardization, asset extraction, directing and all final video/still/asset prompts first. Content audits run together at the displayed prompt-confirmation document. Parsing, identity binding, data delivery and reference extraction remain in their own stages; their structural readiness is not content approval.
+REPAIR METHOD: Act as a document editor. Locate the precise existing field and smallest necessary replacement; edit it and its directly affected source/execution/translation/reference counterparts in place. Do not send the task back to a writer, request whole-shot or whole-film regeneration, restart directing, or erase unaffected results. Preserve original uploaded text and user facts. Correct the editable execution draft when the fault originates there. All content requirements still apply; do not call a pending review passed. The user confirms the actual edited version. Real-media review still needs actual media after generation.`;
+function deferred(previous){return {version:VERSION,status:'deferred',ok:null,stage:'prompt_review',reason:'全部提示词完成后，在确认页内审核并定点修改',...(previous?{previousReceipt:previous}:{})};}
+module.exports={VERSION,INSTRUCTION,deferred};

@@ -157,7 +157,8 @@ test("uploaded-script UI switches to manual standardization and hides baseline w
   const simple = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "simple-mode.js"), "utf8");
   const html = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.html"), "utf8");
   assert.match(workbench, /inputMode: "manual", scriptHandling: "respect"/);
-  assert.match(simple, /inputMode: "manual", scriptHandling: "respect"/);
+  assert.match(simple, /simpleAssetOnly:\s*true/);
+  assert.doesNotMatch(simple, /importTextFile|analyzeScript|uploadScript/);
   assert.match(workbench, /服装资产为 0/);
   assert.doesNotMatch(workbench, /const baseCards = \(project\.characters/);
   assert.match(html, /AI 标准化并拆镜/);

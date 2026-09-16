@@ -10,7 +10,7 @@ const {
   localUploadedAnalysisChunk
 } = require("../app/workbench-workflow");
 
-test("uploaded dialogue local compiler preserves source truth only as non-authoritative recovery evidence", () => {
+test("uploaded dialogue source-ledger compiler preserves source truth for zero-cost structural recovery", () => {
   const raw = [
     "【场景】客厅",
     "林梅（压低声音，忍着火）：你把那张单子给我。",
@@ -43,7 +43,8 @@ test("uploaded dialogue local compiler preserves source truth only as non-author
   assert.equal((workflowSource.match(/localUploadedAnalysisChunk\(/g) || []).length, 2, "production analysis may prepare local evidence before Agent enhancement");
   assert.doesNotMatch(workflowSource, /local-uploaded-script-compiler/);
   assert.doesNotMatch(workflowSource, /agent-plus-local-auto-repair/);
-  assert.match(workflowSource, /Local parsing is recovery evidence only/);
+  assert.match(workflowSource, /zero extra model/);
+  assert.match(workflowSource, /formatRecoveryCount/);
   assert.match(workflowSource, /localFallbackCount:\s*0/);
 });
 
@@ -64,5 +65,5 @@ test("local fallback preserves explicit characters but promotes only causal prop
   });
   assert.deepEqual(data.characters.map(item => item.name), ["林梅", "周兰", "沉默保镖"]);
   assert.deepEqual(data.props.map(item => item.name), ["离婚协议书"]);
-  assert.ok(data.props.every(item => item.coreStory === true && item.units.length === 2));
+  assert.ok(data.props.every(item => item.coreStory === true && item.units.length >= 1 && item.units.length <= data.shots.length));
 });

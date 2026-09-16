@@ -14,7 +14,7 @@ const {
   theoreticalTopicToAssetsUpperBoundMs
 } = require("../app/drama-writing-contract");
 
-test("eight-minute simple mode fails closed when the creative Agent is unavailable", async t => {
+test("eight-minute simple mode waits without a user-facing error when the creative Agent is unavailable", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-eight-minute-sla-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -37,7 +37,7 @@ test("eight-minute simple mode fails closed when the creative Agent is unavailab
   store.patchProject(created.id, {
     productionPlan: { inputMode: "ai", executionMode: "step", scriptFormat: "dialogue", scriptFormatConfirmed: true },
     generation: { targetDurationSeconds: 480, engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "smart", modeConfirmed: true },
-    product: { name: "家庭整理手册", description: "用户上传的纸质手册", sellingPoints: "按用户上传页面阅读与整理，不虚构书中结论", imagePath }
+    product: { name: "家庭整理手册", description: "用户上传的纸质手册", sellingPoints: "按用户上传页面阅读与整理，不虚构书中结论", imagePath, price: "29.9元", offer: "无促销", purchaseInstructions: "点击左下角头像进入橱窗购买" }
   });
 
   const calls = [];
@@ -52,16 +52,12 @@ test("eight-minute simple mode fails closed when the creative Agent is unavailab
     }
   });
 
-  await assert.rejects(
-    workflow.generateTopicOptions(created.id),
-    error => error?.code === "TOPIC_AGENT_RESULT_REQUIRED"
-      && error?.agentRequired === true
-      && error?.localCreativeFallbackUsed === false
-  );
-  const failed = store.getProject(created.id);
-  assert.equal(failed.ideation.status, "failed");
-  assert.equal(failed.ideation.generationSource, "agent");
-  assert.equal(failed.ideation.topics.length, 0);
+  const waiting = await workflow.generateTopicOptions(created.id);
+  assert.equal(waiting.ideation.status, "waiting_topics");
+  assert.equal(waiting.ideation.generationSource, "upstream_no_result");
+  assert.equal(waiting.ideation.topics.length, 0);
+  assert.equal(waiting.ideation.errorCode, "");
+  assert.match(waiting.ideation.message, /不会自动重复提交/);
   assert.equal(calls.length, 1, "Agent failure must not issue a second billable request or use a fixed local topic batch");
 
   const schedule = planFilmSchedule(480, "puream-hailuo-h3", { engine: "hailuo-h3" });
@@ -85,6 +81,11 @@ test("writing and blueprint review use one shared dialogue contract", () => {
   assert.doesNotMatch(workflowSource, /spokenCharactersPerMinute >= 190/);
   const compiled = compileTextStagePrompt("旧提示：每镜固定6句，每分钟20轮、190字。", {}, "units");
   assert.ok(compiled.lastIndexOf("写作与蓝图审核共享合同") > compiled.indexOf("每分钟20轮"));
-  assert.match(compiled, /旧提示中的“每S唯一说话人、换人必须下一S、三个subshots固定同一机位”及每镜固定6句\/8句/);
-  assert.ok(compiled.lastIndexOf("H3连续剧情块最终覆盖规则") > compiled.indexOf("参考成片制作单元合同"));
+  assert.match(compiled, /每个10–15秒H3供应商剧情任务|每个H3供应商任务[^。]*10–15秒/);
+  assert.match(compiled, /句数按程序给定的逐句语音时窗与真实动作容量决定/);
+  assert.match(compiled, /不固定为两句，绝不拆半句/);
+  assert.match(compiled, /最终H3提示词保留[^。]*英文时间段、逐句起止、语速/);
+  assert.match(compiled, /计算公式和制作说明不得作为对白朗读/);
+  assert.doesNotMatch(compiled, /最终H3提示词不写逐句秒点|visibleCharacterIds最多2人/);
+  assert.ok(compiled.lastIndexOf("H3原生对白时窗最终覆盖规则") > compiled.indexOf("参考成片制作单元合同"));
 });

@@ -1,0 +1,545 @@
+{
+  "version": "20260910-25-cases",
+  "method": "paired transcript review and six sampled video frames per case; transcription and legacy product flags may contain errors",
+  "cases": [
+    {
+      "id": "R01",
+      "title": "7.30-2",
+      "productCategory": "清凉油",
+      "mechanism": "relationship_reward",
+      "sourceSha256": "94da9192a8715ada0e2a6dc1cb894faf3b69fc32bd82136e60207258bad178c8",
+      "sourceFile": "D:\\漫剧学习材料\\短剧素材\\7.30-2_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 395,
+          "quote": "角色A（剧情台词）：左下角链接的"
+        },
+        {
+          "line": 472,
+          "quote": "角色B（剧情台词）：那种清凉感"
+        },
+        {
+          "line": 473,
+          "quote": "角色A（剧情台词）：就像是有一股小凉风追着你吹"
+        }
+      ]
+    },
+    {
+      "id": "R02",
+      "title": "全家出去旅游，妈妈的机票却忘记订了、人性、孝顺、内容由爱生成、人性",
+      "productCategory": "",
+      "mechanism": "relationship_only",
+      "sourceSha256": "c3007cb3b2a4bf56604db3f66817e78f93cd213390b3b835f2e3ac23eece2767",
+      "sourceFile": "D:\\漫剧学习材料\\短剧素材\\全家出去旅游，妈妈的机票却忘记订了、人性、孝顺、内容由爱生成、人性_家庭对白稿.txt",
+      "hasCommerce": false,
+      "evidence": [
+        {
+          "line": 24,
+          "quote": "角色A（剧情台词）：房间住不下 我再订一间"
+        },
+        {
+          "line": 25,
+          "quote": "角色A（剧情台词）：我走慢点 不耽误你们"
+        }
+      ]
+    },
+    {
+      "id": "R03",
+      "title": "养育之恩大于天！",
+      "productCategory": "",
+      "mechanism": "relationship_only",
+      "sourceSha256": "4689a5c912c07f9909e17bf960544f9b774d65f419154e18f44ab519c3f136f4",
+      "sourceFile": "D:\\漫剧学习材料\\短剧素材\\养育之恩大于天！_家庭对白稿.txt",
+      "hasCommerce": false,
+      "evidence": [
+        {
+          "line": 65,
+          "quote": "角色A（剧情台词）：我今天跟你好好算算"
+        },
+        {
+          "line": 66,
+          "quote": "角色B（剧情台词）：什么叫脏"
+        }
+      ]
+    },
+    {
+      "id": "R04",
+      "title": "出门在外，安全第一，做好防范！",
+      "productCategory": "防磁卡包",
+      "mechanism": "problem_solution",
+      "sourceSha256": "e3d03b74210aa4c4044a932081272f2eada9f695f25c32756a2deb90195bba92",
+      "sourceFile": "D:\\漫剧学习材料\\短剧素材\\出门在外，安全第一，做好防范！_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 117,
+          "quote": "角色A（剧情台词）：在拼凑泄露信息"
+        },
+        {
+          "line": 118,
+          "quote": "角色A（剧情台词）：伪装专组恐吓你"
+        }
+      ]
+    },
+    {
+      "id": "R05",
+      "title": "回家",
+      "productCategory": "",
+      "mechanism": "relationship_only",
+      "sourceSha256": "01be6eeb3104194a930791cba5cd01d298d6e125245733001180f15573921fc3",
+      "sourceFile": "D:\\漫剧学习材料\\短剧素材\\回家_家庭对白稿.txt",
+      "hasCommerce": false,
+      "evidence": [
+        {
+          "line": 132,
+          "quote": "角色A（剧情台词）：咱家接不开锅了他管过没,现在老了知道找我了。"
+        },
+        {
+          "line": 133,
+          "quote": "角色A（剧情台词）：妈,那都是多少年前的事儿了,"
+        }
+      ]
+    },
+    {
+      "id": "R06",
+      "title": "患难时刻见真情、情感、爱情、相亲、剧情、阿乐",
+      "productCategory": "红烧酱汁",
+      "mechanism": "care_demonstration",
+      "sourceSha256": "0a756a116c047e22793655df4eb9f39babae97c2592d357b5a9cdf67b6087b25",
+      "sourceFile": "D:\\漫剧学习材料\\短剧素材\\患难时刻见真情、情感、爱情、相亲、剧情、阿乐_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 351,
+          "quote": "角色A（剧情台词）：视频左下角的链接"
+        },
+        {
+          "line": 332,
+          "quote": "角色B（剧情台词）：不用去熬糖色"
+        },
+        {
+          "line": 333,
+          "quote": "角色A（剧情台词）：肉焯水"
+        }
+      ]
+    },
+    {
+      "id": "R07",
+      "title": "患难见真情、短剧、原创短剧",
+      "productCategory": "红烧酱汁",
+      "mechanism": "care_demonstration",
+      "sourceSha256": "22a94b523bf22a70e855d975e95058e4968d0eb401d32e87886089a351199767",
+      "sourceFile": "D:\\漫剧学习材料\\短剧素材\\患难见真情、短剧、原创短剧_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 136,
+          "quote": "角色A（剧情台词）：别用直播间的定制杯"
+        },
+        {
+          "line": 395,
+          "quote": "角色A（剧情台词）：我不是拿钱砸你"
+        },
+        {
+          "line": 396,
+          "quote": "角色B（剧情台词）：你手里有烟火气"
+        }
+      ]
+    },
+    {
+      "id": "R08",
+      "title": "父母不能等",
+      "productCategory": "",
+      "mechanism": "relationship_only",
+      "sourceSha256": "0107d3758f64e6535d37991bc0aa5405db2b9229cceb5e1629f3a74a59802ce9",
+      "sourceFile": "D:\\漫剧学习材料\\短剧素材\\父母不能等_家庭对白稿.txt",
+      "hasCommerce": false,
+      "evidence": [
+        {
+          "line": 222,
+          "quote": "角色A（剧情台词）：谁做不到"
+        },
+        {
+          "line": 223,
+          "quote": "角色A（剧情台词）：谁请全家吃饭"
+        }
+      ]
+    },
+    {
+      "id": "R09",
+      "title": "视频号视频",
+      "productCategory": "毛巾",
+      "mechanism": "gratitude_support",
+      "sourceSha256": "047deec1d60c6b40b30c2a82ae5adb5d774a857f7b8983b8170ca676c4d6e2f8",
+      "sourceFile": "D:\\漫剧学习材料\\短剧素材\\视频号视频_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 434,
+          "quote": "角色A（剧情台词）：今天在我直播间下单"
+        },
+        {
+          "line": 461,
+          "quote": "角色A（剧情台词）：吸水性啊 特别的强"
+        },
+        {
+          "line": 462,
+          "quote": "角色A（剧情台词）：最绝的是"
+        }
+      ]
+    },
+    {
+      "id": "R10",
+      "title": "谁是真心人",
+      "productCategory": "红烧酱汁",
+      "mechanism": "relationship_reward",
+      "sourceSha256": "b4bd5a91814a263e7a4d4c6e955598515b3e7cdef723541ee804c1492542be7c",
+      "sourceFile": "D:\\漫剧学习材料\\短剧素材\\谁是真心人_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 354,
+          "quote": "角色A（剧情台词）：赶紧点击左下角链接"
+        },
+        {
+          "line": 348,
+          "quote": "角色A（剧情台词）：亏的差价"
+        },
+        {
+          "line": 349,
+          "quote": "角色A（剧情台词）：全从我傅政庭私人账户里扣"
+        }
+      ]
+    },
+    {
+      "id": "R11",
+      "title": "03",
+      "productCategory": "嫩肉粉",
+      "mechanism": "care_demonstration",
+      "sourceSha256": "2ddc7b50ef1e31dcc0eb49bae1e183095ad091172af2017dc94a04785cd18e1e",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\03_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 313,
+          "quote": "角色B（剧情台词）：如果实在有"
+        },
+        {
+          "line": 314,
+          "quote": "角色A（剧情台词）：就是"
+        }
+      ]
+    },
+    {
+      "id": "R12",
+      "title": "3",
+      "productCategory": "清洁泡腾片",
+      "mechanism": "problem_solution",
+      "sourceSha256": "2cb2bfa3af600eb99556b9ceb88e6e24ffe71403afb222cf2d4af56a35e81912",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\3_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 305,
+          "quote": "角色A（剧情台词）：现在点击我头像进入直播间"
+        },
+        {
+          "line": 390,
+          "quote": "角色A（剧情台词）：有人听见借钱"
+        },
+        {
+          "line": 391,
+          "quote": "角色B（剧情台词）：马上跟我们划清借线"
+        }
+      ]
+    },
+    {
+      "id": "R13",
+      "title": "8.3-2",
+      "productCategory": "清凉油",
+      "mechanism": "relationship_reward",
+      "sourceSha256": "930f11a53330c2d335f803bfc7d30c1238c6b40ca3d21a3c190bada6cf919a8a",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\8.3-2_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 367,
+          "quote": "角色A（剧情台词）：现在点击视频左下角链接的"
+        },
+        {
+          "line": 487,
+          "quote": "角色B（剧情台词）：我想让更多的人夏天"
+        },
+        {
+          "line": 488,
+          "quote": "角色A（剧情台词）：不用硬扛库鼠"
+        }
+      ]
+    },
+    {
+      "id": "R14",
+      "title": "sdfa",
+      "productCategory": "凉拌汁",
+      "mechanism": "care_demonstration",
+      "sourceSha256": "4b811c17dcdd6b5a37587ffb869bc68f2656a73fc072810decf237c197adaaf8",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\sdfa_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 373,
+          "quote": "角色A（剧情台词）：左下角链接点开就是"
+        },
+        {
+          "line": 378,
+          "quote": "角色B（剧情台词）：我现在知道你长什么样了"
+        },
+        {
+          "line": 379,
+          "quote": "角色A（剧情台词）：画的真像"
+        }
+      ]
+    },
+    {
+      "id": "R15",
+      "title": "、亲情、家庭、内容由爱生成",
+      "productCategory": "",
+      "mechanism": "relationship_only",
+      "sourceSha256": "3f82b848827e4a751f7cc67267e0ced9dac934d72b05b50200795e756736bb83",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\、亲情、家庭、内容由爱生成_家庭对白稿.txt",
+      "hasCommerce": false,
+      "evidence": [
+        {
+          "line": 134,
+          "quote": "角色B（剧情台词）：我不该嫌您慢"
+        },
+        {
+          "line": 135,
+          "quote": "角色A（剧情台词）：也不该嫌您丢人"
+        }
+      ]
+    },
+    {
+      "id": "R16",
+      "title": "、剧情、短剧、正能量",
+      "productCategory": "管道清洁用品",
+      "mechanism": "problem_solution",
+      "sourceSha256": "48178124f915b7698f76187656487ee57e83abcc6de6840b314f84e9bb5c963c",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\、剧情、短剧、正能量_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 420,
+          "quote": "角色B（剧情台词）：点击视频下方链接"
+        },
+        {
+          "line": 396,
+          "quote": "角色A（剧情台词）：厚重油脂和头发碎屑"
+        },
+        {
+          "line": 397,
+          "quote": "角色A（剧情台词）：连里面藏着的"
+        }
+      ]
+    },
+    {
+      "id": "R17",
+      "title": "、好剧推荐、短剧分享、亲情、人心、真相、反转",
+      "productCategory": "红烧酱汁",
+      "mechanism": "care_demonstration",
+      "sourceSha256": "4f9803a08d78030011c440b142d00134712c52d9ce99814a98253152c6d878d3",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\、好剧推荐、短剧分享、亲情、人心、真相、反转_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 364,
+          "quote": "角色A（剧情台词）：把大脚的小黄蛋下单"
+        },
+        {
+          "line": 413,
+          "quote": "角色A（剧情台词）：你们帮得够多了"
+        },
+        {
+          "line": 414,
+          "quote": "角色A（剧情台词）：我不能再占房间"
+        }
+      ]
+    },
+    {
+      "id": "R18",
+      "title": "、正能量",
+      "productCategory": "蒸汽眼罩",
+      "mechanism": "care_demonstration",
+      "sourceSha256": "dd9631cd27195f8e57eae86856ed1a2f5db87f3a0779903b11e5c53f63b31b2b",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\、正能量_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 289,
+          "quote": "角色A（剧情台词）：链接在哪"
+        },
+        {
+          "line": 290,
+          "quote": "角色B（剧情台词）：我也派两盒给我爷爷背着"
+        },
+        {
+          "line": 291,
+          "quote": "角色A（剧情台词）：眼睛是革命的本钱"
+        }
+      ]
+    },
+    {
+      "id": "R19",
+      "title": "一定要看到最后，祝天下有情人终成眷属、正能量、情感、夫妻、短剧",
+      "productCategory": "衣柜防潮用品",
+      "mechanism": "problem_solution",
+      "sourceSha256": "c48c110790095d9191a9d9a6072607a29468d324795022c9e4866e39fc6a596d",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\一定要看到最后，祝天下有情人终成眷属、正能量、情感、夫妻、短剧_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 240,
+          "quote": "角色B（剧情台词）：赶紧点击下方头像"
+        },
+        {
+          "line": 222,
+          "quote": "角色A（剧情台词）：卫生间也摆上两小包"
+        },
+        {
+          "line": 223,
+          "quote": "角色A（剧情台词）：这一整年"
+        }
+      ]
+    },
+    {
+      "id": "R20",
+      "title": "你不是累赘--XS002101-1",
+      "productCategory": "",
+      "mechanism": "relationship_only",
+      "sourceSha256": "3f3ea49a321e80319cac7b2919816d06ea840fb6ee9350290fc25ba4479b7ab7",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\你不是累赘--XS002101-1_家庭对白稿.txt",
+      "hasCommerce": false,
+      "evidence": [
+        {
+          "line": 136,
+          "quote": "角色A（剧情台词）：拆成两半的"
+        },
+        {
+          "line": 137,
+          "quote": "角色A（剧情台词）：个官一头"
+        }
+      ]
+    },
+    {
+      "id": "R21",
+      "title": "多一分爱心是不是就会多一份美好、传递善意",
+      "productCategory": "茶叶蛋料包",
+      "mechanism": "craft_teaching",
+      "sourceSha256": "77956ad12c562879d9bd8abfa2f6231a26850197226eb6f172a6eceab68d01b5",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\多一分爱心是不是就会多一份美好、传递善意_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 534,
+          "quote": "角色A（剧情台词）：就放在下方红色链接了"
+        },
+        {
+          "line": 476,
+          "quote": "角色B（剧情台词）：颜色好看"
+        },
+        {
+          "line": 477,
+          "quote": "角色A（剧情台词）：鲜香纯厚 卤香似意"
+        }
+      ]
+    },
+    {
+      "id": "R22",
+      "title": "更好傻瓜",
+      "productCategory": "红烧酱汁",
+      "mechanism": "relationship_reward",
+      "sourceSha256": "72c788f7c4fc5d41baeb2f506a7f1d65a810805c719ab04d3684f41d48acc167",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\更好傻瓜_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 35,
+          "quote": "角色B（剧情台词）：天天在直播间喊宝宝们"
+        },
+        {
+          "line": 307,
+          "quote": "角色A（剧情台词）：我再多送两包"
+        },
+        {
+          "line": 308,
+          "quote": "角色B（剧情台词）：九块九整整七大包"
+        }
+      ]
+    },
+    {
+      "id": "R23",
+      "title": "砸车救孩子，车主回来却问车门谁赔？、短剧",
+      "productCategory": "清凉油",
+      "mechanism": "care_demonstration",
+      "sourceSha256": "cafbc7a133111aa63d5a20666b879c3572ee009969bbda450f79bceeffea8dfa",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\砸车救孩子，车主回来却问车门谁赔？、短剧_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 157,
+          "quote": "角色A（剧情台词）：往需要的地方滚几下就行"
+        },
+        {
+          "line": 158,
+          "quote": "角色A（剧情台词）：薄荷味挺浓的"
+        }
+      ]
+    },
+    {
+      "id": "R24",
+      "title": "老母亲房子塌了，哥哥来借两万，弟弟当众翻脸、剧情",
+      "productCategory": "凉拌汁",
+      "mechanism": "care_demonstration",
+      "sourceSha256": "a7b566eaebf9591a9b0a0f455ee5352308e7a120cf6e758098a96388d407b930",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\老母亲房子塌了，哥哥来借两万，弟弟当众翻脸、剧情_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 605,
+          "quote": "角色B（剧情台词）：点开左下角链接看一下"
+        },
+        {
+          "line": 554,
+          "quote": "角色A（剧情台词）：周总"
+        },
+        {
+          "line": 555,
+          "quote": "角色A（剧情台词）：都准备好了"
+        }
+      ]
+    },
+    {
+      "id": "R25",
+      "title": "遇难见人心",
+      "productCategory": "管道清洁用品",
+      "mechanism": "problem_solution",
+      "sourceSha256": "9e187eb95713ce90401f9479e3ab499780631930c84a87300241b5a3d3672f37",
+      "sourceFile": "D:\\漫剧学习材料\\新短剧素材\\遇难见人心_家庭对白稿.txt",
+      "hasCommerce": true,
+      "evidence": [
+        {
+          "line": 463,
+          "quote": "角色B（剧情台词）：赶紧点击左下角链接多囤几盒"
+        },
+        {
+          "line": 468,
+          "quote": "角色A（剧情台词）：黏糊糊的头发"
+        },
+        {
+          "line": 469,
+          "quote": "角色B（剧情台词）：不用弯着老腿费劲掏"
+        }
+      ]
+    }
+  ]
+}

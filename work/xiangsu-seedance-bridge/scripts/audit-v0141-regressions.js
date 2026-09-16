@@ -245,8 +245,8 @@ async function main() {
     const topMore = page.locator(".top-more-menu");
     assert.equal(await topMore.evaluate(node => node.open), false, "advanced controls must start collapsed");
     await topMore.locator(":scope > summary").click();
-    for (const selector of ["#switchSimpleMode", "#qualityBlueprintToggle", "#accountSwitchShortcut", "#startBridge"]) {
-      assert.equal(await page.locator(selector).isVisible(), true, `${selector} must remain reachable from More`);
+    for (const selector of ["#switchSimpleMode", "#qualityBlueprintToggle"]) {
+      assert.equal(await page.locator(selector).isVisible(), true, `${selector} must remain reachable in the top toolbar`);
     }
     const topMoreShot = path.join(evidenceDir, "top-more-menu-100.png");
     await captureWindow(electronApp, topMoreShot);

@@ -5,13 +5,31 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol, safeStorage, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol, safeStorage, shell } = require("electron");
+const { explicitUserDataDirectory, resolveUserDataDirectory } = require("./user-data-location");
+
+// Preserve the real projects, authorization and asset library created by
+// earlier releases. Explicit --user-data-dir test/audit sandboxes always win.
+// No files are copied, renamed or rewritten by this compatibility selection.
+if (!app.commandLine.hasSwitch("user-data-dir") && !explicitUserDataDirectory(process.argv)) {
+  app.setPath("userData", resolveUserDataDirectory({ appDataPath: app.getPath("appData"), argv: process.argv }));
+}
+process.env.PUREAM_DRAMA_USER_DATA_DIR = app.getPath("userData");
+
 const { BridgeClient } = require("./bridge-client");
 const { contractFor, providerDisplayName } = require("./puream-video-adapters");
-const { testProvider } = require("./ai-provider");
+const { testProvider, listTextProviderModels } = require("./ai-provider");
 const { stageSubmissionMedia } = require("./media-staging");
 const { WorkbenchStore, atomicWriteJson, defaultPromptTemplates } = require("./workbench-store");
-const { WorkbenchWorkflow, projectRequiresFaceMesh, hasOssCredentials } = require("./workbench-workflow");
+const {
+  WorkbenchWorkflow,
+  hasOssCredentials,
+  PROMPT_REVIEW_BUNDLE_VERSION,
+  promptReviewSourceFingerprint,
+  promptReviewSettingsFingerprint
+} = require("./workbench-workflow");
+const { importDramaAssetPackage, DRAMA_ASSET_PACKAGE_EXTENSIONS } = require("./drama-asset-package");
+const { createVideoJobRecoveryScheduler } = require("./video-job-recovery");
 const {
   PROMPT_SCOPE_STAGES,
   normalizePromptStage,
@@ -21,6 +39,7 @@ const {
 } = require("./prompt-intake");
 const { DramaLicenseClient, licenseBypassAllowed, DEFAULT_LICENSE_BASE_URL } = require("./license-gate");
 const { createIntegrityGuard } = require("./integrity-guard");
+const { publicError: publicErrorSafe, sanitizePublicMessage: sanitizePublicMessageSafe, errorWithContext } = require("./public-error");
 const { isActiveVideoJob } = require("./workbench-status");
 const { installAssetProtocol, registerAssetScheme } = require("./secure-asset-protocol");
 const { clearGpuFallback, configureRendererAcceleration, recordGpuCrash } = require("./rendering-policy");
@@ -28,6 +47,9 @@ const { AdaptiveDramaKernel } = require("./foundry/kernel");
 const { relocateCopiedWorkbenchData } = require("./foundry/storage-relocation");
 const { McpAppController } = require("./mcp/app-controller");
 const { startControlGateway } = require("./mcp/control-gateway");
+const { wasClosedByUser, installDesktopExitPolicy } = require("./desktop-exit-policy");
+const { LocalPostProductionAgent } = require("./mcp/local-post-production-agent");
+const { createConnectionInfo, probeStdioConnection } = require("./mcp/client-config");
 const {
   hydratePureamDefaults: applyPureamAuthorization,
   findStoredPureamAuthorization,
@@ -76,8 +98,12 @@ app.on("child-process-gone", (_event, details = {}) => {
   app.exit(0);
 });
 
-const bridge = new BridgeClient();
-const simpleBridge = new BridgeClient();
+// H3 video APIs and reference uploads share Chromium's system proxy and
+// certificate stack so desktop networking matches the rest of the app.
+const remoteVideoFetch = (url, init) => net.fetch(url, init);
+const createDesktopBridge = () => new BridgeClient({ remoteFetchImpl: remoteVideoFetch });
+const bridge = createDesktopBridge();
+const simpleBridge = createDesktopBridge();
 let dramaLicense;
 const integrityGuard = createIntegrityGuard({ app });
 let mainWindow;
@@ -87,9 +113,17 @@ let simpleModeStore;
 let simpleModeWorkflow;
 let foundryKernel;
 let mcpControlGateway;
-let accountSwitchRequest = null;
+let mcpAppController;
+let localPostProductionAgent;
+let simpleMcpAppController;
+let simpleLocalPostProductionAgent;
 let videoJobSyncRequest = null;
+let videoJobRecoveryScheduler = null;
 let rendererCrashReloads = 0;
+// Local MCP regression runs must be able to exercise the actual Electron
+// runtime without creating or showing a desktop window.  This is deliberately
+// opt-in and keeps the normal interactive desktop path unchanged.
+const headlessMcpRuntime = process.env.PUREAM_HEADLESS_MCP === "1";
 let activeWorkbenchDataRoot = "";
 const UPDATE_MANIFEST_URL = "https://puream.cn/api/drama-slot/version";
 let updateDownloadRequest = null;
@@ -111,17 +145,19 @@ function workspaceModeConfigPath() {
 }
 
 function normalizeWorkspaceMode(value) {
-  return value === "simple" ? "simple" : "agent";
+  if (value === "simple") return "simple";
+  if (value === "package") return "package";
+  return "agent";
 }
 
 function readWorkspaceMode() {
   const forced = String(process.env.DRAMA_SLOT_WORKSPACE_MODE || "").trim().toLowerCase();
-  if (!app.isPackaged && ["agent", "simple"].includes(forced)) {
+  if (!app.isPackaged && ["agent", "simple", "package"].includes(forced)) {
     return { selected: true, mode: forced, updatedAt: "test-runtime-override" };
   }
   try {
     const saved = JSON.parse(fs.readFileSync(workspaceModeConfigPath(), "utf8"));
-    if (["agent", "simple"].includes(saved?.mode)) {
+    if (["agent", "simple", "package"].includes(saved?.mode)) {
       return { selected: true, mode: normalizeWorkspaceMode(saved.mode), updatedAt: saved.updatedAt || "" };
     }
   } catch {}
@@ -143,17 +179,11 @@ function workspaceModePage(mode) {
 }
 
 function defaultWorkbenchDataRoot() {
-  return path.join(app.getPath("userData"), "workbench");
+  return require("./workbench-storage-paths").defaultWorkbenchRoot(app.getPath("userData"));
 }
 
 function configuredWorkbenchDataRoot() {
-  if (process.env.DRAMA_SLOT_DATA_ROOT) return path.resolve(process.env.DRAMA_SLOT_DATA_ROOT);
-  try {
-    const saved = JSON.parse(fs.readFileSync(storageLocationConfigPath(), "utf8"));
-    const root = String(saved?.workbenchDataRoot || "").trim();
-    if (root && path.isAbsolute(root)) return path.resolve(root);
-  } catch {}
-  return defaultWorkbenchDataRoot();
+  return require("./workbench-storage-paths").resolveWorkbenchRoot(app.getPath("userData"));
 }
 
 function persistWorkbenchDataRoot(rootDir) {
@@ -385,9 +415,13 @@ const MEDIA_RULES = {
 const TEXT_IMPORT_MAX_BYTES = 2 * 1024 * 1024;
 const SCRIPT_IMPORT_MAX_CHARS = 500_000;
 const PROMPT_IMPORT_MAX_CHARS = 60_000;
-const AV_PROBE_TIMEOUT_MS = 20_000;
+// Media import is a production prerequisite. Large local files, network disks
+// and cold FFmpeg startup must receive the same minimum window as generation.
+const LOCAL_MEDIA_IMPORT_TIMEOUT_MS = 20 * 60_000;
+const AV_PROBE_TIMEOUT_MS = LOCAL_MEDIA_IMPORT_TIMEOUT_MS;
 
 function sanitizePublicMessage(value) {
+  return sanitizePublicMessageSafe(value);
   return String(value || "发生未知错误")
     .replace(/(?:[A-Za-z]:\\|\\\\)[^\r\n"']+/g, "本地文件")
     .replace(/puream[-_]?hailuo[-_]?h3/gi, "纯梦云端算力")
@@ -397,6 +431,7 @@ function sanitizePublicMessage(value) {
 }
 
 function publicError(error) {
+  return publicErrorSafe(error);
   return {
     ok: false,
     code: error?.code || "UNEXPECTED_ERROR",
@@ -549,14 +584,15 @@ function createWindow() {
     bridge.configure(saved.videoProvider);
   }
   const modeState = readWorkspaceMode();
-  const startPage = captureScenario === "hailuoquick"
-    ? "index.html"
-    : capturePath
+  const startPage = capturePath
       ? "workbench.html"
       : modeState.selected
         ? workspaceModePage(modeState.mode)
         : "mode-selector.html";
-  mainWindow.loadFile(path.join(__dirname, "renderer", startPage), captureFragment ? { hash: captureFragment } : undefined);
+  const startPageOptions = captureFragment
+    ? { hash: captureFragment }
+    : (modeState.selected && modeState.mode === "package" ? { query: { entry: "production-package" } } : undefined);
+  mainWindow.loadFile(path.join(__dirname, "renderer", startPage), startPageOptions);
   if (capturePath) {
     mainWindow.webContents.once("did-finish-load", () => {
       setTimeout(async () => {
@@ -582,8 +618,8 @@ function createWindow() {
             const input = document.querySelector('#newProjectName');
             input.value = ${JSON.stringify(projectTitle)};
             input.dispatchEvent(new Event('input', { bubbles: true }));
-            document.querySelector('input[name="newVideoEngine"][value="seedance"]').checked = true;
-            document.querySelector('input[name="newVideoMode"][value="continuation"]').checked = true;
+            document.querySelector('input[name="newVideoEngine"][value="hailuo-h3"]').checked = true;
+            document.querySelector('input[name="newVideoMode"][value="asset_direct"]').checked = true;
             document.querySelector('#newProjectForm').requestSubmit();
             for (let attempt = 0; attempt < 80; attempt += 1) {
               const selected = document.querySelector('#projectSelect option:checked')?.textContent || '';
@@ -639,7 +675,7 @@ function createWindow() {
             await wait(180);
             const kind = document.querySelector('#videoProviderKind');
             const base = document.querySelector('#videoBaseUrl');
-            kind.value = 'puream-seedance';
+            kind.value = 'puream-hailuo-h3';
             kind.dispatchEvent(new Event('change', { bubbles: true }));
             base.value = 'https://puream.cn.attacker.example/v1';
             base.dispatchEvent(new Event('input', { bubbles: true }));
@@ -686,8 +722,8 @@ function createWindow() {
             assign('#videoOssBucket', '');
             assign('#videoOssEndpoint', '');
             assign('#hailuoApiMode', 'multimodal_to_video', true);
-            assign('#hailuoRefImageSize', 'max');
-            assign('#hailuoSeed', '20260804');
+            assign('#hailuoRefImageSize', 'match');
+            assign('#hailuoSeed', '');
             document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
             const card = document.querySelector('.video-provider-card');
             const providerField = document.querySelector('#videoProviderKind');
@@ -706,7 +742,6 @@ function createWindow() {
               hailuoApiMode: document.querySelector('#hailuoApiMode')?.value || '',
               hailuoApiModeOptionCount: document.querySelectorAll('#hailuoApiMode option').length,
               hailuoVisible: !document.querySelector('#hailuoFields')?.classList.contains('hidden'),
-              faceGridButtonCount: document.querySelectorAll('[data-action="apply-grid"]').length,
               providerFieldTop: providerField.getBoundingClientRect().top,
               scrollTop: document.querySelector('.main-stage')?.scrollTop || 0
             };
@@ -729,80 +764,6 @@ function createWindow() {
               rule: document.querySelector('#rulePopover')?.textContent || ''
             };
           })()`);
-        }
-        if (captureScenario === "seedancemesh") {
-          captureResult = await mainWindow.webContents.executeJavaScript(`(async () => {
-            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-            for (let attempt = 0; attempt < 100; attempt += 1) {
-              if (document.body.dataset.workbenchReady === 'true' && document.querySelector('#projectSelect option:checked')?.value) break;
-              await wait(50);
-            }
-            const projectId = document.querySelector('#projectSelect').value;
-            await window.dramaSlot.workbench.patchProject(projectId, {
-              generation: { engine: 'seedance', mode: 'continuation', modeConfirmed: true, shotDuration: 5, aspectRatio: '9:16' },
-              characters: [{ id: 'C01', name: '林桂芬', description: '62岁退休护士，短卷灰发，左眉尾浅疤，深青针织衫', identitySignature: '左眉尾浅疤、短卷灰发、轻微驼背', voiceDescription: '低沉女中音' }]
-            });
-            document.querySelector('#projectSelect').dispatchEvent(new Event('change', { bubbles: true }));
-            await wait(450);
-            document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
-            document.querySelectorAll('.stage-button').forEach(node => node.classList.toggle('active', node.dataset.stage === 'assets'));
-            document.querySelectorAll('.stage-panel').forEach(node => node.classList.toggle('active', node.dataset.panel === 'assets'));
-            await wait(250);
-            const button = document.querySelector('[data-action="remesh-character"]');
-            const gridButton = document.querySelector('[data-action="apply-grid"]');
-            return {
-              engine: document.querySelector('#projectVideoMode')?.textContent || '',
-              meshTag: document.querySelector('.mesh-required-tag')?.textContent || '',
-              meshDrawLabel: button?.textContent?.trim() || '',
-              meshDrawDisabled: button?.disabled ?? true,
-              faceGridButtonCount: document.querySelectorAll('[data-action="apply-grid"]').length,
-              faceGridLabel: gridButton?.textContent?.trim() || '',
-              faceGridDisabled: gridButton?.disabled ?? true
-            };
-          })()`);
-          await new Promise(resolve => setTimeout(resolve, 180));
-        }
-        if (captureScenario === "facegrid") {
-          captureResult = await mainWindow.webContents.executeJavaScript(`(async () => {
-            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-            try {
-            for (let attempt = 0; attempt < 100; attempt += 1) {
-              if (document.body.dataset.workbenchReady === 'true' && document.querySelector('#projectSelect option:checked')?.value) break;
-              await wait(50);
-            }
-            document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
-            document.querySelector('.stage-button[data-stage="assets"]').click();
-            await wait(250);
-            const projectId = document.querySelector('#projectSelect').value;
-            const before = await window.dramaSlot.workbench.getProject(projectId);
-            const existingGridIds = new Set((before.project?.candidates || []).filter(item => item.source === 'local-face-grid').map(item => item.id));
-            const button = document.querySelector('[data-action="apply-grid"]:not([disabled])');
-            if (!button) throw new Error('Seedance 一键检测网格按钮不可用');
-            button.click();
-            let completed = null;
-            for (let attempt = 0; attempt < 300; attempt += 1) {
-              const latest = await window.dramaSlot.workbench.getProject(projectId);
-              completed = latest.project?.candidates?.find(item => item.source === 'local-face-grid' && !existingGridIds.has(item.id)) || null;
-              if (completed) break;
-              await wait(100);
-            }
-            if (!completed) throw new Error(document.querySelector('#toast')?.textContent || '本地网格处理超时');
-            await wait(350);
-            return {
-              projectId,
-              beforeGridCount: before.project?.candidates?.filter(item => item.source === 'local-face-grid').length || 0,
-              afterGridCount: (await window.dramaSlot.workbench.getProject(projectId)).project?.candidates?.filter(item => item.source === 'local-face-grid').length || 0,
-              method: completed.faceMesh?.method || '',
-              faceCount: completed.faceMesh?.faceCount || 0,
-              sourceCandidateId: completed.faceMesh?.sourceCandidateId || '',
-              outputPath: completed.filePath || '',
-              sourceActionStillAvailable: Boolean(document.querySelector('[data-action="apply-grid"]:not([disabled])'))
-            };
-            } catch (error) {
-              return { error: error?.stack || error?.message || String(error) };
-            }
-          })()`);
-          await new Promise(resolve => setTimeout(resolve, 180));
         }
         if (captureScenario === "accessibilitynewproject") {
           await mainWindow.webContents.executeJavaScript(`(async () => {
@@ -972,10 +933,7 @@ function createWindow() {
               }).length,
               horizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth + 1,
               viewport: { width: innerWidth, height: innerHeight, zoom: ${captureZoom} },
-              localComponents: {
-                xiangsuPath: ${JSON.stringify(bridge.locateXiangsu() || "")},
-                ffmpegPath: ${JSON.stringify(locateFfmpeg() || "")}
-              }
+              localComponents: { ffmpegPath: ${JSON.stringify(locateFfmpeg() || "")} }
             };
           })()`);
           await new Promise(resolve => setTimeout(resolve, 120));
@@ -1092,6 +1050,52 @@ function createWindow() {
           })()`);
           await new Promise(resolve => setTimeout(resolve, 120));
         }
+        if (["mcpsettings", "mcpaccessibility"].includes(captureScenario)) {
+          captureResult = await mainWindow.webContents.executeJavaScript(`(async () => {
+            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+            for (let attempt = 0; attempt < 100; attempt += 1) {
+              if (document.body.dataset.workbenchReady === 'true' && document.querySelector('#mcpConfigPreview')) break;
+              await wait(50);
+            }
+            document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+            document.querySelector('.stage-button[data-stage="settings"]')?.click();
+            await wait(180);
+            const card = document.querySelector('.mcp-connection-card');
+            const stage = document.querySelector('.main-stage');
+            if (stage && card) stage.scrollTop = Math.max(0, card.offsetTop - 18);
+            await wait(220);
+            const buttons = [...document.querySelectorAll('.mcp-connection-actions button')];
+            return {
+              activeStage: document.querySelector('.stage-panel.active')?.dataset.panel || '',
+              badge: document.querySelector('#mcpConnectionBadge')?.textContent?.trim() || '',
+              status: document.querySelector('#mcpConnectionStatus')?.textContent?.trim() || '',
+              command: document.querySelector('#mcpCommand')?.value || '',
+              config: document.querySelector('#mcpConfigPreview')?.value || '',
+              readonlyFields: [...document.querySelectorAll('.mcp-connection-card input, .mcp-connection-card textarea')].every(node => node.readOnly),
+              buttonLabels: buttons.map(node => node.textContent.trim()),
+              clippedButtons: buttons.filter(node => node.scrollWidth > node.clientWidth + 1).map(node => node.id),
+              horizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth + 1
+            };
+          })()`);
+          await new Promise(resolve => setTimeout(resolve, 120));
+          if (captureScenario === "mcpaccessibility") {
+            const axePath = path.resolve(__dirname, "..", "node_modules", "axe-core", "axe.min.js");
+            await mainWindow.webContents.executeJavaScript(fs.readFileSync(axePath, "utf8"));
+            captureResult = await mainWindow.webContents.executeJavaScript(`axe.run(document.querySelector('.mcp-connection-card'), {
+              resultTypes: ['violations']
+            }).then(result => ({
+              url: location.href,
+              scope: 'mcp-connection-card',
+              violations: result.violations.map(item => ({
+                id: item.id,
+                impact: item.impact,
+                description: item.description,
+                help: item.help,
+                nodes: item.nodes.map(node => ({ target: node.target, failureSummary: node.failureSummary }))
+              }))
+            }))`);
+          }
+        }
         if (captureScenario === "resumestate") {
           const targetProjectId = String(process.env.DRAMA_SLOT_CAPTURE_PROJECT_ID || "").trim();
           captureResult = await mainWindow.webContents.executeJavaScript(`(async () => {
@@ -1135,11 +1139,8 @@ function createWindow() {
           await new Promise(resolve => setTimeout(resolve, 120));
         }
         if (captureScenario === "localcomponents") {
-          const xiangsuPath = bridge.locateXiangsu();
           const ffmpegPath = locateFfmpeg();
           captureResult = {
-            xiangsuPath,
-            xiangsuExists: Boolean(xiangsuPath && fs.existsSync(xiangsuPath)),
             ffmpegPath,
             ffmpegExists: Boolean(ffmpegPath && fs.existsSync(ffmpegPath))
           };
@@ -1301,10 +1302,7 @@ function createWindow() {
 const { locateFfmpeg: locateBundledFfmpeg } = require("./locate-ffmpeg");
 
 function locateFfmpeg() {
-  // Prefer the ffmpeg shipped with this product. Sibling apps are last-resort only.
-  let xiangsuPath = "";
-  try { xiangsuPath = bridge.locateXiangsu() || ""; } catch {}
-  return locateBundledFfmpeg({ xiangsuPath });
+  return locateBundledFfmpeg();
 }
 
 function readAvMetadata(filePath) {
@@ -1334,7 +1332,7 @@ function readAvMetadata(filePath) {
     child.stderr.on("data", chunk => {
       if (output.length < 256_000) output += chunk.toString("utf8");
     });
-    child.on("error", error => fail(Object.assign(error, { code: error?.code || "MEDIA_PROBE_FAILED" })));
+    child.on("error", error => fail(errorWithContext(error, { code: error?.code || "MEDIA_PROBE_FAILED" })));
     child.on("close", () => {
       const durationMatch = output.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
       const videoMatch = output.match(/Video:[^\r\n]*?\b(\d{2,5})x(\d{2,5})\b/i);
@@ -1392,9 +1390,9 @@ function normalizeImageForImport(filePath, extension) {
     const timer = setTimeout(() => {
       try { child.kill(); } catch {}
       finish(Object.assign(new Error("图片兼容转换超时，请确认文件没有损坏"), { code: "IMAGE_NORMALIZE_TIMEOUT" }));
-    }, 60_000);
+    }, LOCAL_MEDIA_IMPORT_TIMEOUT_MS);
     child.stderr.on("data", chunk => { if (stderr.length < 16_000) stderr += chunk.toString("utf8"); });
-    child.on("error", error => finish(Object.assign(error, { code: error?.code || "IMAGE_NORMALIZE_FAILED" })));
+    child.on("error", error => finish(errorWithContext(error, { code: error?.code || "IMAGE_NORMALIZE_FAILED" })));
     child.on("close", code => {
       const metadata = code === 0 && fs.existsSync(targetPath) ? nativeImageMetadata(targetPath) : null;
       if (!metadata) {
@@ -1493,11 +1491,8 @@ async function importCandidateFromPath(projectId, entityType, entityId, stage, s
     qualityAudit: MANUAL_VIDEO_STAGES.has(stage)
       ? { ok: true, mode: "manual", skipped: true, checkedAt: new Date().toISOString() }
       : undefined,
-    faceMesh: entityType === "character" && ["character_sheet", "character_three_view", "character_intro"].includes(stage)
-      ? { required: projectRequiresFaceMesh(store.getProject(projectId), store.getSettings()), applied: false, method: "manual-awaiting-local-grid" }
-      : undefined
   });
-  // 手动导入绝不偷偷触发付费生图；需要全脸网格时由用户在候选库点“本地添加全脸网格”。
+  // 手动导入绝不偷偷触发付费生图。
   if (["storyboard_start", "storyboard_end", "storyboard_sheet"].includes(stage)) {
     await workflow.auditStoryboardCandidate(projectId, entityId, candidate.id);
     candidate = store.getProject(projectId).candidates.find(item => item.id === candidate.id) || candidate;
@@ -1911,34 +1906,6 @@ ipcMain.handle("bridge:diagnostics", async () => {
     return publicError(error);
   }
 });
-ipcMain.handle("bridge:start", async () => {
-  try {
-    const launch = bridge.launchXiangsuBridge();
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      await new Promise(resolve => setTimeout(resolve, 500));
-      const health = await bridge.health();
-      if (health.ok) return { ...health, launched: true };
-    }
-    return {
-      ok: false,
-      code: "BRIDGE_START_TIMEOUT",
-      message: "像塑后台已启动，但登录态桥尚未就绪，请确认像塑仍处于登录状态。",
-      executable: launch.executable
-    };
-  } catch (error) {
-    return publicError(error);
-  }
-});
-ipcMain.handle("bridge:hide", async () => {
-  try {
-    const switchState = workbenchStore?.getAccountSwitchState?.();
-    if (switchState?.status === "awaiting_login") {
-      throw Object.assign(new Error("像塑官方登录窗口正在用于切换账号，完成验证前不会重新隐藏"), { code: "ACCOUNT_LOGIN_WINDOW_ACTIVE" });
-    }
-    return bridge.hideRunningXiangsuWindows();
-  }
-  catch (error) { return publicError(error); }
-});
 ipcMain.handle("media:choose", async (_event, request) => {
   try {
     const type = typeof request === "string" ? request : request?.type;
@@ -1983,13 +1950,42 @@ ipcMain.handle("app:defaults", () => {
     durationMax: contract.durationMax,
     rules: {
       image: { min: 0, max: contract.imageMax },
-      video: { min: 0, max: contract.videoMax, maxDuration: providerKind === "local-xiangsu" ? 10 : null, recommendedMinDuration: providerKind === "puream-hailuo-h3" ? 2 : null, recommendedMaxDuration: providerKind === "puream-hailuo-h3" ? 15 : null },
-      audio: { min: 0, max: contract.audioMax, maxDuration: providerKind === "local-xiangsu" ? 15 : null },
+      video: { min: 0, max: contract.videoMax, maxDuration: 15, recommendedMinDuration: 10, recommendedMaxDuration: 15 },
+      audio: { min: 0, max: contract.audioMax, maxDuration: 15 },
       pairedAudio: { max: contract.pairedAudioMax || 0 },
       duration: { min: contract.durationMin, max: contract.durationMax, default: defaultDuration },
       ratios: ["9:16", "16:9", "4:3", "1:1", "3:4", "21:9"]
     }
   };
+});
+function currentMcpConnectionInfo() {
+  return createConnectionInfo({
+    executablePath: process.execPath,
+    appVersion: app.getVersion(),
+    gatewayRunning: Boolean(mcpControlGateway),
+    toolCount: 41
+  });
+}
+
+ipcMain.handle("mcp:get-connection-info", () => {
+  try { return { ok: true, info: currentMcpConnectionInfo() }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("mcp:copy-config", (_event, format) => {
+  try {
+    const info = currentMcpConnectionInfo();
+    const text = format === "codex" ? info.codexToml : info.genericJson;
+    clipboard.writeText(text);
+    return { ok: true, format: format === "codex" ? "codex" : "json" };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("mcp:test-connection", async () => {
+  try {
+    if (!mcpControlGateway) {
+      throw Object.assign(new Error("MCP 本地控制通道尚未就绪，请稍后重试"), { code: "MCP_GATEWAY_NOT_READY" });
+    }
+    return { ok: true, result: await probeStdioConnection({ executablePath: process.execPath }) };
+  } catch (error) { return publicError(error); }
 });
 ipcMain.handle("app:check-update", async () => checkForAppUpdate());
 ipcMain.handle("app:install-update", async () => {
@@ -2081,12 +2077,15 @@ ipcMain.handle("file:reveal", async (_event, targetPath) => {
 ipcMain.handle("app-mode:get", () => ({ ok: true, ...readWorkspaceMode() }));
 ipcMain.handle("app-mode:select", async (_event, mode) => {
   try {
-    if (!["agent", "simple"].includes(String(mode || ""))) {
+    if (!["agent", "simple", "package"].includes(String(mode || ""))) {
       throw Object.assign(new Error("工作模式无效"), { code: "WORKSPACE_MODE_INVALID" });
     }
     const saved = saveWorkspaceMode(mode);
     if (mainWindow && !mainWindow.isDestroyed()) {
-      await mainWindow.loadFile(path.join(__dirname, "renderer", workspaceModePage(saved.mode)));
+      await mainWindow.loadFile(
+        path.join(__dirname, "renderer", workspaceModePage(saved.mode)),
+        saved.mode === "package" ? { query: { entry: "production-package" } } : undefined
+      );
     }
     return { ok: true, ...saved };
   } catch (error) {
@@ -2104,15 +2103,30 @@ function requireSimpleMode() {
   return { store: simpleModeStore, workflow: simpleModeWorkflow };
 }
 
+async function promptReviewPreflight(context, projectId, options = {}) {
+  const gate = await context.workflow.requestPromptReview(projectId, options);
+  if (!gate.required) return null;
+  return {
+    ok: true,
+    reviewRequired: true,
+    project: projectForRendererFrom(context, projectId, { reconcile: false })
+  };
+}
+
 function projectForRendererFrom(context, projectId, { reconcile = true } = {}) {
   const { store, workflow } = context;
   if (reconcile) workflow.reconcileDetachedAutomations(projectId);
   const project = store.getProject(projectId);
   const activeVideoJobs = store.listActiveVideoJobs(projectId);
   const activeOperation = workflow.hasActiveOperation(projectId);
+  let finalVideoAvailable = false;
+  if (project.finalVideoPath) {
+    try { const file = fs.statSync(project.finalVideoPath); finalVideoAvailable = file.isFile() && file.size > 0; } catch {}
+  }
   return {
     ...project,
     runtime: {
+      finalVideoAvailable,
       active: activeOperation || activeVideoJobs.length > 0,
       activeOperation,
       activeVideoJobCount: activeVideoJobs.length,
@@ -2152,8 +2166,8 @@ function createSimpleProject(context, title, options = {}) {
     engine: "hailuo-h3",
     videoProviderKind: "puream-hailuo-h3",
     modeConfirmed: true,
-    executionMode: requested.executionMode === "step" ? "step" : "full",
-    inputMode: requested.inputMode === "ai" ? "ai" : "manual"
+    executionMode: "step",
+    inputMode: "manual"
   });
   context.store.patchProject(project.id, {
     generation: {
@@ -2165,11 +2179,14 @@ function createSimpleProject(context, title, options = {}) {
     },
     productionPlan: {
       ...(project.productionPlan || {}),
-      executionMode: requested.executionMode === "step" ? "step" : "full",
-      inputMode: requested.inputMode === "ai" ? "ai" : "manual",
-      scriptHandling: requested.scriptHandling || (requested.inputMode === "ai" ? "optimize" : "respect")
+      executionMode: "step",
+      inputMode: "manual",
+      simpleAssetOnly: true,
+      scriptHandling: "respect"
     },
-    activitySummary: "已创建简易模式 H3 项目"
+    currentStage: "assets",
+    status: "draft",
+    activitySummary: "已创建简易模式资产项目"
   });
   return projectForRendererFrom(context, project.id, { reconcile: false });
 }
@@ -2228,191 +2245,87 @@ function publicPendingJobs(records) {
   }));
 }
 
-async function advanceAccountSwitch(projectId) {
-  const { store, workflow } = requireWorkbench();
-  const settings = store.getSettings();
-  if (settings.videoProvider?.kind !== "local-xiangsu") {
-    throw Object.assign(new Error("当前使用正式远程 Seedance API，不需要切换本机像塑账号"), { code: "XIANGSU_ACCOUNT_SWITCH_NOT_APPLICABLE" });
+async function reconcileVideoJobContext(context) {
+  if (!context?.store || !context?.workflow) return [];
+  const { store, workflow } = context;
+  const activeBeforeReconcile = store.listActiveVideoJobs();
+  const jobs = await workflow.reconcileOrphanedVideoJobs();
+  const affectedProjectIds = new Set([
+    ...activeBeforeReconcile.map(item => item.projectId),
+    ...store.listActiveVideoJobs().map(item => item.projectId)
+  ]);
+  for (const projectId of affectedProjectIds) {
+    try { workflow.reconcileDetachedAutomations(projectId); }
+    catch (error) { console.warn("[video-recovery] project reconciliation deferred", projectId, error?.message || error); }
   }
-  let state = store.getAccountSwitchState();
-  if (state.status === "awaiting_login") {
-    const probe = bridge.probeOfficialLoginWindow();
-    const lastShownAt = Date.parse(state.loginShownAt || "");
-    const recentlyRequested = Number.isFinite(lastShownAt) && Date.now() - lastShownAt < 10_000;
-    let recreated = false;
-    if (probe.supported && !probe.exists && !recentlyRequested) {
-      await bridge.requestOfficialLogin();
-      await new Promise(resolve => setTimeout(resolve, 500));
-      recreated = true;
-    }
-    bridge.showXiangsuForOfficialLogin();
-    state = store.saveAccountSwitchState({
-      status: "awaiting_login",
-      videoSubmissionsPaused: true,
-      loginShownAt: new Date().toISOString(),
-      message: recreated
-        ? "原登录窗口已关闭，现已重新创建唯一的像塑官方登录页；扫码或完成手机号验证后会自动检测并续做"
-        : "已恢复现有的像塑官方登录页；不会重复创建登录窗口，扫码或完成手机号验证后会自动检测并续做",
-      errorCode: ""
-    });
-    return { ...state, pendingJobs: [] };
-  }
-  state = store.saveAccountSwitchState({
-    status: "draining",
-    videoSubmissionsPaused: true,
-    requestedByProjectId: projectId || state.requestedByProjectId || "",
-    requestedAt: state.requestedAt || new Date().toISOString(),
-    message: "正在收拢旧账号已提交任务；暂不接受新视频提交",
-    errorCode: ""
-  });
-  if (!state.previousAccountFingerprint) {
-    let previousAccountFingerprint = state.currentAccountFingerprint || "";
-    try {
-      const session = await bridge.sessionCheck();
-      if (session.ok && session.authenticated && session.accountFingerprint) previousAccountFingerprint = session.accountFingerprint;
-    } catch (error) {
-      store.addActivity(projectId, "product_upload_warning", `商品图已保存到项目；公网素材暂存失败：${sanitizePublicMessage(error?.message || "上传失败")}`);
-    }
-    if (previousAccountFingerprint) state = store.saveAccountSwitchState({ previousAccountFingerprint });
-  }
-  workflow.prepareOperationsForAccountSwitch();
-  await workflow.reconcileOrphanedVideoJobs();
-  const pending = store.listActiveVideoJobs();
-  if (pending.length) {
-    return store.saveAccountSwitchState({
-      status: "draining",
-      videoSubmissionsPaused: true,
-      pendingJobs: publicPendingJobs(pending),
-      message: `还有 ${pending.length} 个旧账号任务正在生成或下载，完成后自动进入官方登录`,
-      errorCode: ""
-    });
-  }
-  await bridge.beginOfficialAccountSwitch();
-  await new Promise(resolve => setTimeout(resolve, 500));
-  bridge.showXiangsuForOfficialLogin();
-  return store.saveAccountSwitchState({
-    status: "awaiting_login",
-    videoSubmissionsPaused: true,
-    pendingJobs: [],
-    loginShownAt: new Date().toISOString(),
-    logoutCompletedAt: new Date().toISOString(),
-    message: "原像塑账号已自动退出；当前只需在官方登录页扫码或完成手机号验证，登录成功后会自动检测并续做",
-    errorCode: ""
-  });
+  return jobs;
 }
 
-ipcMain.handle("workbench:account-switch-status", () => {
-  try {
-    const { store } = requireWorkbench();
-    const state = store.getAccountSwitchState();
-    if (state.status === "idle") return { ok: true, state: { ...state, pendingJobs: [] } };
-    return { ok: true, state: { ...state, pendingJobs: publicPendingJobs(store.listActiveVideoJobs()) } };
-  } catch (error) { return publicError(error); }
-});
-
-ipcMain.handle("workbench:sync-video-jobs", async (_event, options = {}) => {
+async function reconcilePersistedVideoJobs() {
   if (videoJobSyncRequest) return videoJobSyncRequest;
   videoJobSyncRequest = (async () => {
-    try {
-      const { store, workflow } = requireWorkbench();
-      const activeBeforeReconcile = store.listActiveVideoJobs();
-      const jobs = await workflow.reconcileOrphanedVideoJobs();
-      const affectedProjectIds = new Set([
-        ...activeBeforeReconcile.map(item => item.projectId),
-        ...store.listActiveVideoJobs().map(item => item.projectId)
-      ]);
-      for (const projectId of affectedProjectIds) workflow.reconcileDetachedAutomations(projectId);
-      return { ok: true, jobs: publicPendingJobs(jobs) };
-    } catch (error) { return publicError(error); }
-    finally { videoJobSyncRequest = null; }
+    const result = { agent: [], simple: [], errors: {} };
+    try { result.agent = await reconcileVideoJobContext({ store: workbenchStore, workflow: workbenchWorkflow }); }
+    catch (error) { result.errors.agent = error; }
+    try { result.simple = await reconcileVideoJobContext({ store: simpleModeStore, workflow: simpleModeWorkflow }); }
+    catch (error) { result.errors.simple = error; }
+    if (result.errors.agent && result.errors.simple) throw result.errors.agent;
+    return result;
   })();
-  return videoJobSyncRequest;
-});
-
-ipcMain.handle("workbench:begin-account-switch", async (_event, projectId) => {
-  if (accountSwitchRequest) return accountSwitchRequest;
-  accountSwitchRequest = (async () => {
-    try { return { ok: true, state: await advanceAccountSwitch(projectId) }; }
-    catch (error) { return publicError(error); }
-    finally { accountSwitchRequest = null; }
-  })();
-  return accountSwitchRequest;
-});
-
-ipcMain.handle("workbench:verify-account-switch", async () => {
   try {
-    const { store, workflow } = requireWorkbench();
-    const state = store.getAccountSwitchState();
-    if (state.status !== "awaiting_login") {
-      throw Object.assign(new Error("当前没有等待验证的像塑账号切换"), { code: "ACCOUNT_SWITCH_NOT_WAITING" });
-    }
-    const health = await bridge.health();
-    if (!(health.ok && health.ready && health.sessionReady)) {
-      const waiting = store.saveAccountSwitchState({
-        status: "awaiting_login",
-        videoSubmissionsPaused: true,
-        message: health.message || "尚未检测到可用的像塑登录态，请在官方窗口完成登录后重试",
-        errorCode: health.code || "XIANGSU_SESSION_NOT_READY"
-      });
-      return { ok: false, code: waiting.errorCode, message: waiting.message, state: waiting };
-    }
-    const session = await bridge.sessionCheck();
-    if (!(session.ok && session.authenticated)) {
-      const waiting = store.saveAccountSwitchState({
-        status: "awaiting_login",
-        videoSubmissionsPaused: true,
-        message: session.message || "尚未检测到已登录的像塑官方账号",
-        errorCode: session.code || "XIANGSU_LOGIN_REQUIRED"
-      });
-      return { ok: false, code: waiting.errorCode, message: waiting.message, state: waiting };
-    }
-    if (state.previousAccountFingerprint && session.accountFingerprint && state.previousAccountFingerprint === session.accountFingerprint) {
-      const waiting = store.saveAccountSwitchState({
-        status: "awaiting_login",
-        videoSubmissionsPaused: true,
-        message: "检测到仍是切换前的像塑账号，请在官方窗口退出后登录另一个账号",
-        errorCode: "XIANGSU_ACCOUNT_UNCHANGED"
-      });
-      return { ok: false, code: waiting.errorCode, message: waiting.message, state: waiting };
-    }
-    bridge.hideRunningXiangsuWindows();
-    store.saveAccountSwitchState({
-      status: "resuming",
-      videoSubmissionsPaused: false,
-      verifiedAt: new Date().toISOString(),
-      currentAccountFingerprint: session.accountFingerprint || "",
-      pendingJobs: [],
-      message: "新像塑登录态已通过检测，正在从本地断点恢复生产",
-      errorCode: ""
-    });
-    const resumed = workflow.resumePausedOperations();
-    const completed = store.saveAccountSwitchState({
-      status: "idle",
-      videoSubmissionsPaused: false,
-      resumedAt: new Date().toISOString(),
-      pendingJobs: [],
-      message: resumed.length ? `账号已切换，已恢复 ${resumed.length} 个生产流程` : "账号已切换；本地项目、资产和任务记录保持不变",
-      previousAccountFingerprint: "",
-      errorCode: ""
-    });
-    return { ok: true, state: completed, resumed };
+    return await videoJobSyncRequest;
+  } finally {
+    videoJobSyncRequest = null;
+  }
+}
+
+function hasPersistedActiveVideoJobs() {
+  try {
+    return (workbenchStore?.listActiveVideoJobs?.() || []).length > 0
+      || (simpleModeStore?.listActiveVideoJobs?.() || []).length > 0;
+  } catch {
+    return true;
+  }
+}
+
+function startMainProcessVideoRecovery() {
+  videoJobRecoveryScheduler?.stop?.();
+  videoJobRecoveryScheduler = createVideoJobRecoveryScheduler({
+    reconcile: reconcilePersistedVideoJobs,
+    hasActiveJobs: hasPersistedActiveVideoJobs,
+    initialDelayMs: 250,
+    activeIntervalMs: 6_000,
+    idleIntervalMs: 45_000,
+    errorIntervalMs: 15_000,
+    onError: error => console.warn("[video-recovery] background reconciliation deferred", error?.message || error)
+  });
+  videoJobRecoveryScheduler.start();
+}
+
+ipcMain.handle("workbench:sync-video-jobs", async (_event, options = {}) => {
+  try {
+    requireWorkbench();
+    const result = videoJobRecoveryScheduler
+      ? await videoJobRecoveryScheduler.runNow(options?.force ? "renderer-force" : "renderer")
+      : await reconcilePersistedVideoJobs();
+    if (result.errors?.agent) throw result.errors.agent;
+    return { ok: true, jobs: publicPendingJobs(result.agent) };
   } catch (error) { return publicError(error); }
 });
 
-ipcMain.handle("workbench:cancel-account-switch", async () => {
-  try {
-    const { store } = requireWorkbench();
-    bridge.hideRunningXiangsuWindows();
-    const state = store.saveAccountSwitchState({
-      status: "idle",
-      videoSubmissionsPaused: false,
-      pendingJobs: [],
-      previousAccountFingerprint: "",
-      message: "已取消切号并重新隐藏像塑；所有本地项目和历史任务均已保留",
-      errorCode: ""
-    });
-    return { ok: true, state };
-  } catch (error) { return publicError(error); }
+ipcMain.handle("project:export-logs",async(_event,projectId,scope)=>{
+ try{
+  if(!['agent','simple'].includes(scope))throw Error('工作模式无效');
+  const {store}=scope==='simple'?requireSimpleMode():requireWorkbench();
+  const project=store.getProject(projectId);
+  const name=String(project.title||'当前项目').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').slice(0,60);
+  const saveOptions={title:'导出当前项目运行日志',defaultPath:path.join(app.getPath('downloads'),name+'-运行日志-'+new Date().toISOString().replace(/[:.]/g,'-')+'.zip'),filters:[{name:'项目诊断包',extensions:['zip']}],properties:['showOverwriteConfirmation']};
+  const owner=BrowserWindow.fromWebContents(_event.sender);
+  const choice=await (owner&&!owner.isDestroyed()?dialog.showSaveDialog(owner,saveOptions):dialog.showSaveDialog(saveOptions));
+  if(choice.canceled||!choice.filePath)return {ok:true,canceled:true};
+  const result=await require('./project-diagnostics').exportProjectDiagnostics({store,projectId,filePath:choice.filePath,version:app.getVersion(),scope,tracePaths:[require('./ai-provider').textProviderTracePath()]});
+  return {ok:true,result};
+ }catch(error){return publicError(error);}
 });
 
 ipcMain.handle("simple:call", async (_event, method, args = []) => {
@@ -2443,8 +2356,26 @@ ipcMain.handle("simple:call", async (_event, method, args = []) => {
       }
       case "getProject":
         return { ok: true, project: projectForRendererFrom(context, values[0]) };
+      case "stitchProject":
+        if (!simpleLocalPostProductionAgent) throw Object.assign(new Error("本地粗剪 Agent 尚未就绪，请稍后重试"), { code: "MCP_LOCAL_AGENT_UNAVAILABLE" });
+        return { ok: true, result: await simpleLocalPostProductionAgent.runRoughCut(values[0]) };
+      case "exportJianyingDraft":
+        return { ok: true, result: await workflow.exportJianyingDraft(values[0], values[1] || {}) };
+      case "cancelPostProduction":
+        return { ok: true, result: workflow.cancelPostProduction(values[0]) };
       case "patchProject": {
         const patch = values[1] && typeof values[1] === "object" ? { ...values[1] } : {};
+        for (const forbidden of ["script", "ideation", "topics", "topicOptions", "selectedTopic", "finalVideoPath"]) delete patch[forbidden];
+        patch.productionPlan = {
+          ...(patch.productionPlan || {}),
+          simpleAssetOnly: true,
+          inputMode: "manual",
+          executionMode: "step",
+          scriptHandling: "respect"
+        };
+        if (patch.currentStage && !["assets", "storyboard", "videos"].includes(String(patch.currentStage))) {
+          patch.currentStage = "assets";
+        }
         if (patch.generation) {
           patch.generation = {
             ...patch.generation,
@@ -2480,29 +2411,83 @@ ipcMain.handle("simple:call", async (_event, method, args = []) => {
         return { ok: true, wallet: await dramaLicense.walletStatus() };
       case "testProvider": {
         const kind = String(values[0] || "video");
-        if (kind === "video") {
-          simpleBridge.configure(enforceSimpleH3Settings({}, store.getSettings()).videoProvider);
-          return await simpleBridge.health();
-        }
-        return await testProvider(kind, values[1] || store.getSettings()[`${kind}Provider`]);
-      }
-      case "importTextFile": {
-        const result = await dialog.showOpenDialog(mainWindow, {
-          title: "上传剧本文件",
-          properties: ["openFile"],
-          filters: [
-            { name: "剧本文本", extensions: ["txt", "md", "markdown", "json", "csv"] },
-            { name: "所有文件", extensions: ["*"] }
-          ]
-        });
-        if (result.canceled || !result.filePaths?.[0]) return { ok: true, canceled: true };
-        const filePath = result.filePaths[0];
-        return { ok: true, text: readBoundedTextFile(filePath, SCRIPT_IMPORT_MAX_CHARS), fileName: path.basename(filePath), filePath };
+        if (kind !== "video") throw Object.assign(new Error("简易模式只检测图片与视频生产能力，不使用文本模型"), { code: "SIMPLE_TEXT_PROVIDER_DISABLED" });
+        simpleBridge.configure(enforceSimpleH3Settings({}, store.getSettings()).videoProvider);
+        return await simpleBridge.health();
       }
       case "chooseProduct": {
         const result = await dialog.showOpenDialog(mainWindow, { title: "选择带货商品参考图", properties: ["openFile"], filters: MEDIA_RULES.image.filters });
         if (result.canceled) return { ok: true, canceled: true };
         return { ok: true, ...(await importProductFromPath(values[0], result.filePaths[0], "simple-manual-upload", "", context)) };
+      }
+      case "updateProduct": {
+        const projectId = String(values[0] || "");
+        const request = values[1] && typeof values[1] === "object" ? values[1] : {};
+        const name = String(request.name || "").trim().slice(0, 80);
+        const description = String(request.description || "").trim().slice(0, 2000);
+        const sellingPoints = String(request.sellingPoints || description).trim().slice(0, 2000);
+        if (!name) throw Object.assign(new Error("商品名称不能为空"), { code: "PRODUCT_NAME_REQUIRED" });
+        const current = store.getProject(projectId);
+        const previous = { ...(current.product || {}) };
+        const replacing = Boolean(previous.name
+          && String(previous.name).trim().toLocaleLowerCase("zh-CN") !== name.toLocaleLowerCase("zh-CN"));
+        let selectedPath = "";
+        if (request.chooseImage === true || (replacing && previous.imagePath)) {
+          const picked = await dialog.showOpenDialog(mainWindow, {
+            title: replacing ? `为新商品“${name}”选择参考图` : "选择带货商品参考图",
+            properties: ["openFile"],
+            filters: MEDIA_RULES.image.filters
+          });
+          if (picked.canceled) return { ok: true, canceled: true, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
+          selectedPath = picked.filePaths[0];
+        }
+        let archivedPreviousProduct = null;
+        if ((replacing || selectedPath) && previous.imagePath && fs.existsSync(previous.imagePath)) {
+          archivedPreviousProduct = store.importReusableAsset(previous.imagePath, {
+            kind: "product",
+            mediaType: "image",
+            stage: "product_asset",
+            label: previous.name || `${current.title || "项目"}旧商品`,
+            description: previous.sellingPoints || previous.description || "替换前商品参考图",
+            qualityAudit: { ok: true, source: "simple-product-replacement-archive" }
+          });
+        }
+        let nextImagePath = replacing ? "" : String(previous.imagePath || "");
+        let imported = null;
+        if (selectedPath) {
+          const described = await describeMedia(selectedPath, "image");
+          imported = workflow.importAsset(projectId, "product", described.importPath || selectedPath, "product-manual");
+          nextImagePath = imported.path;
+        }
+        const updated = store.replaceProductAsset(projectId, {
+          ...previous,
+          name,
+          description,
+          sellingPoints,
+          imagePath: nextImagePath,
+          publicUrl: "",
+          source: selectedPath ? "simple-product-update" : previous.source || "simple-product-metadata",
+          reusableAssetId: ""
+        });
+        let newProductLibraryEntry = null;
+        if (nextImagePath && fs.existsSync(nextImagePath)) {
+          newProductLibraryEntry = store.importReusableAsset(nextImagePath, {
+            kind: "product",
+            mediaType: "image",
+            stage: "product_asset",
+            label: name,
+            description: sellingPoints || description || "简易模式商品参考图",
+            qualityAudit: { ok: true, source: "simple-product-update" }
+          });
+        }
+        return {
+          ok: true,
+          canceled: false,
+          archivedPreviousProduct,
+          newProductLibraryEntry,
+          imported,
+          project: projectForRendererFrom(context, updated.id, { reconcile: false })
+        };
       }
       case "importCandidate": {
         const stage = String(values[3] || "");
@@ -2553,50 +2538,68 @@ ipcMain.handle("simple:call", async (_event, method, args = []) => {
         if (!voiceEntry) store.touchReusableAssetUse(entry.id);
         return { ok: true, ...payload, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
       }
-      case "analyzeScript":
-        {
-          await workflow.analyzeScript(values[0]);
-          // Simple mode exposes the same review gate as Agent mode: after the
-          // script is structured, persist every Chinese asset/storyboard/video
-          // prompt before any paid generator can be started.
-          return { ok: true, project: await workflow.preparePromptReviewBundle(values[0], { autoApprove: false }) };
-        }
       case "preparePromptReview":
-        return { ok: true, project: await workflow.preparePromptReviewBundle(values[0], { autoApprove: false }) };
-      case "rewriteDialogueScript":
-        return { ok: true, project: await workflow.rewriteDialogueScript(values[0], values[1]) };
-      case "generateTopics":
-        return { ok: true, project: await workflow.generateTopicOptions(values[0]) };
-      case "generateCompleteScript":
-        return { ok: true, project: await workflow.generateCompleteScript(values[0]) };
-      case "runIdeaPipeline":
-        return { ok: true, result: await workflow.runIdeaToFullPipeline(values[0]) };
-      case "generateAllAssets":
-        return { ok: true, candidates: await workflow.generateAllAssets(values[0]) };
-      case "generateAllStoryboards":
-        return { ok: true, candidates: await workflow.generateAllStoryboards(values[0]) };
-      case "generateAllShotVideos":
-        return { ok: true, candidates: await workflow.generateAllShotVideos(values[0]) };
-      case "runFullPipeline":
-        return { ok: true, result: await workflow.runFullPipeline(values[0]) };
-      case "runPipelineFromStage":
-        return { ok: true, result: await workflow.runPipelineFromStage(values[0], values[1] || "script") };
-      case "pausePipeline":
-        return { ok: true, automation: workflow.pausePipeline(values[0], values[1] || "pause") };
-      case "stitch":
-        return { ok: true, result: await workflow.stitchProject(values[0]) };
-      case "generateImage":
-        return { ok: true, candidate: await workflow.generateImageCandidate(values[0], values[1], values[2], values[3]) };
-      case "generateLibraryAsset":
-        return { ok: true, candidate: await workflow.generateLibraryAssetImage(values[0], values[1], values[2]) };
-      case "generateShotVideo":
-        return { ok: true, candidate: await workflow.generateShotVideo(values[0], values[1], values[2]) };
+        return { ok: true, project: (await workflow.requestPromptReview(values[0], { resumeStage: "assets", requestedAction: "review-only" })).project };
+      case "reviewPromptProposal":
+        return {ok:true,project:await workflow.editPromptReviewDocument(values[0])};
+      case "applyPromptProposal":
+        return {ok:true,project:workflow.applyPromptReviewProposal(values[0])};
+      case "confirmPromptReviewItem":
+        return { ok: true, project: await workflow.confirmPromptReviewItem(values[0], values[1], values[2]) };
+      case "confirmAllPromptReview":
+        return { ok: true, project: await workflow.confirmAllPromptReview(values[0], values[1]) };
+      case "generateAllAssets": {
+        const review = await promptReviewPreflight(context, values[0], { resumeStage: "assets", continueAfterApproval: true, requestedAction: "generateAllAssets" });
+        if (review) return review;
+        return { ok: true, candidates: await workflow.generateAllAssets(values[0], { promptPrepared: true }) };
+      }
+      case "generateAllStoryboards": {
+        const review = await promptReviewPreflight(context, values[0], { resumeStage: "shots", continueAfterApproval: true, requestedAction: "generateAllStoryboards" });
+        if (review) return review;
+        return { ok: true, candidates: await workflow.generateAllStoryboards(values[0], { promptPrepared: true }) };
+      }
+      case "generateAllShotVideos": {
+        const review = await promptReviewPreflight(context, values[0], { resumeStage: "videos", continueAfterApproval: true, requestedAction: "generateAllShotVideos" });
+        if (review) return review;
+        return { ok: true, candidates: await workflow.generateAllShotVideos(values[0], { promptPrepared: true }) };
+      }
+      case "generateImage": {
+        const review = await promptReviewPreflight(context, values[0], {
+          resumeStage: "assets",
+          continueAfterApproval: true,
+          requestedAction: "generateImage",
+          resumePayload: { stage: values[1], entityId: values[2], prompt: values[3] || "" }
+        });
+        if (review) return review;
+        return { ok: true, candidate: await workflow.generateImageCandidate(values[0], values[1], values[2], values[3], { promptPrepared: true }) };
+      }
+      case "generateLibraryAsset": {
+        const review = await promptReviewPreflight(context, values[0], {
+          resumeStage: "assets",
+          continueAfterApproval: true,
+          requestedAction: "generateLibraryAsset",
+          resumePayload: { libraryType: values[1], assetId: values[2] }
+        });
+        if (review) return review;
+        return { ok: true, candidate: await workflow.generateLibraryAssetImage(values[0], values[1], values[2], { promptPrepared: true }) };
+      }
+      case "generateShotVideo": {
+        const videoOptions = values[3] && typeof values[3] === "object" ? values[3] : {};
+        const review = await promptReviewPreflight(context, values[0], {
+          resumeStage: "videos",
+          continueAfterApproval: true,
+          requestedAction: "generateShotVideo",
+          resumePayload: { shotId: values[1], mode: values[2] || "", rerollNonce: String(videoOptions.rerollNonce || "") }
+        });
+        if (review) return review;
+        return { ok: true, candidate: await workflow.generateShotVideo(values[0], values[1], values[2], { promptPrepared: true, rerollNonce: String(videoOptions.rerollNonce || "") }) };
+      }
+      case "previewShotVideoDependencies":
+        return { ok: true, preview: workflow.generationDependencyPreview(values[0], [values[1]]) };
       case "previewImagePrompt":
         return { ok: true, preview: redactPromptPreview(workflow.previewImagePrompt(values[0], values[1], values[2])) };
       case "previewShotVideoPrompt":
         return { ok: true, preview: redactPromptPreview(await workflow.previewShotVideoPrompt(values[0], values[1])) };
-      case "refreshCreatorPrompts":
-        return { ok: true, project: await workflow.refreshCreatorPrompts(values[0], values[1] || {}) };
       case "confirmCandidate":
         return { ok: true, candidate: store.confirmCandidate(values[0], values[1], values[2] !== false), project: projectForRendererFrom(context, values[0], { reconcile: false }) };
       case "discardCandidate":
@@ -2634,6 +2637,33 @@ ipcMain.handle("workbench:create-project", (_event, title, options) => {
     return { ok: true, project: projectForRenderer(project.id, { reconcile: false }), settings: redactSettingsForRenderer(settings) };
   }
   catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:import-production-package", async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "导入 Codex 成片资产包",
+      properties: ["openFile"],
+      filters: [
+        { name: "纯梦成片资产包", extensions: DRAMA_ASSET_PACKAGE_EXTENSIONS },
+        { name: "所有文件", extensions: ["*"] }
+      ]
+    });
+    if (result.canceled) return { ok: true, canceled: true };
+    const { store } = requireWorkbench();
+    const imported = importDramaAssetPackage(store, result.filePaths[0], {
+      promptReviewVersion: PROMPT_REVIEW_BUNDLE_VERSION,
+      promptReviewSourceFingerprint,
+      promptReviewSettingsFingerprint
+    });
+    return {
+      ok: true,
+      ...imported,
+      project: projectForRenderer(imported.projectId, { reconcile: false }),
+      settings: redactSettingsForRenderer(store.getSettings())
+    };
+  } catch (error) {
+    return publicError(error);
+  }
 });
 ipcMain.handle("workbench:delete-project", (_event, projectId) => {
   try {
@@ -2840,6 +2870,21 @@ ipcMain.handle("license:payment-status", async (_event, orderNo) => {
     return { ok: true, ...result };
   } catch (error) { return publicError(error); }
 });
+let tutorialWindow = null;
+ipcMain.handle("workbench:open-tutorial", async () => {
+  try {
+    if (tutorialWindow && !tutorialWindow.isDestroyed()) { tutorialWindow.focus(); return { ok: true }; }
+    tutorialWindow = new BrowserWindow({ width: 1100, height: 820, title: "设置与使用教程", autoHideMenuBar: true, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true } });
+    tutorialWindow.webContents.setWindowOpenHandler(({ url }) => {
+      if (url === "https://puream.cn/drama-slot-machine") shell.openExternal(url).catch(() => {});
+      return { action: "deny" };
+    });
+    tutorialWindow.webContents.on("will-navigate", (event, url) => { if (url.split("#")[0] !== tutorialWindow.webContents.getURL().split("#")[0]) event.preventDefault(); });
+    tutorialWindow.on("closed", () => { tutorialWindow = null; });
+    await tutorialWindow.loadFile(path.join(__dirname, "renderer", "user-guide.html"));
+    return { ok: true };
+  } catch (error) { return publicError(error); }
+});
 ipcMain.handle("shell:open-external", async (_event, value) => {
   try {
     const target = new URL(String(value || ""));
@@ -2851,7 +2896,7 @@ ipcMain.handle("shell:open-external", async (_event, value) => {
 ipcMain.handle("workbench:test-provider", async (_event, kind, config) => {
   try {
     if (kind === "video") {
-      const probe = new BridgeClient();
+      const probe = createDesktopBridge();
       probe.configure(config);
       return await probe.health();
     }
@@ -2866,36 +2911,11 @@ ipcMain.handle("workbench:choose-product", async (_event, projectId) => {
       properties: ["openFile"],
       filters: MEDIA_RULES.image.filters
     });
-    if (result.canceled) return { ok: true, canceled: true };
-    const { store, workflow } = requireWorkbench();
-    const initial = await importProductFromPath(projectId, result.filePaths[0], "manual-upload", "");
-    const imported = initial.asset;
-    let publicUrl = "";
-    let warning = "";
-    // Best-effort: cache a public URL so later storyboard/video slots can lock the real packshot.
-    try {
-      const settings = store.getSettings();
-      if (hasOssCredentials(settings.videoProvider || {})) {
-        const uploaded = await workflow.resolveHttpsReferenceInputs(settings, [{
-          path: imported.path,
-          url: "",
-          label: "商品参考图",
-          entityType: "product",
-          sourceStage: "product"
-        }]);
-        if (uploaded[0]?.url) publicUrl = uploaded[0].url;
-      }
-    } catch (error) {
-      warning = sanitizePublicMessage(error?.message || "商品参考图公网暂存失败");
-      store.addActivity(projectId, "asset_library_warning", `商品图已保存到本地；公网暂存失败：${warning}`);
-    }
-    const saved = store.replaceProductAsset(projectId, {
-      imagePath: imported.path,
-      publicUrl,
-      source: "manual-upload",
-      reusableAssetId: ""
-    });
-    return { ok: true, asset: imported, project: saved, warning };
+    if (result.canceled || !result.filePaths?.[0]) return { ok: true, canceled: true };
+    // Import commits the local packshot once. Image generation already resolves
+    // HTTPS references when needed; an optional upload must not hold the chooser
+    // response or later overwrite a newer product selected by the user.
+    return { ok: true, ...(await importProductFromPath(projectId, result.filePaths[0], "manual-upload", "")) };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:import-text-file", async (_event, kind = "script") => {
@@ -3016,6 +3036,41 @@ ipcMain.handle("workbench:delete-reusable-asset", (_event, assetId) => {
     return { ok: true, removed, assets: reusableAssetsForRenderer() };
   } catch (error) { return publicError(error); }
 });
+ipcMain.handle("local-agents:call", async (_event, method, args = []) => {
+  try {
+    const { getHub } = require("./local-agent-runtime");
+    const scope = args[0] === "simple" ? "simple" : "workbench";
+    const store = scope === "simple" ? simpleModeStore : requireWorkbench().store;
+    if (!store) throw new Error("设置尚未就绪，请稍后重新检测。");
+    const hub = getHub(path.join(store.rootDir, "agent-jobs"));
+    if (method === "discover") return { ok:true, agents:await hub.discover(args[1] || store.getSettings().localAgents), jobs:hub.list() };
+    if (method === "jobs") return {ok:true,jobs:hub.list()};
+    if (method === "probe") return await hub.probe(args[1], args[2] || {});
+    if (method === "models") return await hub.modelCatalog(args[1], args[2] || {});
+    if (method === "cancel") return hub.cancel(args[1]);
+    if (method === "copy-worker-instructions") {
+      const id = String(args[1] || "");
+      if (!require("./local-agent-runtime").AGENTS.some(a => a.id === id)) throw new Error("请选择 Agent。");
+      const text = `通过 puream-drama MCP 接管我在短剧老虎机提交的${scope === "simple" ? "简易模式" : "完整模式"}写作和图片任务。scope=${scope}，agentId=${id}，workerId 使用你当前会话的唯一标识。先 register_agent_worker，只有你确有可调用生图工具时才声明 image=true 与准确 imageTool。每60秒重新登记心跳。list_agent_jobs 后逐个 claim_agent_job，严格遵循 request.messages、constraints 和参考图顺序，每批视频提示词最多5镜，完整保留对白、人物、动作和站位。开始处理和阶段进展时用 report_agent_progress 回传真实进度，携带同一 jobId、workerId、claimToken 和从1递增的 sequence，让软件同步显示。任务结果用 complete_agent_job 回传；交付确认丢失时只重传同一结果，不能重新生成。软件负责校验、保存和后续步骤，不能直接修改项目来绕过交付或用户确认。图片必须用真实生图工具生成到领取时给出的 workdir，并回传 imagePath 与 imageTool；不能用SVG、代码绘图或旧图片冒充。禁止调用短剧软件生图/视频API、操作系统GUI、读取凭证、修改软件或自动重发生成请求。开始前先确认 MCP 工具可用；等待新任务期间遵守本 Agent 的等待和用户授权规则。`;
+      clipboard.writeText(text); return { ok:true, text };
+    }
+    throw new Error("未知的本地 Agent 操作。");
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:list-text-models", async (_event, config) => {
+  try {
+    return { ok: true, ...(await listTextProviderModels(config || {})) };
+  } catch (error) {
+    return publicError(error);
+  }
+});
+ipcMain.handle("workbench:update-reusable-asset-metadata", (_event, assetId, metadata) => {
+  try {
+    const { store } = requireWorkbench();
+    const entry = store.updateReusableAssetMetadata(assetId, metadata || {});
+    return { ok: true, entry, assets: reusableAssetsForRenderer() };
+  } catch (error) { return publicError(error); }
+});
 ipcMain.handle("workbench:bind-library-asset", async (_event, projectId, target, assetId) => {
   try {
     const { store, workflow } = requireWorkbench();
@@ -3038,7 +3093,20 @@ ipcMain.handle("workbench:bind-library-asset", async (_event, projectId, target,
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:analyze-script", async (_event, projectId) => {
-  try { return { ok: true, project: await requireWorkbench().workflow.analyzeScript(projectId) }; }
+  try {
+    const context = requireWorkbench();
+    await context.workflow.analyzeScript(projectId);
+    const gate = await context.workflow.requestPromptReview(projectId, {
+      resumeStage: "assets",
+      continueAfterApproval: false,
+      requestedAction: "script-complete-review"
+    });
+    return {
+      ok: true,
+      reviewRequired: gate.required,
+      project: projectForRendererFrom(context, projectId, { reconcile: false })
+    };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:rewrite-dialogue-script", async (_event, projectId, sourceText) => {
@@ -3050,8 +3118,29 @@ ipcMain.handle("workbench:generate-topics", async (_event, projectId) => {
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-complete-script", async (_event, projectId) => {
-  try { return { ok: true, project: await requireWorkbench().workflow.generateCompleteScript(projectId) }; }
+  try {
+    const context = requireWorkbench();
+    await context.workflow.generateCompleteScript(projectId);
+    const gate = await context.workflow.requestPromptReview(projectId, {
+      resumeStage: "assets",
+      continueAfterApproval: false,
+      requestedAction: "script-complete-review"
+    });
+    return {
+      ok: true,
+      reviewRequired: gate.required,
+      project: projectForRendererFrom(context, projectId, { reconcile: false })
+    };
+  }
   catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:adapt-reference-script", async (_event, projectId, sourceText, instructions) => {
+  try { return {ok:true,draft:await requireWorkbench().workflow.adaptReferenceScript(projectId,sourceText,instructions)}; }
+  catch(error){ return publicError(error); }
+});
+ipcMain.handle("workbench:apply-script-adaptation", async (_event, projectId, draftId, acceptWarnings) => {
+  try { return {ok:true,project:requireWorkbench().workflow.applyScriptAdaptation(projectId,draftId,acceptWarnings===true)}; }
+  catch(error){ return publicError(error); }
 });
 ipcMain.handle("workbench:control-script-generation", (_event, projectId, intent) => {
   try { return { ok: true, automation: requireWorkbench().workflow.requestScriptControl(projectId, intent) }; }
@@ -3089,24 +3178,74 @@ ipcMain.handle("workbench:refresh-creator-prompts", async (_event, projectId, op
   try { return { ok: true, project: await requireWorkbench().workflow.refreshCreatorPrompts(projectId, options || {}) }; }
   catch (error) { return publicError(error); }
 });
+ipcMain.handle("workbench:request-prompt-review", async (_event, projectId, options) => {
+  try {
+    const context = requireWorkbench();
+    const gate = await context.workflow.requestPromptReview(projectId, options || {});
+    return { ok: true, reviewRequired: gate.required, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle('workbench:apply-prompt-proposal',async(_event,projectId)=>{
+  try{const context=requireWorkbench();context.workflow.applyPromptReviewProposal(projectId);return {ok:true,project:projectForRendererFrom(context,projectId,{reconcile:false})};}catch(error){return publicError(error);}
+});
+ipcMain.handle("workbench:confirm-prompt-review-item", async (_event, projectId, itemId, prompt) => {
+  try {
+    const context = requireWorkbench();
+    await context.workflow.confirmPromptReviewItem(projectId, itemId, prompt);
+    return { ok: true, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:confirm-all-prompt-review", async (_event, projectId, entries) => {
+  try {
+    const context = requireWorkbench();
+    await context.workflow.confirmAllPromptReview(projectId, entries || []);
+    return { ok: true, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
+  } catch (error) { return publicError(error); }
+});
 ipcMain.handle("workbench:generate-image", async (_event, projectId, stage, entityId, prompt) => {
-  try { return { ok: true, candidate: await requireWorkbench().workflow.generateImageCandidate(projectId, stage, entityId, prompt) }; }
-  catch (error) { return publicError(error); }
-});
-ipcMain.handle("workbench:remesh-character-asset", async (_event, projectId, candidateId) => {
-  try { return { ok: true, candidate: await requireWorkbench().workflow.remeshCharacterAsset(projectId, candidateId) }; }
-  catch (error) { return publicError(error); }
-});
-ipcMain.handle("workbench:apply-face-grid", async (_event, projectId, candidateId) => {
-  try { return { ok: true, candidate: await requireWorkbench().workflow.applyFaceGrid(projectId, candidateId) }; }
+  try {
+    const context = requireWorkbench();
+    const review = await promptReviewPreflight(context, projectId, {
+      resumeStage: "assets",
+      continueAfterApproval: true,
+      requestedAction: "generateImage",
+      resumePayload: { stage, entityId, prompt: prompt || "" }
+    });
+    if (review) return review;
+    return { ok: true, candidate: await context.workflow.generateImageCandidate(projectId, stage, entityId, prompt, { promptPrepared: true }) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-character-video", async (_event, projectId, characterId, prompt) => {
-  try { return { ok: true, candidate: await requireWorkbench().workflow.generateCharacterVideo(projectId, characterId, prompt) }; }
+  try {
+    const context = requireWorkbench();
+    const review = await promptReviewPreflight(context, projectId, {
+      resumeStage: "assets",
+      continueAfterApproval: true,
+      requestedAction: "generateCharacterVideo",
+      resumePayload: { characterId, prompt: prompt || "" }
+    });
+    if (review) return review;
+    return { ok: true, candidate: await context.workflow.generateCharacterVideo(projectId, characterId, prompt, { promptPrepared: true }) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:extract-character-voice", async (_event, projectId, characterId) => {
   try { return { ok: true, candidate: await requireWorkbench().workflow.extractCharacterVoice(projectId, characterId) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:ensure-character-voice", async (_event, projectId, characterId) => {
+  try {
+    const context = requireWorkbench();
+    const review = await promptReviewPreflight(context, projectId, {
+      resumeStage: "assets",
+      continueAfterApproval: true,
+      requestedAction: "ensureCharacterVoice",
+      resumePayload: { characterId }
+    });
+    if (review) return review;
+    return { ok: true, candidate: await context.workflow.ensureCharacterVoice(projectId, characterId, { track: true }) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:list-voice-library", () => {
@@ -3145,20 +3284,49 @@ ipcMain.handle("workbench:import-voice-library", async () => {
     return { ok: true, ...(await importVoiceLibraryFromPath(sourcePath)) };
   } catch (error) { return publicError(error); }
 });
-ipcMain.handle("workbench:generate-shot-video", async (_event, projectId, shotId, mode) => {
-  try { return { ok: true, candidate: await requireWorkbench().workflow.generateShotVideo(projectId, shotId, mode) }; }
+ipcMain.handle("workbench:generate-shot-video", async (_event, projectId, shotId, mode, options = {}) => {
+  try {
+    const context = requireWorkbench();
+    const review = await promptReviewPreflight(context, projectId, {
+      resumeStage: "videos",
+      continueAfterApproval: true,
+      requestedAction: "generateShotVideo",
+      resumePayload: { shotId, mode: mode || "", rerollNonce: String(options?.rerollNonce || "") }
+    });
+    if (review) return review;
+    return { ok: true, candidate: await context.workflow.generateShotVideo(projectId, shotId, mode, { promptPrepared: true, rerollNonce: String(options?.rerollNonce || "") }) };
+  }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:preview-generation-dependencies", async (_event, projectId, shotIds = []) => {
+  try { return { ok: true, preview: requireWorkbench().workflow.generationDependencyPreview(projectId, shotIds) }; }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-all-assets", async (_event, projectId) => {
-  try { return { ok: true, candidates: await requireWorkbench().workflow.generateAllAssets(projectId) }; }
+  try {
+    const context = requireWorkbench();
+    const review = await promptReviewPreflight(context, projectId, { resumeStage: "assets", continueAfterApproval: true, requestedAction: "generateAllAssets" });
+    if (review) return review;
+    return { ok: true, candidates: await context.workflow.generateAllAssets(projectId, { promptPrepared: true }) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-all-storyboards", async (_event, projectId) => {
-  try { return { ok: true, candidates: await requireWorkbench().workflow.generateAllStoryboards(projectId) }; }
+  try {
+    const context = requireWorkbench();
+    const review = await promptReviewPreflight(context, projectId, { resumeStage: "shots", continueAfterApproval: true, requestedAction: "generateAllStoryboards" });
+    if (review) return review;
+    return { ok: true, candidates: await context.workflow.generateAllStoryboards(projectId, { promptPrepared: true }) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-all-shot-videos", async (_event, projectId) => {
-  try { return { ok: true, candidates: await requireWorkbench().workflow.generateAllShotVideos(projectId) }; }
+  try {
+    const context = requireWorkbench();
+    const review = await promptReviewPreflight(context, projectId, { resumeStage: "videos", continueAfterApproval: true, requestedAction: "generateAllShotVideos" });
+    if (review) return review;
+    return { ok: true, candidates: await context.workflow.generateAllShotVideos(projectId, { promptPrepared: true }) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:audit-media-quality", async (_event, projectId) => {
@@ -3170,11 +3338,33 @@ ipcMain.handle("workbench:repair-media-quality", async (_event, projectId) => {
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:run-full-pipeline", async (_event, projectId) => {
-  try { return { ok: true, result: await requireWorkbench().workflow.runFullPipeline(projectId) }; }
+  try {
+    const context = requireWorkbench();
+    const result = await context.workflow.runFullPipeline(projectId);
+    const project = projectForRendererFrom(context, projectId, { reconcile: false });
+    return {
+      ok: true,
+      result,
+      project,
+      reviewRequired: project?.promptReview?.status === "ready"
+        && project?.automation?.status === "awaiting_prompt_review"
+    };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:run-pipeline-from-stage", async (_event, projectId, fromStage) => {
-  try { return { ok: true, result: await requireWorkbench().workflow.runPipelineFromStage(projectId, fromStage || "assets") }; }
+  try {
+    const context = requireWorkbench();
+    const result = await context.workflow.runPipelineFromStage(projectId, fromStage || "assets");
+    const project = projectForRendererFrom(context, projectId, { reconcile: false });
+    return {
+      ok: true,
+      result,
+      project,
+      reviewRequired: project?.promptReview?.status === "ready"
+        && project?.automation?.status === "awaiting_prompt_review"
+    };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:pause-pipeline", (_event, projectId, intent) => {
@@ -3194,7 +3384,17 @@ ipcMain.handle("workbench:list-projects-overview", () => {
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-library-asset", async (_event, projectId, libraryType, assetId) => {
-  try { return { ok: true, candidate: await requireWorkbench().workflow.generateLibraryAssetImage(projectId, libraryType, assetId) }; }
+  try {
+    const context = requireWorkbench();
+    const review = await promptReviewPreflight(context, projectId, {
+      resumeStage: "assets",
+      continueAfterApproval: true,
+      requestedAction: "generateLibraryAsset",
+      resumePayload: { libraryType, assetId }
+    });
+    if (review) return review;
+    return { ok: true, candidate: await context.workflow.generateLibraryAssetImage(projectId, libraryType, assetId, { promptPrepared: true }) };
+  }
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:confirm-candidate", async (_event, projectId, candidateId, discardOthers) => {
@@ -3256,11 +3456,24 @@ ipcMain.handle("workbench:clear-automation-failures", (_event, projectId) => {
   catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:stitch", async (_event, projectId) => {
-  try { return { ok: true, result: await requireWorkbench().workflow.stitchProject(projectId) }; }
+  try {
+    requireWorkbench();
+    if (!localPostProductionAgent) throw Object.assign(new Error("本地粗剪 Agent 尚未就绪，请稍后重试"), { code: "MCP_LOCAL_AGENT_UNAVAILABLE" });
+    return { ok: true, result: await localPostProductionAgent.runRoughCut(projectId) };
+  }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:export-jianying", async (_event, projectId, options) => {
+  try { return { ok: true, result: await requireWorkbench().workflow.exportJianyingDraft(projectId, options || {}) }; }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:cancel-post-production", (_event, projectId) => {
+  try { return { ok: true, result: requireWorkbench().workflow.cancelPostProduction(projectId) }; }
   catch (error) { return publicError(error); }
 });
 
-if (!app.requestSingleInstanceLock()) {
+// Also honor exits when an older, already-running MCP sidecar tries to relaunch.
+if ((process.env.PUREAM_MCP_CHILD === "1" && wasClosedByUser(path.join(app.getPath("userData"), "mcp-control.json"))) || !app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   process.on("unhandledRejection", (reason) => {
@@ -3319,20 +3532,29 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
     foundryKernel.settingsProvider = () => workbenchStore?.getSettings?.() || {};
-    const foundryMigration = workbenchStore.migrateFoundryRuntime();
-    if (foundryMigration.failures.length) console.warn("[foundry] legacy migration retained failures", foundryMigration.failures);
-    const assetProgressMigration = workbenchStore.migrateAssetProgressContracts();
-    if (assetProgressMigration.failures.length) console.warn("[assets] progress migration retained failures", assetProgressMigration.failures);
+    const priorFoundryMigration = foundryKernel.runtime.getMeta("legacy-migration", null);
+    if (!priorFoundryMigration?.completedAt || (priorFoundryMigration.failures || []).length) {
+      const foundryMigration = workbenchStore.migrateFoundryRuntime();
+      if (foundryMigration.failures.length) console.warn("[foundry] legacy migration retained failures", foundryMigration.failures);
+    }
+    // Progress reconciliation already runs lazily in getProject(). Reopening the
+    // app must not deserialize and rewrite every historical project before the
+    // first window can appear.
+    if (!workbenchStore.assetMetadataContractsCurrent()) {
+      const assetMetadataMigration = workbenchStore.migrateAssetMetadataContracts();
+      if (assetMetadataMigration.failures.length) console.warn("[assets] metadata migration retained failures", assetMetadataMigration.failures);
+    }
     integrityGuard.start();
     hydratePureamDefaults(workbenchStore, dramaLicense.storedActivationCode());
     workbenchWorkflow = new WorkbenchWorkflow({
       store: workbenchStore,
       bridge,
       locateFfmpeg,
-      stagingRoot: path.join(process.env.LOCALAPPDATA || app.getPath("temp"), "PureamDramaSlot", "staging"),
+      stagingRoot: require("./workbench-storage-paths").stagingRootForWorkbench(dataRoot, "workbench"),
       licenseClient: licenseBypassAllowed() ? null : dramaLicense,
       integrityGuard,
-      foundryKernel
+      foundryKernel,
+      remoteFetch: remoteVideoFetch
     });
     const simpleRoot = path.join(dataRoot, "simple-mode");
     const simpleFoundryKernel = new AdaptiveDramaKernel({ rootDir: simpleRoot });
@@ -3358,6 +3580,10 @@ if (!app.requestSingleInstanceLock()) {
     // never cross the mode boundary. Only the explicit shared libraries above
     // point at the Agent mode data root.
     simpleModeStore.saveSettings(enforceSimpleH3Settings(simpleModeStore.getSettings(), simpleModeStore.getSettings()));
+    if (!simpleModeStore.assetMetadataContractsCurrent()) {
+      const simpleAssetMetadataMigration = simpleModeStore.migrateAssetMetadataContracts();
+      if (simpleAssetMetadataMigration.failures.length) console.warn("[simple-assets] metadata migration retained failures", simpleAssetMetadataMigration.failures);
+    }
     hydratePureamDefaults(simpleModeStore, dramaLicense.storedActivationCode(), simpleBridge);
     simpleBridge.configure(simpleModeStore.getSettings().videoProvider);
     simpleFoundryKernel.settingsProvider = () => simpleModeStore?.getSettings?.() || {};
@@ -3365,24 +3591,39 @@ if (!app.requestSingleInstanceLock()) {
       store: simpleModeStore,
       bridge: simpleBridge,
       locateFfmpeg,
-      stagingRoot: path.join(process.env.LOCALAPPDATA || app.getPath("temp"), "PureamDramaSlot", "simple-staging"),
+      stagingRoot: require("./workbench-storage-paths").stagingRootForWorkbench(dataRoot, "simple"),
       licenseClient: licenseBypassAllowed() ? null : dramaLicense,
       integrityGuard,
-      foundryKernel: simpleFoundryKernel
+      foundryKernel: simpleFoundryKernel,
+      remoteFetch: remoteVideoFetch
     });
     try {
-      const mcpController = new McpAppController({
+      mcpAppController = new McpAppController({
+        agentStoreForScope: scope => scope === "simple" ? simpleModeStore : workbenchStore,
         appVersion: app.getVersion(),
         dataRoot: () => activeWorkbenchDataRoot,
         store: workbenchStore,
         workflow: workbenchWorkflow,
         license: dramaLicense,
         projectView: projectId => projectForRenderer(projectId),
+        importProductionPackagePath:filePath=>importDramaAssetPackage(workbenchStore,filePath,{promptReviewVersion:PROMPT_REVIEW_BUNDLE_VERSION,promptReviewSourceFingerprint,promptReviewSettingsFingerprint}),
         importProductPath: (projectId, filePath) => importProductFromPath(projectId, filePath, "mcp-import"),
         importCandidatePath: (projectId, entityType, entityId, stage, filePath) => importCandidateFromPath(projectId, entityType, entityId, stage, filePath, "mcp-import")
       });
+      localPostProductionAgent = new LocalPostProductionAgent({ controller: mcpAppController });
+      simpleMcpAppController = new McpAppController({
+        appVersion: app.getVersion(),
+        dataRoot: () => activeWorkbenchDataRoot,
+        store: simpleModeStore,
+        workflow: simpleModeWorkflow,
+        license: dramaLicense,
+        projectView: projectId => projectForRendererFrom({ store: simpleModeStore, workflow: simpleModeWorkflow }, projectId),
+        importProductPath: async () => { throw Object.assign(new Error("简易模式不支持 MCP 导入商品"), { code: "MCP_SIMPLE_IMPORT_UNSUPPORTED" }); },
+        importCandidatePath: async () => { throw Object.assign(new Error("简易模式不支持 MCP 导入素材"), { code: "MCP_SIMPLE_IMPORT_UNSUPPORTED" }); }
+      });
+      simpleLocalPostProductionAgent = new LocalPostProductionAgent({ controller: simpleMcpAppController });
       mcpControlGateway = startControlGateway({
-        controller: mcpController,
+        controller: mcpAppController,
         appVersion: app.getVersion(),
         connectionFile: path.join(app.getPath("userData"), "mcp-control.json")
       });
@@ -3396,17 +3637,29 @@ if (!app.requestSingleInstanceLock()) {
     // This is local state reconciliation only; it never submits or bills work.
     workbenchWorkflow.reconcileDetachedAutomations();
     simpleModeWorkflow.reconcileDetachedAutomations();
-    createWindow();
+    // Recovery belongs to the main process, not to whichever renderer page
+    // happens to finish booting.  It only queries persisted taskIds, repairs
+    // their local download mapping and advances local checkpoints; it never
+    // submits a replacement video task.
+    startMainProcessVideoRecovery();
+    // Recover receipt-free provider/network pauses without asking the creator
+    // to click a retry button.  Each workflow reuses its persisted operation,
+    // project checkpoint and upstream task identity; paid/partial receipts are
+    // deliberately excluded from this automatic lane.
+    const remoteRecoveryTimer = setInterval(() => {
+      try { workbenchWorkflow?.resumePausedOperations?.(); } catch (error) { console.warn("[recovery] agent workflow resume skipped", error?.message || error); }
+      try { simpleModeWorkflow?.resumePausedOperations?.(); } catch (error) { console.warn("[recovery] simple workflow resume skipped", error?.message || error); }
+    }, 15_000);
+    remoteRecoveryTimer.unref?.();
+    if (!headlessMcpRuntime) createWindow();
   });
-  app.on("window-all-closed", () => {
-    if (workbenchHasLiveWork()) {
-      console.warn("[workbench] last window closed during live work; restoring the workbench instead of quitting");
-      try { createWindow(); } catch (error) { console.error("[workbench] failed to restore window", error); }
-      return;
-    }
-    app.quit();
+  installDesktopExitPolicy({
+    app,
+    headless: headlessMcpRuntime,
+    closeGateway: options => mcpControlGateway?.close?.(options)
   });
   app.on("before-quit", () => {
+    try { videoJobRecoveryScheduler?.stop?.(); } catch {}
     try { mcpControlGateway?.close?.(); } catch {}
     try { foundryKernel?.runtime?.checkpoint?.(); } catch {}
     try { foundryKernel?.close?.(); } catch {}

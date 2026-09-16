@@ -7,16 +7,93 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { WorkbenchStore } = require("../app/workbench-store");
-const { WorkbenchWorkflow } = require("../app/workbench-workflow");
+const { WorkbenchWorkflow, latestCompleteShotVideoCandidate } = require("../app/workbench-workflow");
 const videoStatus = require("../app/workbench-status");
+
+function videoJobAtAge(ageMs, patch = {}) {
+  const timestamp = new Date(Date.now() - ageMs).toISOString();
+  return {
+    type: "shot_video",
+    status: "uploading",
+    taskId: "",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    ...patch
+  };
+}
+
+test("no-taskId submissions keep the twenty-minute floor and stable identities get a recovery margin", () => {
+  const nineteenMinutes = videoJobAtAge(19 * 60_000);
+  assert.equal(videoStatus.isPhantomVideoJob(nineteenMinutes), false);
+  assert.equal(videoStatus.isActiveVideoJob(nineteenMinutes), true);
+
+  const twentyOneMinutes = videoJobAtAge(21 * 60_000);
+  assert.equal(videoStatus.isPhantomVideoJob(twentyOneMinutes), true);
+
+  const identifiedTwentyOneMinutes = videoJobAtAge(21 * 60_000, {
+    submissionFingerprint: "stable-fingerprint",
+    clientRequestId: "drama-video-stable"
+  });
+  assert.equal(videoStatus.hasStableSubmissionIdentity(identifiedTwentyOneMinutes), true);
+  assert.equal(videoStatus.isPhantomVideoJob(identifiedTwentyOneMinutes), false);
+});
+
+test("an active production operation is authoritative over no-taskId age", () => {
+  const oldIdentifiedSubmission = videoJobAtAge(31 * 60_000, {
+    submissionFingerprint: "stable-fingerprint",
+    clientRequestId: "drama-video-stable"
+  });
+  assert.equal(videoStatus.isPhantomVideoJob(oldIdentifiedSubmission), true);
+  assert.equal(videoStatus.isPhantomVideoJob(oldIdentifiedSubmission, { activeOperation: true }), false);
+  assert.equal(videoStatus.isActiveVideoJob(oldIdentifiedSubmission, { runtime: { activeOperation: true } }), true);
+
+  const project = {
+    productionRevision: "rev-1",
+    runtime: { activeOperation: true },
+    jobs: [{ ...oldIdentifiedSubmission, productionRevision: "rev-1" }]
+  };
+  assert.equal(videoStatus.activeVideoJobs(project).length, 1);
+});
+
+test("a rejected pre-submit job is resumable missing work, never a red generation failure", () => {
+  const project = {
+    productionRevision: "rev-1",
+    shots: [{ id: "S01", number: 1, duration: 12 }],
+    jobs: [{
+      id: "job-s01",
+      type: "shot_video",
+      entityType: "shot",
+      entityId: "S01",
+      productionRevision: "rev-1",
+      status: "failed",
+      upstreamSubmissionState: "not_created",
+      noRemoteTaskCreated: true,
+      remoteSubmissionUnknown: false,
+      submissionFingerprint: "stable-fingerprint",
+      clientRequestId: "drama-video-s01",
+      message: "the request was rejected before an upstream task existed"
+    }]
+  };
+
+  const state = videoStatus.shotVideoState(project, project.shots[0]);
+  const summary = videoStatus.summarizeShotVideos(project);
+  assert.equal(state.key, "missing");
+  assert.equal(state.label, "已暂停，可继续");
+  assert.match(state.detail, /尚未创建上游任务且未扣费/);
+  assert.equal(summary.failed, 0);
+  assert.equal(summary.missing, 1);
+  assert.equal(summary.generating, 0);
+});
 
 function fixture(title = "视频暂停恢复测试") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-video-pause-recovery-"));
   const store = new WorkbenchStore(root);
   const project = store.createProject(title);
   const queryCalls = [];
+  const ensuredTasks = [];
   let submitCalls = 0;
   const bridge = {
+    ensureRemoteTask: (taskId, mapping) => { ensuredTasks.push({ taskId, mapping }); return mapping; },
     submit: async () => {
       submitCalls += 1;
       throw new Error("恢复已有 taskId 时禁止提交");
@@ -42,7 +119,7 @@ function fixture(title = "视频暂停恢复测试") {
     textGenerator: async () => ({})
   });
   workflow.videoQueryPollSleep = async () => {};
-  return { root, store, project, bridge, workflow, queryCalls, submitCalls: () => submitCalls };
+  return { root, store, project, bridge, workflow, queryCalls, ensuredTasks, submitCalls: () => submitCalls };
 }
 
 test("four submitted videos keep querying original task ids after pipeline pause", async t => {
@@ -65,7 +142,7 @@ test("four submitted videos keep querying original task ids after pipeline pause
     operation: "shot_videos"
   });
 
-  const results = await Promise.all(jobs.map(job => sample.workflow.waitForSeedance(
+  const results = await Promise.all(jobs.map(job => sample.workflow.waitForH3(
     job.taskId,
     sample.project.id,
     job.id,
@@ -114,6 +191,8 @@ test("restart recovery migrates legacy paused failures and only queries their or
   await sample.workflow.reconcileOrphanedVideoJobs(sample.project.id);
 
   assert.deepEqual(sample.queryCalls.map(item => item.taskId).sort(), taskIds.slice().sort());
+  assert.deepEqual(sample.ensuredTasks.map(item => item.taskId).sort(), taskIds.slice().sort());
+  assert.ok(sample.ensuredTasks.every(item => path.isAbsolute(item.mapping.outputDir)));
   assert.deepEqual(finalized.sort(), taskIds.slice().sort());
   assert.equal(sample.submitCalls(), 0);
   const saved = sample.store.getProject(sample.project.id);
@@ -140,8 +219,16 @@ test("paused recovery distinguishes final videos from internal generation blocks
   fs.writeFileSync(blockPath, "video");
   const blockJob = sample.store.addJob(sample.project.id, {
     type: "shot_video", entityType: "shot", entityId: "S01", taskId: "shot-block", status: "completed",
-    productionRevision: "revision-current", internalGenerationBlock: true, internalGenerationBlockFilePath: blockPath
+    productionRevision: "revision-current", internalGenerationBlock: true, internalGenerationBlockFilePath: blockPath,
+    agentGenerationBlock: { id: "S01-B01" }
   });
+  const legacyPartial = sample.store.addCandidate(sample.project.id, {
+    entityType: "shot", entityId: "S01", stage: "shot_video", productionRevision: "revision-current",
+    filePath: blockPath, taskId: "shot-block", sourceJobId: blockJob.id, recoveredInternalBlock: true
+  });
+  const polluted = sample.store.getProject(sample.project.id);
+  polluted.candidates.find(item => item.id === legacyPartial.id).selected = true;
+  sample.store.saveProject(polluted);
 
   await sample.workflow.reconcileOrphanedVideoJobs(sample.project.id);
 
@@ -157,10 +244,59 @@ test("paused recovery distinguishes final videos from internal generation blocks
   assert.match(saved.automation.message, /1 个成品视频已入库，1 个分镜生成片段已保存/);
   assert.equal(saved.jobs.find(item => item.id === finalJob.id)?.taskId, "character-final");
   assert.equal(saved.jobs.find(item => item.id === blockJob.id)?.taskId, "shot-block");
+  const retiredPartial = saved.candidates.find(item => item.id === legacyPartial.id);
+  assert.equal(retiredPartial.selected, false);
+  assert.equal(retiredPartial.incompleteShotVideo, true);
+  assert.equal(retiredPartial.hiddenFromAssetUi, true);
+  assert.equal(saved.candidates.some(item => item.entityId === "S01" && item.stage === "shot_video" && item.selected === true), false);
+  assert.throws(
+    () => sample.store.confirmCandidate(sample.project.id, legacyPartial.id, false),
+    error => error?.code === "SHOT_VIDEO_INTERNAL_BLOCK_NOT_SELECTABLE"
+  );
+  assert.throws(
+    () => sample.store.depositReusableAssetFromCandidate(sample.project.id, legacyPartial.id),
+    error => error?.code === "SHOT_VIDEO_INTERNAL_BLOCK_NOT_LIBRARY_ELIGIBLE"
+  );
   const state = videoStatus.shotVideoState(saved, saved.shots[0]);
   assert.equal(state.key, "partial");
   assert.equal(state.recoveredBlocks.length, 1);
   assert.match(state.detail, /不会重复提交已完成 taskId/);
+});
+
+test("first-download fallback never promotes a newer internal block over a complete shot video", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "drama-complete-shot-picker-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const finalPath = path.join(root, "final.mp4");
+  const blockPath = path.join(root, "block.mp4");
+  fs.writeFileSync(finalPath, "final");
+  fs.writeFileSync(blockPath, "block");
+  const project = {
+    productionRevision: "revision-current",
+    candidates: [
+      {
+        id: "final",
+        entityType: "shot",
+        entityId: "S01",
+        stage: "shot_video",
+        productionRevision: "revision-current",
+        filePath: finalPath,
+        createdAt: "2026-09-01T00:00:00.000Z"
+      },
+      {
+        id: "newer-internal-block",
+        entityType: "shot",
+        entityId: "S01",
+        stage: "shot_video",
+        productionRevision: "revision-current",
+        filePath: blockPath,
+        createdAt: "2026-09-01T00:01:00.000Z",
+        internalGenerationBlock: true,
+        recoveredInternalBlock: true,
+        incompleteShotVideo: true
+      }
+    ]
+  };
+  assert.equal(latestCompleteShotVideoCandidate(project, "S01")?.id, "final");
 });
 
 test("unchanged paused recovery polling does not rewrite the project snapshot", async t => {
@@ -277,6 +413,57 @@ test("loading a project heals days-old no-taskId ghosts so delete is not locked"
   assert.equal(saved.automation.status === "running", false);
 });
 
+test("project refresh never abandons a fresh no-taskId upload", t => {
+  const sample = fixture("刷新不误杀上传任务");
+  t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
+  const job = sample.store.addJob(sample.project.id, {
+    type: "shot_video",
+    entityType: "shot",
+    entityId: "S01",
+    status: "uploading",
+    taskId: "",
+    clientRequestId: "drama-video-fresh",
+    submissionFingerprint: "fresh-fingerprint",
+    exactlyOnceSubmission: true,
+    submissionAttemptCount: 1,
+    upstreamSubmissionState: "preparing"
+  });
+  sample.workflow.reconcileDetachedAutomations(sample.project.id);
+  const saved = sample.store.getProject(sample.project.id).jobs.find(item => item.id === job.id);
+  assert.equal(saved.status, "uploading");
+  assert.notEqual(saved.errorCode, "VIDEO_JOB_ABANDONED");
+});
+
+test("premature legacy abandonment is migrated to same-key recovery", t => {
+  const sample = fixture("旧误判恢复");
+  t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
+  const createdAt = new Date(Date.now() - 60_000).toISOString();
+  const project = sample.store.getProject(sample.project.id);
+  project.automation = { status: "paused_user", stage: "shot_videos" };
+  project.jobs.push({
+    id: "legacy-premature-abandon",
+    type: "shot_video",
+    entityType: "shot",
+    entityId: "S01",
+    status: "failed",
+    errorCode: "VIDEO_JOB_ABANDONED",
+    taskId: "",
+    clientRequestId: "drama-video-original-key",
+    submissionFingerprint: "original-fingerprint",
+    exactlyOnceSubmission: true,
+    submissionAttemptCount: 1,
+    createdAt,
+    updatedAt: new Date().toISOString()
+  });
+  sample.store.saveProject(project);
+  sample.workflow.reconcileDetachedAutomations(sample.project.id);
+  const saved = sample.store.getProject(sample.project.id).jobs.find(item => item.id === "legacy-premature-abandon");
+  assert.equal(saved.status, "paused");
+  assert.equal(saved.upstreamSubmissionState, "unknown");
+  assert.equal(saved.errorCode, "VIDEO_SUBMISSION_RESPONSE_UNKNOWN");
+  assert.match(saved.message, /原幂等键|同一任务/);
+});
+
 test("video settlement remains idempotent by upstream task id", t => {
   const sample = fixture("费用去重测试");
   t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
@@ -305,7 +492,7 @@ test("source keeps legacy pause codes in equivalent-job recovery and never abort
   const mainSource = fs.readFileSync(path.join(__dirname, "..", "app", "main.js"), "utf8");
   const cssSource = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.css"), "utf8");
   assert.match(source, /"SCRIPT_GENERATION_PAUSED",\s*\n\s*"SCRIPT_GENERATION_STOPPED",\s*\n\s*"PIPELINE_PAUSED"/);
-  const polling = source.slice(source.indexOf("async waitForSeedance"), source.indexOf("async submitVideo", source.indexOf("async waitForSeedance")));
+  const polling = source.slice(source.indexOf("async waitForH3"), source.indexOf("async submitVideo", source.indexOf("async waitForH3")));
   assert.doesNotMatch(polling, /assertOperationActive/);
   assert.doesNotMatch(polling, /controller\.signal/);
   const syncHandler = mainSource.slice(mainSource.indexOf('ipcMain.handle("workbench:sync-video-jobs"'), mainSource.indexOf('ipcMain.handle("workbench:begin-account-switch"'));
@@ -316,23 +503,28 @@ test("source keeps legacy pause codes in equivalent-job recovery and never abort
   assert.match(cssSource, /\.dialog-close[^{]*\{[^}]*148px - \(100vw - 100%\) \/ 2/);
 });
 
-test("H3 video submit crops storyboard grids unless a recovered project uses the retired gate", () => {
+test("H3 video submit compiles every storyboard grid independently of quality-gate recovery state", () => {
   const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
   const directorSource = fs.readFileSync(path.join(__dirname, "..", "app", "agent-director.js"), "utf8");
-  assert.match(workflowSource, /const needsCrop = !recoveredRetiredGate && \(hasStoryboardSheet/);
+  assert.match(workflowSource, /const needsCrop = hasStoryboardSheet/);
   assert.doesNotMatch(workflowSource, /const needsCrop = this\.qualityGatesEnabled\(settings, "videos"\)/);
+  assert.match(workflowSource, /cropStoryboardPanelSequence/);
+  assert.doesNotMatch(workflowSource.slice(workflowSource.indexOf("async prepareHailuoAgentShotTakes"), workflowSource.indexOf("async auditAgentGenerationBlockResult")), /recoveredRetiredGate/);
   assert.match(workflowSource, /isolatedProductFrame/);
   assert.match(workflowSource, /assembleRecoveredShotVideoIfNeeded/);
   assert.match(workflowSource, /promoteRecoveredShotVideos/);
-  assert.match(directorSource, /never white studio, never catalog model/);
+  assert.match(directorSource, /HAILUO_FINAL_OUTPUT_LOCK/);
+  assert.doesNotMatch(directorSource, /HAILUO_INTEGRATED_OUTPUT_LOCK_ZH/);
+  assert.doesNotMatch(directorSource, /never white studio, never catalog model/);
 });
 
-test("live work survives a closed window or GPU process crash", () => {
+test("GPU crash preserves live work, but explicit user close is respected", () => {
   const mainSource = fs.readFileSync(path.join(__dirname, "..", "app", "main.js"), "utf8");
   const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
   assert.match(workflowSource, /hasAnyActiveOperation\(\)/);
   assert.match(mainSource, /workbenchHasLiveWork/);
   assert.doesNotMatch(mainSource, /app\.on\("window-all-closed", \(\) => app\.quit\(\)\)/);
-  assert.match(mainSource, /last window closed during live work; restoring the workbench instead of quitting/);
+  assert.match(mainSource, /installDesktopExitPolicy\(\{/);
+  assert.doesNotMatch(mainSource, /last window closed during live work; restoring the workbench instead of quitting/);
   assert.match(mainSource, /GPU process gone during live work; staying alive/);
 });

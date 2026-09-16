@@ -9,9 +9,15 @@ const { WorkbenchStore } = require("../app/workbench-store");
 const { buildCameraTakePlan } = require("../app/agent-director");
 const {
   assertDirectFastSegment,
+  assertDirectFastSemanticSchedule,
+  directFastSemanticScheduleDiagnostics,
+  directFastSemanticScheduleRangeDiagnostics,
+  directFastSemanticScheduleRangePrompt,
   assertDirectFastStorySpine,
   buildDirectFastFallbackSegment,
+  buildDirectFastSemanticSegment,
   buildDirectFastFallbackSpine,
+  normalizeDirectFastSemanticSpeakerUnits,
   directFastProductStartIndex,
   directFastReversalIndex,
   directFastSegmentRanges,
@@ -22,15 +28,226 @@ const {
 const { planFilmSchedule } = require("../app/duration-contract");
 const { dialogueUnitBudget } = require("../app/drama-writing-contract");
 const { storyDensityTargets } = require("../app/script-craft");
-const { representableTargetSeconds } = require("../app/script-duration");
+const { adaptiveUploadedUnitDurations, representableTargetSeconds } = require("../app/script-duration");
 const { allocateH3ShotSpeakers, h3AllowedSpeakersByShot } = require("../app/h3-speaker-allocation");
 const {
   auditDramaSpec,
+  ideaSignature,
   normalizeAnalysis,
   validateBlueprint,
   validateShotBatch,
   validateStoryBible
 } = require("../app/workbench-workflow");
+
+test("AI English execution mirrors survive blueprint-off normalization for an uncommon Chinese action", () => {
+  const project = {
+    generation: { engine: "hailuo-h3", qualityGatesEnabled: false },
+    characters: [{ id: "C01", name: "宁宁" }, { id: "C02", name: "母亲" }]
+  };
+  const shot = {
+    id: "S01", number: 1, duration: 10,
+    visibleCharacterIds: ["C01", "C02"],
+    action: "宁宁把折叠伞横挡在门缝前，门锁弹回",
+    actionEn: "Ning wedges the folded umbrella across the door gap and the lock springs back.",
+    stateBefore: "门缝正在合拢，雨伞尚未挡住门",
+    stateBeforeEn: "The door gap is closing and the umbrella has not blocked it yet.",
+    stateAfter: "折叠伞卡住门缝，门锁弹回",
+    stateAfterEn: "The folded umbrella holds the gap open and the lock springs back.",
+    subshots: [{
+      number: 1, start: 0, end: 10, visibleCharacterIds: ["C01", "C02"],
+      action: "宁宁把折叠伞横挡在门缝前，门锁弹回",
+      actionEn: "Ning wedges the folded umbrella across the door gap and the lock springs back.",
+      framingEn: "Tight medium shot on Ning's hands and the door gap.",
+      cameraEn: "Slow push-in to the umbrella as the lock springs back.",
+      stateBeforeEn: "The door gap is closing and the umbrella has not blocked it yet.",
+      stateAfterEn: "The folded umbrella holds the gap open and the lock springs back.",
+      soundEn: "Continuous hallway room tone with synchronized hinge and lock clicks.",
+      dialogueTurns: [{ speakerId: "C01", listenerIds: ["C02"], text: "妈，先别关门。", onScreen: true }]
+    }]
+  };
+  const plan = buildCameraTakePlan(project, shot);
+  assert.equal(plan.takes.length, 1);
+  assert.match(plan.takes[0].actionEn, /wedges the folded umbrella/i);
+  assert.match(plan.takes[0].stateBeforeEn, /door gap is closing/i);
+  assert.match(plan.takes[0].stateAfterEn, /lock springs back/i);
+  assert.match(plan.takes[0].cameraEn, /Slow push-in/i);
+  assert.match(plan.takes[0].soundEn, /hinge and lock clicks/i);
+});
+
+test("semantic schedule diagnostics keep a partial draft repairable", () => {
+  const partial = {
+    u: [
+      { i: 1, duration: 8, beat: "母亲推门质问", before: "饭桌沉默", after: "账本被拍在桌上", dialogueLines: [[1, "这笔钱到底去了哪儿？"]], cutAfter: "女儿抬眼后切镜", dialogueContinuesToNext: false },
+      { i: 2, duration: 7, beat: "女儿拿出收据", before: "账本在桌上", after: "收据摆到母亲面前", dialogueLines: [[2, "你先仔细看看这个日期。"]], cutAfter: "母亲伸手接过收据后切镜", dialogueContinuesToNext: false }
+    ]
+  };
+  const diagnostics = directFastSemanticScheduleDiagnostics(partial, 30);
+  assert.equal(diagnostics.ok, false);
+  assert.deepEqual(diagnostics.failures, ["total:15/30"]);
+  assert.throws(() => assertDirectFastSemanticSchedule(partial, 30), error => {
+    assert.equal(error.code, "SCRIPT_SEMANTIC_SCHEDULE_CONTRACT_FAILED");
+    assert.equal(error.noAutomaticRetry, false);
+    assert.deepEqual(error.invalidSchedule, partial.u);
+    return true;
+  });
+});
+
+test("AI editorial duration may differ from the scaffold without becoming a repair failure", () => {
+  const unit = {
+    i: 1,
+    duration: 13,
+    beat: "母亲说完整句后，镜头转到女儿攥紧的手",
+    before: "母女隔桌对峙",
+    after: "女儿第一次看见母亲留下的证据",
+    dialogueLines: [[1, "这封信我藏了二十年。", "压低声音慢慢说完，末尾停住呼吸", 2, 3.4, 0.8]],
+    visualReserveSeconds: 4,
+    durationRationale: "对白需要压低语速完整落地，并留给证据特写和听者反应",
+    cutAfter: "女儿闭口看向信封，镜头推到日期后切镜",
+    dialogueContinuesToNext: false
+  };
+  assert.equal(directFastSemanticScheduleRangeDiagnostics({ u: [unit] }, 1, 1, [10]).ok, false);
+  const advisory = directFastSemanticScheduleRangeDiagnostics(
+    { u: [unit] }, 1, 1, [10], { durationAdvisory: true }
+  );
+  assert.equal(advisory.ok, true);
+  assert.equal(advisory.actualTotal, 13);
+  assert.equal(directFastSemanticScheduleDiagnostics({ u: [unit] }, 10, { durationAdvisory: true }).ok, true);
+});
+
+test("semantic schedule treats dialogue density as guidance and preserves complete locked lines", () => {
+  const invalid = {
+    u: [{
+      i: 1,
+      duration: 10,
+      beat: "楼梯争执升级",
+      before: "父亲踩空后女儿托住他",
+      after: "哥哥把救援指向房产争执",
+      dialogueLines: [[3, "你是不是就等着爸出事，好把这套房子抓在手里？"], [1, "我在救爸，你第一句话却是房子。"]],
+      cutAfter: "女儿护住父亲后哥哥的手停在半空",
+      dialogueContinuesToNext: false
+    }]
+  };
+  const diagnostics = directFastSemanticScheduleDiagnostics(invalid, 10);
+  assert.equal(diagnostics.ok, true);
+  assert.deepEqual(assertDirectFastSemanticSchedule(invalid, 10)[0].dialogueLines, invalid.u[0].dialogueLines);
+});
+
+test("semantic schedule identifies a silent final unit for adjacent-unit merging", () => {
+  const diagnostics = directFastSemanticScheduleRangeDiagnostics({
+    u: [{ i: 1, duration: 10, beat: "儿子拦住母亲", before: "母亲转身", after: "儿子握住她的手", cutAfter: "母亲停在门口", dialogueLines: [], dialogueContinuesToNext: false }]
+  }, 1, 1, [10], { productStartNumber: 2 });
+  assert.equal(diagnostics.ok, false);
+  assert.ok(diagnostics.invalidUnits[0].failures.includes("emptyDialogueLedger"));
+});
+
+test("semantic speaker labels normalize uniquely without changing locked dialogue text", () => {
+  const source = [{ i: 1, dialogueLines: [["女儿（急促）", "爸，先抓紧我！"]] }, { i: 2, dialogueLines: [["儿子", "我来扶你。"]] }];
+  const result = normalizeDirectFastSemanticSpeakerUnits(source);
+  assert.deepEqual(result.units.map(unit => unit.dialogueLines), [[[1, "爸，先抓紧我！"]], [[2, "我来扶你。"]]]);
+  assert.throws(() => normalizeDirectFastSemanticSpeakerUnits([{ i: 1, dialogueLines: [["旁白", "这不是对白。"]] }]), error => error.code === "SCRIPT_SEMANTIC_SPEAKER_INVALID");
+  assert.throws(() => normalizeDirectFastSemanticSpeakerUnits([{ i: 1, dialogueLines: [["甲和乙", "一起说。"]] }]), error => error.code === "SCRIPT_SEMANTIC_SPEAKER_INVALID");
+});
+
+test("deterministic semantic fallback fits the current ten-second minimum dialogue budget", () => {
+  const fallback = require("../app/direct-fast-script").buildDirectFastFallbackSemanticUnit({ topic: { hook: "现场冲突" }, index: 4, duration: 10, productStartNumber: 6 });
+  const diagnostics = directFastSemanticScheduleRangeDiagnostics({ u: [fallback] }, 4, 4, [10, 10, 13, 10, 14, 10]);
+  assert.equal(diagnostics.ok, true);
+  assert.ok(fallback.dialogueLines.length >= 1);
+  assert.doesNotMatch(fallback.beat, /行动推进\d+|情节推进/);
+});
+
+test("semantic scheduling ranges retain completed units and reject an incomplete provider prefix", () => {
+  const durations = [10, 11, 12, 10, 10, 11];
+  const unit = i => ({
+    i,
+    duration: durations[i - 1],
+    beat: `beat-${i}`,
+    before: `before-${i}`,
+    after: `after-${i}`,
+    dialogueLines: [[1, "请把这句完整台词现在说完。"]],
+    cutAfter: "完整台词结束后的动作切点",
+    dialogueContinuesToNext: false
+  });
+  const partial = directFastSemanticScheduleRangeDiagnostics({ u: [unit(1), unit(2)] }, 1, 3, durations);
+  assert.equal(partial.ok, false);
+  assert.ok(partial.failures.includes("count:2/3"));
+  assert.ok(partial.failures.includes("S03:missing"));
+  const complete = directFastSemanticScheduleRangeDiagnostics({ u: [unit(1), unit(2), unit(3)] }, 1, 3, durations);
+  assert.equal(complete.ok, true);
+  const prematureFinale = unit(3);
+  prematureFinale.after = "画面定格收束全剧";
+  const rejectedFinale = directFastSemanticScheduleRangeDiagnostics({ u: [prematureFinale] }, 3, 3, durations);
+  assert.equal(rejectedFinale.ok, false);
+  assert.ok(rejectedFinale.failures.includes("S03:prematureFinale"));
+  const prompt = directFastSemanticScheduleRangePrompt({
+    topic: { title: "范围续写" },
+    product: { name: "测试商品", sellingPoints: "真实卖点" },
+    totalSeconds: 64,
+    start: 4,
+    end: 6,
+    durations,
+    spine: {
+      c: [
+        { n: "林小雨", r: "护工，保护老人", d: "短发，蓝色工作服" },
+        { n: "赵强", r: "施暴者，与林小雨对立", d: "黑夹克" },
+        { n: "赵铁柱", r: "受助老人和证人", d: "灰白头发" }
+      ],
+      sc: [{ n: "老人家客厅", d: "冲突与证据发生地" }],
+      b: [{ a: 1, z: 6, sc: 1, en: "林小雨已经挡在老人身前", g: "阻止赵强继续伤人", ex: "赵强被迫停手", h: "证据被拿到桌面" }]
+    }
+  });
+  assert.match(prompt, /\[SEMANTIC_RANGE start=4 end=6\]/);
+  assert.match(prompt, /"i":4,"duration":10/);
+  assert.match(prompt, /范围外/);
+  assert.match(prompt, /全剧人物编号表已经先于对白永久锁定/);
+  assert.match(prompt, /"number":1,"id":"C01","name":"林小雨"/);
+  assert.match(prompt, /绝不允许按本段出场顺序重新编号/);
+  assert.match(prompt, /visibleCharacterNumbers 必须列出本镜画面中实际出现/);
+  assert.match(prompt, /本句专属表演语气/);
+  assert.match(prompt, /duration 只是断点恢复的初始节奏参考/);
+  assert.match(prompt, /每项 duration 必须写成10–15秒整数/);
+  assert.match(prompt, /不得承诺治愈、止痛、立刻见效/);
+});
+
+test("semantic schedule rejects a three-speaker unit before direct compilation", () => {
+  const rejected = directFastSemanticScheduleRangeDiagnostics({ u: [{
+    i: 1,
+    duration: 10,
+    beat: "三人同时争执，证人打断争吵",
+    before: "合同摊在桌上",
+    after: "三人都停下等待证据",
+    dialogueLines: [[1, "你先把合同放下。"], [2, "这件事轮不到你管。"], [3, "日期和签名都在这里。"]],
+    cutAfter: "证人把文件推到桌中央，三人停住动作后切镜",
+    dialogueContinuesToNext: false
+  }] }, 1, 1, [10]);
+  assert.equal(rejected.ok, false);
+  assert.ok(rejected.failures.includes("S01:dialogueSpeakers"));
+});
+
+test("generic provider HTTP errors stop immediately when their body reports balance or credentials", () => {
+  const { WorkbenchWorkflow } = require("../app/workbench-workflow");
+  const workflow = new WorkbenchWorkflow({ store: {}, bridge: {} });
+  assert.equal(workflow.autonomousPipelineExternalBlocker({
+    code: "PROVIDER_HTTP_ERROR",
+    message: "Your account org-test is suspended due to insufficient balance, please recharge."
+  }), true);
+  assert.equal(workflow.autonomousPipelineExternalBlocker({
+    code: "PROVIDER_HTTP_ERROR",
+    message: "invalid api key"
+  }), true);
+  assert.equal(workflow.autonomousPipelineExternalBlocker({
+    code: "PROVIDER_HTTP_ERROR",
+    message: "temporary upstream timeout"
+  }), false);
+});
+
+test("uploaded dialogue timing produces variable 5-15 second units instead of fixed ten-second slots", () => {
+  const durations = adaptiveUploadedUnitDurations([2.1, 3.2, 8.6, 1.8, 11.4, 4.7], 36, "puream-hailuo-h3", { engine: "hailuo-h3" });
+  assert.equal(durations.reduce((sum, value) => sum + value, 0), 36);
+  assert.ok(durations.every(value => value >= 5 && value <= 15));
+  assert.ok(new Set(durations).size > 1);
+  assert.ok(durations.some(value => value !== 10));
+});
 
 function compactSegmentPayload(start, end) {
   return {
@@ -149,6 +366,7 @@ test("global story spine locks cast, scenes and causal handoffs before parallel 
   });
   assert.match(prompt, /唯一全剧骨架/);
   assert.match(prompt, /相邻段必须满足上一段ex\/h能够因果承接下一段en/);
+  assert.match(prompt, /禁止写场景名、SC01、字符串数字或0/);
   const segmentPrompt = directFastUserPrompt({
     topic: { title: "退休金里的秘密" },
     product: { name: "书籍", sellingPoints: "按用户上传页面阅读" },
@@ -250,19 +468,62 @@ test("the direct compiler supports a real 20-second two-shot smoke drama", () =>
   const firstShot = materialized.rawShots[0];
   assert.deepEqual([...new Set(firstShot.dialogueTurns.map(turn => turn.speakerId))], ["C01", "C02"]);
   const cameraPlan = buildCameraTakePlan({ characters: materialized.storyBible.characters }, firstShot, { mode: "storyboard_sheet" });
-  assert.equal(cameraPlan.takes.length, 5, "five alternating dialogue turns must remain five camera segments");
-  assert.equal(cameraPlan.generationBlocks.length, 1, "the same exchange must remain one continuous H3 request");
-  assert.deepEqual(cameraPlan.generationBlocks[0].takeIds, cameraPlan.takes.map(take => take.id));
+  const consecutiveSpeakerRuns = firstShot.dialogueTurns.reduce((count, turn, index, turns) => (
+    count + (index === 0 || turn.speakerId !== turns[index - 1].speakerId || turn.onScreen !== turns[index - 1].onScreen ? 1 : 0)
+  ), 0);
+  assert.equal(cameraPlan.takes.length, consecutiveSpeakerRuns, "complete adjacent lines by the same speaker must share one atomic camera segment");
+  assert.equal(cameraPlan.generationBlocks.length, 1, "a normal complete shot must remain one paid H3 request");
+  assert.deepEqual(
+    cameraPlan.takes.flatMap(take => take.dialogueTurns.map(turn => turn.text)),
+    firstShot.dialogueTurns.map(turn => turn.text),
+    "every dialogue atom must remain complete and in source order"
+  );
+  assert.deepEqual(cameraPlan.generationBlocks.flatMap(block => block.takeIds), cameraPlan.takes.map(take => take.id));
+  assert.equal(cameraPlan.generationBlocks.every(block => block.speakerIds.length <= 3), true);
+  assert.equal(cameraPlan.generationBlocks.every(block => block.mouthOwnerIds.length <= 3), true);
+  assert.equal(cameraPlan.generationBlocks.every(block => block.cameraOwnerIds.length <= 5), true);
 });
 
 test("the minimum 30-second AI contract has room for a late reversal and a later product shot", () => {
   const filmSchedule = planFilmSchedule(30, "puream-hailuo-h3", { preferredUnit: 5, engine: "hailuo-h3" });
-  assert.equal(filmSchedule.unitCount, 6);
-  assert.deepEqual(filmSchedule.suggestedDurations, [5, 5, 5, 5, 5, 5]);
-  assert.equal(directFastReversalIndex(filmSchedule.unitCount), 4);
-  assert.equal(directFastProductStartIndex(filmSchedule.unitCount), 5);
+  assert.equal(filmSchedule.unitCount, 3);
+  assert.deepEqual(filmSchedule.suggestedDurations, [10, 10, 10]);
+  assert.equal(directFastReversalIndex(filmSchedule.unitCount), 1, "zero-based index1 means shot2: conflict must be established before the reversal");
+  assert.equal(directFastProductStartIndex(filmSchedule.unitCount), 2, "shot3 follows the reversal and carries product plus visible ending");
   assert.ok(directFastProductStartIndex(filmSchedule.unitCount) > directFastReversalIndex(filmSchedule.unitCount));
   assert.equal(directFastProductStartIndex(30), 27);
+});
+
+test("a 30-second product result keeps the human ending and explicit character voice gender", () => {
+  const filmSchedule = planFilmSchedule(30, "puream-hailuo-h3", { preferredUnit: 5, engine: "hailuo-h3" });
+  const payload = compactSegmentPayload(1, filmSchedule.unitCount);
+  payload.c = [
+    { n: "王建国", g: "男", a: "68岁", r: "丈夫，妻子陪同康复训练", d: "短灰发、身形清瘦" },
+    { n: "李梅", g: "女", a: "64岁", r: "妻子，照顾丈夫", d: "齐耳灰发、体态稳重" },
+    { n: "王敏", g: "女", a: "36岁", r: "女儿，见证并搀扶父亲", d: "低马尾、动作利落" }
+  ];
+  payload.s[filmSchedule.unitCount - 1] = {
+    ...payload.s[filmSchedule.unitCount - 1],
+    a: "王建国戴好护膝，在妻子与女儿的注视下扶住栏杆稳稳站起",
+    af: "王建国完成站立动作，向家人点头，三人决定按日常计划继续练习",
+    f: 1,
+    v: [1, 2],
+    d: [[1, "我自己试着站起来。", "平静而坚定地低声说，语速放慢，重音落在‘自己’，句尾稳稳收住"]]
+  };
+  const materialized = materializeDirectFastScript({
+    payload,
+    topic: { title: "重新站起", hook: "父亲在门口险些跌倒。", reversal: "家人终于看清误会。", proofChain: "旧记录与现场动作互相印证。" },
+    product: { name: "舒缓护膝", description: "日常支撑用品", sellingPoints: "轻薄贴合、佩戴稳固" },
+    filmSchedule
+  });
+  const endingPlan = materialized.plans.at(-1);
+  const endingShot = materialized.rawShots.at(-1);
+  assert.equal(endingPlan.productShotType, "product_result");
+  assert.ok(endingPlan.visibleCharacterIds.length > 0);
+  assert.match(endingPlan.action, /王建国.*稳稳站起/);
+  assert.ok(endingShot.subshots.every(item => !/product_packshot/.test(item.shotType)));
+  assert.match(materialized.storyBible.characters[0].voiceDescription, /男声/);
+  assert.match(materialized.storyBible.characters[1].voiceDescription, /女声/);
 });
 
 test("total film duration is unbounded while every text request stays in five-shot resumable segments", () => {
@@ -341,68 +602,243 @@ test("the direct compiler adapts product actions by category instead of forcing 
   assert.doesNotMatch(productText, /膝部|绑带|跪地量裁|戴好/);
 });
 
-test("failed direct segment falls back locally without restarting successful Agent segments", async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-direct-resume-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+test("legacy fixed-schedule flag also uses one complete screenplay request without automatic range repair", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-firstpass-legacy-"));
+  t.after(() => fs.rmSync(root, {recursive:true,force:true}));
   const store = new WorkbenchStore(root);
-  const imagePath = path.join(root, "product.png");
-  fs.writeFileSync(imagePath, Buffer.from("product"));
-  const created = store.createProject("分段续写", {
-    inputMode: "ai",
-    executionMode: "step",
-    scriptFormat: "dialogue",
-    scriptFormatConfirmed: true,
-    targetDurationSeconds: 300
-  });
-  const topic = {
-    id: "TOPIC_01",
-    title: "跪地母亲",
-    relationship: "母女",
-    logline: "女儿误解跪地缝婚纱的母亲，证据最终揭开牺牲。",
-    hook: "女儿踢开跪地缝纫的母亲，婚纱裙摆从她手里滑落。",
-    proofChain: "手术单日期、婚纱血渍和邻居证言形成证据链。",
-    reversal: "女儿确认母亲为婚礼错过治疗并公开承担错误。",
-    emotionalPayoff: "女儿用持续行动照顾母亲。"
-  };
-  store.patchProject(created.id, {
-    productionPlan: { inputMode: "ai", executionMode: "step", scriptFormat: "dialogue", scriptFormatConfirmed: true },
-    generation: { targetDurationSeconds: 300, engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "smart", modeConfirmed: true },
-    product: { name: "硅胶护膝", description: "日常活动支撑", sellingPoints: "贴合膝部、活动支撑", imagePath },
-    ideation: { topics: [topic], selectedTopicId: topic.id, status: "ready" }
-  });
-  const calls = new Map();
-  let failMiddle = true;
-  const ranges = directFastSegmentRanges(30);
-  const schedule = planFilmSchedule(300, "puream-hailuo-h3", { preferredUnit: 10, engine: "hailuo-h3" });
-  const workflow = new (require("../app/workbench-workflow").WorkbenchWorkflow)({
-    store,
-    bridge: {},
-    locateFfmpeg: () => "",
-    stagingRoot: root,
-    textGenerator: async (_config, messages) => {
-      const user = String(messages.find(message => message.role === "user")?.content || "");
-      if (/全剧骨架/.test(user)) return compactStorySpine(ranges);
-      const range = user.match(/第(\d+)-(\d+)镜/);
-      const start = Number(range?.[1]);
-      const end = Number(range?.[2]);
-      calls.set(start, (calls.get(start) || 0) + 1);
-      if (start === 11 && failMiddle) {
-        failMiddle = false;
-        throw Object.assign(new Error("模拟连接中断"), { code: "PUREAM_TEXT_STREAM_ERROR", noAutomaticRetry: true });
-      }
-      return { s: strictSegmentPayload(start, end, schedule.suggestedDurations).s };
-    }
-  });
+  const project = store.createProject("旧入口一致性", {inputMode:"ai",executionMode:"step",scriptFormat:"dialogue",scriptFormatConfirmed:true});
+  store.patchProject(project.id,{productionPlan:{inputMode:"ai",commerceMode:"none",scriptFormat:"dialogue",scriptFormatConfirmed:true},ideation:{topics:[{id:"T1",title:"回家",logline:"母子化解误会"}],selectedTopicId:"T1",status:"ready"}});
+  const line="儿子（对母亲；焦急；扶住门框）：妈，先别走，我把那封信找到了。";
+  // This tests request count, so provide a complete-duration response under
+  // the current original-script contract rather than a two-line micro-script.
+  const fixtureLines=[line];
+  while(require('../app/film-runtime-policy').measure(fixtureLines.join('\n')).seconds<490)fixtureLines.push('母亲（对儿子；含泪；接稳信封）：你愿意听，我就不走了，我把信上的日期讲清楚。');
+  const calls=[];
+  const workflow=new (require("../app/workbench-workflow").WorkbenchWorkflow)({store,bridge:{},locateFfmpeg:()=>"",stagingRoot:root,textGenerator:async(_config,messages)=>{
+    const input=JSON.parse(messages.filter(m=>m.role==="user").at(-1).content);calls.push(input);
+    if(input.narrativeRequirements)return {commerceProfile:{},plan:{title:"回家",logline:"母子化解误会",cast:[{name:"儿子",role:"儿子"},{name:"母亲",role:"母亲"}],locations:[{name:"门厅"}],scenes:[{id:"S01"}],ending:"两人留在家中"},parts:[{sceneId:"S01",scriptText:fixtureLines.join('\n'),endState:"母亲持信，母子在门厅"}]};
+    return {ok:true,issues:[],checks:[{dimension:"因果",evidence:line}],openingCheck:{ok:true,quote:line,bond:"母子",reason:"离家冲突直接出现"}};
+  }});
+  let delivered=0;
+  workflow.prepareWrittenScriptForConfirmation=async id=>{delivered++;return store.getProject(id);};
+  const result=await workflow.generateCompleteScript(project.id,{legacyFixedSchedule:true});
+  assert.equal(delivered,1,'legacy writing entry also proceeds to the complete prompt confirmation preparation');
+  assert.equal(calls.length,2,"one complete generation plus one independent review");
+  assert.ok(calls[0].narrativeRequirements);assert.equal(calls[0].requiredOutput,undefined);
+  assert.ok(calls[1].sourceLines);
+  assert.equal(result.script.firstPassQuality.generationCalls,1);
+  assert.equal(result.script.firstPassQuality.automaticRewriteCalls,0);
+  assert.equal(result.script.reviewStatus,"ready");
+  assert.equal(result.currentStage,"script");
+  assert.equal(result.shots.length,0,"the isolated delivery stub does not submit media");
+  assert.equal(result.generation.durationLocked,false);
+});
 
-  const completed = await workflow.generateCompleteScript(created.id);
-  assert.equal(calls.get(11), 1, "invalid upstream output must not trigger a second billable request");
-  for (const start of [1, 6, 16, 21, 26]) assert.equal(calls.get(start), 1, `completed segment S${start} must be reused`);
-  assert.equal(completed.script.generationCheckpoint, null);
-  assert.equal(completed.shots.length, 30);
-  assert.equal(completed.currentStage, "assets");
-  assert.equal(completed.script.generationPerformance.localFallbackCount, 1);
-  assert.deepEqual(completed.script.generationPerformance.localFallbackRanges, [[11, 15]]);
-  assert.deepEqual(completed.script.generationPerformance.generationSources, ["agent", "deterministic-local-preservation"]);
+test("local semantic materializer preserves locked lines byte-for-byte and satisfies strict direct contracts", () => {
+  const semanticUnits = [
+    { i: 1, duration: 10, beat: "女儿逼问合同去向", before: "合同不见", after: "母亲指明抽屉", dialogueLines: [[1, "你把合同藏哪儿了？"], [2, "就在抽屉最下面。"]], cutAfter: "母亲说完，女儿拉开抽屉后切镜", dialogueContinuesToNext: false },
+    { i: 2, duration: 10, beat: "女儿看见代签说明", before: "母亲指明抽屉", after: "女儿确认自己误会", dialogueLines: [[1, "这份代签说明是真的？"], [2, "日期和签名都在这里。"]], cutAfter: "母亲说完，女儿停住动作后切镜", dialogueContinuesToNext: false }
+  ];
+  const spine = compactStorySpine([[1, 2]]);
+  const payload = buildDirectFastSemanticSegment({ spine, topic: { title: "合同真相" }, segmentStart: 1, segmentEnd: 2, unitDurations: [10, 10], semanticUnits });
+  assert.equal(assertDirectFastSegment(payload, 1, 2, {
+    characters: spine.c,
+    scenes: spine.sc,
+    durations: [10, 10],
+    strict: true,
+    semanticUnits,
+    requireCompleteDialogue: true
+  }), payload);
+  assert.deepEqual(payload.s.map(shot => shot.d.map(line => line.slice(0, 2))), semanticUnits.map(unit => unit.dialogueLines));
+});
+
+test("direct semantic and final materialization retain all three authored visible people without inventing a fallback actor", () => {
+  const spine = compactStorySpine([[1, 3]]);
+  const semanticUnits = [1, 2, 3].map(i => ({ i, duration: 10, beat: "母亲出示回单，女儿吃惊，证人在门旁闭口点头", before: "回单握在母亲手中", after: "回单摆在桌面，女儿停止指责", visibleCharacterNumbers: [1, 2, 3], dialogueLines: [[1, "缴费回单就在这里。", "快速而坚定地说明事实", 2]], cutAfter: "女儿看清回单后抬头", dialogueContinuesToNext: false }));
+  const payload = buildDirectFastSemanticSegment({ spine, topic: { title: "回单证人" }, segmentStart: 1, segmentEnd: 3, unitDurations: [10, 10, 10], semanticUnits });
+  assert.deepEqual(payload.s[0].v, [1, 2, 3]);
+  assert.equal(assertDirectFastSegment(payload, 1, 3, { characters: spine.c, scenes: spine.sc, durations: [10, 10, 10], strict: true, semanticUnits }), payload);
+  const materialized = materializeDirectFastScript({ payload, topic: { title: "回单证人" }, product: { name: "台灯", sellingPoints: "旋钮调节" }, filmSchedule: planFilmSchedule(30, "puream-hailuo-h3", { engine: "hailuo-h3" }) });
+  assert.deepEqual(materialized.plans[0].visibleCharacterIds, ["C01", "C02", "C03"]);
+  assert.deepEqual(materialized.rawShots[0].subshots[0].visibleCharacterIds, ["C01", "C02", "C03"]);
+  const duplicate = structuredClone(payload);
+  duplicate.s[0].v = [1, 1, 3];
+  assert.throws(() => assertDirectFastSegment(duplicate, 1, 3, { characters: spine.c, scenes: spine.sc, durations: [10, 10, 10], strict: true, semanticUnits }), error => error.strictFailures?.some(item => item.failed.includes("visible")));
+});
+
+test("semantic materialization keeps a silent listener visible and gives every line a concrete performance", () => {
+  const spine = compactStorySpine([[1, 1]]);
+  spine.c[0].n = "陆天";
+  spine.c[1].n = "陆大强";
+  spine.c[2].n = "李玉兰";
+  const semanticUnits = [{
+    i: 1,
+    duration: 10,
+    beat: "陆天俯身给李玉兰戴好护膝并扶住她起身",
+    before: "李玉兰双腿发抖无法站稳",
+    after: "李玉兰在陆天搀扶下站稳",
+    visibleCharacterNumbers: [1, 3],
+    dialogueLines: [[1, "奶奶，我扶着您慢慢走。", "心疼地轻声安抚，音量低、语速慢，重音落在慢慢走，句尾留半拍"]],
+    cutAfter: "李玉兰握住陆天手臂并站稳后切镜",
+    dialogueContinuesToNext: false
+  }];
+  const payload = buildDirectFastSemanticSegment({
+    spine,
+    topic: { title: "雪地搀扶" },
+    segmentStart: 1,
+    segmentEnd: 1,
+    unitDurations: [10],
+    productStartNumber: 2,
+    semanticUnits
+  });
+  assert.deepEqual(payload.s[0].v, [1, 3]);
+  assert.equal(payload.s[0].d[0][0], 1);
+  assert.equal(payload.s[0].d[0][1], "奶奶，我扶着您慢慢走。");
+  assert.match(payload.s[0].d[0][2], /心疼|音量低|语速慢/);
+  assert.doesNotMatch(payload.s[0].d[0][2], /语气贴合当前冲突|自然说/);
+});
+
+test("semantic dialogue carries the authored listener instead of guessing another visible character", () => {
+  const spine = compactStorySpine([[1, 1]]);
+  spine.c[0].n = "林素琴";
+  spine.c[1].n = "周岚";
+  spine.c[2].n = "陈建国";
+  const semanticUnits = [{
+    i: 1,
+    duration: 10,
+    beat: "林素琴和陈建国把缴费记录交给周岚核对",
+    before: "周岚仍不相信母亲",
+    after: "周岚看清记录并停止指责",
+    visibleCharacterNumbers: [1, 3],
+    dialogueLines: [
+      [1, "孩子夜里没人接，我就带回家。", "林素琴面对周岚低声承认，语速放慢，句尾泄气"],
+      [3, "缴费人一直是她。", "陈建国平静核实，重音落在一直，句尾收住", 2]
+    ],
+    cutAfter: "周岚看清姓名后抬眼，停顿0.5秒切镜",
+    dialogueContinuesToNext: false
+  }];
+  const payload = buildDirectFastSemanticSegment({
+    spine,
+    topic: { title: "缴费单真相" },
+    segmentStart: 1,
+    segmentEnd: 1,
+    unitDurations: [10],
+    productStartNumber: 2,
+    semanticUnits
+  });
+  payload.spineLocked = true;
+  assert.equal(payload.s[0].d[0][5], 2, "legacy three-field dialogue should infer the named listener from delivery");
+  assert.equal(payload.s[0].d[1][5], 2, "the explicit listener must survive deterministic compilation");
+  const materialized = materializeDirectFastScript({
+    payload,
+    topic: { title: "缴费单真相" },
+    product: { name: "护眼台灯", sellingPoints: "柔和阅读光" },
+    filmSchedule: { unitCount: 1, totalSeconds: 10, suggestedDurations: [10] }
+  });
+  assert.deepEqual(materialized.rawShots[0].dialogueTurns.map(turn => turn.listenerIds), [["C02"], ["C02"]]);
+  assert.ok(materialized.rawShots[0].dialogueTurns.every(turn => /周岚/.test(turn.listenerBeat)));
+});
+
+test("final semantic compilation heals placeholders and dangling local truncation without a paid rewrite", () => {
+  const spine = compactStorySpine([[1, 6]]);
+  const topic = {
+    title: "雨夜门口那盏没熄的灯",
+    settlementAction: "女儿把灯擦干放回书桌，第一次主动请母亲留下吃饭。",
+    emotionalPayoff: "误解被具体证据击穿，和解以可见行动兑现。"
+  };
+  const payload = buildDirectFastSemanticSegment({
+    spine,
+    topic,
+    segmentStart: 6,
+    segmentEnd: 6,
+    unitDurations: [5, 7, 7, 10, 5, 5],
+    semanticUnits: [{
+      i: 6,
+      duration: 5,
+      beat: "行动推进6",
+      before: "女儿接住抹布并面对母亲",
+      after: "护眼台灯被重新放回书桌，女儿邀请母亲留下吃饭，母亲接受并坐到",
+      visibleCharacterNumbers: [1, 2],
+      dialogueLines: [[1, "你把话说清。", "低声追问，句尾等待回应", 2]],
+      cutAfter: "完成收束",
+      dialogueContinuesToNext: false
+    }]
+  });
+  const shot = payload.s[0];
+  assert.doesNotMatch(`${shot.t} ${shot.a} ${shot.af}`, /行动推进6|完成收束|接受并坐到$/);
+  assert.match(shot.a, /把灯擦干放回书桌|留下吃饭/);
+  assert.match(shot.af, /和解以可见行动兑现/);
+  assert.equal(shot.d.length, 0, "an isolated ending question should become a silent visible settlement, not reopen the story");
+});
+
+test("semantic range prompt locks speaker, spoken text, delivery and listener into separate fields", () => {
+  const prompt = directFastSemanticScheduleRangePrompt({
+    topic: { title: "合同真相", settlementAction: "女儿归还合同并当面道歉。", emotionalPayoff: "关系以行动修复。" },
+    product: { name: "台灯", sellingPoints: "旋钮调节" },
+    totalSeconds: 10,
+    start: 1,
+    end: 1,
+    durations: [10],
+    spine: compactStorySpine([[1, 1]])
+  });
+  assert.match(prompt, /明确听者 number/);
+  assert.match(prompt, /只有第二项属于口型与配音/);
+  assert.match(prompt, /settlementAction/);
+  assert.match(prompt, /禁止“行动推进N/);
+});
+
+test("semantic shots preserve every locked dialogue sentence and reject cross-shot fragments", () => {
+  const semanticUnits = [
+    {
+      i: 1,
+      duration: 10,
+      beat: "女儿逼问合同去向",
+      before: "合同不见",
+      after: "母亲指明抽屉",
+      dialogueLines: [[1, "你把合同藏哪儿了？"], [2, "就在抽屉最下面。"]],
+      cutAfter: "母亲说完，女儿停顿0.6秒后拉开抽屉",
+      dialogueContinuesToNext: false
+    },
+    {
+      i: 2,
+      duration: 10,
+      beat: "女儿看见代签说明",
+      before: "母亲指明抽屉",
+      after: "女儿确认自己误会",
+      dialogueLines: [[1, "这份代签说明是真的？"], [2, "日期和签名都在。"]],
+      cutAfter: "母亲说完，女儿看清签名并抬眼反应0.5秒",
+      dialogueContinuesToNext: false
+    }
+  ];
+  assert.equal(assertDirectFastSemanticSchedule({ u: semanticUnits }, 20), semanticUnits);
+
+  const payload = strictSegmentPayload(1, 2, [10, 10]);
+  payload.s[0].d = semanticUnits[0].dialogueLines;
+  payload.s[1].d = semanticUnits[1].dialogueLines;
+  assert.equal(assertDirectFastSegment(payload, 1, 2, {
+    characters: payload.c,
+    scenes: payload.sc,
+    durations: [10, 10],
+    strict: true,
+    semanticUnits,
+    requireCompleteDialogue: true
+  }), payload);
+
+  const cutOff = structuredClone(payload);
+  cutOff.s[0].d[0][1] = "你把合同藏哪儿";
+  cutOff.s[1].d[0][1] = "了？";
+  assert.throws(
+    () => assertDirectFastSegment(cutOff, 1, 2, {
+      characters: cutOff.c,
+      scenes: cutOff.sc,
+      durations: [10, 10],
+      strict: true,
+      semanticUnits,
+      requireCompleteDialogue: true
+    }),
+    error => error.code === "SCRIPT_DIRECT_SEGMENT_CONTRACT_FAILED"
+      && error.strictFailures.some(item => item.failed.includes("semanticDialogue"))
+  );
 });
 
 test("one-call compact script is locally expanded into a 300-second production-ready drama", () => {

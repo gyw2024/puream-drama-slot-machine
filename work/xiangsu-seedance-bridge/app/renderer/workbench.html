@@ -6,6 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; connect-src 'none'; img-src 'self' file: puream-asset: data:; media-src 'self' file: puream-asset: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
   <title>纯梦短剧老虎机</title>
   <link rel="stylesheet" href="workbench.css">
+  <link rel="stylesheet" href="prompt-review-editor.css">
 </head>
 <body>
   <div class="noise"></div>
@@ -13,28 +14,27 @@
     <header class="topbar">
       <div class="brand">
         <span class="brand-icon"><img src="../assets/drama-slot-mark.svg" alt="纯梦短剧老虎机"></span>
-        <div><h1>纯梦短剧老虎机</h1><p>PUREAM CREATIVE STUDIO · 本地优先，云端算力可选</p></div>
+        <div><h1>纯梦短剧老虎机</h1><p>PUREAM CREATIVE STUDIO · 云端全参考短剧生产</p></div>
       </div>
       <div class="project-switcher">
         <label for="projectSelect">当前项目</label>
         <select id="projectSelect" aria-label="当前漫剧项目"></select>
         <button id="newProject" class="icon-button" type="button" title="新建项目" aria-label="新建项目">＋</button>
-        <button id="deleteProject" class="icon-button delete-project-button" type="button" title="删除当前历史项目" aria-label="删除当前历史项目">删</button>
-        <button id="restoreProject" class="icon-button" type="button" title="从项目回收区恢复" aria-label="从项目回收区恢复">恢</button>
+        <button id="importProductionPackage" class="project-action-button import-package-button" type="button" title="导入 .pdramapack 完整制作包，跳过选题、写作、拆镜、提示词和资产生成" aria-label="导入完整制作包"><span aria-hidden="true">⇧</span><b>导入资产包</b></button>
+        <button id="deleteProject" class="project-action-button delete-project-button" type="button" title="删除当前项目" aria-label="删除当前项目"><span aria-hidden="true">×</span><b>删除项目</b></button>
+        <button id="restoreProject" class="project-action-button restore-project-button" type="button" title="从回收区恢复项目" aria-label="恢复项目"><span aria-hidden="true">↶</span><b>恢复项目</b></button>
       </div>
       <div class="top-status">
         <button id="runFullPipeline" class="primary-button"><img src="../assets/icons/sparkle.png" alt="">一键全流程</button>
         <button id="pausePipeline" class="outline-button" type="button" title="暂停当前自动化/抽卡">暂停任务</button>
         <button id="stopPipeline" class="danger-button" type="button" title="结束当前自动化/抽卡">结束任务</button>
         <button id="walletShortcut" class="wallet-chip" type="button" title="查看余额并充值"><span>余额</span><b id="walletBalance">读取中</b><i>充值</i></button>
-        <div id="bridgeBadge" class="bridge-badge offline"><i></i><b>像塑检测中</b></div>
+        <div id="bridgeBadge" class="bridge-badge offline"><i></i><b>云端视频服务检测中</b></div>
         <button id="switchSimpleMode" class="mode-switch-button" type="button" title="切换到简易短剧工作台">简易模式</button>
         <details class="top-more-menu">
           <summary>更多</summary>
           <div class="top-more-panel">
             <button id="qualityBlueprintToggle" class="review-blueprint-toggle" type="button" aria-pressed="false" aria-expanded="false"><span class="review-blueprint-indicator" aria-hidden="true"></span><span id="qualityBlueprintToggleLabel">审核蓝图：关闭</span></button>
-            <button id="accountSwitchShortcut" class="outline-button" type="button" title="切换像塑账号"><img src="../assets/icons/history.png" alt="">切换像塑账号</button>
-            <button id="startBridge" class="outline-button" type="button" title="后台隐藏启动像塑"><img src="../assets/icons/lock.png" alt="">后台启动像塑</button>
           </div>
         </details>
         <div id="qualityBlueprintMenu" class="quality-blueprint-menu hidden" role="dialog" aria-labelledby="qualityBlueprintMenuTitle" tabindex="-1">
@@ -55,7 +55,7 @@
                 <label><input type="checkbox" data-quality-module="assets"><span><b>人物与资产</b><small>人物、场景、音色与素材质量</small></span></label>
                 <label><input type="checkbox" data-quality-module="storyboards"><span><b>分镜图</b><small>构图、人物一致性与首尾帧</small></span></label>
                 <label><input type="checkbox" data-quality-module="videos"><span><b>分镜视频</b><small>音画、口型、重复画面与表演</small></span></label>
-                <label><input type="checkbox" data-quality-module="delivery"><span><b>成片交付</b><small>拼接后的声音、画面与时长验收</small></span></label>
+                <label><input type="checkbox" data-quality-module="delivery"><span><b>粗剪交付</b><small>片头净音、画面与时长核对；剪映分轨导出</small></span></label>
               </div>
             </section>
             <section class="quality-blueprint-details" aria-label="剧本审核明细">
@@ -80,7 +80,7 @@
       <button class="stage-button" data-stage="assets"><em>02</em><img src="../assets/icons/image.png" alt=""><span><b>角色与场景</b><small>三视图、服装、道具、音色</small></span><i></i></button>
       <button class="stage-button" data-stage="shots"><em>03</em><img src="../assets/icons/drag.png" alt=""><span><b>分镜工作台</b><small>首尾帧、提示词、资产引用</small></span><i></i></button>
       <button class="stage-button" data-stage="videos"><em>04</em><img src="../assets/icons/video.png" alt=""><span><b>分镜视频</b><small>延续或按剧情生成</small></span><i aria-hidden="true"></i></button>
-      <button class="stage-button" data-stage="final"><em>05</em><img src="../assets/icons/play.png" alt=""><span><b>合成与交付</b><small>等待分镜视频</small></span><i aria-hidden="true"></i></button>
+      <button class="stage-button" data-stage="final"><em>05</em><img src="../assets/icons/play.png" alt=""><span><b>智能粗剪</b><small>等待分镜视频</small></span><i aria-hidden="true"></i></button>
       <div class="nav-spacer"></div>
       <section class="sidebar-libraries" aria-label="独立资产库">
         <div class="sidebar-library-title"><span>LIBRARIES</span><b>独立资产库</b></div>
@@ -108,6 +108,7 @@
         </div>
       </section>
       <button class="stage-button settings-button" data-stage="settings"><em>⚙</em><img src="../assets/icons/settings.png" alt=""><span><b>系统设置</b><small>模型、API、提示词模板</small></span><i></i></button>
+      <button id="exportProjectLogs" class="stage-button" type="button" title="导出当前项目状态、错误和请求返回；自动隐藏密钥，不包含图片视频"><em>↓</em><span><b>导出运行日志</b><small>当前项目 · 故障排查</small></span></button>
       <button id="appVersionUpdate" class="app-version-update" type="button" aria-live="polite" data-tooltip="检查最新版；发现新版本后可直接下载并覆盖当前安装，项目和全局资产不会被删除。"><span>VERSION</span><b id="appVersionText">读取中</b><small id="appUpdateState">正在检查更新</small></button>
       <div class="local-note"><span>LOCAL FIRST</span><p>项目、抽卡历史与成片保存在本机</p></div>
     </aside>
@@ -118,8 +119,6 @@
         <div class="strategy-item"><span>视频模式</span><b id="projectVideoMode">待确认</b></div>
         <div class="strategy-item"><span>执行方式</span><b id="projectExecutionMode">分步制作</b></div>
         <div class="strategy-item"><span>起步内容</span><b id="projectInputMode">AI 生成</b></div>
-        <div class="strategy-item"><span>剧本格式</span><b id="projectScriptFormat">写剧本时选择</b></div>
-        <div class="strategy-item"><span>V2 制作意图</span><b id="projectCommerceShots">自然植入 · 均衡</b></div>
         <p id="projectStrategyHelp">每个阶段都可单独运行，也可一键制作；所有 AI 结果均可改为手动输入或上传。</p>
         <button id="editProjectStrategy" class="outline-button" type="button">调整制作策略</button>
       </section>
@@ -136,53 +135,65 @@
       </section>
       <section class="stage-panel active" data-panel="script">
         <div class="stage-head">
-          <div><span class="eyebrow">PHASE 01 · IDEA TO SCRIPT</span><h2>一键选题，自动写完整短剧</h2><p>AI 先给出 10 个适合中老年观众的爆款题材；选中一个，填入商品图、商品名和卖点即可生产。</p></div>
-          <div class="head-actions">
-            <button id="saveScript" class="outline-button">保存剧本</button>
-            <button id="continueFromScript" class="outline-button" type="button">运行当前剧本阶段</button>
-            <button id="analyzeScript" class="primary-button"><img src="../assets/icons/sparkle.png" alt="">AI 标准化并拆镜</button>
+          <div><span class="eyebrow">PHASE 01 · IDEA TO SCRIPT</span><h2>按顺序完成剧本与商品</h2><p>选择创作方式，填写商品资料，完成剧本后在下方继续下一环节。</p></div>
+        </div>
+        <section id="scriptEntryChooser" class="workflow-entry panel-card" aria-labelledby="scriptEntryTitle">
+          <div class="card-title"><h3 id="scriptEntryTitle">1. 选择创作方式</h3><span class="muted">切换方式会保留已填资料和剧本</span></div>
+          <div class="workflow-entry-options" role="group" aria-label="创作方式">
+            <button type="button" class="outline-button" data-script-entry="original" aria-pressed="true" aria-controls="originalScriptActions">原创剧本</button>
+            <button type="button" class="outline-button" data-script-entry="upload" aria-pressed="false" aria-controls="scriptImportActions">上传剧本</button>
+            <button type="button" class="outline-button" data-script-entry="adapt" aria-pressed="false" aria-controls="scriptImportActions">改写剧本</button>
           </div>
-        </div>
-        <div class="primary-entry-bar" role="region" aria-label="上传已有剧本">
-          <div><span>已有剧本</span><b>上传后自动标准化、提取资产并拆镜</b><small>支持任意常见排版；系统保留剧情、人物和完整对白，再转换为稳定生产格式。</small></div>
-          <button id="importScriptFile" class="outline-button manual-button" type="button">上传剧本</button>
-        </div>
-        <details class="advanced-entry-bar">
-          <summary>专业导入与提示词工具</summary>
-          <div class="manual-entry-actions"><button id="importDialogueRewrite" class="outline-button manual-button" type="button">上传对白稿并轻改</button><button class="outline-button manual-button" type="button" data-action="import-prompt-batch" data-prompt-scope="script">导入剧本提示词包</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="script">下载系统建议</button></div>
-        </details>
-        <section id="scriptExampleLibrary" class="script-example-library" aria-labelledby="scriptExampleLibraryTitle">
-          <div class="script-example-library-copy"><span>WRITING EXAMPLES</span><b id="scriptExampleLibraryTitle">三种七分钟完整剧本案例</b><small>每种案例均为 420 秒、42 个完整生产单元，可直接照此上传；人物介绍和故事简介只建资产，绝不进入成片。</small></div>
-          <div class="script-example-library-actions" role="group" aria-label="查看或下载三种剧本模式示例">
-            <div><b>完整制作稿</b><span>人物、场景、动作、对白与承接</span><button type="button" data-script-format-preview="production">查看示例</button><button type="button" data-script-format-example="production">下载 TXT</button></div>
-            <div><b>简易对白稿</b><span>背景、说话人、听者、语气与原句</span><button type="button" data-script-format-preview="dialogue">查看示例</button><button type="button" data-script-format-example="dialogue">下载 TXT</button></div>
-            <div><b>秒级分镜成片稿</b><span>逐秒动作、表演、对白与声音</span><button type="button" data-script-format-preview="timed_storyboard">查看示例</button><button type="button" data-script-format-example="timed_storyboard">下载 TXT</button></div>
+        </section>
+        <section id="topicProductSetup" class="product-card topic-product-card panel-card" aria-labelledby="topicProductSetupTitle">
+          <div class="card-title"><div><span class="step-tag">2. 填写商品资料 · 自动保存</span><h3 id="topicProductSetupTitle">带货模式先锁定商品资料</h3></div><div class="card-title-actions"><button id="openProductAsset" class="asset-open-button" type="button" disabled>打开商品图</button><b id="productState" class="state-pill" role="status" aria-live="polite" aria-atomic="true">未上传</b></div></div>
+          <div class="topic-product-image-column">
+            <button id="productImage" class="product-drop" type="button"><img src="../assets/icons/image.png" alt=""><span>上传产品图</span><small id="productDropHelp">选题前锁定商品外观；后续商品镜头持续引用此图</small></button>
+            <button id="selectProductLibrary" class="outline-button" type="button">从独立资产库选商品图</button>
+          </div>
+          <div class="topic-product-fields">
+            <label>商品名称<input id="productName" placeholder="填写图片中真实商品的名称" aria-describedby="topicProductGateHelp"></label>
+            <label>商品卖点<textarea id="productDescription" rows="4" placeholder="可留空：AI根据商品名判断日常卖点；有资料时优先采用" aria-describedby="topicProductGateHelp"></textarea></label>
+            <label>商品价格<input id="productPrice" placeholder="填写本次真实成交价，例如39.9元" aria-describedby="topicProductGateHelp"></label>
+            <label>促销活动<input id="productOffer" placeholder="填写真实优惠、赠品或活动期限；没有则填写“无促销”" aria-describedby="topicProductGateHelp"></label>
+            <label>购买指令<input id="productPurchase" value="点击左下角头像进入橱窗购买" aria-describedby="topicProductGateHelp"></label>
+            <p id="topicProductGateHelp" class="topic-product-gate-help" role="status" aria-live="polite">上传商品图并填写名称即可开始。卖点可留空，由AI结合商品名和参考案例植入人物剧情；价格、活动按已填资料保留，不虚构。</p>
           </div>
         </section>
         <div id="scriptBootstrapBanner" class="build-banner" role="status" hidden></div>
-        <section class="idea-machine panel-card" aria-labelledby="ideaMachineTitle">
+        <section id="originalScriptActions" class="idea-machine panel-card" aria-labelledby="ideaMachineTitle">
           <div class="idea-machine-head">
-            <div><span class="step-tag">MIDDLE-AGED &amp; SENIOR HIT TOPICS</span><h3 id="ideaMachineTitle">中老年爆款选题工作台</h3><p>覆盖家庭伦理、亲情关系、养老尊严、邻里互助与晚年成长；每个题材都标明开场钩子、反转和善良内核。</p></div>
-            <button id="generateTopics" class="primary-button idea-spin"><img src="../assets/icons/slot.png" alt="">一键生成 10 个选题</button>
+            <div><span class="step-tag">3. 生成选题，再写剧本</span><h3 id="ideaMachineTitle">剧情带货逻辑原创选题</h3><p>先生成候选选题，选中后在列表下方写剧本。</p></div>
+            <button id="generateTopics" class="primary-button idea-spin"><img src="../assets/icons/slot.png" alt="">一键生成选题</button>
           </div>
           <div id="ideationStatus" class="idea-status" role="status" aria-live="polite">点击按钮开始寻找爆款题材</div>
           <div id="topicGrid" class="topic-grid"></div>
-        </section>
-        <div class="script-layout">
-          <div class="product-card panel-card">
-            <div class="card-title"><div><span class="step-tag">带货锚点</span><h3>商品参考资产</h3></div><div class="card-title-actions"><button id="openProductAsset" class="asset-open-button" type="button" disabled>打开商品图</button><b id="productState" class="state-pill">未上传</b></div></div>
-            <button id="productImage" class="product-drop"><img src="../assets/icons/image.png" alt=""><span>上传产品图</span><small id="productDropHelp">商品出现的镜头会自动把此图传给当前视频引擎</small></button>
-            <label>商品名称<input id="productName" placeholder="例如：纯梦焕亮精华液"></label>
-            <label>商品卖点<textarea id="productDescription" rows="4" placeholder="包装特征、核心卖点、剧情中的自然植入方式"></textarea></label>
-            <div class="idea-actions">
-              <button id="selectProductLibrary" class="outline-button" type="button">从独立资产库选商品图</button>
-              <button id="generateCompleteScript" class="outline-button">只生成完整剧本</button>
-              <button id="runIdeaPipeline" class="primary-button"><img src="../assets/icons/sparkle.png" alt="">生成并自动生产</button>
-            </div>
-            <p id="productionSequenceNote" class="idea-cost-note">自动生产会按顺序执行：完整剧本 → 角色/场景资产 → 人物视频与音色 → 分镜图 → 当前引擎分镜视频 → 拼接成片。任务支持断点续做。</p>
+          <div class="idea-actions topic-next-actions">
+            <button id="generateCompleteScript" class="outline-button">只生成完整剧本</button>
+            <button id="runIdeaPipeline" class="primary-button"><img src="../assets/icons/sparkle.png" alt="">生成并自动生产</button>
           </div>
+          <p id="productionSequenceNote" class="idea-cost-note">自动生产会按顺序执行：完整剧本 → 提示词总确认 → 角色/场景资产 → 人物视频与音色 → 分镜图 → 当前引擎分镜视频 → 片头净音粗剪。随后可一键导出音效、字幕分轨的剪映草稿。任务支持断点续做。</p>
+        </section>
+        <section id="scriptImportActions" class="primary-entry-bar" role="region" aria-labelledby="scriptImportTitle" hidden>
+          <div><span>3. 准备剧本</span><b id="scriptImportTitle">上传已有剧本</b><small id="scriptImportHelp">上传后保留原稿，并由 Agent 整理剧本、提取资产和拆镜。</small></div>
+          <button id="importScriptFile" class="primary-button manual-button" type="button">选择剧本文件并导入</button>
+          <button id="openScriptImitation" class="primary-button" type="button" hidden>上传参考稿并改写</button>
+        </section>
+        <details class="advanced-entry-bar">
+          <summary>剧本示例与专业导入工具</summary>
+          <div class="manual-entry-actions"><button id="importDialogueRewrite" class="outline-button manual-button" type="button">上传对白稿并轻改</button><button class="outline-button manual-button" type="button" data-action="import-prompt-batch" data-prompt-scope="script">导入剧本提示词包</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="script">下载系统建议</button></div>
+          <section id="scriptExampleLibrary" class="script-example-library" aria-labelledby="scriptExampleLibraryTitle">
+            <div class="script-example-library-copy"><span>WRITING EXAMPLES</span><b id="scriptExampleLibraryTitle">剧本输入格式示例</b><small>自然语言、对白稿或秒级稿均可上传；原稿保留，再按逐镜格式整理。</small></div>
+            <div class="script-example-library-actions" role="group" aria-label="查看或下载三种剧本模式示例">
+              <div><b>完整制作稿</b><span>人物、场景、动作、对白与承接</span><button type="button" data-script-format-preview="production">查看示例</button><button type="button" data-script-format-example="production">下载 TXT</button></div>
+              <div><b>简易对白稿</b><span>背景、说话人、听者、语气与原句</span><button type="button" data-script-format-preview="dialogue">查看示例</button><button type="button" data-script-format-example="dialogue">下载 TXT</button></div>
+              <div><b>秒级分镜成片稿</b><span>逐秒动作、表演、对白与声音</span><button type="button" data-script-format-preview="timed_storyboard">查看示例</button><button type="button" data-script-format-example="timed_storyboard">下载 TXT</button></div>
+            </div>
+          </section>
+        </details>
+        <div class="script-layout script-only-layout">
           <div class="script-editor panel-card">
-            <div class="card-title"><div><span class="step-tag">完整剧本 · 实时自动保存</span><h3>生产级短剧文本</h3></div><span id="scriptCount" class="muted">0 字</span></div>
+            <div class="card-title"><div><span class="step-tag">4. 查看并编辑剧本</span><h3>完整分镜剧本</h3></div><div class="card-title-actions"><button id="downloadOriginalScript" class="outline-button" type="button" hidden>下载上传原稿</button><span id="scriptCount" class="muted">0 字</span></div></div>
             <div id="scriptTaskPanel" class="script-task-panel idle" role="status" aria-live="polite">
               <div class="script-task-copy">
                 <span id="scriptTaskState" class="script-task-state">未开始</span>
@@ -194,11 +205,19 @@
                 <button id="stopScriptGeneration" class="danger-button script-control-button" type="button">停止写作</button>
               </div>
             </div>
-            <textarea id="scriptText" class="script-text" maxlength="500000" aria-label="完整剧本正文" placeholder="AI 生成的完整剧本会出现在这里；也可以手动粘贴剧本并使用右上角 AI 自动拆镜。"></textarea>
-            <div class="script-footer"><span id="scriptEditHint">拆解结果不会覆盖原文，可继续修改后重新抽卡。</span><b id="analysisSummary">尚未拆解</b></div>
+            <textarea id="scriptText" class="script-text" maxlength="500000" aria-label="完整剧本正文" placeholder="生成或导入的剧本会出现在这里；也可粘贴剧本，查看后使用下方按钮保存或继续。"></textarea>
+            <div class="script-footer"><span id="scriptEditHint">整理后显示逐镜执行稿；上传原稿单独保留，可下载查看。</span><b id="analysisSummary">尚未拆解</b></div>
           </div>
         </div>
         <div id="analysisStats" class="stats-row"></div>
+        <div class="workflow-stage-footer panel-card" aria-label="剧本查看后的操作">
+          <div><b>5. 保存或继续</b><p>确认上方剧本后，继续拆镜与后续制作。</p></div>
+          <div class="head-actions">
+            <button id="saveScript" class="outline-button">保存剧本</button>
+            <button id="analyzeScript" class="outline-button"><img src="../assets/icons/sparkle.png" alt="">AI 标准化并拆镜</button>
+            <button id="continueFromScript" class="primary-button" type="button">完成剧本阶段并继续</button>
+          </div>
+        </div>
       </section>
 
       <section class="stage-panel" data-panel="assets">
@@ -206,7 +225,6 @@
           <div><span class="eyebrow">PHASE 02 · ASSETS</span><h2>角色、音色与场景资产库</h2><p>每次点击都是一次抽卡；未确认前保留全部历史，确认后才清理同类其他候选。</p></div>
           <div class="head-actions">
             <div class="mode-chip">已就绪资产自动跳过</div>
-            <button id="continueFromAssets" class="outline-button" type="button">继续当前资产阶段</button>
             <button id="generateAllAssets" class="primary-button draw-button">AI 抽齐全部资产</button>
           </div>
         </div>
@@ -234,29 +252,30 @@
         <div id="propGrid" class="asset-grid"></div>
         <div class="section-label scene-label"><span>SCENES</span><h3>场景资产</h3><b id="sceneCount">0</b></div>
         <div id="sceneGrid" class="asset-grid scene-grid"></div>
+        <div class="workflow-stage-footer panel-card" aria-label="资产查看后的操作"><div><b>查看资产后继续</b><p>按当前制作策略补齐本阶段，再进入后续环节。</p></div><button id="continueFromAssets" class="primary-button" type="button">完成资产阶段并继续</button></div>
       </section>
 
       <section class="stage-panel" data-panel="shots">
         <div class="stage-head">
-          <div><span class="eyebrow">PHASE 03 · STORYBOARD</span><h2>逐镜可控的分镜工作台</h2><p>本阶段只管拆镜字段、首尾帧与引用资产；完整视频提示词在「04 分镜视频」编辑与提交。</p></div>
-          <div class="head-actions"><button id="continueFromShots" class="outline-button" type="button">继续当前分镜阶段</button><button id="generateAllStoryboards" class="primary-button draw-button">AI 抽卡：全部首尾帧</button><div class="mode-controls">
-            <label>已确认模式<select id="generationMode" disabled><option value="continuation">视频延续模式</option><option value="keyframe">首尾帧模式</option><option value="smart">智能首尾帧+视频延续</option><option value="storyboard_sheet">逐秒分镜合图</option></select></label>
+          <div><span class="eyebrow">PHASE 03 · VISUAL PLAN</span><h2>逐镜可控的视觉工作台</h2><p id="shotStageDescription">按项目模式准备视觉主控；资产直投跳过分镜图，资产导入则只显示包内锁定的原始图片引用。</p></div>
+          <div class="head-actions"><div class="mode-controls">
+            <label>已确认模式<select id="generationMode" disabled><option value="production_package">资产导入</option><option value="asset_direct">资产包直投</option><option value="keyframe">首尾帧</option><option value="storyboard_sheet">分镜合图</option></select></label>
             <button id="editGenerationMode" class="outline-button" type="button">修改模式</button>
-          </div></div>
+          </div><button id="generateAllStoryboards" class="primary-button draw-button">AI 抽卡：全部首尾帧</button></div>
         </div>
-        <div class="manual-entry-bar" role="region" aria-label="分镜图手动导入通道">
+        <div id="storyboardManualEntryBar" class="manual-entry-bar" role="region" aria-label="分镜图手动导入通道">
           <div><span>AI / MANUAL</span><b>分镜图提示词与分镜图都可从 0 批量上传</b><small>提示词可用 S01-start / S01-end / S01-sheet 对应；尚未拆镜也会先保存，后续自动匹配。系统建议会说明如何读取场景四视图。</small></div>
           <div class="manual-entry-actions"><button class="outline-button manual-button" type="button" data-action="import-prompt-batch" data-prompt-scope="storyboards">批量上传分镜提示词</button><button class="outline-button" type="button" data-action="download-prompt-suggestions" data-prompt-scope="storyboards">下载系统建议</button><button id="importStoryboardBatch" class="outline-button manual-button" type="button">批量上传分镜图</button><button class="outline-button" type="button" data-action="open-independent-library">打开独立资产库</button></div>
         </div>
-        <div class="build-banner" role="status"><b>v0.13.27 分镜台</b><span>这里改拆镜与首尾帧；视频提示词请到「04 分镜视频」。本地像塑与云端算力的引用编号由软件自动转换。</span></div>
+        <div class="build-banner" role="status"><b>云端视频视觉主控</b><span>资产直投模式不创建分镜图；其他模式仍按各自关键帧/合图策略执行。视频提示词统一在「04 分镜视频」确认。</span></div>
         <div id="shotList" class="shot-list"></div>
+        <div class="workflow-stage-footer panel-card" aria-label="分镜查看后的操作"><div><b>查看分镜后继续</b><p>资产直投直接进入视频；其他模式按需补齐分镜图。</p></div><button id="continueFromShots" class="primary-button" type="button">完成分镜阶段并继续</button></div>
       </section>
 
       <section class="stage-panel" data-panel="videos">
         <div class="stage-head">
           <div><span class="eyebrow">PHASE 04 · VIDEO</span><h2 id="videoStageTitle">分镜视频生产线</h2><p id="videoModeDescription">延续模式串行：第1镜用首尾帧开场；第2镜起只抽尾帧，时间起点引用上一镜完整视频。</p></div>
           <div class="head-actions">
-            <button id="continueFromVideos" class="outline-button" type="button">继续当前视频阶段</button>
             <button id="generateAllVideos" class="primary-button draw-button">AI 抽卡：全部分镜视频</button>
           </div>
         </div>
@@ -267,18 +286,19 @@
         <div class="build-banner" role="status"><b>视频提示词在这里</b><span>每镜「创作控制」默认折叠，点开可改/预览完整提交稿；提交时会自动整理参考素材编号。</span></div>
         <div id="jobStrip" class="job-strip"></div>
         <div id="videoGrid" class="video-grid"></div>
+        <div class="workflow-stage-footer panel-card" aria-label="视频查看后的操作"><div><b>查看分镜视频后继续</b><p>按当前制作策略完成视频阶段，再整理成片。</p></div><button id="continueFromVideos" class="primary-button" type="button">完成视频阶段并继续</button></div>
       </section>
 
       <section class="stage-panel" data-panel="final">
         <div class="stage-head">
-          <div><span class="eyebrow">PHASE 05 · MASTER</span><h2>排序、拼接与完整成片</h2><p>按镜号读取每镜已确认版本，无损拼接优先；格式不一致时自动统一转码。</p></div>
+          <div><span class="eyebrow">PHASE 05 · ROUGH CUT</span><h2>智能粗剪与剪映草稿</h2><p>按镜号整理视频并检测片头杂音。150种固定音效按剧情与环境匹配，仅写入剪映独立音轨，不叠加进粗剪视频。</p></div>
           <div class="head-actions">
-            <button id="continueFromFinal" class="outline-button" type="button">只拼接成片</button>
-            <button id="stitchVideo" class="primary-button"><img src="../assets/icons/play.png" alt="">拼接完整短剧</button>
+            <button id="continueFromFinal" class="outline-button" type="button">只执行智能粗剪</button>
+            <button id="stitchVideo" class="primary-button"><img src="../assets/icons/play.png" alt="">生成粗剪成片</button>
           </div>
         </div>
         <div class="manual-entry-bar" role="region" aria-label="完整成片手动导入通道">
-          <div><span>AI / MANUAL</span><b>可以自动拼接，也可以直接上传自己的完整成片</b><small>手动成片会复制进当前项目并设为当前版本，原分镜和旧成片仍会保留。</small></div>
+          <div><span>AI / MANUAL</span><b>可以自动智能粗剪，也可以直接上传自己的完整成片</b><small>手动成片会复制进当前项目并设为当前版本，原分镜和旧成片仍会保留。</small></div>
           <div class="manual-entry-actions"><button id="importFinalVideo" class="outline-button manual-button" type="button">上传完整成片</button><button class="outline-button" type="button" data-action="select-independent-asset" data-entity-type="final" data-stage="final_video">从独立资产库选择</button></div>
         </div>
         <div class="quality-gate panel-card">
@@ -286,14 +306,15 @@
           <p class="quality-gate-note">剧本因果、反转、画面去重、对白响度、全程环境声和成片响度全部通过后才允许交付；旧版“有文件即就绪”不再算合格。</p>
           <div id="qualityGatePanel" class="quality-gate-grid" role="status" aria-live="polite"></div>
         </div>
+        <div id="workbenchPostProduction" aria-label="剪映草稿导出与本地后期状态"></div>
         <div class="final-layout">
           <div class="timeline-panel panel-card"><div class="card-title"><div><span class="step-tag">最终时间线</span><h3>分镜顺序</h3></div><b id="timelineDuration">0/0 已就绪</b></div><div id="timeline" class="timeline" role="status" aria-live="polite"></div></div>
-          <div class="master-preview panel-card"><div class="card-title"><div><span class="step-tag">MASTER</span><h3 id="finalPreviewTitle">完整成片</h3></div><div id="finalActions" class="card-title-actions hidden"><button id="revealFinal" class="asset-open-button" type="button" title="在应用内预览成片">打开成片</button><button id="locateFinal" class="mini-button" type="button" title="在资源管理器中选中成片文件">定位到本地</button></div></div><p id="finalQualityNotice" class="final-quality-notice hidden"></p><div id="finalEmpty" class="final-empty"><img src="../assets/icons/slot.png" alt=""><b>等待拼接</b><span>所有分镜确认后即可生成完整短剧</span></div><video id="finalVideo" controls class="hidden"></video><div id="finalVideoHistory" class="final-history hidden" aria-label="历史成片版本"></div></div>
+          <div class="master-preview panel-card"><div class="card-title"><div><span class="step-tag">ROUGH CUT</span><h3 id="finalPreviewTitle">智能粗剪成片</h3></div><div id="finalActions" class="card-title-actions hidden"><button id="revealFinal" class="asset-open-button" type="button" title="在应用内预览成片">打开成片</button><button id="locateFinal" class="mini-button" type="button" title="在资源管理器中选中成片文件">定位到本地</button></div></div><p id="finalQualityNotice" class="final-quality-notice hidden"></p><div id="finalEmpty" class="final-empty"><img src="../assets/icons/slot.png" alt=""><b>等待智能粗剪</b><span>所有分镜确认后可生成无叠加音效粗剪，再导出音效与字幕分轨的剪映草稿</span></div><video id="finalVideo" controls class="hidden"></video><div id="finalVideoHistory" class="final-history hidden" aria-label="历史成片版本"></div></div>
         </div>
       </section>
 
       <section class="stage-panel" data-panel="settings">
-        <div class="stage-head"><div><span class="eyebrow">SYSTEM SETTINGS</span><h2>纯梦官网算力与本地像塑</h2><p>默认使用纯梦官网完成文本与图片生成；视频可选本地像塑或云端算力。纯梦官网地址由软件锁定，用户只需填写授权码。</p></div><div class="head-actions"><button id="resetSettings" class="outline-button">恢复系统默认</button><button id="saveSettings" class="primary-button">保存全部设置</button></div></div>
+        <div class="stage-head"><div><span class="eyebrow">SYSTEM SETTINGS</span><h2>纯梦官网与云端视频算力</h2><p>文本与图片按所选供应商生成；视频统一由纯梦云端视频服务处理。官网地址由软件锁定，用户只需填写授权码。</p></div><div class="head-actions"><button id="resetSettings" class="outline-button">恢复系统默认</button><button id="openTutorial" class="outline-button" type="button">设置与使用教程</button><button id="saveSettings" class="primary-button">保存全部设置</button></div></div>
         <div class="settings-grid">
           <div class="settings-card workspace-mode-card panel-card">
             <div class="card-title"><div><span class="step-tag">WORKSPACE MODE</span><h3>当前：Agent 模式</h3></div><b class="state-pill">高级调度</b></div>
@@ -301,24 +322,31 @@
             <div class="card-actions"><button id="settingsSwitchSimpleMode" class="primary-button" type="button">切换到简易模式</button></div>
             <p class="settings-note">切换只改变默认入口，不迁移、不合并、不删除任何项目。</p>
           </div>
-          <div id="accountSwitchCard" class="settings-card account-switch-card panel-card">
-            <div class="card-title"><div><span class="step-tag">XIANGSU OFFICIAL LOGIN</span><h3>安全切换像塑账号</h3></div><b id="accountSwitchState" class="state-pill">未在切换</b></div>
-            <div class="account-switch-flow" role="group" aria-label="切换账号流程"><span>1 收拢旧任务</span><i>→</i><span>2 自动退出原账号</span><i>→</i><span>3 只显示一个登录窗</span><i>→</i><span>4 扫码/手机号验证后续做</span></div>
-            <p id="accountSwitchMessage" class="account-switch-message" role="status" aria-live="polite">像塑登录态与本地项目数据相互独立；切号不会清空剧本、素材、抽卡历史或已完成视频。</p>
-            <div id="accountSwitchPending" class="account-switch-pending hidden"></div>
-            <div class="account-switch-actions">
-              <button id="beginAccountSwitch" class="primary-button">切换像塑账号</button>
-              <button id="verifyAccountSwitch" class="primary-button hidden">立即检测登录状态</button>
-              <button id="cancelAccountSwitch" class="outline-button hidden">取消并隐藏登录页</button>
+          <div class="settings-card mcp-connection-card panel-card">
+            <div class="card-title"><div><span class="step-tag">LOCAL MCP</span><h3>连接电脑上的 Agent</h3></div><b id="mcpConnectionBadge" class="state-pill" data-state="loading">正在检测</b></div>
+            <p class="mcp-connection-intro">短剧老虎机是 MCP 服务端。请把下面配置复制到需要接入的本地 Agent；无需填写网址、端口、令牌或 API Key。</p>
+            <div class="mcp-connection-fields">
+              <label>服务名称<input id="mcpServerName" readonly aria-readonly="true" value="puream-drama-workbench"></label>
+              <label>连接方式<input id="mcpTransport" readonly aria-readonly="true" value="stdio"></label>
+              <label class="mcp-command-field">启动命令<input id="mcpCommand" readonly aria-readonly="true" value="正在读取当前安装路径…"></label>
+              <label>启动参数<input id="mcpArguments" readonly aria-readonly="true" value="--mcp-stdio"></label>
             </div>
-            <p class="settings-note">旧任务收拢后会调用像塑官方退出，再只保留一个官方登录窗口；同进程空白辅助窗和完整编辑器都会隐藏。应用不保存密码、短信、二维码、Cookie 或令牌，扫码或手机号验证成功后自动检测并续做。</p>
+            <label class="mcp-config-preview-label" for="mcpConfigPreview">通用 MCP JSON 配置</label>
+            <textarea id="mcpConfigPreview" class="mcp-config-preview" rows="8" readonly aria-readonly="true" spellcheck="false">正在生成配置…</textarea>
+            <div class="mcp-connection-actions">
+              <button id="copyMcpJson" class="primary-button" type="button">复制通用 JSON</button>
+              <button id="copyMcpCodex" class="outline-button" type="button">复制 Codex TOML</button>
+              <button id="testMcpConnection" class="outline-button" type="button">检测 MCP 握手</button>
+            </div>
+            <p id="mcpConnectionStatus" class="mcp-connection-status" role="status" aria-live="polite">正在读取本机 MCP 状态…</p>
+            <p class="settings-note">Agent 必须与短剧老虎机运行在同一台电脑、同一 Windows 用户会话，并支持标准 stdio MCP。配置完成后先调用 <code>app_status</code>；粗剪使用 <code>stitch_final_video</code>，不会创建新媒体或产生生成费用。</p>
           </div>
-          <div class="settings-card panel-card"><div class="card-title"><div><span id="textProviderTag" class="step-tag">PUREAM OFFICIAL</span><h3>写剧本与拆镜文本算力</h3></div><button id="testTextProvider" class="text-button">测试连接</button></div><label>供应商<select id="textProviderKind"><option value="puream-relay">纯梦官网（默认）</option><option value="openai-native">OpenAI 官方</option><option value="openai-compatible">自定义 OpenAI 兼容厂商</option><option value="gemini-native">Google Gemini 原生</option><option value="anthropic-native">Anthropic Claude 原生</option></select></label><div id="textOfficialLock" class="official-endpoint-lock"><b>纯梦官网</b><span>官网地址由软件锁定，只需填写授权码；算力方案在后台自动调度</span></div><label id="textOfficialModelField" class="hidden">写作方案<select id="textOfficialModel"><option value="claude-opus-5">Claude</option><option value="gpt-5-6-sol">GPT</option></select></label><label id="textBaseUrlField"><span id="textBaseUrlLabel">请求地址</span><input id="textBaseUrl"></label><label><span id="textApiKeyLabel">授权码</span><input id="textApiKey" type="password" autocomplete="off"></label><label id="textModelField" class="hidden"><span id="textModelLabel">内部方案</span><input id="textModel"></label><label id="textMaxTokensField">最大输出 Token<input id="textMaxTokens" type="number" min="256" max="131072" step="256"></label><div id="textPricingFields" class="settings-inline"><label>输入单价（元/百万 Token）<input id="textInputPricePerMillion" type="number" min="0" step="0.01" placeholder="例如 2"></label><label>输出单价（元/百万 Token）<input id="textOutputPricePerMillion" type="number" min="0" step="0.01" placeholder="例如 8"></label></div><p id="textPricingHelp" class="settings-note">外部文本供应商未返回结算金额时，可按这里的单价估算。</p><p id="textProviderHelp" class="settings-note"></p><p id="pureamAuthState" class="settings-note">正在读取纯梦官网授权…</p></div>
+          <div id="textProviderSettingsCard" class="settings-card panel-card"><div class="card-title"><div><span id="textProviderTag" class="step-tag">PUREAM OFFICIAL</span><h3>写剧本与拆镜文本算力</h3></div><button id="testTextProvider" class="text-button">测试连接</button></div><label>供应商<select id="textProviderKind"><option value="puream-relay">纯梦官网（内置 GPT / Claude）</option><option value="openai-native">OpenAI 官方（GPT）</option><option value="openai-compatible">自定义 OpenAI 兼容厂商</option><option value="gemini-native">Google 官方（Gemini）</option><option value="anthropic-native">Anthropic 官方（Claude）</option></select></label><div id="textOfficialLock" class="official-endpoint-lock"><b>纯梦官网</b><span>官网地址由软件锁定，只需填写授权码；可在 GPT 与 Claude 之间明确选择</span></div><label id="textOfficialModelField" class="hidden">官网写作模型<select id="textOfficialModel"><option value="gpt-5-6-sol">GPT-5.6</option><option value="claude-opus-5">Claude Opus 5</option></select></label><label id="textBaseUrlField"><span id="textBaseUrlLabel">请求地址</span><input id="textBaseUrl"></label><label><span id="textApiKeyLabel">授权码</span><input id="textApiKey" type="password" autocomplete="off"></label><label id="textModelField" class="hidden"><span id="textModelLabel">内部方案</span><input id="textModel"></label><label id="textMaxTokensField">最大输出 Token<input id="textMaxTokens" type="number" min="256" max="131072" step="256"></label><div id="textPricingFields" class="settings-inline"><label>输入单价（元/百万 Token）<input id="textInputPricePerMillion" type="number" min="0" step="0.01" placeholder="例如 2"></label><label>输出单价（元/百万 Token）<input id="textOutputPricePerMillion" type="number" min="0" step="0.01" placeholder="例如 8"></label></div><p id="textPricingHelp" class="settings-note">外部文本供应商未返回结算金额时，可按这里的单价估算。</p><p id="textProviderHelp" class="settings-note"></p><p id="pureamAuthState" class="settings-note">正在读取纯梦官网授权…</p></div>
           <div class="settings-card panel-card"><div class="card-title"><div><span class="step-tag">PUREAM IMAGE</span><h3>角色、场景与分镜生图</h3></div><button id="testImageProvider" class="text-button">验证授权</button></div><div class="official-endpoint-lock"><b>纯梦官网</b><span>图片算力地址与模型已锁定</span></div><label class="locked-provider-field">官网请求地址<input id="imageBaseUrl" readonly tabindex="-1" aria-readonly="true"></label><label>纯梦授权码<input id="imageApiKey" type="password" autocomplete="off"></label><label class="locked-provider-field">算力类型<input id="imageModel" readonly tabindex="-1" aria-readonly="true"></label><p class="settings-note">只需填写授权码。生成资产保留官网结果 URL，供后续参考图继续引用。</p></div>
-          <div class="settings-card panel-card video-provider-card"><div class="card-title"><div><span class="step-tag">VIDEO COMPUTE</span><h3>本地像塑 / 云端算力</h3></div><button id="testVideoProvider" class="text-button">校验配置</button></div>
-            <label>视频供应商<select id="videoProviderKind"><option value="local-xiangsu">本地像塑</option><option value="puream-hailuo-h3">云端算力</option><option value="puream-seedance" hidden>回退版本</option></select></label>
-            <div id="videoOfficialLock" class="official-endpoint-lock"><b>纯梦官网</b><span>云端算力地址由软件锁定</span></div><label class="locked-provider-field">纯梦官网地址<input id="videoBaseUrl" readonly tabindex="-1" aria-readonly="true"></label><label>纯梦授权码<input id="videoApiKey" type="password" autocomplete="off"></label><label class="locked-provider-field">算力类型<input id="videoModel" readonly tabindex="-1" aria-readonly="true"></label>
-            <div id="hailuoFields" class="provider-subsection"><b>云端算力参数</b><div class="settings-inline"><label>视频输出分辨率<select id="cloudVideoResolution" data-tooltip="只控制云端视频输出，不改变人物图、场景图、分镜图或产品图。竖屏高清档提交 768×1344。"><option value="480">480 · 标准</option><option value="768">768 · 高清</option></select></label><label>调用模式<select id="hailuoApiMode"><option value="auto">自动识别（推荐）</option><option value="text_to_video">文生视频 · 仅提示词</option><option value="image_to_video">图生视频 · 参考图片</option><option value="video_to_video">视频续接 · 参考视频</option><option value="audio_to_video">音频驱动 · 参考音频</option><option value="multimodal_to_video">全能多参 · 混合素材</option></select></label></div><div class="settings-inline"><label>参考图强度<select id="hailuoRefImageSize"><option value="match">标准</option><option value="max">更强一致性</option></select></label><label>随机种子（可空）<input id="hailuoSeed" inputmode="numeric"></label></div></div>
+          <div class="settings-card panel-card video-provider-card"><div class="card-title"><div><span class="step-tag">PUREAM VIDEO COMPUTE</span><h3>纯梦云端视频算力</h3></div><button id="testVideoProvider" class="text-button">校验配置</button></div>
+            <label class="locked-provider-field">视频供应商<select id="videoProviderKind" disabled aria-disabled="true"><option value="puream-hailuo-h3">纯梦云端视频（唯一）</option></select></label>
+            <div id="videoOfficialLock" class="official-endpoint-lock"><b>纯梦官网</b><span>视频地址与算力已锁定</span></div><label class="locked-provider-field">纯梦官网地址<input id="videoBaseUrl" readonly tabindex="-1" aria-readonly="true"></label><label>纯梦授权码<input id="videoApiKey" type="password" autocomplete="off"></label><label class="locked-provider-field">算力类型<input id="videoModel" readonly tabindex="-1" aria-readonly="true"></label>
+            <div id="hailuoFields" class="provider-subsection"><b>云端算力参数</b><div class="settings-inline"><label>视频输出分辨率<select id="cloudVideoResolution" data-tooltip="只控制云端视频输出，不改变人物图、场景图、分镜图或产品图。竖屏高清档提交 768×1344。"><option value="480">480 · 标准</option><option value="768">768 · 高清</option></select></label></div><div class="settings-inline"><label>说话声线来源<select id="hailuoReferenceAudioMode" data-tooltip="仅参考图时不会上传任何音色文件；中文台词由人物参考图和提示词原生生成。"><option value="image_only">仅参考图 · 不传音频（推荐）</option><option value="image_audio">参考图 + 可选音色音频</option></select></label><label>参考图策略<select id="hailuoRefImageSize" disabled aria-disabled="true" data-tooltip="固定为官方 API 兼容模式；不会因旧配置启动自建实例。"><option value="match">官方 API 优先</option></select></label></div><div class="official-endpoint-lock"><b>官方英文模板</b><span>整段参考模式使用 H3 六段 full-reference 模板；文生/首尾帧使用三段 T2VA/FL2VA 模板。只有 &lt;d&gt; 标签里的对白保留中文。</span></div></div>
             <details id="videoOssFields" class="provider-subsection oss-settings"><summary><span>云端参考素材存储</span><small id="videoOssStatus">默认由纯梦托管</small></summary>
               <label>存储方式<select id="videoStorageMode"><option value="managed">纯梦托管（默认）</option><option value="direct-oss">使用我的阿里云 OSS</option></select></label>
               <div id="videoDirectOssFields">
@@ -341,6 +369,7 @@
       <div id="progressOverview" class="progress-overview"></div>
       <div id="drawingStatusBar" class="drawing-status-bar" aria-live="polite" hidden></div>
       <div id="automationQueuePanel" class="automation-queue-panel" aria-live="polite"></div>
+      <div id="agentActivityPanel" aria-label="Agent 实时状态" hidden></div>
       <div class="run-detail-head"><div><span>RUN DETAILS</span><b>运行详情</b></div><small id="runDetailSummary">当前没有后端任务</small></div>
       <div id="jobHistory" class="candidate-history" role="region" tabindex="0" aria-label="生产任务历史，可使用方向键和滚轮浏览"></div>
     </aside>
@@ -393,34 +422,17 @@
       <p class="dialog-description">项目会独立保存剧本、素材、抽卡历史、生成任务和完整成片。</p>
       <label for="newProjectName">项目名称</label>
       <input id="newProjectName" name="projectName" maxlength="60" autocomplete="off" aria-describedby="newProjectError" placeholder="例如：母亲的旧账本">
-      <fieldset class="strategy-fieldset"><legend>先确认视频上游 <span>必选</span></legend><div class="strategy-options strategy-options-3">
-        <label class="strategy-option"><input type="radio" name="newVideoProvider" value="local-xiangsu"><span><b>本地像塑</b><small>本机登录态；不需要全脸网格。</small></span></label>
-        <!-- 云端回退仅保留内部，不作为新项目入口。 -->
-            <label class="strategy-option"><input type="radio" name="newVideoProvider" value="puream-hailuo-h3"><span><b>纯梦云端算力</b><small>自动整理参考素材与连续镜头。</small></span></label>
+      <fieldset class="strategy-fieldset"><legend>视频上游</legend><div class="strategy-options">
+        <label class="strategy-option"><input type="radio" name="newVideoProvider" value="puream-hailuo-h3" checked><span><b>纯梦云端视频</b><small>唯一视频引擎；自动整理人物、场景、物品/商品、音色与连续镜头。</small></span></label>
       </div></fieldset>
       <fieldset class="strategy-fieldset"><legend>先确认视频生成模式 <span>必选</span></legend><div class="strategy-options">
-        <label class="strategy-option"><input type="radio" name="newVideoMode" value="keyframe"><span><b>首尾帧模式</b><small>每个镜头独立使用首帧和尾帧，按分镜计划生成。</small></span></label>
-        <label class="strategy-option"><input type="radio" name="newVideoMode" value="continuation"><span><b>视频延续模式</b><small>第1镜首+尾帧；第2镜起只抽尾帧，严格串行引用上一镜完整视频。</small></span></label>
-        <label class="strategy-option"><input type="radio" name="newVideoMode" value="smart"><span><b>智能首尾帧+视频延续</b><small>同场景延续；切场景用首尾帧，不再引用上一镜视频。</small></span></label>
-        <label class="strategy-option"><input type="radio" name="newVideoMode" value="storyboard_sheet"><span><b>逐秒分镜合图</b><small>每镜一张由多个完整9:16竖屏画格拼成的时间轴合图；控制更精细、更省图。</small></span></label>
+        <label class="strategy-option"><input type="radio" name="newVideoMode" value="production_package"><span><b>资产导入</b><small>导入完整制作包，沿用包内资产与提示词直接制作。</small></span></label>
+        <label class="strategy-option"><input type="radio" name="newVideoMode" value="asset_direct"><span><b>资产包直投</b><small>先确认人物、场景、物品/商品和音色资产，再跳过分镜图直接生成视频。</small></span></label>
+        <label class="strategy-option"><input type="radio" name="newVideoMode" value="keyframe"><span><b>首尾帧</b><small>每个镜头独立使用首帧和尾帧，按分镜计划生成。</small></span></label>
+        <label class="strategy-option"><input type="radio" name="newVideoMode" value="storyboard_sheet"><span><b>分镜合图</b><small>每镜一张由多个完整9:16竖屏画格拼成的时间轴合图；控制更精细、更省图。</small></span></label>
       </div></fieldset>
       <div class="strategy-field-row"><fieldset class="strategy-fieldset"><legend>执行方式</legend><label class="compact-choice"><input type="radio" name="newExecutionMode" value="step" checked> 分步制作</label><label class="compact-choice"><input type="radio" name="newExecutionMode" value="full"> AI 一键制作</label></fieldset><fieldset class="strategy-fieldset"><legend>起步内容</legend><label class="compact-choice"><input type="radio" name="newInputMode" value="ai" checked> AI 生成</label><label class="compact-choice"><input type="radio" name="newInputMode" value="manual"> 自己输入/上传</label></fieldset></div>
-      <fieldset class="strategy-fieldset foundry-intent-fieldset"><legend>V2 制作意图 <span>随时可改</span></legend><div class="foundry-intent-grid">
-        <label for="newScriptHandling"><b>原稿处理</b><select id="newScriptHandling" name="newScriptHandling"><option value="respect">尊重原稿</option><option value="optimize" selected>智能优化（推荐）</option><option value="recreate">重新创作</option></select></label>
-        <label for="newCommerceMode"><b>带货方式</b><select id="newCommerceMode" name="newCommerceMode"><option value="none">不带货</option><option value="natural" selected>自然植入（推荐）</option><option value="explicit">明确带货</option></select></label>
-        <label for="newPriorityProfile"><b>生产偏好</b><select id="newPriorityProfile" name="newPriorityProfile"><option value="speed">速度优先</option><option value="balanced" selected>均衡正式（推荐）</option><option value="quality">效果优先</option></select></label>
-      </div><p class="settings-note">尊重原稿只做结构化；智能优化不改人物关系、事实、对白意图与结局；重新创作仍锁定你确认的事实。无商品时系统自动按“不带货”执行。</p></fieldset>
-      <fieldset class="strategy-fieldset"><legend>AI 剧本模式 <span>AI 生成时必选</span></legend><div class="strategy-options script-format-options">
-        <label class="strategy-option script-format-option"><input type="radio" name="newScriptFormat" value="production"><span><b>完整制作稿</b><small>原先模式；包含故事、人物场景圣经、逐镜动作、声音与连续性。</small></span></label>
-        <label class="strategy-option script-format-option"><input type="radio" name="newScriptFormat" value="dialogue"><span><b>简易对白稿</b><small>简单背景情节，以及谁以什么语气、表情和动作对谁说完整原句。</small></span></label>
-        <label class="strategy-option script-format-option"><input type="radio" name="newScriptFormat" value="timed_storyboard"><span><b>秒级分镜成片稿</b><small>按幕、分镜和秒级子镜输出，可直接进入生产。</small></span></label>
-      </div><div class="script-format-examples"><b>下载参考：</b><button type="button" data-script-format-example="production">完整制作稿示例</button><button type="button" data-script-format-example="dialogue">简易对白稿示例</button><button type="button" data-script-format-example="timed_storyboard">秒级分镜稿示例</button></div><p class="settings-note">选择“自己输入/上传”时无需选择，系统会按上传原稿智能识别并自适应时长。</p></fieldset>
-      <label for="newTargetDuration">剧总时长（秒）<span class="required-mark">必填</span></label>
-      <input id="newTargetDuration" name="targetDurationSeconds" type="number" min="30" step="1" value="300" aria-describedby="newTargetDurationHelp" required>
-      <p id="newTargetDurationHelp" class="settings-note">AI 生成会严格按此秒数规划完整故事；选择自己输入/上传后，本项自动停用，并按原稿逐句对白、语速、停顿和动作节拍自适应。</p>
-      <label for="newCommerceShotCount">后半段带货讲解镜头数</label>
-      <input id="newCommerceShotCount" name="commerceShotCount" type="number" min="1" step="1" value="3" aria-describedby="newCommerceShotCountHelp">
-      <p id="newCommerceShotCountHelp" class="settings-note">数值越高，后半段商品讲解越长、卖点与使用细节越丰富；超过实际镜头容量时系统自动适配，不会报错拦截。</p>
+      <p class="settings-note">原创按8–10分钟规划完整故事；上传按原稿整理，改写相对原稿时长上下不超过30秒。</p>
       <p class="settings-note">单元时长由剧情节拍和分镜动作自动决定，不设固定默认值。</p>
       <p id="newProjectError" class="field-error" role="alert" aria-live="polite"></p>
       <div class="dialog-actions">
@@ -448,67 +460,20 @@
   <dialog id="projectStrategyDialog" class="project-dialog strategy-dialog" aria-labelledby="projectStrategyDialogTitle">
     <form id="projectStrategyForm" novalidate>
       <div class="dialog-head"><div><span class="step-tag">PROJECT CONTRACT</span><h2 id="projectStrategyDialogTitle">确认项目制作策略</h2></div><button id="closeProjectStrategyDialog" class="dialog-close" type="button" aria-label="关闭制作策略窗口">×</button></div>
-      <p class="dialog-description">这里统一确认视频模式、执行方式、起步内容与 AI 剧本模式。修改后只影响后续任务，历史资产与抽卡记录不会删除。</p>
-      <fieldset class="strategy-fieldset"><legend>视频上游 <span>必选</span></legend><div class="strategy-options strategy-options-3">
-        <label class="strategy-option"><input type="radio" name="projectVideoProvider" value="local-xiangsu"><span><b>本地像塑</b><small>本机登录态；不需要全脸网格。</small></span></label>
-        <!-- 云端回退仅保留内部，不作为项目策略入口。 -->
-        <label class="strategy-option"><input type="radio" name="projectVideoProvider" value="puream-hailuo-h3"><span><b>纯梦云端算力</b><small>自动整理参考素材与连续镜头。</small></span></label>
+      <p class="dialog-description">选择视频模式、执行方式与起步内容，剧本统一使用标准分镜格式。修改后只影响后续任务，历史资产与抽卡记录不会删除。</p>
+      <fieldset class="strategy-fieldset"><legend>视频上游</legend><div class="strategy-options">
+        <label class="strategy-option"><input type="radio" name="projectVideoProvider" value="puream-hailuo-h3" checked><span><b>纯梦云端视频</b><small>唯一视频引擎；自动整理全部参考资产与连续镜头。</small></span></label>
       </div></fieldset>
       <fieldset class="strategy-fieldset"><legend>视频生成模式 <span>必选</span></legend><div class="strategy-options">
-        <label class="strategy-option"><input type="radio" name="projectVideoMode" value="keyframe"><span><b>首尾帧模式</b><small>每镜独立生成，按分镜节拍推进；适合批量生产。</small></span></label>
-        <label class="strategy-option"><input type="radio" name="projectVideoMode" value="continuation"><span><b>视频延续模式</b><small>第1镜首+尾；第2镜起只抽尾帧，并串行引用上一镜视频。</small></span></label>
-        <label class="strategy-option"><input type="radio" name="projectVideoMode" value="smart"><span><b>智能首尾帧+视频延续</b><small>同场景延续；切场景用首尾帧。</small></span></label>
-        <label class="strategy-option"><input type="radio" name="projectVideoMode" value="storyboard_sheet"><span><b>逐秒分镜合图</b><small>每镜一张多帧9:16逐秒合图，视频严格按画格时间顺序演绎。</small></span></label>
+        <label class="strategy-option"><input type="radio" name="projectVideoMode" value="production_package"><span><b>资产导入</b><small>导入完整制作包，沿用包内资产与提示词直接制作。</small></span></label>
+        <label class="strategy-option"><input type="radio" name="projectVideoMode" value="asset_direct"><span><b>资产包直投</b><small>人物、场景、物品/商品和音色确认后，直接进入分镜视频。</small></span></label>
+        <label class="strategy-option"><input type="radio" name="projectVideoMode" value="keyframe"><span><b>首尾帧</b><small>每镜独立生成，按分镜节拍推进；适合批量生产。</small></span></label>
+        <label class="strategy-option"><input type="radio" name="projectVideoMode" value="storyboard_sheet"><span><b>分镜合图</b><small>每镜一张多帧9:16逐秒合图，视频严格按画格时间顺序演绎。</small></span></label>
       </div></fieldset>
       <div class="strategy-field-row"><fieldset class="strategy-fieldset"><legend>执行方式</legend><label class="compact-choice"><input type="radio" name="projectExecutionMode" value="step"> 分步制作</label><label class="compact-choice"><input type="radio" name="projectExecutionMode" value="full"> AI 一键制作</label></fieldset><fieldset class="strategy-fieldset"><legend>起步内容</legend><label class="compact-choice"><input type="radio" name="projectInputMode" value="ai"> AI 生成</label><label class="compact-choice"><input type="radio" name="projectInputMode" value="manual"> 自己输入/上传</label></fieldset></div>
-      <fieldset class="strategy-fieldset foundry-intent-fieldset"><legend>V2 制作意图 <span>随时可改</span></legend><div class="foundry-intent-grid">
-        <label for="projectScriptHandling"><b>原稿处理</b><select id="projectScriptHandling" name="projectScriptHandling"><option value="respect">尊重原稿</option><option value="optimize">智能优化（推荐）</option><option value="recreate">重新创作</option></select></label>
-        <label for="projectCommerceMode"><b>带货方式</b><select id="projectCommerceMode" name="projectCommerceMode"><option value="none">不带货</option><option value="natural">自然植入（推荐）</option><option value="explicit">明确带货</option></select></label>
-        <label for="projectPriorityProfile"><b>生产偏好</b><select id="projectPriorityProfile" name="projectPriorityProfile"><option value="speed">速度优先</option><option value="balanced">均衡正式（推荐）</option><option value="quality">效果优先</option></select></label>
-      </div><p class="settings-note">这些选择会编译成同一份生产合同，一键与分步共用；字幕、背景音乐、人物介绍进成片等绝对禁令始终不可关闭。</p></fieldset>
-      <fieldset class="strategy-fieldset"><legend>AI 剧本模式 <span>AI 生成时必选</span></legend><div class="strategy-options script-format-options">
-        <label class="strategy-option script-format-option"><input type="radio" name="projectScriptFormat" value="production"><span><b>完整制作稿</b><small>原先模式；完整故事、资产圣经、逐镜表演、声音和连续性。</small></span></label>
-        <label class="strategy-option script-format-option"><input type="radio" name="projectScriptFormat" value="dialogue"><span><b>简易对白稿</b><small>简单背景情节，逐句写清说话人、听者、语气、表情、动作和原话。</small></span></label>
-        <label class="strategy-option script-format-option"><input type="radio" name="projectScriptFormat" value="timed_storyboard"><span><b>秒级分镜成片稿</b><small>按幕、分镜和秒级子镜编写，直接匹配资产、分镜图与视频提示词。</small></span></label>
-      </div><div class="script-format-examples"><b>下载参考：</b><button type="button" data-script-format-example="production">完整制作稿示例</button><button type="button" data-script-format-example="dialogue">简易对白稿示例</button><button type="button" data-script-format-example="timed_storyboard">秒级分镜稿示例</button></div><p class="settings-note">自己输入/上传时保持原稿模式，无需选择；重新切回 AI 生成时必须在这里确认一种格式。</p></fieldset>
-      <label for="projectTargetDuration">剧总时长（秒）</label>
-      <input id="projectTargetDuration" name="targetDurationSeconds" type="number" min="30" step="1" value="300">
-      <p id="projectTargetDurationHelp" class="settings-note">AI 生成严格执行此秒数；自己输入/上传剧本会停用此设置，并在拆镜后显示按原稿推算的实际总时长。</p>
-      <label for="projectCommerceShotCount">后半段带货讲解镜头数</label>
-      <input id="projectCommerceShotCount" name="commerceShotCount" type="number" min="1" step="1" value="3">
-      <p class="settings-note">数值越高，后半段商品讲解越丰富；系统按实际镜头数自动收敛，绝不因填写过大而卡住流程。</p>
+      <p class="settings-note">原创按8–10分钟规划完整故事；上传按原稿整理，改写相对原稿时长上下不超过30秒。</p>
       <p id="projectStrategyError" class="field-error" role="alert" aria-live="polite"></p>
       <div class="dialog-actions"><button id="cancelProjectStrategy" class="outline-button" type="button">暂不修改</button><button id="confirmProjectStrategy" class="primary-button" type="submit">确认并应用</button></div>
-    </form>
-  </dialog>
-  <dialog id="scriptFormatDialog" class="project-dialog strategy-dialog script-format-dialog" aria-labelledby="scriptFormatDialogTitle">
-    <form id="scriptFormatForm" novalidate>
-      <div class="dialog-head">
-        <div><span class="step-tag">SCRIPT FORMAT</span><h2 id="scriptFormatDialogTitle">这次要写什么格式的剧本？</h2></div>
-        <button id="closeScriptFormatDialog" class="dialog-close" type="button" aria-label="关闭剧本格式选择">×</button>
-      </div>
-      <p class="dialog-description">三种格式都会生成同一套人物、场景四视图、商品、分镜图和视频生产数据，也都会逐句锁定说话人、听者、语气、情绪和表情。区别只在你看到和编辑的剧本文本。</p>
-      <fieldset class="strategy-fieldset"><legend>剧本文本格式 <span>必选</span></legend><div class="strategy-options script-format-options">
-        <label class="strategy-option script-format-option">
-          <input type="radio" name="scriptFormat" value="production">
-          <span><b>完整制作稿（原先模式）</b><small>保留完整故事梗概、人物/场景/道具圣经、逐镜动作、声音、连续性和结尾审计，适合制作团队查看。</small></span>
-        </label>
-        <label class="strategy-option script-format-option">
-          <input type="radio" name="scriptFormat" value="dialogue">
-          <span><b>简易对白稿</b><small>主要展示简单背景情节，以及“谁用什么语气、表情和动作，对谁说什么原句”，更接近用户上传的对白台本。</small></span>
-        </label>
-        <label class="strategy-option script-format-option">
-          <input type="radio" name="scriptFormat" value="timed_storyboard">
-          <span><b>秒级分镜成片稿</b><small>按幕、5–15秒分镜和秒级子镜编写；逐镜包含场景人物物品、人声、承接、对白汇总、音效与负向提示，可直接进入生产。</small></span>
-        </label>
-      </div></fieldset>
-      <div class="script-format-guarantee" role="note"><b>上传剧本统一标准</b><span>先写总时长、人物、场景和故事简介，再单独写“正式剧情”；只有正式剧情会生成视频。每句对白必须有说话人、听者、语气/情绪/动作，镜头或时间段连续。人物介绍、小传、创作说明、故事简介永不转成视频；成片强制无字幕、无标题、无水印、无背景音乐。</span></div>
-      <div class="script-format-examples" role="group" aria-label="下载剧本格式示例"><b>先看示例：</b><button type="button" data-script-format-example="production">完整制作稿示例</button><button type="button" data-script-format-example="dialogue">简易对白稿示例</button><button type="button" data-script-format-example="timed_storyboard">秒级分镜成片稿示例</button></div>
-      <p id="scriptFormatError" class="field-error" role="alert" aria-live="polite"></p>
-      <div class="dialog-actions">
-        <button id="cancelScriptFormat" class="outline-button" type="button">取消写作</button>
-        <button id="confirmScriptFormat" class="primary-button" type="submit">确认格式并开始</button>
-      </div>
     </form>
   </dialog>
   <dialog id="assetViewerDialog" class="asset-viewer-dialog" aria-labelledby="assetViewerTitle">
@@ -556,13 +521,22 @@
         <button type="button" id="closeCreatorPromptDialog" class="dialog-close" aria-label="关闭提示词编辑">×</button>
       </div>
       <p id="creatorPromptMeta" class="dialog-description"></p>
+      <section id="creatorPromptDialogueAudit" class="creator-prompt-dialogue-audit hidden" aria-labelledby="creatorPromptDialogueAuditTitle">
+        <div class="creator-prompt-dialogue-head">
+          <div><b id="creatorPromptDialogueAuditTitle">本镜对白账本</b><span>逐句核对说话人、听者、语气和完整原话；这里显示的顺序就是提交顺序。</span></div>
+          <strong id="creatorPromptDialogueCount" aria-live="polite">0 句</strong>
+        </div>
+        <div class="manual-entry-banner"><div><span>参考剧本改写</span><b>保留内核、剧情推进与商品植入，替换人物和场景</b><small>按所选写作与审核 Agent 分阶段执行，先预览，再另存新项目，不覆盖原资产。</small></div><button id="openScriptAdaptation" type="button" class="outline-button">上传剧本并保留核心改写</button></div>
+        <ol id="creatorPromptDialogueList" aria-live="polite"></ol>
+      </section>
       <div class="prompt-mode" id="creatorPromptMode" role="group" aria-label="提示词来源">
         <button type="button" data-mode="system" class="active" data-tooltip="显示本资产/本镜系统编译出的提示词（只读）。设置页的全局规则模板仍保持隐藏。">系统编译稿</button>
         <button type="button" data-mode="manual" data-tooltip="切换为可编辑的自定义提示词，可在系统稿基础上改写后保存。">自定义填写</button>
       </div>
       <div id="creatorPromptSystemMask" class="system-prompt-mask hidden"><b>系统默认提示词已启用</b><span>仅设置页全局规则模板会隐藏；项目内生成提示词应始终可见。</span><i></i><i></i><i></i></div>
-      <label id="creatorPromptTextField">提示词正文<textarea id="creatorPromptText" maxlength="60000" rows="16" placeholder="系统编译稿或自定义提示词"></textarea></label>
+      <label id="creatorPromptTextField"><span class="creator-prompt-text-label">提示词正文 <b id="creatorPromptCharCount" aria-live="polite">0 字</b></span><textarea id="creatorPromptText" maxlength="100000" rows="16" spellcheck="false" wrap="soft" placeholder="系统编译稿或自定义提示词"></textarea></label>
       <textarea id="creatorPromptCompiled" class="hidden" rows="1" readonly aria-hidden="true"></textarea>
+      <textarea id="creatorPromptDisplayCompiled" class="hidden" rows="1" readonly aria-hidden="true"></textarea>
       <div class="dialog-actions">
         <button type="button" id="creatorPromptRefreshCompile" class="outline-button">刷新系统编译稿</button>
         <button type="button" id="creatorPromptUseCompiled" class="outline-button">使用系统稿改写</button>
@@ -570,6 +544,40 @@
         <button type="button" id="creatorPromptSave" class="primary-button">保存并应用</button>
       </div>
     </form>
+  </dialog>
+  <button id="pendingPromptReviewButton" class="pending-prompt-review-button" type="button" hidden>继续确认全部提示词<b>0</b></button>
+  <dialog id="promptReviewDialog" class="project-dialog prompt-review-dialog" aria-labelledby="promptReviewDialogTitle">
+    <div class="prompt-review-shell">
+      <header class="dialog-head prompt-review-head">
+        <div><span class="step-tag">PROMPT REVIEW · BEFORE GENERATION</span><h2 id="promptReviewDialogTitle">确认后续全部生成提示词</h2><p>完整查看所有提示词，可选择 AI 审核校正；查看修改前后和原因后，一键应用。您确认当前版本后再继续生成。英文执行稿配有完整中文译文，编辑时同步更新。</p></div>
+        <button id="closePromptReviewDialog" class="dialog-close" type="button" aria-label="暂时关闭提示词确认">×</button>
+      </header>
+      <section class="prompt-review-summary" aria-live="polite">
+        <div><b id="promptReviewConfirmedCount">0 / 0</b><span>已确认</span></div>
+        <div><b data-prompt-review-count="characters">0</b><span>人物</span></div>
+        <div><b data-prompt-review-count="scenes">0</b><span>场景</span></div>
+        <div><b data-prompt-review-count="objects">0</b><span>物品 / 商品</span></div>
+        <div><b data-prompt-review-count="storyboards">0</b><span>分镜图</span></div>
+        <div><b data-prompt-review-count="videos">0</b><span>分镜视频</span></div>
+      </section>
+      <div class="prompt-review-tools">
+        <div class="prompt-review-filters" role="group" aria-label="按提示词阶段筛选">
+          <button type="button" class="is-active" data-prompt-review-filter="all">全部</button>
+          <button type="button" data-prompt-review-filter="characters">人物</button>
+          <button type="button" data-prompt-review-filter="scenes">场景</button>
+          <button type="button" data-prompt-review-filter="objects">物品 / 商品</button>
+          <button type="button" data-prompt-review-filter="storyboards">分镜图</button>
+          <button type="button" data-prompt-review-filter="videos">分镜视频</button>
+        </div>
+        <label class="prompt-review-search"><span>搜索</span><input id="promptReviewSearch" type="search" autocomplete="off" placeholder="名称、镜头或提示词内容"></label>
+      </div>
+      <p id="promptReviewDialogMessage" class="prompt-review-message" role="status" aria-live="polite">请完整检查提示词；确认后的文本会保存到对应生成环节。</p>
+      <section id="promptReviewList" class="prompt-review-list" aria-label="完整提示词清单"></section>
+      <footer class="prompt-review-footer">
+        <span id="promptReviewFooterStatus">尚有提示词待确认</span>
+        <div><button id="cancelPromptReview" class="outline-button" type="button">稍后确认</button><button id="confirmAllPrompts" class="primary-button" type="button">一键保存并确认全部</button></div>
+      </footer>
+    </div>
   </dialog>
   <dialog id="rechargeDialog" class="project-dialog recharge-dialog" aria-labelledby="rechargeDialogTitle">
     <form id="rechargeForm" class="dialog-panel" novalidate>
@@ -588,14 +596,28 @@
       <p class="license-eyebrow">ONLINE LICENSE</p>
       <h2>激活纯梦短剧老虎机</h2>
       <p class="license-copy">请输入纯梦官网账户发放的授权码。激活后将由官网核验会员权益、绑定本机，并自动配置应用内全部纯梦服务。</p>
-      <label>纯梦授权码<input id="licenseCode" maxlength="64" spellcheck="false" placeholder="请输入官网授权码" required /></label>
+      <label>纯梦授权码<input id="licenseCode" maxlength="64" spellcheck="false" placeholder="请输入官网授权码" aria-describedby="licenseMachine licenseError" required /></label>
       <p id="licenseMachine" class="license-machine"></p>
-      <p id="licenseError" class="license-error" hidden></p>
+      <p id="licenseError" class="license-error" role="alert" aria-live="polite" hidden></p>
       <button type="submit" class="primary-button" id="licenseSubmit">在线激活</button>
     </form>
   </div>
   <script src="text-provider-catalog.js"></script>
   <script src="../workbench-status.js"></script>
+  <script src="review-receipt-state.js"></script>
+  <script src="prompt-review-dialog.js"></script>
+  <script src="post-production-panel.js"></script>
+  <link rel="stylesheet" href="local-agent-panel.css">
+  <script src="local-agent-panel.js"></script>
+  <link rel="stylesheet" href="script-adaptation-panel.css">
+  <script src="script-adaptation-panel.js"></script>
+  <script src="project-log-export.js"></script>
+  <script src="product-draft-store.js"></script>
+  <script src="workflow-layout.js"></script>
+  <script src="commerce-input-mode.js"></script>
+  <script src="agent-activity-view.js"></script>
   <script src="workbench.js"></script>
+  <link rel="stylesheet" href="agent-activity.css">
+  <script src="agent-activity-panel.js"></script>
 </body>
 </html>

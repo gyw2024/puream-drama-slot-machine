@@ -65,13 +65,13 @@ test("timed storyboard upload is parsed locally with synopsis, exact dialogue an
   ]);
   assert.doesNotMatch(parsed.shots[0].action, /签了，今晚就走/);
 
-  const adapted = expandTimedStoryboardForProvider(parsed, "local-xiangsu", { engine: "seedance" });
-  assert.equal(adapted.shots.length, 4);
+  const adapted = expandTimedStoryboardForProvider(parsed, "puream-hailuo-h3", { engine: "hailuo-h3" });
+  assert.equal(adapted.shots.length, 2);
   assert.equal(adapted.shots.reduce((sum, shot) => sum + shot.duration, 0), 30);
   assert.equal(adapted.shots.reduce((sum, shot) => sum + shot.dialogueTurns.length, 0), 4);
   const project = {
     productionPlan: { inputMode: "manual", scriptFormat: "timed_storyboard" },
-    generation: { engine: "seedance", mode: "keyframe", shotDuration: 10, targetDurationSeconds: 300 },
+    generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "keyframe", shotDuration: 10, targetDurationSeconds: 300 },
     product: { name: "用户商品", description: "用户上传商品", sellingPoints: "真实信息" }
   };
   const normalized = conformImportedAnalysisToDurationContract(adapted, project, {
@@ -89,18 +89,29 @@ test("timed storyboard upload is parsed locally with synopsis, exact dialogue an
   }
 });
 
-test("real uploaded timed-storyboard analysis requires a real text-model response", async t => {
+test("real uploaded timed-storyboard uses one AI standardization then deterministic analysis", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-timed-storyboard-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
-  let project = store.createProject("用户秒级分镜", { inputMode: "manual", engine: "seedance", mode: "keyframe" });
+  let project = store.createProject("用户秒级分镜", { inputMode: "manual", engine: "hailuo-h3", mode: "keyframe" });
   project.productionPlan.inputMode = "manual";
-  project.generation.videoProviderKind = "local-xiangsu";
+  project.generation.videoProviderKind = "puream-hailuo-h3";
   project.script.raw = miniTimedStoryboard;
   project.product = { name: "商品礼盒", description: "用户上传的礼盒", sellingPoints: "只按真实信息", imagePath: "", publicUrl: "" };
   store.saveProject(project);
   let paidCalls = 0;
-  const modelSeed = expandTimedStoryboardForProvider(parseTimedStoryboardScript(miniTimedStoryboard), "local-xiangsu", { engine: "seedance" });
+  const modelSeed = expandTimedStoryboardForProvider(parseTimedStoryboardScript(miniTimedStoryboard), "puream-hailuo-h3", { engine: "hailuo-h3" });
+  const characterNames = new Map(modelSeed.characters.map(item => [item.id, item.name]));
+  const corePropNames = (modelSeed.props || []).map(item => item.name).filter(Boolean);
+  const canonicalForTest = modelSeed.shots.map((shot, index) => [
+    `### S${String(index + 1).padStart(2, "0")}｜场景：${shot.scene || "客厅"}`,
+    `【动作】${shot.action || "承接原稿动作"}${corePropNames.length ? `；核心物品：${corePropNames.join("、")}` : ""}`,
+    ...(shot.dialogueTurns || []).length
+      ? shot.dialogueTurns.map(turn => `【对白】${characterNames.get(turn.speakerId) || turn.speakerId}（${turn.sourceTone || "按原稿"}）：${turn.text}`)
+      : ["【对白】无对白"],
+    "【声音】保留原稿环境声与动作声",
+    `【承接】${shot.stateAfter || "严格承接下一段"}`
+  ].join("\n")).join("\n\n");
   const workflow = new WorkbenchWorkflow({
     store,
     bridge: {},
@@ -108,17 +119,36 @@ test("real uploaded timed-storyboard analysis requires a real text-model respons
     stagingRoot: root,
     textGenerator: async (_config, messages) => {
       paidCalls += 1;
-      return { ...modelSeed };
+      const user = String(messages.find(item => item.role === "user")?.content || "");
+      // Every manual upload now goes through the AI standardization boundary
+      // before the deterministic timed-storyboard expansion is consumed.
+      if(user.startsWith('{"completeSource":')){const r=require('./whole-script-test-fixture')(JSON.parse(user).completeSource);r.productionScript=r.productionScript.replaceAll('【核心物品】无','【核心物品】协议书');return r;}
+      if (user.includes("UPLOADED_TEXT_TO_STANDARDIZE:\n") || user.startsWith('{"lines":')) {
+        return {
+          productionScript: canonicalForTest,
+          sourceAudit: {
+            sceneOccurrenceCount: modelSeed.shots.length,
+            dialogueCount: modelSeed.sourceDialogueLedger.length,
+            sceneOccurrences: modelSeed.shots.map((shot, index) => ({ order: index + 1, physicalSceneName: shot.scene || "客厅" })),
+            preservedAllDialogue: true,
+            preservedAllScenes: true,
+            preservedAllActions: true,
+            preservedEventOrder: true,
+            noInventedDialogue: true
+          }
+        };
+      }
+      return modelSeed;
     }
   });
   const analyzed = await workflow.analyzeScript(project.id);
-  assert.ok(paidCalls >= 1);
+  assert.equal(paidCalls, 1, "the upload must use one standardization call and no duplicate analysis call");
   assert.equal(analyzed.currentStage, "assets");
   assert.equal(analyzed.productionPlan.scriptFormat, "timed_storyboard");
   assert.equal(analyzed.script.detectedFormat, "timed_storyboard");
   assert.match(analyzed.script.modeSynopsis, /当众逼迫.*反击决定/);
-  assert.equal(analyzed.shots.length, 4);
-  assert.equal(analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0), 30);
+  assert.equal(analyzed.shots.length, 1);
+  assert.equal(analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0), 10);
   assert.equal(analyzed.script.sourceDialogueLedger.length, 4);
   assert.equal(analyzed.script.assetExtractionNormalization.version, 3);
   assert.match(analyzed.script.assetExtractionNormalization.normalizedScript, /上传剧本标准制作稿/);

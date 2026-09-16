@@ -47,8 +47,20 @@ function startControlGateway(options = {}) {
     socket.setEncoding("utf8");
     let buffer = "";
     let closed = false;
-    const reply = value => {
+    const responseFiles=new Set();
+    const reply = async (value,allowFile=false) => {
       if (closed || socket.destroyed) return;
+      if(allowFile&&value.ok){
+        const files=require('./control-response-files'),serialized=JSON.stringify(value.result);
+        if(serialized&&Buffer.byteLength(serialized,'utf8')>files.INLINE_BYTES){
+          const file=files.responsePath(connectionFile,instanceId,value.id);
+          responseFiles.add(file);
+          const receipt=await files.write(file,serialized);
+          if(closed||socket.destroyed){await fs.promises.unlink(file).catch(()=>{});return;}
+          socket.write(`${JSON.stringify({id:value.id,ok:true,resultFile:receipt})}\n`);
+          return;
+        }
+      }
       socket.write(`${JSON.stringify(value)}\n`);
     };
     socket.on("data", chunk => {
@@ -77,7 +89,7 @@ function startControlGateway(options = {}) {
           continue;
         }
         Promise.resolve(controller.dispatch(String(request?.method || ""), request?.params || {}))
-          .then(result => reply({ id, ok: true, result }))
+          .then(result => reply({ id, ok: true, result },request.acceptResponseFile===1))
           .catch(error => reply({ id, ok: false, error: publicGatewayError(error) }));
       }
     });
@@ -85,10 +97,15 @@ function startControlGateway(options = {}) {
     socket.on("close", () => {
       closed = true;
       sockets.delete(socket);
+      // Delete only response files created by this authenticated connection.
+      // The client closes after reading and checking the exact result bytes.
+      for(const file of responseFiles)fs.promises.unlink(file).catch(()=>{});
     });
   });
 
+  let closing = false;
   server.listen(pipeName, () => {
+    if (closing) { try { server.close(); } catch {} return; }
     atomicWriteJson(connectionFile, {
       version: 1,
       protocol: "puream-local-control/1",
@@ -105,15 +122,25 @@ function startControlGateway(options = {}) {
   server.unref();
   server.on("error", error => console.error("[mcp-control] gateway failed", error?.message || error));
 
-  const close = () => {
+  const close = (options = {}) => {
+    if (closing) return;
+    closing = true;
     for (const socket of sockets) {
       try { socket.destroy(); } catch {}
     }
     sockets.clear();
     try { server.close(); } catch {}
     try {
-      const current = JSON.parse(fs.readFileSync(connectionFile, "utf8"));
-      if (current?.instanceId === instanceId) fs.rmSync(connectionFile, { force: true });
+      let current = null;
+      try { current = JSON.parse(fs.readFileSync(connectionFile, "utf8")); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (!current || current.instanceId === instanceId) {
+        if (options.userClosed) {
+          // A token-free tombstone prevents idle MCP clients from reopening the UI.
+          // A normal manual launch replaces this with a fresh connection receipt.
+          atomicWriteJson(connectionFile, { version: 1, protocol: "puream-local-control/1", instanceId, closedByUser: true, closedAt: new Date().toISOString() });
+        } else fs.rmSync(connectionFile, { force: true });
+      }
     } catch {}
     if (process.platform !== "win32") {
       try { fs.rmSync(pipeName, { force: true }); } catch {}

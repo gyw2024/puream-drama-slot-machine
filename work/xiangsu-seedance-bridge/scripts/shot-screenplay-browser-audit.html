@@ -1,0 +1,28 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>逐镜执行稿交互验收</title><style>body{margin:0;background:#181818;color:white;font:14px sans-serif}iframe{width:100%;height:850px;border:0}pre{white-space:pre-wrap}</style><pre id="result">正在检查隔离项目界面……</pre><iframe src="/app/renderer/workbench.html" title="真实工作台隔离验收"></iframe><script>
+(async()=>{
+ const frame=document.querySelector('iframe'),out=document.querySelector('#result'),evidence={scope:'Codex built-in browser, isolated project, actual renderer; no native GUI',checks:[]};
+ const check=(name,ok,detail)=>{evidence.checks.push({name,ok,detail});if(!ok)throw Error(name);};
+ const wait=ms=>new Promise(r=>setTimeout(r,ms));
+ try{
+  for(let n=0;n<100&&!frame.contentDocument?.querySelector('#scriptText')?.value;n++)await wait(100);
+  const w=frame.contentWindow,d=w.document;check('script loaded',d.querySelector('#scriptText').value.includes('片段S01'));
+  check('original download visible',!d.querySelector('#downloadOriginalScript').hidden);
+  check('source-first hint',d.querySelector('#scriptEditHint').textContent.includes('后续沿用'));
+  const blobs=new Map(),downloads=[];w.URL.createObjectURL=b=>{const key='blob:audit-'+blobs.size;blobs.set(key,b);return key;};w.URL.revokeObjectURL=()=>{};
+  const anchorClick=w.HTMLAnchorElement.prototype.click;w.HTMLAnchorElement.prototype.click=function(){if(this.download){downloads.push({name:this.download,blob:blobs.get(this.href)});return;}return anchorClick.call(this);};
+  d.querySelector('#downloadOriginalScript').click();await wait(50);check('original downloaded verbatim',(await downloads.at(-1).blob.text()).replace(/^\uFEFF/,'')==='小梅：妈，我回来了。');
+  for(const mode of ['production','dialogue','timed_storyboard']){
+   d.querySelector('[data-script-format-preview="'+mode+'"]').click();await wait(50);
+   check(mode+' preview opens',d.querySelector('#promptExampleDialog').open);
+   check(mode+' complete per-shot fields',/起始状态/.test(d.querySelector('#promptExampleText').value)&&/片段S02/.test(d.querySelector('#promptExampleText').value));
+   d.querySelector('#closePromptExampleDialog').click();check(mode+' preview closes',!d.querySelector('#promptExampleDialog').open);
+   d.querySelector('[data-script-format-example="'+mode+'"]').click();await wait(20);check(mode+' example download',(await downloads.at(-1).blob.text()).includes('片段S02'));
+  }
+  evidence.layout={width:d.documentElement.clientWidth,scrollWidth:d.documentElement.scrollWidth};
+  check('no page horizontal overflow',d.documentElement.scrollWidth<=d.documentElement.clientWidth+1,evidence.layout);
+  check('no runtime JS errors',w.__auditErrors.length===0,w.__auditErrors);
+  evidence.status='passed';
+ }catch(e){evidence.status='failed';evidence.error=e.message;}
+ out.textContent=JSON.stringify(evidence,null,2);await fetch('/evidence',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(evidence)});
+})();
+</script></html>

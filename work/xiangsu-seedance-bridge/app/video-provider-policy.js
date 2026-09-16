@@ -3,14 +3,16 @@
 const net = require("node:net");
 const dns = require("node:dns").promises;
 
-const LOCAL_XIANGSU_ORIGIN = "http://127.0.0.1:28911";
 const PUREAM_CLOUD_ORIGIN = "https://puream.cn";
 const PUREAM_ROOT_DOMAIN = "puream.cn";
-const VIDEO_PROVIDER_KINDS = new Set(["local-xiangsu", "puream-seedance", "puream-hailuo-h3"]);
+// 0.16.106+ is H3-only. Legacy provider values are migration input only and are
+// normalized immediately; no alternate video engine can enter runtime.
+const VIDEO_PROVIDER_KINDS = new Set(["puream-hailuo-h3"]);
 const HAILUO_API_MODES = new Set([
   "auto",
   "text_to_video",
   "image_to_video",
+  "reference_to_video",
   "video_to_video",
   "audio_to_video",
   "multimodal_to_video"
@@ -141,13 +143,12 @@ function normalizeOssBucket(value) {
   return bucket;
 }
 
-function normalizeProviderKind(value) {
-  if (value === "remote-api") return "puream-seedance";
-  return VIDEO_PROVIDER_KINDS.has(value) ? value : "local-xiangsu";
+function normalizeProviderKind(_value) {
+  return "puream-hailuo-h3";
 }
 
-function providerEngine(kind) {
-  return normalizeProviderKind(kind) === "puream-hailuo-h3" ? "hailuo-h3" : "seedance";
+function providerEngine(_kind) {
+  return "hailuo-h3";
 }
 
 function normalizeHailuoApiMode(value) {
@@ -161,6 +162,7 @@ function normalizeCloudVideoResolution(value) {
 
 function normalizeVideoProvider(config = {}) {
   const kind = normalizeProviderKind(config.kind);
+  const legacyKind = String(config.kind || "").trim();
   const common = {
     ...config,
     kind,
@@ -172,20 +174,23 @@ function normalizeVideoProvider(config = {}) {
     ossAccessKeySecret: String(config.ossAccessKeySecret || config.aliosskey || "").trim(),
     ossBucket: normalizeOssBucket(config.ossBucket || config.bucket || ""),
     ossEndpoint: normalizeOssEndpoint(config.ossEndpoint || config.diyu || ""),
-    referenceUrlTtlSeconds: Math.max(3600, Math.min(86400, Number(config.referenceUrlTtlSeconds) || 21600)),
+    // Temporary reference objects are governed by the 24-hour cleanup
+    // contract. A shorter explicit value remains supported for sensitive work.
+    referenceUrlTtlSeconds: Math.max(3600, Math.min(86400, Number(config.referenceUrlTtlSeconds) || 86400)),
     cloudVideoResolution: normalizeCloudVideoResolution(config.cloudVideoResolution),
     hailuoApiMode: normalizeHailuoApiMode(config.hailuoApiMode),
-    hailuoRefImageSize: config.hailuoRefImageSize === "max" ? "max" : "match",
-    hailuoSeed: String(config.hailuoSeed ?? "").trim()
+    // These legacy instance-only hints are intentionally normalized away.
+    // The official AutoDL API is the authoritative first route.
+    hailuoRefImageSize: "match",
+    hailuoSeed: ""
   };
-  if (kind === "local-xiangsu") {
-    return { ...common, baseUrl: LOCAL_XIANGSU_ORIGIN, model: "seedance2.0-mini", migrationNotice: String(config.migrationNotice || "") };
-  }
   return {
     ...common,
     baseUrl: normalizePureamCloudBaseUrl(config.baseUrl || PUREAM_CLOUD_ORIGIN),
-    model: kind === "puream-hailuo-h3" ? "hailuo-h3" : "seedance2.0",
-    migrationNotice: ""
+    model: "hailuo-h3",
+    migrationNotice: legacyKind && legacyKind !== "puream-hailuo-h3"
+      ? "旧视频引擎已自动迁移为纯梦 H3"
+      : String(config.migrationNotice || "")
   };
 }
 
@@ -220,7 +225,6 @@ function assertPublicReferenceUrl(value) {
 }
 
 module.exports = {
-  LOCAL_XIANGSU_ORIGIN,
   HAILUO_API_MODES,
   PUREAM_CLOUD_ORIGIN,
   PUREAM_ROOT_DOMAIN,

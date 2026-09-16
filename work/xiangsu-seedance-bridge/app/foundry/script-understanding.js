@@ -4,7 +4,8 @@ const { detectUploadedScriptFormat, parseSourceDialogueLedger } = require("../di
 const { bindDialogueLedgerToScenes, buildSourceSceneLedger } = require("../script-scene-ledger");
 const { fingerprint } = require("./canonical");
 
-const SCRIPT_UNDERSTANDING_VERSION = "foundry.script-understanding.v2";
+const SCRIPT_UNDERSTANDING_VERSION = "foundry.script-understanding.v4-declaration-boundaries";
+const PRODUCTION_IR_VERSION = "foundry.production-ir.v1";
 
 const STORY_KEYWORDS = Object.freeze({
   hook: /(?:突然|当众|摔|抢|砸|推|赶|拦|跪|不许|威胁|质问|失踪|出事|倒下|第一镜|开场|前\s*\d+秒)/i,
@@ -61,6 +62,7 @@ function castFromSource(records, dialogueLedger) {
   const validCastName = value => {
     const name = String(value || "").trim().replace(/^[#>*\-\s]+/, "").replace(/[：:]\s*$/, "");
     if (!name || name.length > 12) return "";
+    if (/^(?:人物|角色|人物表|角色表|主要人物|出场人物|人物简介|角色简介|姓名|年龄|性别|职业|简介|设定|character|characters|cast)$/i.test(name)) return "";
     if (/^[（(【\[]|[）)】\]]/.test(name)) return "";
     if (/(?:转场|画面|镜头|机器发出|大门|手机响|音效|字幕|标题|旁白|场景|动作|特写)/.test(name)) return "";
     if (!/[\u3400-\u9fffA-Za-z]/.test(name)) return "";
@@ -70,9 +72,10 @@ function castFromSource(records, dialogueLedger) {
   const castLines = records.filter(item => /^(?:\s*[-*]\s*)?(?:C\d{1,3}\s+)?[\u3400-\u9fffA-Za-z][^\n]{0,30}[:：] ?\s*\d{1,3}岁/.test(item.text)
     || /^\s*【?(?:人物|角色)】?\s*[:：]/.test(item.text));
   for (const record of castLines) {
-    for (const part of record.text.split(/[;；,，、]/)) {
+    const declaration=record.text.replace(/^\s*【?(?:人物|角色)】?\s*[:：]\s*/, "");
+    for (const part of declaration.split(/[;；,，、]/)) {
       const match = part.match(/(?:^|[-*]\s*|C\d{1,3}\s+)([\u3400-\u9fffA-Za-z·]{2,12})(?=\s*[:：，,]|，?\s*\d{1,3}岁)/);
-      const name = validCastName(match?.[1]);
+      const name = validCastName(match?.[1] || (/^[\u3400-\u9fffA-Za-z·]{1,12}$/.test(part.trim()) ? part.trim() : ""));
       if (name) names.add(name);
     }
   }
@@ -107,6 +110,103 @@ function storyBeatEvidence(source, bodyStart) {
   }));
 }
 
+function normalizeSpokenTurn(turn = {}, order = 0) {
+  const text = String(turn.spokenText || turn.text || "").trim();
+  const speaker = String(turn.speaker || "").trim();
+  // Production-field labels are silent metadata, even if a provider placed
+  // them inside dialogueTurns.  This last semantic boundary prevents actions
+  // and camera notes from ever reaching a speech/audio compiler.
+  if (!text || /^(?:镜头|动作|场景|画面|机位|运镜|表演|情绪|音效|字幕|转场|时间|制作说明|分镜说明)$/i.test(speaker)) return null;
+  return {
+    id: String(turn.sourceDialogueId || turn.id || `D${String(order + 1).padStart(4, "0")}`),
+    sourceDialogueId: String(turn.sourceDialogueId || turn.id || ""),
+    sourceStart: Number.isFinite(Number(turn.sourceStart)) ? Number(turn.sourceStart) : null,
+    sourceEnd: Number.isFinite(Number(turn.sourceEnd)) ? Number(turn.sourceEnd) : null,
+    speakerId: String(turn.speakerId || ""),
+    speaker,
+    listenerIds: Array.isArray(turn.listenerIds) ? turn.listenerIds.map(String).filter(Boolean) : [],
+    text,
+    delivery: {
+      tone: String(turn.sourceTone || turn.metadata?.sourceTone || turn.metadata?.delivery || turn.delivery || "按当前处境自然表达").trim(),
+      emotion: String(turn.metadata?.emotion || turn.emotion || "").trim(),
+      volume: String(turn.metadata?.volume || turn.volume || "").trim(),
+      pace: String(turn.metadata?.pace || turn.pace || "").trim(),
+      stressWord: String(turn.metadata?.stressWord || turn.stressWord || "").trim(),
+      breath: String(turn.metadata?.breath || turn.breath || "").trim()
+    },
+    performance: {
+      body: String(turn.metadata?.body || turn.body || "").trim(),
+      listenerBeat: String(turn.metadata?.listenerBeat || turn.listenerBeat || "").trim()
+    },
+    subshotNumber: Math.max(1, Number(turn.subshotNumber) || 1)
+  };
+}
+
+function buildProductionIR(source, project = {}, context = {}) {
+  const units = (Array.isArray(project.shots) ? project.shots : [])
+    .slice()
+    .sort((left, right) => (Number(left.number) || 0) - (Number(right.number) || 0))
+    .map((shot, shotIndex) => {
+      const spokenTurns = (Array.isArray(shot.dialogueTurns) ? shot.dialogueTurns : [])
+        .map((turn, turnIndex) => normalizeSpokenTurn(turn, shotIndex * 100 + turnIndex))
+        .filter(Boolean);
+      return {
+        id: String(shot.id || `S${String(shotIndex + 1).padStart(2, "0")}`),
+        number: Number(shot.number) || shotIndex + 1,
+        sourceSceneId: String(shot.sourceSceneId || shot.sceneId || ""),
+        sceneId: String(shot.sceneId || ""),
+        sceneName: String(shot.scene || shot.sceneName || "").trim(),
+        durationSeconds: Math.max(0, Number(shot.duration) || 0),
+        durationBasis: "dialogue_action_and_scene_rhythm",
+        visibleCharacterIds: Array.isArray(shot.visibleCharacterIds) ? shot.visibleCharacterIds.map(String).filter(Boolean) : [],
+        scenePresenceCharacterIds: Array.isArray(shot.scenePresenceCharacterIds) ? shot.scenePresenceCharacterIds.map(String).filter(Boolean) : [],
+        spokenTurns,
+        silentDirections: {
+          action: String(shot.action || "").trim(),
+          visualBeat: String(shot.visualBeat || "").trim(),
+          stateBefore: String(shot.stateBefore || shot.startFrame || "").trim(),
+          stateAfter: String(shot.stateAfter || shot.endFrame || "").trim(),
+          camera: String(shot.cameraMove || shot.compositionPlan || shot.shotSize || "").trim(),
+          emotionArc: shot.emotionArc || shot.emotion || "",
+          productAction: shot.productCausalBridge || null
+        },
+        continuity: {
+          wardrobeBindings: Array.isArray(shot.wardrobeBindings) ? shot.wardrobeBindings : [],
+          propBindings: Array.isArray(shot.propBindings) ? shot.propBindings : [],
+          imageReferenceCharacterIds: Array.isArray(shot.imageReferenceCharacterIds) ? shot.imageReferenceCharacterIds.map(String).filter(Boolean) : [],
+          videoReferenceCharacterIds: Array.isArray(shot.videoReferenceCharacterIds) ? shot.videoReferenceCharacterIds.map(String).filter(Boolean) : []
+        },
+        productMention: shot.productMention === true
+      };
+    });
+  const ir = {
+    version: PRODUCTION_IR_VERSION,
+    sourceFingerprint: context.sourceFingerprint || fingerprint(source),
+    sourceAuthority: context.sourceAuthority || "",
+    targetDuration: {
+      seconds: Math.max(0, Number(project.generation?.targetDurationSeconds) || 0),
+      role: "authoring_reference_only",
+      locksUnitCount: false,
+      locksShotDuration: false
+    },
+    cast: (Array.isArray(project.characters) ? project.characters : []).map(character => ({
+      id: String(character.id || ""), name: String(character.name || "").trim(),
+      identitySignature: String(character.identitySignature || "").trim(), voiceDescription: String(character.voiceDescription || "").trim()
+    })),
+    scenes: (Array.isArray(project.scenes) ? project.scenes : []).map(scene => ({
+      id: String(scene.id || ""), name: String(scene.name || "").trim(),
+      continuityLocks: Array.isArray(scene.continuityLocks) ? scene.continuityLocks.map(String).filter(Boolean) : []
+    })),
+    product: {
+      name: String(project.product?.name || "").trim(),
+      sellingPoints: String(project.product?.sellingPoints || project.product?.description || "").trim()
+    },
+    units
+  };
+  ir.fingerprint = fingerprint(ir);
+  return ir;
+}
+
 function buildScriptUnderstanding(sourceValue = "", project = {}, options = {}) {
   const source = normalizeSource(sourceValue);
   const sourceFingerprint = fingerprint(source);
@@ -125,6 +225,8 @@ function buildScriptUnderstanding(sourceValue = "", project = {}, options = {}) 
   if (!cast.length) unknowns.push({ id: "cast", severity: "high", message: "未从原稿中识别出可稳定绑定的人物", resolution: "model_extract_with_source_spans" });
   if (!dialogueLedger.length && !["prose", "json"].includes(format)) unknowns.push({ id: "dialogue", severity: "medium", message: "当前格式似乎包含对白，但本地未提取到对白账本", resolution: "model_extract_then_parity_check" });
   const foundBeatCount = Object.values(beats).filter(item => item.found).length;
+  const sourceAuthority = userUploadedAuthority ? "user_uploaded_authority" : "model_authored_draft";
+  const productionIR = buildProductionIR(source, project, { sourceFingerprint, sourceAuthority });
   return {
     version: SCRIPT_UNDERSTANDING_VERSION,
     sourceFingerprint,
@@ -135,7 +237,7 @@ function buildScriptUnderstanding(sourceValue = "", project = {}, options = {}) 
       dramaticBody: { sourceStart: bodyStart, sourceEnd: source.length }
     },
     sourceAuthority: {
-      level: userUploadedAuthority ? "user_uploaded_authority" : "model_authored_draft",
+      level: sourceAuthority,
       handling: project.foundry?.contract?.intent?.scriptHandling || (userUploadedAuthority ? "respect" : "optimize"),
       documentDirectionsAreUserRequest: false,
       note: "文档中的制作说明只是原稿证据，不能覆盖项目级绝对禁令"
@@ -149,6 +251,7 @@ function buildScriptUnderstanding(sourceValue = "", project = {}, options = {}) 
     cast: { names: cast, count: cast.length },
     product: productEvidence(source, project),
     storyBeats: beats,
+    productionIR,
     directions,
     uncertainty: {
       entries: unknowns,
@@ -168,4 +271,4 @@ function buildScriptUnderstanding(sourceValue = "", project = {}, options = {}) 
   };
 }
 
-module.exports = { SCRIPT_UNDERSTANDING_VERSION, buildScriptUnderstanding, normalizeSource, storyBeatEvidence };
+module.exports = { PRODUCTION_IR_VERSION, SCRIPT_UNDERSTANDING_VERSION, buildProductionIR, buildScriptUnderstanding, normalizeSource, normalizeSpokenTurn, storyBeatEvidence };

@@ -1,0 +1,12 @@
+'use strict';
+const VERSION=1;
+function narrativeSchema(props=[],minLength=1){
+ const ids=props.map(p=>p.id).filter(Boolean).map(id=>String(id).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+ return {type:'string',minLength,...(ids.length?{pattern:'^(?![\\s\\S]*(?:'+ids.join('|')+'))[\\s\\S]*$'}:{})};
+}
+function manifest(project,propIds){const selected=propIds?new Set(propIds):null;return {
+ product:{id:'product',kind:'original_product',name:project.product?.name||'',binding:'usesProduct/productVisible; never a prop ID'},
+ objects:(project.assetLibraries?.props||[]).filter(p=>!selected||selected.has(p.id)).map(p=>({id:p.id,name:p.name,kind:p.assetRequired===false||p.sourceInventory?.classification==='in_scene'?'scene_furniture':'independent_prop',description:p.descriptionEn||p.description||''}))
+};}
+const INSTRUCTION='Actor identity is stable across every sentence and language. Resolve each C-ID against its supplied name, gender and role before authoring. Prefer explicit C-IDs or names over he/she/his/her whenever multiple actors share an event or state; never infer gender from ID order or neighboring sentences. Privately check every remaining pronoun against its actual referent in En and Zh. For each camera interval, include every source on-screen speaking actor and every actor required to visibly perform the stated contact or transfer; a shot-level cast list alone does not make an omitted actor visible in that camera. Do not convert source on-screen speech to voice-over to conceal a framing mismatch. Object identity is a typed contract. Use the supplied identityManifest to distinguish the original product, receiving vessel and supporting furniture. Machine prop IDs belong ONLY in visiblePropIds and event.propIds. In narrative fields use unambiguous physical nouns such as the original product package, the drinking cup, the pouring vessel, or the dining table; never substitute an opaque prop ID for a noun. Keep actor C-IDs for visible or audible performers. Merely mentioned absent people use their transliterated human name and relationship, never an undefined C-ID. The original product is selected ONLY by productVisible/usesProduct; never borrow an unrelated prop ID for it. An event may reference a table as its support while usesProduct identifies the package being handled. Check every selected ID against its given name and every actor-object-support relation before returning.';
+module.exports={VERSION,narrativeSchema,manifest,INSTRUCTION};

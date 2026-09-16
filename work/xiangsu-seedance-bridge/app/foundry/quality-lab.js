@@ -58,7 +58,20 @@ function evaluateProject(project = {}, options = {}) {
 
   const target = Math.max(1, Number(project.generation?.targetDurationSeconds) || shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0) || 1);
   const planned = shots.reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
-  if (shots.length && Math.abs(planned - target) > Math.max(10, target * 0.08)) technical.push(issue("duration_contract", "blocking", `分镜合计 ${planned} 秒与目标 ${target} 秒不一致`));
+  // Target duration is a writing hint, never a production-unit quota.  This is
+  // especially important for uploaded scripts: the authored dialogue, action
+  // and scene changes own the cut points and their natural durations.  Keep a
+  // useful diagnostic without turning it into a paid-generation guillotine.
+  if (shots.length && Math.abs(planned - target) > Math.max(10, target * 0.08)) technical.push(issue(
+    "duration_reference_variance",
+    "advisory",
+    `分镜合计 ${planned} 秒，与创作参考时长 ${target} 秒存在差异；按当前剧情与对白节奏继续`,
+    {
+      plannedSeconds: planned,
+      referenceSeconds: target,
+      sourceAuthority: understanding?.sourceAuthority?.level || ""
+    }
+  ));
   for (const candidate of candidates.filter(item => item.selected === true && item.stale !== true)) {
     if (candidate.filePath && !fs.existsSync(candidate.filePath)) technical.push(issue("selected_asset_missing", "blocking", `当前选中资产文件已丢失：${candidate.id}`, { candidateId: candidate.id }));
   }
@@ -91,6 +104,7 @@ function evaluateProject(project = {}, options = {}) {
   const achievedLevel = level3 ? 3 : level2 ? 2 : level1 ? 1 : 0;
   const minimumFormalLevel = Number(contract.quality?.minimumFormalLevel) || 2;
   const allIssues = [...technical, ...story, ...reference];
+  const executionReady = Boolean(String(project.script?.raw || "").trim()) && shots.length > 0;
   return {
     version: "foundry.quality-report.v1",
     fingerprint: fingerprint({ projectId: project.id, productionRevision: project.productionRevision, contract: contract.fingerprint, shots, candidates: candidates.map(item => ({ id: item.id, selected: item.selected, stale: item.stale, filePath: item.filePath, qualityAudit: item.qualityAudit })) }),
@@ -103,13 +117,19 @@ function evaluateProject(project = {}, options = {}) {
     achievedLevel,
     minimumFormalLevel,
     formalReady: achievedLevel >= minimumFormalLevel,
-    paidGenerationAllowed: achievedLevel >= minimumFormalLevel,
+    // Quality is an authoring signal, not an execution permission system.
+    // Downstream stages may use the report to improve the first pass, but may
+    // not stop, rewrite or roll back a creator's work because a probabilistic
+    // score missed a threshold.  Concrete stage dependencies remain enforced
+    // by their own preflight (for example a missing source file).
+    paidGenerationAllowed: executionReady,
+    executionPolicy: "advisory_quality_with_stage_preflight",
     issueCounts: {
       blocking: allIssues.filter(item => item.severity === "blocking").length,
       repair: allIssues.filter(item => item.severity === "repair").length,
       total: allIssues.length
     },
-    summary: achievedLevel >= 3 ? "已达到参考片质量目标" : achievedLevel >= 2 ? "已达到正式生产线，可继续向参考片水平优化" : achievedLevel >= 1 ? "技术结构成立，但剧情质量仍需定点修复" : "技术合同未满足，已禁止进入付费生成"
+    summary: achievedLevel >= 3 ? "已达到参考片质量目标" : achievedLevel >= 2 ? "已达到正式生产线，可继续向参考片水平优化" : achievedLevel >= 1 ? "技术结构成立，已保留剧情优化建议并继续" : "已记录结构改进建议；生产流程由真实阶段依赖决定"
   };
 }
 

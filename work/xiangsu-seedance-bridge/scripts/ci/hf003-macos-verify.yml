@@ -1,0 +1,24 @@
+name: HF003 macOS patch verification
+
+on:
+  push:
+    branches:
+      - codex/hf003-macos-ci-20260823
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify patch on a real macOS runner
+        shell: bash
+        run: bash .codex-ci/HF003/verify-macos.sh

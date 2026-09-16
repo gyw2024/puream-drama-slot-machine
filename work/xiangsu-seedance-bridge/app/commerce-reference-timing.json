@@ -1,0 +1,180 @@
+{
+  "version": "reference-screenplay-lower-bound-v1",
+  "timingSource": "supplied-timed-screenplay",
+  "videoVerified": false,
+  "selection": "minimum-positive-reviewed-dialogue-ratio",
+  "defaultTargetRatio": 0.057,
+  "cases": [
+    {
+      "id": "R01",
+      "title": "7.30-2",
+      "mechanism": "relationship_reward",
+      "totalSeconds": 735,
+      "effectiveSeconds": 275.8,
+      "ratio": 0.37523809523809526,
+      "sourceSha256": "41381bad08001243c2868eeed3e7fb4b6ec417067054dffc8701ffcdca624b5d"
+    },
+    {
+      "id": "R04",
+      "title": "出门在外，安全第一，做好防范！",
+      "mechanism": "problem_solution",
+      "totalSeconds": 222,
+      "effectiveSeconds": 36.6,
+      "ratio": 0.16486486486486487,
+      "sourceSha256": "6fec58483b6ee94446a4f96aca6aa16ba77b52e7f8cd8f62c7b30529b9ecc104"
+    },
+    {
+      "id": "R06",
+      "title": "患难时刻见真情、情感、爱情、相亲、剧情、阿乐",
+      "mechanism": "care_demonstration",
+      "totalSeconds": 633,
+      "effectiveSeconds": 160.7,
+      "ratio": 0.25387045813586095,
+      "sourceSha256": "bcfd69dfafb025770031a22855b435963419f8773987b53fe96a4f94b16974d0"
+    },
+    {
+      "id": "R07",
+      "title": "患难见真情、短剧、原创短剧",
+      "mechanism": "care_demonstration",
+      "totalSeconds": 551,
+      "effectiveSeconds": 89.6,
+      "ratio": 0.16261343012704174,
+      "sourceSha256": "3759dcdc16cee107a64a0a6df2e406b937dac7c9335a064422a9bed77210bdc0"
+    },
+    {
+      "id": "R09",
+      "title": "视频号视频",
+      "mechanism": "gratitude_support",
+      "totalSeconds": 773,
+      "effectiveSeconds": 174,
+      "ratio": 0.22509702457956016,
+      "sourceSha256": "22b87a417ab543fe07adb0dfe1cb552b23a67e8f635d505f6fa141eda7706a22"
+    },
+    {
+      "id": "R10",
+      "title": "谁是真心人",
+      "mechanism": "relationship_reward",
+      "totalSeconds": 671,
+      "effectiveSeconds": 136.2,
+      "ratio": 0.20298062593144559,
+      "sourceSha256": "52bef66fbb9be6065fcb8f91f03264fa2f622f907bae1d04d949a200ba967f56"
+    },
+    {
+      "id": "R11",
+      "title": "03",
+      "mechanism": "care_demonstration",
+      "totalSeconds": 602,
+      "effectiveSeconds": 34.3,
+      "ratio": 0.05697674418604651,
+      "sourceSha256": "25712b2cee0bddd78442d16f548e7c641b04eba9551f6b863cd366bd74bb9831"
+    },
+    {
+      "id": "R12",
+      "title": "3",
+      "mechanism": "problem_solution",
+      "totalSeconds": 736,
+      "effectiveSeconds": 179.2,
+      "ratio": 0.2434782608695652,
+      "sourceSha256": "9014ad36419fd2fcf56be6d13525e12ab372359bf22f03c09155f9a506d6ddb7"
+    },
+    {
+      "id": "R13",
+      "title": "8.3-2",
+      "mechanism": "relationship_reward",
+      "totalSeconds": 762,
+      "effectiveSeconds": 263.6,
+      "ratio": 0.34593175853018376,
+      "sourceSha256": "b8246e068e225aedc3fb0d66bf985526672e76a81b16912f9960765ac8bf99ac"
+    },
+    {
+      "id": "R14",
+      "title": "sdfa",
+      "mechanism": "care_demonstration",
+      "totalSeconds": 542,
+      "effectiveSeconds": 121,
+      "ratio": 0.22324723247232472,
+      "sourceSha256": "2af8aa15a9dd818928b74b6f4065286e8d443af40dab72f00d070ba6b77acfb0"
+    },
+    {
+      "id": "R16",
+      "title": "、剧情、短剧、正能量",
+      "mechanism": "problem_solution",
+      "totalSeconds": 643,
+      "effectiveSeconds": 96.4,
+      "ratio": 0.14992223950233283,
+      "sourceSha256": "bb4f9028facf345d637a1958aee63126a96035730ab0595660b96c176e533909"
+    },
+    {
+      "id": "R17",
+      "title": "、好剧推荐、短剧分享、亲情、人心、真相、反转",
+      "mechanism": "care_demonstration",
+      "totalSeconds": 573,
+      "effectiveSeconds": 116.5,
+      "ratio": 0.20331588132635253,
+      "sourceSha256": "6666b3c74299bea75dfa9ede081f2d20b2c9e76fb99af2a6c77286f971985221"
+    },
+    {
+      "id": "R18",
+      "title": "、正能量",
+      "mechanism": "care_demonstration",
+      "totalSeconds": 543,
+      "effectiveSeconds": 99.5,
+      "ratio": 0.1832412523020258,
+      "sourceSha256": "f84c9847888e2be183533082607b7c266f97dbef5175620fe1ff3f57086cb978"
+    },
+    {
+      "id": "R19",
+      "title": "一定要看到最后，祝天下有情人终成眷属、正能量、情感、夫妻、短剧",
+      "mechanism": "problem_solution",
+      "totalSeconds": 382,
+      "effectiveSeconds": 106,
+      "ratio": 0.2774869109947644,
+      "sourceSha256": "3df2af91003750434603086df3635cfd935dd8f31e968f37aa92bdd79ab5606f"
+    },
+    {
+      "id": "R21",
+      "title": "多一分爱心是不是就会多一份美好、传递善意",
+      "mechanism": "craft_teaching",
+      "totalSeconds": 651,
+      "effectiveSeconds": 74.7,
+      "ratio": 0.11474654377880185,
+      "sourceSha256": "49ef701c3c0996637c590d983bf1563e0a14d2cd1a5f98fa8d49f8d9e8b4e01b"
+    },
+    {
+      "id": "R22",
+      "title": "更好傻瓜",
+      "mechanism": "relationship_reward",
+      "totalSeconds": 512,
+      "effectiveSeconds": 120.3,
+      "ratio": 0.2349609375,
+      "sourceSha256": "001e294b8372113779f81acbdaf95a57a210fe9062899d99567dd095bcc74a02"
+    },
+    {
+      "id": "R23",
+      "title": "砸车救孩子，车主回来却问车门谁赔？、短剧",
+      "mechanism": "care_demonstration",
+      "totalSeconds": 283,
+      "effectiveSeconds": 39.1,
+      "ratio": 0.13816254416961132,
+      "sourceSha256": "b0ee8b04384c6dc6d70e5697e07866457afb3918eb36407cd5727d4402f2b9b1"
+    },
+    {
+      "id": "R24",
+      "title": "老母亲房子塌了，哥哥来借两万，弟弟当众翻脸、剧情",
+      "mechanism": "care_demonstration",
+      "totalSeconds": 726,
+      "effectiveSeconds": 76,
+      "ratio": 0.1046831955922865,
+      "sourceSha256": "fb7fff0c279aefa2973c72b404aa009739ab0fcfff9a0739a846d133937373be"
+    },
+    {
+      "id": "R25",
+      "title": "遇难见人心",
+      "mechanism": "problem_solution",
+      "totalSeconds": 569,
+      "effectiveSeconds": 140.1,
+      "ratio": 0.2462214411247803,
+      "sourceSha256": "108f4a3035d304b11de6eefc173b9be62bdb55789a10ee5addd4ed0fca089782"
+    }
+  ]
+}

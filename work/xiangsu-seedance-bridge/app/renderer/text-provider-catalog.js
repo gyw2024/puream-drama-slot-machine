@@ -27,9 +27,15 @@ window.textProviderCatalog = Object.freeze({
   },
   "doubao-native": {
     tag: "DOUBAO ARK", displayName: "火山豆包", baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-    defaultModel: "doubao-seed-1-8", models: ["doubao-seed-1-8", "doubao-seed-1-6-250615", "doubao-seed-1-6-thinking-250715", "doubao-seed-1-6-flash-250828", "doubao-1-5-pro-32k-250115", "doubao-lite-32k-240828"],
+    defaultModel: "doubao-seed-2-1-pro-260628", models: ["doubao-seed-2-1-pro-260628", "doubao-seed-evolving"],
     temperature: 0.7, authSource: "user", domestic: true,
-    help: "内置火山方舟兼容接口；可选择模型 ID，也可填写 Endpoint ID。"
+    help: "标准方舟使用 Responses API；默认是控制台快速接入页给出的 Seed 2.1 Pro 版本 ID。未开通模型请填写方舟 Endpoint ID。"
+  },
+  "doubao-coding-plan": {
+    tag: "VOLCENGINE CODING PLAN", displayName: "火山方舟 Coding Plan", baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+    defaultModel: "ark-code-latest", models: ["ark-code-latest"],
+    temperature: 0.7, authSource: "user", domestic: true,
+    help: "Coding Plan 专用地址；ark-code-latest 跟随方舟控制台为套餐选择的当前模型。"
   },
   "deepseek-native": {
     tag: "DEEPSEEK", displayName: "DeepSeek", baseUrl: "https://api.deepseek.com",

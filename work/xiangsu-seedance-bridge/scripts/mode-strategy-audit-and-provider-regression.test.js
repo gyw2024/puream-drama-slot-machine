@@ -68,7 +68,7 @@ test("an explicit 云端算力节点 quarantine response is preserved instead of
       providerKind: "puream-hailuo-h3",
       clientRequestId: "quarantine-contract-test",
       prompt: "A person speaks to camera.",
-      duration: 5,
+      duration: 10,
       hailuoApiMode: "text_to_video",
       aspectRatio: "9:16",
       images: [], videos: [], videoAudios: [], audios: [],
@@ -83,28 +83,84 @@ test("an explicit 云端算力节点 quarantine response is preserved instead of
   }
 });
 
-test("character-video and voice prerequisites follow the selected project engine", () => {
+test("legacy project engine requests are normalized to H3 and default to image-only prerequisites", () => {
   const root = temporaryDirectory("puream-character-provider-matrix-");
   try {
     const store = new WorkbenchStore(root);
     const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: root });
-    const local = store.createProject("本地像塑", { engine: "seedance", mode: "keyframe" });
+    const local = store.createProject("旧引擎迁移", { engine: "retired", mode: "keyframe" });
     store.patchProject(local.id, { characters: [{ id: "C01", name: "林梅" }], generation: { engine: "seedance", videoProviderKind: "local-xiangsu", mode: "keyframe", modeConfirmed: true } });
     const localKinds = workflow.buildAssetBatchPlan(local.id).map(item => item.kind);
+    assert.equal(store.getProject(local.id).generation.engine, "hailuo-h3");
+    assert.equal(store.getProject(local.id).generation.videoProviderKind, "puream-hailuo-h3");
     assert.equal(localKinds.includes("character_video"), false);
     assert.equal(localKinds.includes("character_voice"), false);
 
     const cloud = store.createProject("云端算力", { engine: "hailuo-h3", mode: "storyboard_sheet" });
     store.patchProject(cloud.id, { characters: [{ id: "C01", name: "林梅" }], generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "storyboard_sheet", modeConfirmed: true } });
     const cloudKinds = workflow.buildAssetBatchPlan(cloud.id).map(item => item.kind);
-    assert.equal(cloudKinds.includes("character_video"), true);
-    assert.equal(cloudKinds.includes("character_voice"), true);
+    assert.equal(cloudKinds.includes("character_video"), false);
+    assert.equal(cloudKinds.includes("character_voice"), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("a recoverable character-video outage does not block independent visual assets", async () => {
+test("loading a materialized legacy project migrates its complete video contract to H3", () => {
+  const root = temporaryDirectory("puream-provider-video-only-switch-");
+  try {
+    const store = new WorkbenchStore(root);
+    const created = store.createProject("平滑切 H3", { engine: "seedance", videoProviderKind: "local-xiangsu", mode: "keyframe" });
+    const project = store.getProject(created.id);
+    project.generation = { ...project.generation, engine: "retired", videoProviderKind: "retired", durationContract: { providerKind: "retired", targetSeconds: 10 } };
+    project.productionRevision = "revision_active";
+    project.characters = [{ id: "C01", name: "林秀兰" }];
+    project.scenes = [{ id: "SC01", name: "客厅" }];
+    project.shots = [{ id: "S01", number: 1, sceneId: "SC01", dialogueTurns: [{ speakerId: "C01", speaker: "林秀兰", text: "我回来了。" }] }];
+    const stages = ["character_sheet", "storyboard_start", "storyboard_end", "character_voice", "character_video", "shot_video"];
+    project.candidates = stages.map((stage, index) => ({
+      id: `candidate_${index}`,
+      entityType: stage.startsWith("storyboard") || stage === "shot_video" ? "shot" : "character",
+      entityId: stage.startsWith("storyboard") || stage === "shot_video" ? "S01" : "C01",
+      stage,
+      productionRevision: project.productionRevision,
+      selected: true,
+      stale: false
+    }));
+    project.promptReview = { version: "old", status: "approved", items: [] };
+    project.finalVideoPath = path.join(root, "old-final.mp4");
+    fs.writeFileSync(store.projectPath(created.id), JSON.stringify(project, null, 2));
+    const switched = store.getProject(created.id);
+    assert.equal(switched.generation.engine, "hailuo-h3");
+    assert.equal(switched.generation.videoProviderKind, "puream-hailuo-h3");
+    assert.equal(switched.generation.durationContract?.providerKind, "puream-hailuo-h3");
+    assert.equal(switched.productionRevision, "revision_active");
+    assert.equal(switched.characters.length, 1);
+    assert.equal(switched.scenes.length, 1);
+    assert.equal(switched.shots.length, 1);
+    for (const stage of ["character_sheet", "storyboard_start", "storyboard_end", "character_voice"]) {
+      const candidate = switched.candidates.find(item => item.stage === stage);
+      assert.equal(candidate.stale, false, `${stage} should remain reusable`);
+      assert.equal(candidate.selected, true, `${stage} should stay selected`);
+    }
+    assert.equal(switched.promptReview.status, "approved");
+    assert.equal(switched.finalVideoPath, path.join(root, "old-final.mp4"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("renderer and settings expose one cloud video engine only", () => {
+  const renderer = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.html"), "utf8");
+  assert.match(renderer, /kind: "puream-hailuo-h3"/);
+  assert.match(renderer, /model: "hailuo-h3"/);
+  assert.match(renderer, /云端视频（锁定）/);
+  assert.doesNotMatch(renderer, /videoProviderEngine\(kind\) ===/);
+  assert.match(html, /asset_direct/);
+});
+
+test("image-only generation never queues a character-video outage and completes independent visual assets", async () => {
   const root = temporaryDirectory("puream-asset-dependency-");
   try {
     const store = new WorkbenchStore(root);
@@ -129,13 +185,19 @@ test("a recoverable character-video outage does not block independent visual ass
     workflow.generateQualityCharacterVideo = async () => {
       throw Object.assign(new Error("云端算力节点 服务已隔离"), { code: "PROVIDER_QUARANTINED" });
     };
-    const results = await workflow.generateAllAssets(created.id, { track: false });
+    await workflow.preparePromptReviewBundle(created.id, { compileProviderSemantics: false });
+    const review = store.getProject(created.id).promptReview;
+    await workflow.confirmAllPromptReview(created.id, review.items.map(item => ({
+      id: item.id,
+      prompt: item.displayPrompt || item.prompt
+    })));
+    const results = await workflow.generateAllAssets(created.id, { track: false, promptPrepared: true });
     assert.ok(results.some(item => item.stage === "character_sheet"));
     assert.equal(results.some(item => item.stage === "character_intro"), false);
     assert.equal(workflow.buildAssetBatchPlan(created.id).some(item => item.kind === "character_intro"), false);
     const progress = store.getProject(created.id).automation.progress;
-    assert.equal(progress.items.find(item => item.kind === "character_video").status, "queued");
-    assert.equal(progress.items.find(item => item.kind === "character_voice").status, "queued");
+    assert.equal(progress.items.some(item => item.kind === "character_video"), false);
+    assert.equal(progress.items.some(item => item.kind === "character_voice"), false);
     assert.equal(progress.failed, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

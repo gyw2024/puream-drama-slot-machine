@@ -14,6 +14,7 @@ const {
 } = require("../app/hailuo-h3-prompt");
 const { matrixRuntimeVideoPromptForProject } = require("../app/production-mode-matrix");
 const { assertHailuoPromptVoiceBindings, assertSystemPromptDialogueParity } = require("../app/workbench-workflow");
+const { buildApprovedHailuoPrompt } = require("../app/hailuo-h3-natural-prompt");
 
 const TEMPLATE = `subject_definitions:
 {{subjectDefinitions}}
@@ -135,38 +136,81 @@ test("cloud video final prompt hard-binds speaker, listener, delivery, exact lin
     template: TEMPLATE,
     parityInstruction: matrixRuntimeVideoPromptForProject(project, null, "storyboard_sheet")
   });
-  assert.match(prompt, /【生成规格】/);
-  assert.match(prompt, /音频1=角色“林青山”的唯一音色参考/);
-  assert.match(prompt, /角色“林青山”使用音频1/);
-  assert.match(prompt, /面向“林宇义”/);
-  assert.match(prompt, /语气“压着怒气，低声起句，在多久上加重音”/);
-  assert.match(prompt, /情绪“压着怒气质问”/);
-  assert.match(prompt, /只说一次：“你到底瞒了我多久？”/);
-  assert.match(prompt, /林宇义闭口，愣住并后退半步/);
-  assert.match(prompt, /对白内容＞语气＞情绪＞场景＞运镜＞其他/);
-  assert.doesNotMatch(prompt, /subject_definitions|retention_analysis|<Subject|<Audio|<d>\[Chinese\]/);
+  assert.match(prompt, /^subject_definitions:/);
+  assert.match(prompt, /<Audio 1> is the voice-timbre reference for <Subject 1> \(S1\)/);
+  assert.match(prompt, /<Subject 1> \(S1\) faces <Subject 2> and speaks once using only the vocal identity of <Audio 1>/);
+  assert.match(prompt, /Deliver at no less than 8 effective Chinese characters per second: restrained anger, clipped stress, firm keyword stress/);
+  assert.match(prompt, /advances one measured step with a locked jaw and fixed eyeline/);
+  assert.match(prompt, /<Subject 2> remains closed-lipped/);
+  assert.match(prompt, /<d>\[Chinese\] 你到底瞒了我多久？<\/d>/);
+  assert.doesNotMatch(prompt, /speech_boundary:/);
+  assert.ok(prompt.indexOf("subject_definitions:") < prompt.indexOf("[Shot 1]"));
+  assert.match(prompt, /summary:[\s\S]*retention_analysis:[\s\S]*detailed_description:[\s\S]*overall_soundscape:[\s\S]*non_diegetic_music:/i);
+  assert.equal(containsCjkOutsideDialogue(prompt), false);
   assert.equal(assertHailuoPromptVoiceBindings(project, shot, references, prompt), true);
   assert.equal(assertSystemPromptDialogueParity(project, shot, prompt, "hailuo-h3"), true);
 
-  const broken = prompt.replace(/面向“林宇义”，/, "");
+  const broken = prompt.replace("Only <Subject 1> (S1) moves the lips for this line", "<Subject 1> remains still");
   assert.throws(
     () => assertHailuoPromptVoiceBindings(project, shot, references, broken),
     error => error?.code === "HAILUO_PROMPT_DIALOGUE_PERFORMANCE_MISSING"
   );
 });
 
-test("cloud and local video prompts remain separate compiler branches", () => {
+test("official H3 mirror monologue validates ownership through Subject and Speaker tokens", () => {
+  const project = {
+    generation: { engine: "hailuo-h3", mode: "asset_direct", aspectRatio: "9:16" },
+    characters: [{ id: "C01", name: "苏梅" }],
+    scenes: [{ id: "SC02", name: "家中洗手间" }]
+  };
+  const shot = {
+    id: "S05",
+    duration: 10,
+    sceneId: "SC02",
+    characterIds: ["C01"],
+    visibleCharacterIds: ["C01"],
+    action: "苏梅正面对着浴室镜子，轻触一侧鬓角白发。",
+    actionEn: "C01 faces the bathroom mirror and touches the gray hair at one temple.",
+    dialogueTurns: [{
+      speakerId: "C01",
+      speaker: "苏梅",
+      text: "这些白发不是丢人，是我把女儿养大的日子。",
+      plannedSpeechSeconds: 4.35,
+      plannedAfterBeatSeconds: 0.6,
+      deliveryEn: "warm private reflection that settles into firm dignity",
+      speakerFacingZh: "正面对着面前的镜子，镜中脸与真实人物保持同一身份"
+    }]
+  };
+  const prompt = buildApprovedHailuoPrompt({
+    project,
+    shot,
+    references: {
+      images: ["scene.png", "c01.png"],
+      imageRoles: [{ type: "scene", entityId: "SC02" }, { type: "character", entityId: "C01" }],
+      audios: [{ characterId: "C01" }],
+      promptMode: "asset_direct"
+    },
+    dialogueTurns: shot.dialogueTurns
+  });
+  assert.match(prompt, /<Subject 1> \(S1\) faces the mirror directly in front of them/);
+  assert.match(prompt, /Only <Subject 1> \(S1\) moves the lips for this line/);
+  assert.match(prompt, /The line is complete before the window ends at no less than 5 effective Chinese characters per second/);
+  assert.match(prompt, /no false start, restart, trailing syllable, or cut-off word/);
+  assert.equal(containsCjkOutsideDialogue(prompt), false);
+  assert.equal(assertSystemPromptDialogueParity(project, shot, prompt, "hailuo-h3"), true);
+});
+
+test("the shot compiler has one H3 branch and no retired provider compiler", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
   const start = source.indexOf("buildShotPrompt(project, settings, shot");
   const end = source.indexOf("async generateShotVideo", start);
   const compiler = source.slice(start, end);
   assert.match(compiler, /if \(engine === "hailuo-h3"\)/);
   assert.match(compiler, /buildFullReferencePrompt\(/);
-  assert.match(compiler, /formatDialogueWithAudioBinding\(/);
-  assert.match(compiler, /【Seedance本镜约束】/);
+  assert.doesNotMatch(compiler, /local-xiangsu|puream-seedance|seedance/i);
 });
 
-test("historical Chinese metadata compiles into the approved Chinese natural-language contract", t => {
+test("official English prompt keeps authored dialogue visible while the legacy sanitizer remains scoped", t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "puream-prompt-cjk-repair-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const audioPath = path.join(dir, "voice.wav");
@@ -175,9 +219,11 @@ test("historical Chinese metadata compiles into the approved Chinese natural-lan
   shot.mainlineStage = "开场钩子";
   spec.fingerprint = promptFingerprint(project, shot, "storyboard_sheet");
   const prompt = buildFullReferencePrompt({ project, shot, mode: "storyboard_sheet", references, spec, template: TEMPLATE });
-  assert.equal(containsCjkOutsideDialogue(prompt), true);
-  assert.match(prompt, /只说一次：“你到底瞒了我多久？”/);
-  assert.doesNotMatch(prompt, /subject_definitions|retention_analysis|<Subject|<Audio|<d>\[Chinese\]/);
+  assert.equal(containsCjkOutsideDialogue(prompt), false);
+  assert.match(prompt, /^subject_definitions:/);
+  assert.match(prompt, /detailed_description:[\s\S]*\[Shot 1\]/);
+  assert.match(prompt, /<d>\[Chinese\] 你到底瞒了我多久？<\/d>/);
+  assert.match(prompt, /<Subject|<Audio|<d>\[Chinese\]/);
   assert.equal((prompt.match(/你到底瞒了我多久？/g) || []).length, 1);
   assert.equal(sanitizeCjkOutsideDialogue("English 中文 <d>[Chinese] 原句不变！</d> 尾注"), "English <d>[Chinese] 原句不变！</d>");
 });

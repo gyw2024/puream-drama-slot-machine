@@ -10,7 +10,7 @@ const { WorkbenchWorkflow } = require("../app/workbench-workflow");
 const videoStatus = require("../app/workbench-status");
 const { stageCounts } = require("../app/project-overview");
 
-test("blueprint master off accepts old failed assets, videos and local Hailuo prompt assembly", async t => {
+test("blueprint master off accepts old media and delegates missing prompt authoring to the Agent", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-blueprint-global-off-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -49,9 +49,10 @@ test("blueprint master off accepts old failed assets, videos and local Hailuo pr
   assert.equal(counts.scenes.ready, 1);
   assert.equal(counts.storyboards.ready, 1);
   assert.equal(counts.videos.ready, 1);
+  let authorCalls=0;
+  workflow.authorAgentProductionDecisions=async(id,options)=>{authorCalls++;assert.deepEqual(options.shotIds,['S01']);const p=store.getProject(id);p.shots[0].finalPromptEditing={status:'authored',detailedDescriptionEn:'Agent authored source performance'};p.shots[0].finalPromptEditing.fingerprint=require('../app/h3-final-prompt-editor').fingerprint(p.shots[0]);store.saveProject(p);return p;};
   const spec = await workflow.ensureHailuoPromptSpec(created.id, "S01", "storyboard_sheet", store.getSettings());
-  assert.ok(spec.styleEn);
-  assert.equal(spec.subshots.length, 1);
+  assert.equal(authorCalls,1);assert.equal(spec.detailedDescriptionEn,'Agent authored source performance');
 });
 
 test("blueprint master off runs production without video audits or audit-triggered rerolls", async t => {

@@ -1,18 +1,20 @@
 {
-  "name": "xiangsu-seedance-bridge",
-  "version": "0.16.31",
-  "description": "纯梦短剧老虎机：纯梦云端算力默认、可切换本地像塑的一键短剧生产工具",
+  "name": "puream-drama-slot-h3",
+  "version": "0.16.352",
+  "description": "纯梦短剧老虎机：H3 云端视频与资产直投的一键短剧生产工具",
   "main": "app/bootstrap.js",
   "author": "PUREAM",
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
+    "version": "node scripts/release-version-contract.js --sync",
     "test": "node --test scripts/*.test.js",
     "verify:build-assets": "node scripts/verify-build-assets.js",
     "prepare:build-assets": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-build-assets.ps1",
-    "prebuild:dir": "npm run verify:build-assets",
+    "sync:drama-skill": "node scripts/sync-drama-skill.js --write",
+    "prebuild:dir": "npm run verify:build-assets && node scripts/verify-electron-runtime.js && node scripts/sync-drama-skill.js",
     "build:dir": "electron-builder --win dir --x64",
-    "prebuild:installer": "npm run verify:build-assets",
+    "prebuild:installer": "npm run verify:build-assets && node scripts/verify-electron-runtime.js && node scripts/sync-drama-skill.js",
     "build:installer": "electron-builder --win nsis --x64",
     "audit:packaged": "node scripts/audit-packaged.js",
     "audit:installed": "node scripts/audit-installed.js",
@@ -21,37 +23,60 @@
     "audit:upload-transport": "electron scripts/electron-upload-transport.audit.js"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.0.0",
     "axe-core": "4.13.0",
     "electron": "43.2.0",
     "electron-builder": "26.15.3",
     "playwright-core": "1.62.1"
   },
   "build": {
+    "electronDist": "node_modules/electron/dist",
     "appId": "cn.puream.drama-slot-machine",
     "productName": "纯梦短剧老虎机",
     "artifactName": "纯梦短剧老虎机-安装版-${version}.${ext}",
     "asar": true,
-    "asarUnpack": [
-      "app/assets/xiangsu-window-hider.exe",
-      "app/assets/face-grid-processor.exe"
-    ],
     "files": [
       "app/**/*",
+      "!app/**/__pycache__/**",
+      "!app/assets/builtin-sfx/**/*",
+      "!app/renderer/index.html",
       "package.json"
     ],
     "extraResources": [
       {
-        "from": "plugin",
-        "to": "xiangsu-plugin"
+        "from": "app/local-audio-performance.py",
+        "to": "agents/local-audio-performance.py"
+      },
+      {
+        "from": "app/local-active-speaker.py",
+        "to": "agents/local-active-speaker.py"
+      },
+      {
+        "from": "app/local-media-asr.py",
+        "to": "agents/local-media-asr.py"
+      },
+      {
+        "from": "app/local-agent-dsh.py",
+        "to": "agents/local-agent-dsh.py"
       },
       {
         "from": "media-tools",
         "to": "media-tools"
+      },
+      {
+        "from": "app/assets/builtin-sfx",
+        "to": "builtin-sfx"
+      },
+      {
+        "from": "app/mcp/packaged-stdio-entry.js",
+        "to": "mcp/packaged-stdio-entry.js"
+      },
+      {
+        "from": "app/mcp/stage-delivery-entry.js",
+        "to": "mcp/stage-delivery-entry.js"
       }
     ],
     "directories": {
-    "output": "dist-fixed-0.16.31"
+      "output": "dist-fixed-0.16.352"
     },
     "win": {
       "icon": "app/assets/app.ico",
@@ -77,6 +102,7 @@
     }
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0"
   }
 }

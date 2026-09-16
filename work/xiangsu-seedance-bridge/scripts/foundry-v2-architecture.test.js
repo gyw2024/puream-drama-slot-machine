@@ -98,6 +98,22 @@ test("production contract keeps absolute bans above uploaded-document directions
   assert.throws(() => assertAbsolutePolicies(tampered), error => error.code === "FOUNDRY_ABSOLUTE_POLICY_VIOLATION");
 });
 
+test("production contract preserves selected commerce intent before product intake", () => {
+  for (const commerceMode of ["natural", "explicit"]) {
+    const project = projectFixture({
+      productionPlan: {
+        ...projectFixture().productionPlan,
+        commerceMode
+      },
+      product: { name: "", sellingPoints: "" }
+    });
+    const contract = compileProductionContract(project);
+    assert.equal(contract.intent.commerceMode, commerceMode);
+    assert.equal(contract.facts.productName, "");
+    assert.equal(contract.facts.commerceShotCount, 0);
+  }
+});
+
 test("local script understanding treats document instructions as evidence and suppresses conflicting cues", () => {
   const project = projectFixture();
   const contract = compileProductionContract(project);
@@ -109,6 +125,25 @@ test("local script understanding treats document instructions as evidence and su
   assert.ok(report.summary.characterCount >= 2);
   assert.ok(report.summary.suppressedDirectionCount >= 1);
   assert.ok(report.directions.forbidden.every(item => item.resolution === "preserve_as_source_evidence_but_exclude_from_generated_media"));
+  assert.equal(report.productionIR.targetDuration.role, "authoring_reference_only");
+  assert.equal(report.productionIR.targetDuration.locksUnitCount, false);
+  assert.equal(report.productionIR.targetDuration.locksShotDuration, false);
+  assert.equal(report.productionIR.units.every(unit => unit.durationBasis === "dialogue_action_and_scene_rhythm"), true);
+});
+
+test("semantic IR keeps production directions permanently outside spoken dialogue", () => {
+  const project = projectFixture();
+  project.shots[0].dialogueTurns = [
+    { speakerId: "C01", speaker: "林姨", text: "你先看完日期。", sourceTone: "压低声音，克制提醒" },
+    { speaker: "动作", text: "林姨把缴费单推到桌上" },
+    { speaker: "运镜", text: "镜头缓慢推近" }
+  ];
+  const contract = compileProductionContract(project);
+  project.foundry = { contract };
+  const report = buildScriptUnderstanding(project.script.raw, project, { contract });
+  assert.deepEqual(report.productionIR.units[0].spokenTurns.map(turn => turn.text), ["你先看完日期。"]) ;
+  assert.equal(report.productionIR.units[0].silentDirections.action, project.shots[0].action);
+  assert.match(report.productionIR.units[0].spokenTurns[0].delivery.tone, /克制提醒/);
 });
 
 test("compound scene headings stay split while transition notes never become characters", () => {
@@ -198,7 +233,9 @@ test("quality laboratory blocks policy conflicts and admits a coherent complete 
   const broken = structuredClone(project);
   broken.shots[0].videoPrompt = "添加醒目字幕，并配上背景音乐，再显示人物介绍";
   const blocked = evaluateProject(broken, { contract, understanding });
-  assert.equal(blocked.paidGenerationAllowed, false);
+  assert.equal(blocked.formalReady, false);
+  assert.equal(blocked.paidGenerationAllowed, true);
+  assert.equal(blocked.executionPolicy, "advisory_quality_with_stage_preflight");
   assert.ok(blocked.levels.technical.issues.some(item => item.id === "absolute_media_policy"));
 });
 
@@ -251,7 +288,7 @@ test("transactional runtime preserves revisions, audit history, and retryable op
 
   const operation = runtime.beginOperation({ projectId: first.id, kind: "generate.asset", targetId: "C01", inputFingerprint: "same-input" });
   const failure = runtime.failOperation(operation.operationKey, new FoundryError("provider timeout", { code: "PROVIDER_TIMEOUT", kind: ERROR_KINDS.PROVIDER_TRANSIENT, retryable: true }));
-  assert.equal(failure.status, "failed");
+  assert.equal(failure.status, "waiting");
   const resumed = runtime.beginOperation({ projectId: first.id, kind: "generate.asset", targetId: "C01", inputFingerprint: "same-input" });
   assert.equal(resumed.resumed, true);
   assert.equal(resumed.attempts, 2);

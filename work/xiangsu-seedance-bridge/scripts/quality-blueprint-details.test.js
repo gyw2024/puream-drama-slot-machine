@@ -101,3 +101,10 @@ test("renderer exposes per-item controls and one-click enable or disable actions
   assert.match(html, /data-blueprint-bulk="none"/);
   assert.match(renderer, /saveQualityBlueprintSetting\(state\.settings\?\.generation\?\.qualityGatesEnabled === true, null, checks\)/);
 });
+
+test("renderer labels disabled audits as unscored instead of claiming a fabricated pass", () => {
+  const renderer = fs.readFileSync(path.join(__dirname, "..", "app", "renderer", "workbench.js"), "utf8");
+  assert.match(renderer, /审核蓝图已关闭：本项未评分，绝不显示虚假100分/);
+  assert.match(renderer, /structural\?\.skipped \? "pending"/);
+  assert.match(renderer, /semantic\?\.skipped \|\| semantic\?\.unscored/);
+});

@@ -7,16 +7,25 @@ function clean(value = "") {
 }
 
 function normalizeSceneName(value = "") {
-  let name = clean(value)
-    .replace(/^[\[【(（《<]\s*/, "")
-    .replace(/\s*[\]】)）》>]$/, "")
+  let name = clean(value);
+  const wrapperPairs = new Map([["[", "]"], ["【", "】"], ["(", ")"], ["（", "）"], ["《", "》"], ["<", ">"]]);
+  if (wrapperPairs.get(name[0]) === name.at(-1)) name = name.slice(1, -1).trim();
+  name = name
     .replace(/^(?:场景|地点|内景|外景)\s*[:：-]?\s*/i, "")
+    .replace(/[｜|]\s*\d+(?:\.\d+)?\s*[-–—~～]\s*\d+(?:\.\d+)?\s*秒\s*$/u, "")
     .replace(/^(?:转场|切至|切到|转至|来到)\s*[:：-]?\s*/i, "")
     .replace(/^@+/, "")
     .replace(/[。；;，,]+$/, "")
     .trim();
+  // Comma-delimited time and performance annotations are not reusable spaces.
+  // Keep a compound location prefix intact; only strip a suffix beginning with
+  // an explicit time/state marker, never an arbitrary second physical place.
+  name = name.replace(/[，,]\s*(?:白天|夜晚|夜里|夜间|清晨|晚上|夜|日)(?:[，,\s].*|$)$/u, '').replace(/[，,]\s*(?:路灯昏黄|墙上挂着|门轻轻带上).*$/u,'').trim();
   // Day/time state is shot continuity, not a reusable physical location.
-  name = name.replace(/\s*[（(](?:次日|翌日|当天|当晚|同日|数日后|几日后|第二天|第三天|白天|夜晚|夜间|清晨|傍晚|深夜|凌晨)[^）)]{0,32}[）)]?\s*$/i, "").trim();
+  name = name
+    .replace(/\s*[·•]\s*(?:连续|当天|当晚|同日|次日|翌日|第[一二三四五六七八九十百千零〇\d]+天(?:后)?|[一二三四五六七八九十百千零〇\d]+天后|数日后|几日后)?\s*(?:白天|夜晚|夜间|清晨|傍晚|深夜|凌晨|上午|下午|中午|晚上)?\s*(?:[（(][^）)]{0,32}[）)])?\s*$/i, "")
+    .replace(/\s*[（(](?:次日|翌日|当天|当晚|同日|数日后|几日后|第二天|第三天|白天|夜晚|夜间|清晨|傍晚|深夜|凌晨|产品段)[^）)]{0,32}[）)]\s*$/i, "")
+    .trim();
   name = name.replace(/集团总裁办(?:公室)?/g, "总裁办公室").replace(/总裁办(?!公室)/g, "总裁办公室");
   return name;
 }
@@ -24,6 +33,7 @@ function normalizeSceneName(value = "") {
 function sceneSemanticKey(value = "") {
   return normalizeSceneName(value)
     .replace(/宽大(?:的)?|巨大(?:的)?|高档|豪华|气派|室内|室外/g, "")
+    .replace(/小(?=客厅|卧室|书房|厨房|餐厅)/g, "")
     .replace(/办公桌前|桌前|收银台前/g, "")
     .replace(/大门前|门前/g, "门口")
     .replace(/机场免税店/g, "免税店")
@@ -47,6 +57,10 @@ function isSceneTimeToken(value = "") {
 function isInvalidPhysicalSceneAssetName(value = "") {
   const name = normalizeSceneName(value);
   if (!name || isSceneTimeToken(name)) return true;
+  // Structural beat labels are often wrapped in the same brackets as a real
+  // location in rehearsal scripts. They are not physical spaces and must not
+  // become an extra scene asset.
+  if (/^(?:收尾|结尾|尾声|开场|开始|转场|过场|同时|次日|翌日|人物|角色|道具|对白|对话汇总|剧情|制作说明|背景说明|逐句表演|表演说明|逐句语气|情绪弧线|动作表情|表演时间预算)$/i.test(name)) return true;
   // Shot ranges and production headings are never reusable physical scenes.
   if (/^(?:第\s*[一二三四五六七八九十百千万\d]+\s*(?:镜|分镜|镜头)|(?:S|SHOT)\s*\d+)(?:\s|$|[:：|｜])/i.test(name)) return true;
   if (/^\d+(?:\.\d+)?\s*(?:秒)?\s*(?:[-~—至]\s*\d+(?:\.\d+)?\s*秒?)?(?:内|外)?$/i.test(name)) return true;
@@ -65,7 +79,7 @@ function splitCompoundSceneName(value = "") {
     .filter(part => part && !isSceneTimeToken(part));
 }
 
-function parseSceneHeading(line = "") {
+function parseSceneHeading(line = "", options = {}) {
   const text = String(line || "").trim();
   if (!text || text.length > 180) return null;
   // Acts and shot headers describe narrative structure, camera coverage or
@@ -91,6 +105,14 @@ function parseSceneHeading(line = "") {
   }
   match = text.match(/^(?:#{1,6}\s*)?第[一二三四五六七八九十百千零〇\d]+场\s*[:：、.-]?\s*(.+)$/i);
   if (match) return { raw: clean(match[1]), kind: "numbered_chinese" };
+  // The AI format-adaptation contract uses `S01｜场景：地点` because S is a
+  // production unit, not a reusable scene id. Admit that exact syntax only
+  // for the already-standardized document; arbitrary user S01 shot headers
+  // remain excluded so camera/action titles cannot become scene assets.
+  if (options.acceptStandardShotHeading === true) {
+    match = text.match(/^(?:#{1,6}\s*)?S\d{1,4}\s*[｜|]\s*(?:场景\s*[:：]\s*)?(.+)$/i);
+    if (match) return { raw: clean(match[1]), kind: "standardized_shot" };
+  }
   // SC01 is a scene identifier. S01 is a shot identifier and must never be
   // promoted into a scene asset, even when it contains time/camera/action fields.
   match = text.match(/^(?:#{1,6}\s*)?SC\d{1,4}\b\s*[:：、.\-]?\s*(.+)$/i);
@@ -99,6 +121,17 @@ function parseSceneHeading(line = "") {
   if (match) return { raw: clean(match[1]).replace(/\s+[-—]\s*(?:DAY|NIGHT|日|夜|晨|晚).*$/i, ""), kind: "fountain" };
   match = text.match(/^(?:#{1,6}\s*)?(?:地点|内景|外景)\s*[:：]\s*(.+)$/i);
   if (match) return { raw: clean(match[1]), kind: "location" };
+  // Common rehearsal/舞台对白 format: 【楼道，傍晚】 or [图书室里].
+  // It has no “场景：” label but is still an authored physical-location
+  // heading. Drop a trailing pure time token while preserving the location.
+  match = text.match(/^[【\[]\s*([^】\]\n]{2,80})\s*[】\]]$/);
+  if (match) {
+    const parts = clean(match[1]).split(/[，,]/).map(clean).filter(Boolean);
+    const raw = parts.length > 1 && isSceneTimeToken(parts.at(-1))
+      ? parts.slice(0, -1).join("，")
+      : clean(match[1]);
+    return raw ? { raw, kind: "bracketed_rehearsal" } : null;
+  }
   return null;
 }
 
@@ -131,7 +164,7 @@ function isPresentationSceneVariant(value = "") {
   return /(?:直播|主观|监控|采访|航拍|跟拍)?(?:视角|机位|镜头|画面)$/i.test(normalizeSceneName(value));
 }
 
-function buildSourceSceneLedger(value = "") {
+function buildSourceSceneLedger(value = "", options = {}) {
   const source = String(value || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   const catalogue = [];
   const occurrences = [];
@@ -168,10 +201,14 @@ function buildSourceSceneLedger(value = "") {
     if (declared && !scene.sourceStarts.includes(sourceStart)) scene.sourceStarts.push(sourceStart);
     return scene;
   };
-  const pushOccurrence = (scene, sourceStart, sourceEnd, reason, rawName) => {
+  const pushOccurrence = (scene, sourceStart, sourceEnd, reason, rawName, preserveRepeatedHeading = false) => {
     if (!scene) return;
     const previous = occurrences.at(-1);
-    if (previous?.sceneId === scene.id) return;
+    // Two consecutive authored headings may return to the same physical scene
+    // under a different time/beat label.  Keep both occurrences for dialogue
+    // binding and shot order while still reusing one catalogue asset.
+    if (previous?.sceneId === scene.id
+      && (!preserveRepeatedHeading || previous.sourceStart === sourceStart)) return;
     if (previous && previous.sourceEnd == null) previous.sourceEnd = sourceStart;
     occurrences.push({
       id: `SRC_OCC${String(occurrences.length + 1).padStart(3, "0")}`,
@@ -187,15 +224,25 @@ function buildSourceSceneLedger(value = "") {
 
   let pending = [];
   for (const line of lines) {
-    const heading = parseSceneHeading(line.text);
+    const heading = parseSceneHeading(line.text, options);
     if (heading) {
       headingKinds.add(heading.kind);
-      const parts = splitCompoundSceneName(heading.raw);
+      const parts = heading.kind === 'standardized_shot' ? [heading.raw] : splitCompoundSceneName(heading.raw);
       const declared = parts.map(part => addScene(part, line.start, true, heading.kind)).filter(Boolean);
       pending = declared.slice(1);
-      pushOccurrence(declared[0], line.start, null, "heading", parts[0]);
+      pushOccurrence(
+        declared[0],
+        line.start,
+        null,
+        "heading",
+        parts[0],
+        ["numbered_chinese", "standardized_shot"].includes(heading.kind)
+      );
       continue;
     }
+    // Canonical S headings already declare each unit. A prop handoff or an
+    // action mentioning a doorway must not create extra scene occurrences.
+    if (options.acceptStandardShotHeading === true && headingKinds.has('standardized_shot')) continue;
     const explicitTransition = transitionTarget(line.text);
     if (explicitTransition) {
       const candidates = pending.length ? pending : catalogue;
@@ -250,7 +297,7 @@ function sceneAtSourceOffset(ledger, offset) {
 function bindDialogueLedgerToScenes(dialogueLedger = [], sceneLedger = {}) {
   return (Array.isArray(dialogueLedger) ? dialogueLedger : []).map(item => {
     const occurrence = sceneAtSourceOffset(sceneLedger, item.sourceStart);
-    return occurrence ? { ...item, sourceSceneId: occurrence.sceneId, sourceSceneName: occurrence.sceneName } : { ...item };
+    return occurrence ? { ...item, sourceSceneId: occurrence.sceneId, sourceSceneName: occurrence.sceneName, sourceSceneOccurrenceId: occurrence.id } : { ...item };
   });
 }
 
@@ -317,8 +364,10 @@ function enforceSourceSceneLedger(analysis = {}, sceneLedger = {}, dialogueLedge
       ...(Array.isArray(shot?.dialogueTurns) ? shot.dialogueTurns.map(item => item?.sourceDialogueId) : [])
     ].map(String).filter(Boolean);
     const dialogueSceneIds = [...new Set(bindingIds.map(id => dialogueById.get(id)?.sourceSceneId).filter(Boolean))];
-    let scene = sceneFromToken(shot?.scene || shot?.sceneName || shot?.sceneId);
-    if (!scene && dialogueSceneIds.length === 1) scene = catalogue.find(item => item.id === dialogueSceneIds[0]);
+    // Exact original dialogue ownership outranks a valid-looking stale scene
+    // token copied from the first shot during normalization.
+    let scene = dialogueSceneIds.length === 1 ? catalogue.find(item => item.id === dialogueSceneIds[0]) : null;
+    if (!scene) scene = sceneFromToken(shot?.scene || shot?.sceneName || shot?.sceneId);
     if (!scene) {
       const slot = Math.min(orderedIds.length - 1, Math.floor(index * orderedIds.length / Math.max(1, all.length)));
       scene = catalogue.find(item => item.id === orderedIds[Math.max(0, slot)]) || catalogue[0];

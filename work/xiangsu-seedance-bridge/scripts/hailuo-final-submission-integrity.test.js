@@ -7,16 +7,20 @@ const os = require("node:os");
 const path = require("node:path");
 
 const {
-  HAILUO_FINAL_OUTPUT_LOCK_EN,
   assertHailuoFinalPromptIntegrity,
   compactFullReferencePrompt,
   hasHailuoFinalOutputLock
 } = require("../app/hailuo-h3-prompt");
 const {
   assertHailuoPromptVoiceBindings,
-  finalizeVideoPromptForSubmission
+  finalizeVideoPromptForSubmission,
+  PROMPT_REVIEW_BUNDLE_VERSION
 } = require("../app/workbench-workflow");
 const { compactProviderVideoPrompt } = require("../app/ai-provider");
+const {
+  buildApprovedHailuoPrompt,
+  HAILUO_FINAL_OUTPUT_LOCK
+} = require("../app/hailuo-h3-natural-prompt");
 
 function writeVoiceWav(filePath) {
   const sampleRate = 8000;
@@ -60,6 +64,7 @@ function fixture(t) {
   }));
   const project = {
     generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3" },
+    promptReview: { version: PROMPT_REVIEW_BUNDLE_VERSION, status: "approved" },
     characters: [{ id: "C01", name: "林梅" }, { id: "C02", name: "周强" }],
     shots: []
   };
@@ -68,9 +73,17 @@ function fixture(t) {
     number: 1,
     duration: 8,
     promptMode: "system",
+    promptReviewBundleVersion: PROMPT_REVIEW_BUNDLE_VERSION,
     characterIds: ["C01", "C02"],
     visibleCharacterIds: ["C01", "C02"],
-    dialogueTurns: turns
+    dialogueTurns: turns,
+    promptReviewReferencePlan: {
+      images: [],
+      audios: [
+        { characterId: "C01" },
+        { characterId: "C02" }
+      ]
+    }
   };
   project.shots = [shot];
   const references = {
@@ -80,37 +93,23 @@ function fixture(t) {
       { characterId: "C02", characterName: "周强", path: voice2, duration: 0.1 }
     ]
   };
-  const contracts = turns.map((turn, index) => {
-    const speaker = index % 2 === 0 ? "林梅" : "周强";
-    const listener = speaker === "林梅" ? "周强" : "林梅";
-    const audio = speaker === "林梅" ? 1 : 2;
-    return `${index * 2.0}-${(index + 1) * 2.0}秒：角色“${speaker}”使用音频${audio}，面向“${listener}”，语气“${turn.sourceTone}”，情绪“逐步加压”，只说一次：“${turn.text}”；说话时仅“${speaker}”动嘴，眉眼、呼吸和手部随重音变化；${listener}闭口并同步反应。`;
+  const overlong = buildApprovedHailuoPrompt({
+    project,
+    shot,
+    references,
+    dialogueTurns: turns.map((turn, index) => ({ ...turn, start: index * 2, end: (index + 1) * 2 })),
+    spec: { summaryEn: "A four-line confrontation escalates through alternating speaker close-ups and visible reactions." }
   });
-  const overlong = [
-    "【生成规格】",
-    "S01；9:16竖屏；写实真人短剧；严格8.0秒；图片+音频多模态参考。",
-    "【素材绑定】",
-    "音频1=角色“林梅”的唯一音色参考，只参考音色、音质和说话质感，不复制原音频台词；“林梅”只使用音频1，其他角色禁止借用；音频2=角色“周强”的唯一音色参考，只参考音色、音质和说话质感，不复制原音频台词；“周强”只使用音频2，其他角色禁止借用；素材冲突时按：完整对白与表演＞人物图片＞音频声线＞场景图片＞参考视频。",
-    "【核心表演】",
-    `每句对白逐字完整，只说一次；对白内容＞语气＞情绪＞场景＞运镜＞其他。${"保持视线、手部、呼吸与情绪递进。".repeat(80)}`,
-    "【逐秒镜头与对白】",
-    ...contracts,
-    "【连续性】",
-    "人物身份、服装、站位、持物手、视线轴、场景布局和主光连续。",
-    "【声音】",
-    "对白清晰；声线按音频编号一一对应；连续现场底噪和同步动作音效。",
-    "【禁止项】",
-    HAILUO_FINAL_OUTPUT_LOCK_EN
-  ].join("\n");
   return { project, shot, references, lines, overlong };
 }
 
-test("Hailuo final compiler reserves the output lock and preserves four complete dialogue contracts", t => {
+test("Hailuo final compiler never truncates a valid over-budget prompt and preserves four complete dialogue contracts", t => {
   const { project, shot, references, lines, overlong } = fixture(t);
   const compiled = compactFullReferencePrompt(overlong);
-  assert.ok(compiled.length <= 1900, `compiled prompt must fit provider limit, got ${compiled.length}`);
+  assert.equal(compiled, overlong, "the advisory local character budget must not truncate a provider-valid prompt");
   assert.equal(hasHailuoFinalOutputLock(compiled), true);
-  assert.ok(compiled.includes(HAILUO_FINAL_OUTPUT_LOCK_EN));
+  assert.ok(compiled.includes(HAILUO_FINAL_OUTPUT_LOCK));
+  assert.ok(compiled.startsWith("subject_definitions:\n"));
   assert.equal(assertHailuoFinalPromptIntegrity(compiled), true);
   for (const line of lines) {
     assert.equal(compiled.split(line).length - 1, 1, `dialogue must appear exactly once: ${line}`);
@@ -121,7 +120,7 @@ test("Hailuo final compiler reserves the output lock and preserves four complete
 test("the paid submission path keeps a compiler-owned Hailuo shot byte-identical", t => {
   const { project, shot, references, overlong } = fixture(t);
   const compiled = compactFullReferencePrompt(overlong);
-  const execution = finalizeVideoPromptForSubmission(project, "shot", shot.id, "shot_video", compiled, "hailuo-h3");
+  const execution = finalizeVideoPromptForSubmission(project, "shot", shot.id, "shot_video", compiled, "hailuo-h3", references);
   assert.equal(execution, compiled);
   assert.equal(assertHailuoPromptVoiceBindings(project, shot, references, execution), true);
 });
@@ -130,17 +129,62 @@ test("generic prompt compaction reserves policy space instead of appending then 
   const prompt = `${"Optional camera prose. ".repeat(180)}\nSpeaker: <Subject 1>; voice timbre referenced by <Audio 1>; delivery: firm; addresses: <Subject 2>; exact line, say once: <d>[Chinese] 原话</d>; listener reaction: <Subject 2> stays silent.`;
   const compacted = compactProviderVideoPrompt(prompt);
   assert.ok(compacted.length <= 1900);
-  assert.match(compacted, /FINAL VIDEO OUTPUT LOCK:/);
+  assert.match(compacted, /FINAL VIDEO RUNTIME BOUNDARY:/);
   assert.match(compacted, /<d>\[Chinese\] 原话<\/d>/);
 });
 
-test("an over-budget compiler-owned shot is rejected rather than silently truncated", () => {
+test("an over-budget current integrated compiler-owned shot is never truncated or blocked by a local character budget", () => {
   const project = {
-    generation: { engine: "hailuo-h3" },
-    shots: [{ id: "S01", promptMode: "system", dialogueTurns: [] }]
+    generation: { engine: "hailuo-h3", aspectRatio: "9:16" },
+    promptReview: { version: PROMPT_REVIEW_BUNDLE_VERSION, status: "approved" },
+    shots: [{
+      id: "S01",
+      number: 1,
+      duration: 10,
+      promptMode: "system",
+      promptReviewBundleVersion: PROMPT_REVIEW_BUNDLE_VERSION,
+      dialogueTurns: [],
+      action: `人物从门口走到柜台，完成一次清楚的取物动作，然后回到原位。${"观众能看见动作结果，人物保持沉默，现场状态连续。".repeat(90)}`
+    }]
   };
-  assert.throws(
-    () => finalizeVideoPromptForSubmission(project, "shot", "S01", "shot_video", "x".repeat(1901), "hailuo-h3"),
-    error => error?.code === "VIDEO_PROMPT_COMPILER_BUDGET_EXCEEDED"
-  );
+  const valid = buildApprovedHailuoPrompt({ project, shot: project.shots[0], references: {}, dialogueTurns: [] });
+  assert.ok(valid.length > 1900);
+  assert.equal(finalizeVideoPromptForSubmission(project, "shot", "S01", "shot_video", valid, "hailuo-h3"), valid);
+});
+
+test("a stale retired six-section cache is deterministically recompiled before paid submission", () => {
+  const project = {
+    generation: { engine: "hailuo-h3", aspectRatio: "9:16" },
+    promptReview: { version: "prompt-review-v8-retired", status: "approved" },
+    characters: [{ id: "C01", name: "店主" }],
+    shots: [{
+      id: "S01",
+      number: 1,
+      duration: 10,
+      promptMode: "system",
+      promptReviewBundleVersion: "prompt-review-v8-retired",
+      characterIds: ["C01"],
+      visibleCharacterIds: ["C01"],
+      dialogueTurns: [{ speakerId: "C01", text: "今天还是老样子。" }]
+    }]
+  };
+  const retired = [
+    "subject_definitions:",
+    "<Subject 1> is the shop owner.",
+    "summary:",
+    "Old prompt.",
+    "retention_analysis:",
+    "Old cache.",
+    "detailed_description:",
+    "Old six-section body.",
+    "overall_soundscape:",
+    "Room tone.",
+    "non_diegetic_music:",
+    "N/A"
+  ].join("\n");
+  const execution = finalizeVideoPromptForSubmission(project, "shot", "S01", "shot_video", retired, "hailuo-h3");
+  assert.ok(execution.startsWith("subject_definitions:\n"));
+  assert.match(execution, /<d>\[Chinese\] 今天还是老样子。<\/d>/);
+  assert.match(execution, /subject_definitions:|retention_analysis:/);
+  assert.doesNotMatch(execution.replace(/<d>\[Chinese\][\s\S]*?<\/d>/g, ""), /[\u3400-\u9fff]/);
 });

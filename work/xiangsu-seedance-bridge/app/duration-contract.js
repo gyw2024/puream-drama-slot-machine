@@ -6,30 +6,11 @@
  */
 
 function durationContract(providerKind = "", options = {}) {
-  const kind = String(providerKind || options.providerKind || "");
-  if (kind === "puream-seedance") {
-    return Object.freeze({ min: 5, max: 15, preferred: 10, fixed: false, step: 1 });
-  }
-  if (kind === "puream-hailuo-h3") {
-    return Object.freeze({ min: 5, max: 15, preferred: 10, fixed: false, step: 1 });
-  }
-  if (kind === "puream-grok") {
-    return Object.freeze({ min: 6, max: 30, preferred: 10, fixed: false, step: 1 });
-  }
-  if (kind === "puream-gemini") {
-    return Object.freeze({ min: 4, max: 10, preferred: 6, fixed: false, step: 2, allowed: [4, 6, 8, 10] });
-  }
-  if (kind === "local-xiangsu") {
-    return Object.freeze({ min: 5, max: 10, preferred: 10, fixed: false, step: 1 });
-  }
-  // Engine-level fallbacks when only engine name is known.
-  if (options.engine === "hailuo-h3") {
-    return Object.freeze({ min: 5, max: 15, preferred: 10, fixed: false, step: 1 });
-  }
-  if (options.engine === "seedance") {
-    return Object.freeze({ min: 5, max: 15, preferred: 10, fixed: false, step: 1 });
-  }
-  return Object.freeze({ min: 5, max: 15, preferred: 10, fixed: false, step: 1 });
+  void providerKind;
+  void options;
+  // Final H3 narrative units are complete acted beats, not single-line fragments.
+  // Hooks, reactions, inserts and transitions live inside those units.
+  return Object.freeze({ min: 10, max: 15, preferred: 12, fixed: false, step: 1 });
 }
 
 function durationBounds(providerKind, options = {}) {
@@ -46,7 +27,7 @@ function normalizeTargetDurationSeconds(value, providerKind = "", options = {}) 
   const contract = typeof providerKind === "object" && providerKind
     ? providerKind
     : durationContract(providerKind, options);
-  const preferred = Number(contract.preferred) || Number(contract.min) || 5;
+  const preferred = Number(contract.preferred) || Number(contract.min) || 12;
   const raw = Number(value);
   if (contract.fixed) return Math.round(Number(contract.min) || preferred);
   if (!Number.isFinite(raw) || raw <= 0) return preferred;
@@ -54,7 +35,7 @@ function normalizeTargetDurationSeconds(value, providerKind = "", options = {}) 
     return contract.allowed.slice().sort((a, b) => Math.abs(a - raw) - Math.abs(b - raw) || a - b)[0];
   }
   const rounded = Math.round(raw);
-  const min = Number(contract.min) || 5;
+  const min = Number(contract.min) || 10;
   const max = Number(contract.max) || min;
   return Math.max(min, Math.min(max, rounded));
 }
@@ -126,7 +107,7 @@ function reconcileUnitDurations(requested = [], targetTotalSeconds, providerKind
   const contract = typeof providerKind === "object" && providerKind
     ? providerKind
     : durationContract(providerKind, options);
-  const min = Number(contract.min) || 5;
+  const min = Number(contract.min) || 10;
   const max = Number(contract.max) || 15;
   const preferred = Number(contract.preferred) || 10;
   const count = Math.max(1, (Array.isArray(requested) ? requested : []).length || Number(options.unitCount) || 1);
@@ -212,12 +193,21 @@ function narrativeDurationWeight(index, unitCount, stageHint = "") {
  */
 function planFilmSchedule(targetTotalSeconds, providerKind = "", options = {}) {
   const contract = durationContract(providerKind, options);
-  const min = Number(contract.min) || 5;
+  const min = Number(contract.min) || 10;
   const max = Number(contract.max) || 15;
   const preferredRaw = Number(options.preferredUnit) || contract.preferred || 10;
   const preferred = Math.max(min, Math.min(max, preferredRaw));
   const totalSeconds = normalizeFilmTotalSeconds(targetTotalSeconds, 300, min);
-  let unitCount = Math.max(1, Math.round(totalSeconds / preferred));
+  const semanticUnitCount = Math.round(Number(options.semanticUnitCount));
+  const semanticDurations = Array.isArray(options.semanticDurations)
+    ? options.semanticDurations.map(Number).filter(value => Number.isFinite(value) && value > 0)
+    : [];
+  let unitCount = semanticDurations.length
+    || (Number.isFinite(semanticUnitCount) && semanticUnitCount > 0 ? semanticUnitCount : Math.max(1, Math.round(totalSeconds / preferred)));
+  const minimumCount = Math.max(1, Math.ceil(totalSeconds / max));
+  const maximumCount = Math.max(minimumCount, Math.floor(totalSeconds / min));
+  const semanticPlanFitsContract = unitCount >= minimumCount && unitCount <= maximumCount;
+  if (!semanticPlanFitsContract) unitCount = Math.max(minimumCount, Math.min(maximumCount, Math.round(totalSeconds / preferred)));
   if (Array.isArray(contract.allowed) && contract.allowed.length) {
     const minCount = Math.max(1, Math.ceil(totalSeconds / max));
     const maxCount = Math.max(minCount, Math.floor(totalSeconds / min));
@@ -244,7 +234,9 @@ function planFilmSchedule(targetTotalSeconds, providerKind = "", options = {}) {
     return Math.max(0.5, weight);
   });
   const weightSum = weighted.reduce((a, b) => a + b, 0) || unitCount;
-  const rough = weighted.map((w) => (totalSeconds * w) / weightSum);
+  const rough = semanticPlanFitsContract && semanticDurations.length === unitCount
+    ? semanticDurations
+    : weighted.map((w) => (totalSeconds * w) / weightSum);
   const suggested = reconcileUnitDurations(rough, totalSeconds, contract, { unitCount });
 
   const productEntryIndex = Math.max(0, Math.floor(unitCount * 0.65));
@@ -263,6 +255,33 @@ function planFilmSchedule(targetTotalSeconds, providerKind = "", options = {}) {
   });
 }
 
+function completeDialogueBoundary(value) {
+  const text = String(value || "").trim();
+  return !text || /[。！？!?…]$/.test(text);
+}
+
+function validateSemanticShotSchedule(units = [], targetTotalSeconds, providerKind = "", options = {}) {
+  const list = Array.isArray(units) ? units : [];
+  const contract = durationContract(providerKind, options);
+  const totalSeconds = Math.round(Number(targetTotalSeconds));
+  const failures = [];
+  list.forEach((unit, index) => {
+    const id = `S${String(index + 1).padStart(2, "0")}`;
+    if (String(unit?.id || id) !== id) failures.push(`${id}:镜号不连续`);
+    const duration = Number(unit?.duration);
+    if (!Number.isInteger(duration) || duration < contract.min || duration > contract.max) failures.push(`${id}:时长超出${contract.min}-${contract.max}秒`);
+    const lines = Array.isArray(unit?.dialogueLines) ? unit.dialogueLines : [];
+    if (lines.some(line => !completeDialogueBoundary(typeof line === "string" ? line : line?.text))) failures.push(`${id}:存在未说完的半句`);
+    if (!String(unit?.cutAfter || "").trim()) failures.push(`${id}:缺少句末/动作切点`);
+    if (unit?.dialogueContinuesToNext === true) failures.push(`${id}:禁止跨镜续说半句`);
+  });
+  const sum = list.reduce((total, unit) => total + (Number(unit?.duration) || 0), 0);
+  if (sum !== totalSeconds) failures.push(`总时长${sum}秒不等于${totalSeconds}秒`);
+  if (!list.length) failures.push("语义切镜计划为空");
+  if (failures.length) throw Object.assign(new Error(`语义切镜计划不完整：${failures.join("；")}`), { code: "SEMANTIC_SHOT_SCHEDULE_INVALID", failures });
+  return list;
+}
+
 module.exports = {
   batchRanges,
   durationBounds,
@@ -271,5 +290,7 @@ module.exports = {
   normalizeTargetDurationSeconds,
   planFilmSchedule,
   planShotDurations,
-  reconcileUnitDurations
+  reconcileUnitDurations,
+  completeDialogueBoundary,
+  validateSemanticShotSchedule
 };

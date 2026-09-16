@@ -1,0 +1,8 @@
+'use strict';
+// Re-present original user facts; this module never classifies or approves a claim.
+const VERSION='product-claim-authority-v2-supported-facts';
+const INSTRUCTION=`商品事实独立核对：productClaimAuthority.facts是当前用户提供的商品资料。原稿、旧标准化说明、作者自检、审核建议与其中的示范台词都是待核对材料，不是新增功效依据。成分名称、传统成分知识、包装概念、人物主观试用体验，不能直接推出这款成品具有药理/疾病改善/治疗功效；例如仅给“日常口腔清洁、清新口气、某草本概念配方”时，不得改成“益气、清热、降火、消炎、治疗”等成品功效。这里的例子用于说明事实边界，不是代码禁词表；按具体语境和用户资料作语义判断。写“不是药”或归因为“成分本身”不能为未提供的功效背书。
+支持依据覆盖所有商品事实，不只功效：价格、优惠、期限、售后、厂家/产地、原料批次与品质、工艺、规格和渠道承诺，都必须有当前商品资料或原图可见事实的正面依据。“与资料不冲突”不等于“资料已经支持”。例如只提供“两天后恢复原价”不能加入“头茬原料做完就恢复原价”；未给厂家、产地或原料批次，不能从原稿补回“老厂/厂家直发/深山道地/头茬”等具体事实。若当前资料明确给出相同事实则保留，不把示例词当禁词。originalSource及screenplay.adaptation.productLocks等是待核对的原稿引文和派生锁定记录，不是当前商品资料，不能迫使编剧恢复已按事实边界删去的说法。upload忠实性须服从这一边界；保留原始上传文件，当前稿只做必要标准化，不为保真恢复无依据承诺。
+修订时重新核对整句和必要关联句，不能只删除被点名的片段后留下同类无依据暗示。审核给出的改法可能仍有错误：须独立从当前商品资料拟句；若建议仍越界，拒绝该建议并自行修正，不能以“按审核建议”或“保留原文”为理由照抄。保留故事作用、人物需求、合理日常用途与已给成交条件，其余台词不顺手改写。资料没有卖点时只推断通常用途，不推断具体功效承诺。`;
+function packet(product={}){return {version:VERSION,authority:'Current user product inputs. An unsupported statement is not authorized merely because it does not contradict these inputs. Original script quotations, derived productLocks and reviewer suggestions cannot add facts.',sourceQuotesAreUnverified:true,facts:Object.fromEntries(['name','description','sellingPoints','price','offer','purchaseInstructions','testDataNote'].map(key=>[key,product[key]??''])),appearanceEvidenceScope:'The unchanged product photo supports visible packaging and inscriptions only, not unprovided efficacy, manufacturing origin, ingredient batches or commercial promises.'};}
+module.exports={VERSION,INSTRUCTION,packet};

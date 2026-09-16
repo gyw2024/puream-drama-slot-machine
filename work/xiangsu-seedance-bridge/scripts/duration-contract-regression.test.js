@@ -11,6 +11,7 @@ const { estimateUploadedScriptDuration, explicitShotTimelinePlan, explicitTimeli
 const { WorkbenchStore } = require("../app/workbench-store");
 const {
   WorkbenchWorkflow,
+  h3ExactStitchFilter,
   conformImportedAnalysisToDurationContract,
   parseStructuredProductionScript,
   scriptPipelineEntryRoute
@@ -55,7 +56,7 @@ test("an impossible fixed shot count never pretends to satisfy the film duration
   );
 });
 
-test("uploaded structured analysis is retimed exactly without losing the authored ending", () => {
+test("uploaded structured analysis keeps semantic timing without losing the authored ending", () => {
   const project = {
     generation: {
       engine: "hailuo-h3",
@@ -70,18 +71,20 @@ test("uploaded structured analysis is retimed exactly without losing the authore
   assert.deepEqual(conformed.shots.map(shot => shot.id), ["S01", "S02", "S03"]);
   assert.equal(conformed.shots.at(-1).action.includes("原稿结尾完整落地"), true);
   assert.equal(conformed.shots.every(shot => shot.subshots.at(-1).end === shot.duration), true);
-  assert.equal(conformed.durationContract.locked, true);
+  assert.equal(conformed.durationContract.locked, false);
   assert.equal(conformed.durationContract.source, "uploaded-script-adaptive");
 });
 
-test("AI generated projects still obey the configured duration exactly", () => {
+test("AI generated projects treat configured duration as an authoring reference", () => {
   const conformed = conformImportedAnalysisToDurationContract(importedAnalysis(3), {
     generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", targetDurationSeconds: 45 },
     productionPlan: { inputMode: "ai" }
   });
-  assert.equal(conformed.durationContract.targetSeconds, 45);
-  assert.equal(conformed.shots.reduce((sum, shot) => sum + shot.duration, 0), 45);
-  assert.equal(conformed.durationContract.source, "ai-configured-target");
+  assert.equal(conformed.durationContract.targetSeconds, 30);
+  assert.equal(conformed.durationContract.requestedTargetSeconds, 45);
+  assert.equal(conformed.shots.reduce((sum, shot) => sum + shot.duration, 0), 30);
+  assert.equal(conformed.durationContract.source, "ai-authoring-reference");
+  assert.equal(conformed.durationContract.locked, false);
 });
 
 test("uploaded dialogue duration responds to exact speech, punctuation, pace and action beats", () => {
@@ -136,7 +139,7 @@ test("explicit per-shot ranges remain authoritative when Agent rhythm returns 14
   assert.deepEqual(normalized.durationContract.authoredShotDurations, [10, 10]);
 });
 
-test("scripts without complete shot ranges keep adaptive Agent rhythm", () => {
+test("scripts without complete shot ranges preserve adaptive rhythm inside the 10-15 second production contract", () => {
   const estimate = estimateUploadedScriptDuration("全片20秒。林娜质问，秦添承认。", [], "puream-hailuo-h3", { engine: "hailuo-h3" });
   const agentResult = importedAnalysis(2);
   agentResult.shots[0].duration = 14;
@@ -145,7 +148,7 @@ test("scripts without complete shot ranges keep adaptive Agent rhythm", () => {
     generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", targetDurationSeconds: 20 },
     productionPlan: { inputMode: "manual" }
   }, { adaptiveTargetSeconds: 20, durationEstimate: estimate });
-  assert.deepEqual(normalized.shots.map(shot => shot.duration), [14, 6]);
+  assert.deepEqual(normalized.shots.map(shot => shot.duration), [14, 10]);
   assert.equal(normalized.durationContract.authoredShotDurationsLocked, false);
 });
 
@@ -154,7 +157,7 @@ test("JSON script imports use the same local structured path as markdown imports
   assert.deepEqual(parseStructuredProductionScript(JSON.stringify(source)), source);
 });
 
-test("the local uploaded-script workflow reaches assets with one persisted exact-duration revision", async () => {
+test("the local uploaded-script workflow reaches assets with one persisted adaptive-duration revision", async () => {
   const root = temporaryDirectory("puream-local-script-duration-");
   try {
     const store = new WorkbenchStore(root);
@@ -162,23 +165,46 @@ test("the local uploaded-script workflow reaches assets with one persisted exact
     settings.generation.qualityGatesEnabled = false;
     store.saveSettings(settings);
     const created = store.createProject("本地上传剧本", { targetDurationSeconds: 45, inputMode: "manual" });
-    store.patchProject(created.id, { script: { raw: JSON.stringify(importedAnalysis(3)) } });
+    const imported=importedAnalysis(3);imported.shots.forEach((shot,i)=>shot.dialogueTurns=[{speaker:'母亲',sourceDialogueId:'D'+i,text:'你先听我把今天发生的事情讲清楚，这些原始收据我一直完整地留着，等你看过日期再做决定。'}]);
+    store.patchProject(created.id, { script: { raw: JSON.stringify(imported) } });
      let paidTextCalls = 0;
     const workflow = new WorkbenchWorkflow({
       store,
       bridge: {},
       locateFfmpeg: () => "",
       stagingRoot: root,
-      textGenerator: async () => { paidTextCalls += 1; return { ...importedAnalysis(3), props: [] }; }
+    textGenerator: async (_config, messages) => {
+      paidTextCalls += 1;
+      const user = String(messages.find(item => item.role === "user")?.content || "");
+      if(user.startsWith('{"completeSource":'))return require('./whole-script-test-fixture')(JSON.parse(user).completeSource);
+      if (user.includes("UPLOADED_TEXT_TO_STANDARDIZE:\n") || user.startsWith('{"lines":')) return {
+        productionScript: "### S01｜场景：客厅\n【人物】母亲、女儿\n【核心物品】无\n【动作】母亲挡在女儿面前，女儿停步并抬眼。\n【对白】母亲（克制而坚定）：你先听我把话说完。\n【声音】连续安静室内环境声。\n【承接】女儿闭口看向母亲，冲突继续。",
+        sourceAudit: {
+          sceneOccurrenceCount: 1,
+          dialogueCount: 1,
+          sceneOccurrences: [{ order: 1, physicalSceneName: "客厅" }],
+          preservedAllDialogue: true,
+          preservedAllScenes: true,
+          preservedAllActions: true,
+          preservedEventOrder: true,
+          noInventedDialogue: true
+        }
+      };
+      return { ...importedAnalysis(3), props: [] };
+    }
     });
     const analyzed = await workflow.analyzeScript(created.id);
-     assert.equal(paidTextCalls, 1);
+     assert.equal(paidTextCalls, 1, "every upload has exactly one paid AI-first standardization pass");
+    assert.equal(analyzed.script.analysisMethod, "uploaded-ai-standardized-local-compiler-v1");
+    assert.equal(analyzed.script.analysisEnhancement?.noDuplicatePaidAnalysis, true);
     assert.equal(analyzed.currentStage, "assets");
-    assert.equal(analyzed.generation.durationLocked, true);
-    assert.equal(analyzed.generation.durationContract.targetSeconds, 30);
-    assert.equal(analyzed.generation.targetDurationSeconds, 30);
+    assert.equal(analyzed.generation.durationLocked, false);
+    const plannedSeconds = analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0);
+    assert.ok(plannedSeconds > 0);
+    assert.equal(analyzed.generation.durationContract.targetSeconds, plannedSeconds);
+    assert.equal(analyzed.generation.targetDurationSeconds, plannedSeconds);
     assert.equal(analyzed.generation.durationSource, "uploaded-script-adaptive");
-    assert.equal(analyzed.shots.reduce((sum, shot) => sum + shot.duration, 0), 30);
+    assert.notEqual(plannedSeconds, 45, "the configured target remains advisory for uploaded scripts");
     assert.match(analyzed.productionRevision, /^revision_/);
     assert.match(analyzed.script.sourceFingerprint, /^[a-f0-9]{64}$/);
   } finally {
@@ -186,12 +212,12 @@ test("the local uploaded-script workflow reaches assets with one persisted exact
   }
 });
 
-test("legacy shots with the wrong total are routed back to analysis", () => {
+test("legacy shots with a different total remain usable because duration is advisory", () => {
   assert.equal(scriptPipelineEntryRoute({
     generation: { targetDurationSeconds: 60 },
     shots: [{ duration: 10 }, { duration: 10 }],
     script: { raw: "用户上传的原稿" }
-  }), "reanalyze_duration");
+  }), "ready");
 });
 
 test("an analyzed source fingerprint prevents silently reusing shots after an out-of-band edit", () => {
@@ -308,9 +334,28 @@ test("replacing a script after pausing AI writing retires the old checkpoint", (
   }
 });
 
-test("locked duration stitching is engine-agnostic and cannot be bypassed with quality gates off", () => {
+test("rough-cut stitching uses actual trimmed media duration, selected aspect ratio and full audio", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
-  assert.match(source, /const exactDurationRequired = durationLocked && targetSeconds > 0;/);
+  assert.match(source, /const exactDurationRequired = true;/);
+  // Authored duration is only a planning hint in local post-production. Real
+  // media length minus a safe head trim now owns the exported timeline, so a
+  // stale script duration cannot truncate dialogue or pad the final sentence.
+  assert.match(source, /const sourceDuration = await probeMediaStreamDuration\(ffmpeg, videos\[index\]\.filePath, "0:v:0", signal\);/);
+  assert.match(source, /duration: Math\.max\(0\.001, sourceDuration - trimStartSeconds\), hasAudio/);
+  assert.match(source, /exactTargetSeconds = Math\.max\(0\.001, finalStreams\.reduce\(/);
+  assert.match(source, /h3ExactStitchFilter\(finalStreams, exactTargetSeconds, 24, project\.generation\?\.aspectRatio \|\| "9:16"\)/);
+  const streams = [{ duration: 12.5, trimStartSeconds: 0.2, hasAudio: true }, { duration: 6.25, trimStartSeconds: 0, hasAudio: false }];
+  for (const [ratio, dimensions] of Object.entries({ "9:16": "576:1024", "16:9": "1024:576", "1:1": "720:720", "4:3": "960:720", "3:4": "720:960", "21:9": "1344:576" })) {
+    const filter = h3ExactStitchFilter(streams, 18.75, 24, ratio);
+    assert.ok(filter.includes(`scale=${dimensions}:force_original_aspect_ratio=increase,crop=${dimensions}`), `${ratio} must retain its requested frame shape`);
+    assert.match(filter, /\[0:v:0\]settb=AVTB,trim=start=0\.2,/);
+    assert.match(filter, /\[0:a:0\][^;]*atrim=start=0\.2,[^;]*atrim=duration=12\.5/);
+    assert.match(filter, /anullsrc=r=48000:cl=stereo,atrim=duration=6\.25,[^;]*\[a1\]/);
+    assert.match(filter, /\[v0\]\[a0\]\[v1\]\[a1\]concat=n=2:v=1:a=1/);
+    assert.match(filter, /\[vcat\][^;]*trim=duration=18\.75/);
+    assert.match(filter, /\[acat\][^;]*atrim=duration=18\.75[^;]*\[outa\]/);
+    assert.doesNotMatch(filter, /drawtext|subtitles=/, "editable captions belong in the draft, never burned into the rough cut");
+  }
   assert.match(source, /if \(exactDurationRequired\) \{/);
   assert.doesNotMatch(source, /const exactDurationH3/);
   assert.match(source, /if \(!finalDurationAudit\.ok\) \{\s*throw Object\.assign/);

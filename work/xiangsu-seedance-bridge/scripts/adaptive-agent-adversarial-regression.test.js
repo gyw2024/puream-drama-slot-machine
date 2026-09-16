@@ -21,24 +21,26 @@ const {
   legacyAutomationIsAdvisory,
   productTailRange,
   scriptPipelineEntryRoute,
-  scriptQualityGateOptions
+  scriptQualityGateOptions,
+  storyboardSheetGrid
 } = require("../app/workbench-workflow");
 
-const providers = ["xiangsu", "cloud"];
-const modes = ["keyframe", "continuation", "smart", "storyboard_sheet"];
+const providers = ["cloud"];
+const modes = ["production_package", "asset_direct", "keyframe", "continuation", "smart", "storyboard_sheet"];
 
-test("all eight production modes hard-lock generated video output without BGM or text overlays", () => {
-  assert.equal(Object.keys(MATRIX).length, 8);
+test("all six H3 production modes use a clean positive runtime output contract", () => {
+  assert.equal(Object.keys(MATRIX).length, 6);
   for (const provider of providers) {
     for (const mode of modes) {
       const global = matrixGlobalPrompt(provider, mode);
       const runtime = matrixRuntimeVideoPromptForProject({
-        generation: { mode, engine: provider === "cloud" ? "hailuo-h3" : "seedance", videoProviderKind: provider === "cloud" ? "puream-hailuo-h3" : "local-xiangsu" }
+        generation: { mode, engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3" }
       });
       const joined = `${global}\n${runtime}`;
-      assert.match(joined, /(?:禁止BGM|No BGM)/i, `${provider}/${mode} must ban BGM`);
-      assert.match(joined, /(?:禁止字幕|No subtitles)/i, `${provider}/${mode} must ban subtitles`);
-      assert.match(joined, /(?:禁止.*水印|watermarks)/i, `${provider}/${mode} must ban watermarks`);
+      assert.doesNotMatch(runtime, /字幕|subtitles?|captions?/i, `${provider}/${mode} runtime payload must not name post-production text artifacts`);
+      assert.match(runtime, /FINAL VIDEO RUNTIME BOUNDARY|最终成片保持纯剧情摄影/);
+      assert.match(joined, /(?:只保留剧中人物对白、现场环境声和与画面同步的动作声|exact in-world speech, ambience and visible action sound)/i, `${provider}/${mode} must keep only authored production sound`);
+      assert.match(joined, /(?:纯剧情摄影|clean full-frame camera-original live-action plate)/i, `${provider}/${mode} must request a clean narrative plate`);
     }
   }
 });
@@ -46,8 +48,8 @@ test("all eight production modes hard-lock generated video output without BGM or
 test("overlong generated prompts are locally bounded and retain the final output lock", () => {
   const compacted = compactProviderVideoPrompt(`动作链${"。人物表演和对白承接".repeat(600)}`, 1900);
   assert.ok(compacted.length <= 1900);
-  assert.match(compacted, /禁止BGM|No BGM/i);
-  assert.match(compacted, /禁止字幕|No subtitles/i);
+  assert.match(compacted, /FINAL VIDEO RUNTIME BOUNDARY|最终成片保持纯剧情摄影/);
+  assert.doesNotMatch(compacted, /字幕|subtitles?|captions?/i);
 });
 
 test("commerce count is monotonic, latter-half only, and clamps instead of rejecting", () => {
@@ -143,7 +145,100 @@ test("workflow owns one adaptive agent and can route an arbitrary API adapter", 
   assert.equal(workflow.adaptiveProductionPlan("P01").nextStage, "script");
 });
 
-test("96 mode format entry and blueprint combinations keep routing stable and QC non-blocking", () => {
+test("uploaded analysis preserves two returned shots and asks AI only for the three missing shots", async () => {
+  let calls = 0;
+  const story = { premise: "家庭冲突", hook: "母亲推门", conflict: "账本争议", ending: "当面对账" };
+  const characters = [{ id: "C01", name: "母亲" }, { id: "C02", name: "女儿" }];
+  const scenes = [{ id: "SC01", name: "客厅" }];
+  const makeShot = number => ({ id: `S${String(number).padStart(2, "0")}`, duration: number % 2 ? 7 : 11 });
+  const workflow = new WorkbenchWorkflow({
+    store: { getProject: () => null },
+    bridge: {},
+    locateFfmpeg: () => "",
+    stagingRoot: "",
+    textGenerator: async () => {
+      calls += 1;
+      return calls === 1
+        ? { story, characters, scenes, props: [], shots: [makeShot(1), makeShot(2)] }
+        : { story, characters, scenes, props: [], shots: [makeShot(3), makeShot(4), makeShot(5)] };
+    }
+  });
+  const result = await workflow.runAgentSkill("script.analyze_chunk", {
+    projectId: "P01",
+    config: { kind: "default" },
+    messages: [{ role: "user", content: "拆成五镜" }],
+    textOptions: { sessionId: "missing-shot-repair" },
+    unitCount: 5,
+    requireCoreProp: false,
+    explicitPropNames: []
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(result.shots.map(item => item.id), ["S01", "S02", "S03", "S04", "S05"]);
+});
+
+test("free-form uploaded analysis treats unitCount zero as adaptive and keeps repaired shots", async () => {
+  let calls = 0;
+  const story = { premise: "家庭和解" };
+  const characters = [{ id: "C01", name: "母亲" }];
+  const scenes = [{ id: "SC01", name: "客厅" }];
+  const workflow = new WorkbenchWorkflow({
+    store: { getProject: () => null },
+    bridge: {},
+    locateFfmpeg: () => "",
+    stagingRoot: "",
+    textGenerator: async (_config, messages) => {
+      calls += 1;
+      if (calls === 1) return { story, characters, scenes, props: [], shots: [] };
+      assert.match(messages.map(item => String(item.content || "")).join("\n"), /unitCount=0 表示自由拆镜，绝不表示返回 0 项/);
+      return {
+        shots: [{ id: "S01", duration: 9 }, { id: "S02", duration: 12 }]
+      };
+    }
+  });
+  const result = await workflow.runAgentSkill("script.analyze_chunk", {
+    projectId: "P01",
+    config: { kind: "default" },
+    messages: [{ role: "user", content: "按剧情自由拆镜" }],
+    textOptions: { sessionId: "adaptive-free-form-repair" },
+    unitCount: 0,
+    requireCoreProp: false,
+    explicitPropNames: []
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(result.shots.map(item => item.id), ["S01", "S02"]);
+  assert.deepEqual(result.characters, characters);
+  assert.deepEqual(result.scenes, scenes);
+});
+
+test("uploaded analysis stops paid repair after a second structurally identical result", async () => {
+  let calls = 0;
+  const invalid = { story: { premise: "家庭和解" }, characters: [{ id: "C01", name: "母亲" }], scenes: [{ id: "SC01", name: "客厅" }], props: [], shots: [] };
+  const workflow = new WorkbenchWorkflow({
+    store: { getProject: () => null },
+    bridge: {},
+    locateFfmpeg: () => "",
+    stagingRoot: "",
+    textGenerator: async () => {
+      calls += 1;
+      return invalid;
+    }
+  });
+  await assert.rejects(
+    workflow.runAgentSkill("script.analyze_chunk", {
+      projectId: "P01",
+      config: { kind: "default" },
+      messages: [{ role: "user", content: "按剧情自由拆镜" }],
+      textOptions: { sessionId: "no-progress-repair" },
+      unitCount: 0,
+      requireCoreProp: false,
+      explicitPropNames: []
+    }),
+    error => error?.code === "SCRIPT_ANALYSIS_REPAIR_NO_PROGRESS" && error?.noAutomaticRetry === true
+  );
+  assert.equal(calls, 2, "the unchanged third paid request must never be sent");
+});
+
+test("72 H3 mode format entry and blueprint combinations keep routing stable and QC non-blocking", () => {
   const formats = ["production", "dialogue", "timed_storyboard"];
   const entries = ["one_click", "staged"];
   let combinations = 0;
@@ -159,8 +254,8 @@ test("96 mode format entry and blueprint combinations keep routing stable and QC
               shots: []
             };
             const prompt = matrixRuntimeVideoPromptForProject(project);
-            assert.match(prompt, /(?:No BGM|BGM)/i);
-            assert.match(prompt, /(?:No subtitles|subtitles|禁止字幕)/i);
+            assert.match(prompt, /FINAL VIDEO RUNTIME BOUNDARY|最终成片保持纯剧情摄影/);
+            assert.doesNotMatch(prompt, /字幕|subtitles?|captions?/i);
             const options = scriptQualityGateOptions({ generation: { qualityGatesEnabled, qualityGateModules: { script: true } } });
             assert.equal(options.skipQualityGates, !qualityGatesEnabled);
             assert.equal(options.advisoryOnly, qualityGatesEnabled);
@@ -171,7 +266,7 @@ test("96 mode format entry and blueprint combinations keep routing stable and QC
       }
     }
   }
-  assert.equal(combinations, 96);
+  assert.equal(combinations, 72);
 });
 
 test("a single pause signal never expands into per-shot failures", async () => {
@@ -200,10 +295,19 @@ test("legacy QC and pause cascades migrate, while technical failures stay failur
   }), false);
 });
 
-test("dynamic storyboard-sheet ratios use the nearest supported provider canvas", () => {
+test("storyboard sheets use one provider-supported canvas without stretching project-ratio panels", () => {
   const eight = imageGenerationOptions({ generation: { aspectRatio: "9:16" } }, "storyboard_sheet", [], { duration: 8 });
-  assert.equal(eight.aspectRatio, "9:8");
-  assert.equal(eight.size, "1:1");
+  assert.equal(eight.aspectRatio, "9:16");
+  assert.equal(eight.size, "9:16");
+  const tenGrid = storyboardSheetGrid(10, "9:16");
+  assert.deepEqual([tenGrid.columns, tenGrid.rows], [4, 4]);
+  assert.equal(tenGrid.panelAspectRatio, "9:16");
+  assert.equal(tenGrid.canvasAspectRatio, "9:16");
+  assert.equal(tenGrid.fitPolicy, "exact-panel-ratio-square-grid-never-stretch");
+  assert.equal(tenGrid.emptyCells, 6);
+  const ten = imageGenerationOptions({ generation: { aspectRatio: "9:16" } }, "storyboard_sheet", [], { duration: 10 });
+  assert.equal(ten.aspectRatio, "9:16");
+  assert.equal(ten.size, "9:16");
   const vertical = imageGenerationOptions({ generation: { aspectRatio: "9:16" } }, "storyboard_start", [], { duration: 8 });
   assert.equal(vertical.size, "9:16");
 });

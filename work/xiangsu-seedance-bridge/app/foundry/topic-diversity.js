@@ -43,8 +43,25 @@ function normalizeTitle(value = "") {
   return String(value || "").replace(/[\s··《》：:,.，。!?！？'"“”‘’]/g, "").toLowerCase();
 }
 
+function normalizeStoryFingerprintPart(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[\s··《》【】：:,.，。!?！？'"“”‘’；;、—–→/\\|()[\]（）]/g, "")
+    .slice(0, 240);
+}
+
 function topicSignature(topic = {}) {
-  return fingerprint({ title: normalizeTitle(topic.title), relationship: topic.relationship, mechanism: topic.storyMechanism, hook: topic.hook, object: topic.themeObject });
+  const causalCore = {
+    relationship: normalizeStoryFingerprintPart(topic.relationship),
+    conflict: normalizeStoryFingerprintPart(topic.conflictDomain),
+    goalAndPressure: normalizeStoryFingerprintPart(topic.logline),
+    openingAction: normalizeStoryFingerprintPart(topic.hookAction || topic.hook),
+    reversal: normalizeStoryFingerprintPart(topic.reversalSource || topic.proofChain || topic.reversal),
+    settlement: normalizeStoryFingerprintPart(topic.settlementAction || topic.emotionalPayoff)
+  };
+  return fingerprint(Object.values(causalCore).some(Boolean)
+    ? causalCore
+    : { title: normalizeTitle(topic.title), mechanism: topic.storyMechanism });
 }
 
 function topicHistory(project = {}) {
@@ -120,7 +137,22 @@ function buildNovelTopicBatch(project = {}, generationIndex = 1, options = {}) {
 function rememberTopicBatch(project = {}, topics = [], source = "upstream") {
   const current = topicHistory(project);
   const at = new Date().toISOString();
-  const additions = topics.map(topic => ({ title: String(topic.title || ""), signature: topicSignature(topic), relationship: String(topic.relationship || ""), source, generatedAt: at }));
+  const additions = topics.map(topic => ({
+    title: String(topic.title || ""),
+    signature: topicSignature(topic),
+    relationship: String(topic.relationship || ""),
+    storyMechanism: String(topic.storyMechanism || ""),
+    conflictDomain: String(topic.conflictDomain || ""),
+    hookAction: String(topic.hookAction || topic.hook || ""),
+    themeObject: String(topic.themeObject || ""),
+    storyPremise: String(topic.logline || ""),
+    moralCore: String(topic.valueStatement || ""),
+    reversalSource: String(topic.reversalSource || topic.proofChain || ""),
+    reversalOutcome: String(topic.reversal || ""),
+    settlementAction: String(topic.settlementAction || topic.emotionalPayoff || ""),
+    source,
+    generatedAt: at
+  }));
   const bySignature = new Map();
   for (const entry of [...additions, ...current]) {
     const key = String(entry.signature || fingerprint({ title: normalizeTitle(entry.title), relationship: entry.relationship }));
@@ -134,4 +166,17 @@ function priorTopicTitles(project = {}, limit = 80) {
   return topicHistory(project).map(item => String(item.title || "").trim()).filter(Boolean).slice(0, Math.max(1, limit));
 }
 
-module.exports = { buildNovelTopicBatch, normalizeTitle, priorTopicTitles, rememberTopicBatch, topicHistory, topicSignature };
+function priorTopicPatterns(project = {}, limit = 36) {
+  const compact = (value, max = 90) => String(value || "").trim().replace(/\s+/g, " ").slice(0, max);
+  return topicHistory(project).slice(0, Math.max(1, limit)).map(item => [
+    ["关系", item.relationship],
+    ["场域", item.conflictDomain],
+    ["开场", item.hookAction],
+    ["核心因果", item.storyPremise],
+    ["反转来源", item.reversalSource],
+    ["反转结果", item.reversalOutcome],
+    ["结局行动", item.settlementAction]
+  ].map(([label, value]) => compact(value) ? `${label}=${compact(value)}` : "").filter(Boolean).join("；")).filter(Boolean);
+}
+
+module.exports = { buildNovelTopicBatch, normalizeTitle, priorTopicPatterns, priorTopicTitles, rememberTopicBatch, topicHistory, topicSignature };

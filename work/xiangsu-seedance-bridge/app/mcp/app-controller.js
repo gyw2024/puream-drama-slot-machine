@@ -3,11 +3,17 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { generateText, listTextProviderEvents } = require("../ai-provider");
+const { AI_GENERATION_TIMEOUT_FLOOR_MS, generationRequestTimeoutMs } = require("../bridge-client");
+const { sanitizePublicMessage } = require("../public-error");
 
 const BILLABLE_ACTIONS = new Set([
   "generate_topics",
   "analyze_script",
   "generate_complete_script",
+  "adapt_reference_script",
+  "prepare_prompt_review",
+  "test_text_provider",
   "generate_all_assets",
   "generate_all_storyboards",
   "generate_all_videos",
@@ -66,8 +72,53 @@ class McpAppController {
     this.projectView = typeof options.projectView === "function" ? options.projectView : projectId => this.store.getProject(projectId);
     this.importProductPath = options.importProductPath;
     this.importCandidatePath = options.importCandidatePath;
+    this.importProductionPackagePath = options.importProductionPackagePath;
+    this.textGenerator = typeof options.textGenerator === "function" ? options.textGenerator : generateText;
     this.operations = new Map();
+    this.operationOwner = crypto.randomUUID();
+    this.operationDirectory = this.store?.rootDir ? path.join(this.store.rootDir, "mcp-operations") : "";
+    this.operationRecoveryIssues = [];
+    this.restoreOperations();
+    this.agentStoreForScope = options.agentStoreForScope || (() => this.store);
     this.startedAt = new Date().toISOString();
+  }
+
+  persistOperation(record) {
+    if (!this.operationDirectory) return;
+    fs.mkdirSync(this.operationDirectory, { recursive: true });
+    const target = path.join(this.operationDirectory, `${record.operationId}.json`);
+    const temp = `${target}.${this.operationOwner}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify(record), "utf8");
+    fs.renameSync(temp, target);
+  }
+
+  restoreOperations() {
+    if (!this.operationDirectory || !fs.existsSync(this.operationDirectory)) return;
+    for (const name of fs.readdirSync(this.operationDirectory)) {
+      if (!/^mcpop_[a-f0-9-]{36}\.json$/.test(name)) continue;
+      try {
+        const record = JSON.parse(fs.readFileSync(path.join(this.operationDirectory, name), "utf8"));
+        if (`${record.operationId}.json` !== name) throw new Error("Operation identity mismatch");
+        if (["running", "queued", "pending"].includes(record.status)) {
+          // A promise owned by the previous controller cannot survive a restart.
+          // Keep its identity and checkpoint; never replay billable work here.
+          Object.assign(record, { status: "interrupted", errorCode: "MCP_OPERATION_INTERRUPTED", recoverable: true,
+            updatedAt: new Date().toISOString(), message: "应用已重启；原任务记录与项目断点已保留，请从项目当前进度继续。" });
+        }
+        this.operations.set(record.operationId, record);
+      } catch (error) {
+        this.operationRecoveryIssues.push({ file: name, code: "MCP_OPERATION_RECORD_UNREADABLE" });
+      }
+    }
+  }
+
+  saveOperationOutcome(record) {
+    try { this.persistOperation(record); }
+    catch (error) {
+      // Storage failure must not turn a successfully generated artifact into
+      // failed work and cause the caller to regenerate it.
+      record.persistenceError = String(error?.code || "MCP_OPERATION_PERSIST_FAILED");
+    }
   }
 
   operationRecord(operationId) {
@@ -84,6 +135,7 @@ class McpAppController {
     const startedAt = new Date().toISOString();
     const record = {
       operationId,
+      owner: this.operationOwner,
       action,
       projectId: String(projectId || ""),
       status: "running",
@@ -94,6 +146,8 @@ class McpAppController {
       message: "操作已由应用接管；MCP 客户端断开不会中止任务",
       result: null
     };
+    // Register durably before starting anything billable.
+    this.persistOperation(record);
     this.operations.set(operationId, record);
     Promise.resolve()
       .then(runner)
@@ -105,16 +159,18 @@ class McpAppController {
           message: "操作完成",
           result: safeResult(result)
         });
+        this.saveOperationOutcome(record);
       })
       .catch(error => {
         Object.assign(record, {
-          status: ["SCRIPT_GENERATION_PAUSED", "SCRIPT_GENERATION_STOPPED"].includes(String(error?.code || "")) ? "controlled" : "failed",
+          status: error?.code === "LOCAL_MEDIA_CANCELLED" ? "cancelled" : ["SCRIPT_GENERATION_PAUSED", "SCRIPT_GENERATION_STOPPED"].includes(String(error?.code || "")) ? "controlled" : "failed",
           updatedAt: new Date().toISOString(),
           completedAt: new Date().toISOString(),
           errorCode: String(error?.code || "OPERATION_FAILED"),
-          message: String(error?.message || error || "操作失败"),
+          message: sanitizePublicMessage(error?.message || String(error) || "操作失败", error?.code),
           result: null
         });
+        this.saveOperationOutcome(record);
       });
     return { ...record };
   }
@@ -125,6 +181,18 @@ class McpAppController {
 
   async dispatch(method, params = {}) {
     const input = params && typeof params === "object" ? params : {};
+    if (["list_local_agents", "list_agent_jobs", "register_agent_worker", "claim_agent_job", "complete_agent_job", "submit_agent_job_data", "report_agent_progress", "cancel_agent_job"].includes(method)) {
+      const { getHub } = require("../local-agent-runtime");
+      const store = this.agentStoreForScope(input.scope || "workbench");
+      const hub = getHub(path.join(store.rootDir, "agent-jobs"));
+      if (method === "list_local_agents") return { ok: true, agents: await hub.discover(store.getSettings().localAgents) };
+      if (method === "list_agent_jobs") return { ok: true, jobs: hub.list().filter(job => !input.agentId || job.agentId === input.agentId) };
+      if (method === "register_agent_worker") return { ok: true, worker: hub.register(input) };
+      if (method === "claim_agent_job") return { ok: true, ...hub.claim(input) };
+      if (method === "complete_agent_job" || method === "submit_agent_job_data") return hub.complete(input);
+      if (method === "report_agent_progress") return hub.progress(input);
+      return hub.cancel(input.jobId);
+    }
     if (method === "app_status") {
       return {
         ok: true,
@@ -142,7 +210,23 @@ class McpAppController {
       this.workflow.reconcileDetachedAutomations();
       return { ok: true, projects: this.store.listProjects() };
     }
-    if (method === "get_project") return { ok: true, project: this.project(input.project_id) };
+    if (method === "get_project") {
+      const project = this.project(input.project_id);
+      if (!Array.isArray(input.fields) || !input.fields.length) return { ok: true, project };
+      const fields = [...new Set(input.fields.map(String))];
+      if (fields.some(key => !/^[A-Za-z][A-Za-z0-9_]*$/.test(key) || !Object.hasOwn(project,key))) {
+        throw Object.assign(new Error("fields 必须是项目现有的顶层字段"),{code:"MCP_PROJECT_FIELD_INVALID"});
+      }
+      const offset = Math.max(0,Math.floor(Number(input.offset)||0));
+      const limit = Math.max(1,Math.min(100,Math.floor(Number(input.limit)||20)));
+      const selected = {id:project.id,title:project.title}, pagination={};
+      for (const key of fields) {
+        const value=project[key];
+        selected[key]=Array.isArray(value)?value.slice(offset,offset+limit):value;
+        if(Array.isArray(value))pagination[key]={offset,limit,total:value.length,nextOffset:offset+limit<value.length?offset+limit:null};
+      }
+      return {ok:true,project:selected,selection:{fields,pagination,completeProject:false}};
+    }
     if (method === "get_production_status") {
       const project = this.project(input.project_id);
       return {
@@ -164,11 +248,25 @@ class McpAppController {
     }
     if (method === "list_operations") {
       const projectId = String(input.project_id || "");
-      return { ok: true, operations: [...this.operations.values()].filter(item => !projectId || item.projectId === projectId).map(item => ({ ...item })) };
+      return { ok: true, operations: [...this.operations.values()].filter(item => !projectId || item.projectId === projectId).map(item => ({ ...item })), recoveryIssues: this.operationRecoveryIssues };
     }
+    if (method === "get_text_provider_events") return { ok: true, events: listTextProviderEvents(input.limit) };
     if (method === "get_operation") return { ok: true, operation: this.operationRecord(input.operation_id) };
     if (method === "list_reusable_assets") return { ok: true, assets: this.store.listReusableAssets(String(input.kind || "")) };
     if (method === "list_archived_projects") return { ok: true, projects: this.store.listDeletedProjects() };
+    if (method === "test_text_provider") {
+      const config = this.store.getSettings()?.textProvider || {};
+      const requestedTimeoutMs = generationRequestTimeoutMs(input.timeout_ms);
+      const reply = await this.textGenerator(config, [{ role: "user", content: "只回复：连接成功" }], {
+        timeoutMs: requestedTimeoutMs || AI_GENERATION_TIMEOUT_FLOOR_MS,
+        maxTokens: 64,
+        // Two total attempts gives one bounded recovery. Provider adapters
+        // still refuse replay after partial text, completion or a receipt.
+        maxReconnectAttempts: 2,
+        forceStream: input.force_stream === true
+      });
+      return { ok: true, provider: String(config.kind || ""), model: String(config.model || ""), reply: String(reply || "").slice(0, 100) };
+    }
 
     if (method === "create_project") {
       const project = this.store.createProject(requireText(input.title, "title"), input.options || {});
@@ -176,6 +274,9 @@ class McpAppController {
     }
     if (method === "update_project") {
       const projectId = requireText(input.project_id, "project_id");
+      const existing=this.store.getProject(projectId);
+      if(input.expected_updated_at&&input.expected_updated_at!==existing.updatedAt)throw Object.assign(new Error('项目已更新，请读取最新项目后合并修改。'),{code:'MCP_PROJECT_REVISION_CONFLICT'});
+      if(this.workflow.hasActiveOperation?.(projectId)||this.store.listActiveVideoJobs(projectId).length)throw Object.assign(new Error('项目正在执行；请通过已领取任务回传结果，避免覆盖运行中的数据。'),{code:'MCP_PROJECT_BUSY'});
       const requested = input.patch && typeof input.patch === "object" ? input.patch : {};
       const allowed = new Set(["title", "script", "ideation", "product", "generation", "productionPlan", "promptIntake", "characters", "scenes", "shots"]);
       const patch = Object.fromEntries(Object.entries(requested).filter(([key]) => allowed.has(key)));
@@ -214,8 +315,28 @@ class McpAppController {
       const imported = await this.importCandidatePath(projectId, requireText(input.entity_type, "entity_type"), requireText(input.entity_id, "entity_id"), requireText(input.stage, "stage"), filePath);
       return { ok: true, ...imported, project: this.projectView(projectId) };
     }
+    if(method==='import_production_package_path'){
+      const filePath=requireExistingPath(input.file_path,'file_path');
+      if(typeof this.importProductionPackagePath!=='function')throw Object.assign(new Error('当前工作区不支持资产包导入'),{code:'MCP_PACKAGE_IMPORT_UNAVAILABLE'});
+      // The same complete importer as the UI owns all validation and writes.
+      // Return its compact receipt, never a huge project history over stdio.
+      return {ok:true,...await this.importProductionPackagePath(filePath)};
+    }
     if (method === "confirm_candidate") {
       return { ok: true, candidate: this.store.confirmCandidate(requireText(input.project_id, "project_id"), requireText(input.candidate_id, "candidate_id"), input.discard_others !== false) };
+    }
+    if (method === "confirm_all_prompt_review") {
+      return {
+        ok: true,
+        project: await this.workflow.confirmAllPromptReview(
+          requireText(input.project_id, "project_id"),
+          Array.isArray(input.entries) ? input.entries : []
+        )
+      };
+    }
+    if (method === "apply_script_adaptation") {
+      return { ok: true, project: this.workflow.applyScriptAdaptation(
+        requireText(input.project_id, "project_id"), requireText(input.draft_id, "draft_id"), input.accept_warnings === true) };
     }
     if (method === "bind_reusable_asset") {
       return { ok: true, candidate: this.store.bindReusableAsset(requireText(input.project_id, "project_id"), requireText(input.entity_type, "entity_type"), requireText(input.entity_id, "entity_id"), requireText(input.asset_id, "asset_id")) };
@@ -223,22 +344,46 @@ class McpAppController {
     if (method === "pause_pipeline" || method === "stop_pipeline") {
       return { ok: true, automation: this.workflow.pausePipeline(requireText(input.project_id, "project_id"), method === "stop_pipeline" ? "stop" : "pause") };
     }
+    if (method === "cancel_post_production") {
+      return { ok: true, result: this.workflow.cancelPostProduction(requireText(input.project_id, "project_id")) };
+    }
 
     const projectId = requireText(input.project_id, "project_id");
     const runners = {
       generate_topics: () => this.workflow.generateTopicOptions(projectId),
       analyze_script: () => this.workflow.analyzeScript(projectId),
       generate_complete_script: () => this.workflow.generateCompleteScript(projectId),
-      generate_all_assets: () => this.workflow.generateAllAssets(projectId),
-      generate_all_storyboards: () => this.workflow.generateAllStoryboards(projectId),
-      generate_all_videos: () => this.workflow.generateAllShotVideos(projectId),
+      adapt_reference_script: async () => {
+        const draft = await this.workflow.adaptReferenceScript(projectId, requireText(input.source_text, "source_text"), String(input.instructions || ""));
+        return { draftId: draft.id, audit: draft.audit, warnings: draft.contract?.warnings || [], textLength: String(draft.text || '').length };
+      },
+      // Compiles the complete asset, storyboard and video prompt bundle only.
+      // It never submits image/video generation jobs.
+      prepare_prompt_review: () => this.workflow.runTrackedOperation(projectId, 'prepare_prompt_review', '', () => this.workflow.preparePromptReviewBundle(projectId, { autoApprove: false, requireCompleteDelivery:true })),
+      // These three methods are the local-control equivalents of the already
+      // reviewed UI buttons. Re-running prompt preparation here used to reset a
+      // production-package review to pending and made a confirmed package look
+      // unapproved. Keep the reviewed bundle immutable at the generation edge.
+      generate_all_assets: () => this.workflow.generateAllAssets(projectId, { promptPrepared: true }),
+      generate_all_storyboards: () => this.workflow.generateAllStoryboards(projectId, { promptPrepared: true }),
+      generate_all_videos: () => this.workflow.generateAllShotVideos(projectId, { promptPrepared: true }),
       run_full_pipeline: () => this.workflow.runFullPipeline(projectId),
       run_pipeline_from_stage: () => this.workflow.runPipelineFromStage(projectId, String(input.from_stage || "assets")),
       audit_media_quality: () => this.workflow.auditProjectMediaQuality(projectId),
+      audit_actual_media: () => this.workflow.auditActualMedia(projectId, { shotIds:input.shot_ids,python:input.python_path,model:input.asr_model_path,device:input.asr_device||'cpu',evidencePython:input.evidence_python_path,audioModel:input.audio_model_path,activeSpeakerRepo:input.active_speaker_repo_path }),
       repair_media_quality: () => this.workflow.repairFailedMedia(projectId),
-      stitch_final_video: () => this.workflow.stitchProject(projectId),
+      stitch_final_video: () => this.workflow.stitchProject(projectId, { executionPath: "mcp_local_agent" }),
+      export_jianying_draft: () => this.workflow.exportJianyingDraft(projectId, { draftRoot: input.draft_root || "" }),
       generate_character_video: () => this.workflow.generateCharacterVideo(projectId, requireText(input.character_id, "character_id"), String(input.prompt || "")),
-      generate_shot_video: () => this.workflow.generateShotVideo(projectId, requireText(input.shot_id, "shot_id"), String(input.mode || ""))
+      // A single-shot MCP action is the exact equivalent of the reviewed UI
+      // draw button. Never rebuild the review bundle here: doing so resets an
+      // approved production-package contract to `ready` before the submit.
+      generate_shot_video: () => this.workflow.generateShotVideo(
+        projectId,
+        requireText(input.shot_id, "shot_id"),
+        String(input.mode || ""),
+        { promptPrepared: true,exactlyOnce:input.single_submission===true,rerollNonce:String(input.reroll_nonce||'') }
+      )
     };
     const runner = runners[method];
     if (!runner) throw Object.assign(new Error(`不支持的 MCP 控制方法：${method}`), { code: "MCP_METHOD_NOT_FOUND" });

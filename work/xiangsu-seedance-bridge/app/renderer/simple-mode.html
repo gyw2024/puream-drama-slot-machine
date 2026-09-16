@@ -6,6 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'none'; img-src 'self' puream-asset: data:; media-src 'self' puream-asset: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
   <title>简易模式 · 纯梦短剧老虎机</title>
   <link rel="stylesheet" href="simple-mode.css">
+  <link rel="stylesheet" href="prompt-review-editor.css">
 </head>
 <body>
   <div class="app-shell">
@@ -19,12 +20,10 @@
         <label for="projectSelect">当前项目</label>
         <select id="projectSelect" aria-label="当前简易模式项目"></select>
         <button id="newProject" class="icon-button" type="button" title="新建项目" aria-label="新建项目">＋</button>
-        <button id="deleteProject" class="icon-button danger-icon" type="button" title="删除项目" aria-label="删除项目">删</button>
-        <button id="restoreProject" class="icon-button" type="button" title="恢复已删除项目" aria-label="恢复已删除项目">恢</button>
+        <button id="deleteProject" class="project-action-button danger-icon" type="button" title="删除当前项目" aria-label="删除当前项目"><span aria-hidden="true">×</span><b>删除项目</b></button>
+        <button id="restoreProject" class="project-action-button" type="button" title="恢复已删除项目" aria-label="恢复已删除项目"><span aria-hidden="true">↶</span><b>恢复项目</b></button>
       </div>
       <div class="top-actions">
-        <button id="runAll" class="primary-button" type="button"><img src="../assets/icons/sparkle.png" alt="">一键做完整部剧</button>
-        <button id="pauseRun" class="outline-button" type="button">暂停</button>
         <button id="switchAgentTop" class="mode-switch top-mode-switch" type="button">Agent 模式</button>
         <button id="walletButton" class="wallet-button" type="button"><span>余额</span><b id="walletBalance">读取中</b></button>
       </div>
@@ -33,20 +32,20 @@
     <aside class="sidebar" aria-label="简易制作流程">
       <div class="sidebar-title"><span>SIMPLE WORKSPACE</span><b>短剧制作台</b></div>
       <nav>
-        <button class="nav-button active" type="button" data-panel="overview"><em>01</em><span><b>项目总览</b><small>进度与下一步</small></span></button>
-        <button class="nav-button" type="button" data-panel="script"><em>02</em><span><b>剧本与分集</b><small>上传、改写、拆镜</small></span></button>
-        <button class="nav-button" type="button" data-panel="assets"><em>03</em><span><b>角色场景道具</b><small>共享或生成资产</small></span></button>
-        <button class="nav-button" type="button" data-panel="storyboard"><em>04</em><span><b>分镜准备</b><small>画面与提示词</small></span></button>
-        <button class="nav-button" type="button" data-panel="generate"><em>05</em><span><b>分镜视频工作台</b><small>视频生产</small></span></button>
-        <button class="nav-button" type="button" data-panel="final"><em>06</em><span><b>成片导出</b><small>拼接与交付</small></span></button>
+        <button class="nav-button active" type="button" data-panel="assets"><em>01</em><span><b>资产工作台</b><small>创建、上传或复用资产</small></span></button>
+        <button class="nav-button" type="button" data-panel="storyboard"><em>02</em><span><b>分镜合图</b><small>创建镜头与生成合图</small></span></button>
+        <button class="nav-button" type="button" data-panel="generate"><em>03</em><span><b>分镜视频</b><small>逐镜生成视频</small></span></button>
+        <button class="nav-button" type="button" data-panel="post"><em>04</em><span><b>粗剪与剪映</b><small>音效、字幕独立可编辑</small></span></button>
       </nav>
+      <button id="exportProjectLogs" class="nav-button" type="button" title="导出当前项目状态、错误和请求返回；自动隐藏密钥，不包含图片视频"><em>↓</em><span><b>导出运行日志</b><small>当前项目 · 故障排查</small></span></button>
       <div class="sidebar-spacer"></div>
       <details id="simpleMore" class="sidebar-more">
         <summary>更多</summary>
         <div class="sidebar-more-menu">
           <button class="nav-button" type="button" data-panel="tasks"><em>任</em><span><b>任务与费用</b><small>查看状态和失败原因</small></span></button>
           <button class="nav-button shared-nav" type="button" data-panel="library"><em>库</em><span><b>共享资产库</b><small>管理可复用素材</small></span></button>
-          <button class="nav-button" type="button" data-panel="settings"><em>设</em><span><b>设置与连接</b><small>文本模型、视频与存储</small></span></button>
+          <button id="simpleGuideButton" class="nav-button" type="button" data-action="open-guide"><em>?</em><span><b>新手使用说明</b><small>随时查看三步流程与费用范围</small></span></button>
+          <button class="nav-button" type="button" data-panel="settings"><em>设</em><span><b>设置与连接</b><small>视频、画幅与存储</small></span></button>
           <button id="switchAgent" class="nav-button mode-switch" type="button"><em>高</em><span><b>高级模式</b><small>进入完整专业工作台</small></span></button>
           <button id="versionButton" class="version-button" type="button"><span>版本与更新</span><b id="versionText">读取中</b><small id="updateText">检查更新</small></button>
         </div>
@@ -54,58 +53,28 @@
     </aside>
 
     <main class="workspace">
+      <div id="agentActivityPanel" aria-label="Agent 实时状态" hidden></div>
       <section class="workspace-status">
         <div><span>当前流程</span><b id="currentStatus">等待创建项目</b><small id="statusDetail">选择或新建一个项目开始制作</small></div>
         <div class="status-progress"><i id="statusProgress"></i></div>
-        <div class="status-count"><b id="progressPercent">0%</b><span id="progressCount">0/6 阶段</span></div>
+        <div class="status-count"><b id="progressPercent">0%</b><span id="progressCount">0/3 阶段</span></div>
+      </section>
+      <section id="simpleStartupNotice" class="startup-notice" role="alert" hidden>
+        <span><b>部分本地信息暂未读取</b><small id="simpleStartupDetail">工作台仍可使用；失败模块不会拖住其他模块。</small></span>
+        <button type="button" class="outline-button" data-action="retry-initialize">重新读取</button>
       </section>
 
-      <section class="panel active" data-content="overview">
+      <section class="panel active" data-content="assets">
         <header class="panel-head">
-          <div><span>PROJECT OVERVIEW</span><h1>今天要做的短剧</h1><p>按六步走完，也可以直接点击右上角一键制作。</p></div>
-          <button class="primary-button" type="button" data-action="next-step">带我做下一步</button>
+          <div><span>STEP 01 · ASSETS</span><h1>资产工作台</h1><p>直接创建人物、场景、道具或商品，再选择上传、共享库复用或 AI 生图；不经过选题和剧本。</p></div>
+          <div class="head-actions"><button id="newAsset" class="outline-button" type="button">新建资产</button><button class="outline-button" type="button" data-panel-jump="library">打开共享资产库</button><button id="generateAssets" class="primary-button" type="button">生成缺少的资产</button></div>
         </header>
-        <div id="emptyProject" class="empty-project" hidden>
-          <span class="empty-icon">＋</span><h2>新建第一部短剧</h2><p>简易模式只保留最清楚的制作步骤，底层仍由 AI 和纯梦云端视频服务完成。</p><button class="primary-button" type="button" data-action="new-project">开始新项目</button>
+        <div id="simpleWelcome" class="empty-project" hidden>
+          <span class="empty-icon" aria-hidden="true">＋</span>
+          <h2>从资产开始，不需要选题或剧本</h2>
+          <p>先创建一个简易项目，再创建、上传或复用人物、场景、道具和商品；随后手动建立分镜，生成分镜合图与逐镜视频。</p>
+          <div class="inline-actions"><button class="primary-button" type="button" data-action="new-project">新建简易项目</button><button class="outline-button" type="button" data-action="open-guide">查看三步使用说明</button></div>
         </div>
-        <div id="overviewContent">
-          <div id="projectHero" class="project-hero"></div>
-          <div id="stepGrid" class="step-grid"></div>
-          <div class="overview-columns">
-            <article class="card"><div class="card-head"><span><small>NEXT ACTION</small><b>下一步建议</b></span></div><div id="nextAction" class="next-action"></div></article>
-            <article class="card"><div class="card-head"><span><small>RECENT ACTIVITY</small><b>最近动态</b></span><button class="text-button" type="button" data-panel-jump="tasks">查看全部</button></div><div id="recentActivity" class="activity-list"></div></article>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel" data-content="script">
-        <header class="panel-head">
-          <div><span>STEP 02 · SCRIPT</span><h1>剧本与分集</h1><p>无论原稿怎样排版，先交给 AI 识别与整理，再保留剧情、人物和原对白完成拆镜。</p></div>
-          <div class="head-actions"><button id="aiAnalyze" class="primary-button" type="button">标准化剧本并拆镜</button></div>
-        </header>
-        <div class="script-grid">
-          <article class="card script-card">
-            <div class="card-head"><span><small>SOURCE SCRIPT</small><b>完整剧本</b></span><span id="scriptCount" class="muted">0 字</span></div>
-            <div class="inline-actions"><button id="uploadScript" class="outline-button" type="button">上传剧本文件</button><button id="saveScript" class="outline-button" type="button">保存剧本</button></div>
-            <textarea id="scriptText" class="script-editor" maxlength="500000" aria-label="短剧剧本" placeholder="粘贴任意格式剧本，或上传 TXT / Markdown / JSON / CSV。AI 会保留故事、人物、对白和细节，再转成系统可稳定生产的格式。"></textarea>
-            <div id="scriptAnalysis" class="analysis-bar">尚未拆解</div>
-          </article>
-          <aside class="script-side">
-            <article class="card">
-              <div class="card-head"><span><small>PRODUCT · OPTIONAL</small><b>带货商品（可选）</b></span><i id="productState" class="state-pill">不带货</i></div>
-              <button id="productPreview" class="product-preview" type="button"><img src="../assets/icons/image.png" alt=""><span>上传商品原图</span></button>
-              <label>商品名称<input id="productName" placeholder="不带货可留空"></label>
-              <label>商品卖点<textarea id="productSellingPoints" rows="4" placeholder="商品如何自然参与剧情"></textarea></label>
-            </article>
-          </aside>
-        </div>
-      </section>
-
-      <section class="panel" data-content="assets">
-        <header class="panel-head">
-          <div><span>STEP 03 · ASSETS</span><h1>角色、场景与核心道具</h1><p>只生成参与核心剧情的道具。人物、场景和音色可直接复用两个模式共享的资产库。</p></div>
-          <div class="head-actions"><button class="outline-button" type="button" data-panel-jump="library">打开共享资产库</button><button id="generateAssets" class="primary-button" type="button">AI 生成缺少的资产</button></div>
-        </header>
         <div id="assetSummary" class="summary-strip"></div>
         <div id="promptReviewStatus" class="prompt-review-status" role="status" aria-live="polite" hidden></div>
         <div class="asset-section"><div class="section-title"><span>CHARACTERS</span><h2>人物</h2><b id="characterCount">0</b></div><div id="characterGrid" class="asset-grid"></div></div>
@@ -115,8 +84,8 @@
 
       <section class="panel" data-content="storyboard">
         <header class="panel-head">
-          <div><span>STEP 04 · STORYBOARD</span><h1>分镜准备</h1><p>查看剧情拆分、人物关系和画面提示词；修改后保存，再生成多帧合图或首尾帧。</p></div>
-          <div class="head-actions"><button id="saveShots" class="outline-button" type="button">保存分镜修改</button><button id="generateStoryboards" class="primary-button" type="button">生成全部分镜图</button></div>
+          <div><span>STEP 02 · STORYBOARD</span><h1>分镜合图</h1><p>手动创建镜头并引用已有资产，系统直接编译逐秒合图提示词，不需要文本模型。</p></div>
+          <div class="head-actions"><button id="newShot" class="outline-button" type="button">新建分镜</button><button id="preparePrompts" class="outline-button" type="button">生成全部提示词</button><button id="saveShots" class="outline-button" type="button">保存修改</button><button id="generateStoryboards" class="primary-button" type="button">生成全部分镜合图</button></div>
         </header>
         <div id="storyboardMode" class="summary-strip"></div>
         <div id="shotEditorList" class="shot-editor-list"></div>
@@ -124,19 +93,17 @@
 
       <section class="panel" data-content="generate">
         <header class="panel-head">
-          <div><span>STEP 05 · VIDEO PRODUCTION</span><h1>分镜视频工作台</h1><p>每个分镜都按说话人、听者、情绪、机位与切镜控制；任务无总时限，网络中断会保留断点续跑。</p></div>
+          <div><span>STEP 03 · VIDEO PRODUCTION</span><h1>分镜视频</h1><p>每个分镜直接引用已选资产与分镜合图生成视频；任务断点和费用独立保留。</p></div>
           <div class="head-actions"><button id="generateVideos" class="primary-button" type="button">生成全部分镜视频</button></div>
         </header>
         <div id="videoQueueSummary" class="summary-strip"></div>
         <div id="videoGrid" class="video-grid"></div>
       </section>
 
-      <section class="panel" data-content="final">
-        <header class="panel-head">
-          <div><span>STEP 06 · DELIVERY</span><h1>成片导出</h1><p>所有分镜视频完成后按剧情顺序拼接，不增加字幕、背景音乐或人物介绍。</p></div>
-          <div class="head-actions"><button id="stitchFinal" class="primary-button" type="button">拼接最新成片</button></div>
-        </header>
-        <div id="finalStage" class="final-stage"></div>
+      <section class="panel" data-content="post">
+        <header class="panel-head"><div><span>STEP 04 · EDITABLE DRAFT</span><h1>粗剪与剪映草稿</h1><p>已完成的分镜可在本地粗剪，并一键导出可编辑的剪映草稿；不调用新的图片或视频生成。</p></div></header>
+        <div id="simplePostProduction" aria-label="剪映草稿导出与本地后期状态"></div>
+        <article id="simpleRoughCutPreview" class="card post-preview" hidden><h2>当前粗剪预览</h2><p>此视频不包含新增的音效或字幕。它们在剪映草稿内以独立轨道编辑。</p><video id="simpleRoughCutVideo" controls preload="metadata" aria-label="当前项目粗剪预览"></video></article>
       </section>
 
       <section class="panel" data-content="tasks">
@@ -147,15 +114,21 @@
 
       <section class="panel" data-content="library">
         <header class="panel-head"><div><span>SHARED LIBRARY</span><h1>共享资产库</h1><p>这是两个模式唯一互通的数据：人物、场景、道具、服装、商品、音色和可复用视频。</p></div><div class="head-actions"><select id="libraryKind" aria-label="资产类型"><option value="">全部</option><option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="wardrobe">服装</option><option value="product">商品</option><option value="voice">音色</option><option value="video">视频</option></select><button id="importLibrary" class="primary-button" type="button">导入资产</button></div></header>
+        <div class="library-filters" role="search" aria-label="筛选共享资产">
+          <label>关键词<input id="librarySearch" type="search" autocomplete="off" placeholder="名称、说明或标签"></label>
+          <label>性别<select id="libraryGender"><option value="">全部性别</option><option value="male">男</option><option value="female">女</option></select></label>
+          <label>年龄<select id="libraryAge"><option value="">全部年龄</option><option value="youth">少年</option><option value="middle">中年</option><option value="senior">老年</option></select></label>
+          <label>标签<input id="libraryTag" autocomplete="off" placeholder="例如：短发、低沉"></label>
+          <output id="libraryFilterSummary" aria-live="polite">尚未读取资产</output>
+        </div>
         <div id="libraryGrid" class="library-grid"></div>
       </section>
 
       <section class="panel" data-content="settings">
-        <header class="panel-head"><div><span>SIMPLE SETTINGS</span><h1>简易模式设置</h1><p>这些设置只属于简易模式；Agent 模式设置不会被覆盖。</p></div><div class="head-actions"><button id="resetSettings" class="outline-button" type="button">恢复默认</button><button id="saveSettings" class="primary-button" type="button">保存设置</button></div></header>
+        <header class="panel-head"><div><span>SIMPLE SETTINGS</span><h1>简易模式设置</h1><p>这些设置只属于简易模式；Agent 模式设置不会被覆盖。</p></div><div class="head-actions"><button id="resetSettings" class="outline-button" type="button">恢复默认</button><button id="openTutorial" class="outline-button" type="button">设置与使用教程</button><button id="saveSettings" class="primary-button" type="button">保存设置</button></div></header>
         <div class="settings-grid">
-          <article class="card provider-card"><div class="card-head"><span><small>TEXT MODEL</small><b>AI 拆镜文本模型</b></span><button id="testTextProvider" class="text-button" type="button">测试连接</button></div><label>供应商<select id="textProviderKind"><option value="puream-relay">纯梦官网（默认）</option><option value="openai-native">OpenAI 官方</option><option value="openai-compatible">自定义 OpenAI 兼容厂商</option><option value="gemini-native">Google Gemini 原生</option><option value="anthropic-native">Anthropic Claude 原生</option></select></label><label id="textBaseUrlField">Base URL<input id="textBaseUrl" autocomplete="url"></label><label id="textApiKeyField">API Key<input id="textApiKey" type="password" autocomplete="off"></label><label id="textModelField">模型名称<input id="textModel"></label><label id="textMaxTokensField">最大输出 Token<input id="textMaxTokens" type="number" min="256" max="131072" step="256"></label><p id="textProviderHelp">纯梦官网由系统自动调度；选择自定义供应商后可填写完整连接参数。</p><div id="textProviderStatus" class="test-status">尚未检测</div></article>
           <article class="card provider-card"><div class="card-head"><span><small>VIDEO ENGINE</small><b>纯梦云端视频</b></span><i class="locked-pill">固定接入</i></div><p>简易模式所有人物视频与分镜视频统一通过纯梦云端视频服务生成，不能误切到其他引擎。</p><button id="testH3" class="outline-button" type="button">检测视频连接</button><div id="h3Status" class="test-status">尚未检测</div></article>
-          <article class="card"><div class="card-head"><span><small>CONCURRENCY</small><b>生成并发</b></span></div><label>图片并发（后台额度）<input id="imageConcurrency" type="number" min="1" step="1" readonly aria-readonly="true"></label><label>视频并发（后台额度）<input id="videoConcurrency" type="number" min="1" step="1" readonly aria-readonly="true"></label><label>默认画幅<select id="aspectRatio"><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option><option value="1:1">1:1 方形</option></select></label><p>并发严格读取管理后台授权，不再由客户端写死或少开。</p></article>
+          <article class="card"><div class="card-head"><span><small>CONCURRENCY</small><b>生成并发</b></span></div><label>图片并发（后台额度）<input id="imageConcurrency" type="text" readonly aria-readonly="true" value="未知"></label><label>视频并发（后台额度）<input id="videoConcurrency" type="text" readonly aria-readonly="true" value="未知"></label><label>默认画幅<select id="aspectRatio"><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option><option value="1:1">1:1 方形</option></select></label><p id="concurrencyStatus">并发只显示管理后台已确认的授权值；读取失败时显示“未知”，不会伪造默认值。</p><button id="retryLicense" class="outline-button" type="button">重新读取授权并发</button></article>
           <article class="card"><div class="card-head"><span><small>STORAGE</small><b>数据边界</b></span></div><dl class="storage-list"><dt>简易模式项目</dt><dd id="simpleRoot">读取中</dd><dt>共享资产库</dt><dd id="sharedRoot">读取中</dd></dl><p class="boundary-note">项目、任务、费用、设置与成片不互通；只有资产库互通。</p></article>
           <article class="card switch-card"><div class="card-head"><span><small>WORKSPACE MODE</small><b>需要高级控制？</b></span></div><p>切换只改变默认入口，不搬迁、不合并、不删除任何项目。</p><button class="mode-switch large" type="button" data-action="switch-agent">切换到 Agent 模式</button></article>
         </div>
@@ -163,18 +136,85 @@
     </main>
   </div>
 
-  <div id="busyOverlay" class="busy-overlay" hidden><div><i></i><b id="busyTitle">正在处理</b><span id="busyMessage">AI 正在执行，请保持软件开启</span><button id="hideBusy" class="text-button" type="button">转入后台</button></div></div>
+  <div id="busyOverlay" class="busy-overlay" hidden><div><i></i><b id="busyTitle">正在处理</b><span id="busyMessage">后台任务正在执行，请保持软件开启</span><button id="hideBusy" class="text-button" type="button">转入后台</button></div></div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog id="simpleGuideDialog" class="modal" aria-labelledby="simpleGuideTitle">
+    <form method="dialog">
+      <header><span><small>QUICK START</small><b id="simpleGuideTitle">简易模式三步使用说明</b></span><button type="button" data-close-dialog="simpleGuideDialog" aria-label="关闭使用说明">×</button></header>
+      <p><b>简易模式不选题、不写剧本，也不调用文本模型。</b>它只负责资产、分镜合图和分镜视频；需要 AI 写作或自动拆剧本时，请切换到 Agent 模式。</p>
+      <ol>
+        <li><b>准备资产：</b>新建人物、场景、道具或商品，再选择上传本地文件、复用共享资产或 AI 生成。商品必须上传真实参考图。</li>
+        <li><b>创建分镜：</b>选择场景，写清画面动作；对白按“人物名（语气）：对白”逐行填写，括号里的语气会原样进入最终视频提示词。本模式按动作、对白和时长直接编译提示词，不调用文本模型；先检查提示词，再生成分镜合图。</li>
+        <li><b>生成视频：</b>确认分镜图和提示词后，可只生成本镜或生成全部分镜视频。提交前确认框会说明本次依赖范围和可能产生的图片、人物视频、音色与分镜视频费用。</li>
+      </ol>
+      <p>长任务可转入后台，在“更多 → 任务与费用”查看进度、失败原因和已结费用；已完成的资产与结果会自动跳过。视频完成后进入“粗剪与剪映”，可本地粗剪并导出音效、环境音与字幕分轨的可编辑草稿。</p>
+      <footer><button type="button" class="primary-button" data-close-dialog="simpleGuideDialog">我知道了</button></footer>
+    </form>
+  </dialog>
+
+  <button id="pendingPromptReviewButton" class="pending-prompt-review-button" type="button" hidden>继续确认全部提示词<b>0</b></button>
+  <dialog id="promptReviewDialog" class="modal prompt-review-dialog" aria-labelledby="promptReviewDialogTitle">
+    <div class="prompt-review-shell">
+      <header><span><small>PROMPT REVIEW · BEFORE GENERATION</small><b id="promptReviewDialogTitle">确认后续全部生成提示词</b><em>查看全部提示词，可选择 AI 审核校正；对比修改前后和原因后，一键应用。确认当前版本再继续生成。</em></span><button id="closePromptReviewDialog" type="button" aria-label="暂时关闭提示词确认">×</button></header>
+      <section class="prompt-review-summary" aria-live="polite">
+        <div><b id="promptReviewConfirmedCount">0 / 0</b><span>已确认</span></div>
+        <div><b data-prompt-review-count="characters">0</b><span>人物</span></div>
+        <div><b data-prompt-review-count="scenes">0</b><span>场景</span></div>
+        <div><b data-prompt-review-count="objects">0</b><span>物品 / 商品</span></div>
+        <div><b data-prompt-review-count="storyboards">0</b><span>分镜图</span></div>
+        <div><b data-prompt-review-count="videos">0</b><span>分镜视频</span></div>
+      </section>
+      <div class="prompt-review-tools"><div class="prompt-review-filters" role="group" aria-label="按提示词阶段筛选"><button type="button" class="is-active" data-prompt-review-filter="all">全部</button><button type="button" data-prompt-review-filter="characters">人物</button><button type="button" data-prompt-review-filter="scenes">场景</button><button type="button" data-prompt-review-filter="objects">物品 / 商品</button><button type="button" data-prompt-review-filter="storyboards">分镜图</button><button type="button" data-prompt-review-filter="videos">分镜视频</button></div><label class="prompt-review-search"><span>搜索</span><input id="promptReviewSearch" type="search" autocomplete="off" placeholder="名称、镜头或提示词内容"></label></div>
+      <p id="promptReviewDialogMessage" class="prompt-review-message" role="status" aria-live="polite">请完整检查提示词；确认后的文本会保存到对应生成环节。</p>
+      <section id="promptReviewList" class="prompt-review-list" aria-label="完整提示词清单"></section>
+      <footer class="prompt-review-footer"><span id="promptReviewFooterStatus">尚有提示词待确认</span><div><button id="cancelPromptReview" class="outline-button" type="button">稍后确认</button><button id="confirmAllPrompts" class="primary-button" type="button">一键保存并确认全部</button></div></footer>
+    </div>
+  </dialog>
 
   <dialog id="newProjectDialog" class="modal">
     <form id="newProjectForm" method="dialog">
       <header><span><small>NEW SIMPLE PROJECT</small><b>新建简易模式项目</b></span><button type="button" data-close-dialog="newProjectDialog" aria-label="关闭">×</button></header>
       <label>项目名称<input id="newProjectName" required maxlength="80" placeholder="例如：婆婆留下的旧钥匙"></label>
-      <div class="form-columns"><label>起步方式<select id="newInputMode" disabled aria-disabled="true"><option value="manual">上传 / 粘贴已有剧本</option></select></label><label>制作方式<select id="newExecutionMode"><option value="full">一键全流程</option><option value="step">一步步制作</option></select></label></div>
-      <label>分镜模式<select id="newGenerationMode"><option value="storyboard_sheet">多帧合图</option><option value="smart">智能首尾帧 + 延续</option><option value="continuation">视频延续</option><option value="keyframe">首尾帧</option></select></label>
-      <div class="form-columns"><label>目标时长（秒）<input id="newDuration" type="number" min="1" step="1" value="60"></label><label>带货方式<select id="newCommerceMode"><option value="none">不带货</option><option value="natural">自然植入</option><option value="explicit">明确带货</option></select></label></div>
-      <p>目标时长没有上限；实际分镜会按剧情完整性与云端单段能力自动拆分。</p>
+      <label>视频生成模式<select id="newGenerationMode"><option value="production_package">资产导入</option><option value="asset_direct" selected>资产包直投</option><option value="keyframe">首尾帧</option><option value="storyboard_sheet">分镜合图</option></select></label>
+      <p>创建后直接添加或上传资产，再手动创建需要生成的分镜。</p>
       <footer><button type="button" class="outline-button" data-close-dialog="newProjectDialog">取消</button><button type="submit" class="primary-button">创建项目</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="assetDialog" class="modal">
+    <form id="assetForm" method="dialog">
+      <header><span><small>NEW ASSET</small><b>新建资产</b></span><button type="button" data-close-dialog="assetDialog" aria-label="关闭">×</button></header>
+      <label>资产类型<select id="assetType"><option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="product">商品</option></select></label>
+      <label>名称<input id="assetName" required maxlength="80" placeholder="例如：林婉 / 客厅 / 暖心阅读灯"></label>
+      <label>外观与用途<textarea id="assetDescription" rows="5" required maxlength="2000" placeholder="写清年龄、外观、空间布局、材质或商品特征"></textarea></label>
+      <p id="productReplacementNotice" class="boundary-note" hidden>当前项目已有商品。提交后会先明确确认；旧商品参考图仍保留在共享商品库，新商品不会沿用旧图。</p>
+      <footer><button type="button" class="outline-button" data-close-dialog="assetDialog">取消</button><button type="submit" class="primary-button">创建资产</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="shotDialog" class="modal">
+    <form id="shotForm" method="dialog">
+      <header><span><small>NEW SHOT</small><b>新建分镜</b></span><button type="button" data-close-dialog="shotDialog" aria-label="关闭">×</button></header>
+      <label>分镜名称<input id="shotTitle" required maxlength="100" placeholder="例如：阅读灯照亮账本"></label>
+      <label>场景<select id="shotScene"></select></label>
+      <label>镜头时长（秒）<input id="shotDuration" type="number" min="5" max="15" step="1" value="10"></label>
+      <fieldset class="reference-fieldset"><legend>本镜入画人物</legend><p>只绑定勾选人物；对白说话人即使漏选也会自动补入本镜。</p><div id="shotCharacterChoices" class="choice-grid"></div></fieldset>
+      <fieldset class="reference-fieldset"><legend>本镜道具</legend><p>只把实际出现或推动动作的道具加入参考。</p><div id="shotPropChoices" class="choice-grid"></div></fieldset>
+      <label id="shotProductField" class="check-row" hidden><input id="shotUsesProduct" type="checkbox"><span>本镜使用当前商品 <b id="shotProductName"></b></span></label>
+      <label>画面与动作<textarea id="shotAction" rows="4" required maxlength="3000" placeholder="人物站位、动作、机位、运镜与画面变化"></textarea></label>
+      <label>对白（可留空）<textarea id="shotDialogue" rows="4" maxlength="2000" placeholder="每句写成：人物名（语气）：对白"></textarea></label>
+      <p class="form-hint">系统按动作段落、对白字数和说话人切换自适应分配三个可剪辑子镜时长，不再机械三等分。</p>
+      <footer><button type="button" class="outline-button" data-close-dialog="shotDialog">取消</button><button type="submit" class="primary-button">创建分镜</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="libraryImportDialog" class="modal">
+    <form id="libraryImportForm" method="dialog">
+      <header><span><small>IMPORT ASSET</small><b>选择要导入的资产类型</b></span><button type="button" data-close-dialog="libraryImportDialog" aria-label="关闭">×</button></header>
+      <p>文件选择器会按这里的类型校验图片、视频或音频；不会把“全部”静默当成人物。</p>
+      <label>资产类型<select id="libraryImportKind" required><option value="">请选择</option><option value="character">人物形象</option><option value="scene">场景</option><option value="prop">道具</option><option value="wardrobe">服装</option><option value="product">商品</option><option value="voice">人物音色</option><option value="video">视频</option></select></label>
+      <footer><button type="button" class="outline-button" data-close-dialog="libraryImportDialog">取消</button><button type="submit" class="primary-button">按此类型选择文件</button></footer>
     </form>
   </dialog>
 
@@ -186,7 +226,16 @@
     </form>
   </dialog>
 
-  <script src="text-provider-catalog.js"></script>
+  <script src="review-receipt-state.js"></script>
+  <script src="prompt-review-dialog.js"></script>
+  <script src="post-production-panel.js"></script>
+  <link rel="stylesheet" href="local-agent-panel.css">
+  <script src="local-agent-panel.js"></script>
+  <script src="project-log-export.js"></script>
+  <script src="../workbench-status.js"></script>
+  <script src="agent-activity-view.js"></script>
   <script src="simple-mode.js"></script>
+  <link rel="stylesheet" href="agent-activity.css">
+  <script src="agent-activity-panel.js"></script>
 </body>
 </html>

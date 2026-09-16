@@ -47,6 +47,7 @@ test("Kimi compatible transport requests SSE and persists cumulative deltas and 
       json: true,
       timeoutMs: 2_000,
       maxReconnectAttempts: 1,
+      reasoningEffort: "low",
       sessionId: "logical-kimi-1",
       onDelta: value => deltas.push(value),
       onUsage: value => receipts.push(value)
@@ -55,6 +56,7 @@ test("Kimi compatible transport requests SSE and persists cumulative deltas and 
     assert.equal(requests.length, 1);
     assert.equal(requests[0].stream, true);
     assert.deepEqual(requests[0].stream_options, { include_usage: true });
+    assert.equal(requests[0].reasoning_effort, "low");
     assert.deepEqual(deltas, ['{"ok":', '{"ok":true}']);
     assert.equal(receipts.length, 1);
     assert.equal(receipts[0].total_tokens, 16);
@@ -65,7 +67,7 @@ test("Kimi compatible transport requests SSE and persists cumulative deltas and 
   }
 });
 
-test("reasoning-only compatible streams remain recoverable as text", async () => {
+test("reasoning-only compatible streams are never surfaced as deliverable text", async () => {
   const previousFetch = global.fetch;
   global.fetch = async () => sseResponse([
     'data: {"choices":[{"delta":{"reasoning_content":"first "}}]}\n\n',
@@ -73,11 +75,13 @@ test("reasoning-only compatible streams remain recoverable as text", async () =>
     "data: [DONE]\n\n"
   ]);
   try {
-    const result = await generateText(provider, [{ role: "user", content: "think" }], {
-      timeoutMs: 2_000,
-      maxReconnectAttempts: 1
-    });
-    assert.equal(result, "first second");
+    await assert.rejects(
+      () => generateText(provider, [{ role: "user", content: "think" }], {
+        timeoutMs: 2_000,
+        maxReconnectAttempts: 1
+      }),
+      error => error?.code === "TEXT_RESULT_EMPTY" && error?.reasoningOnly === true
+    );
   } finally {
     global.fetch = previousFetch;
   }
@@ -163,6 +167,7 @@ test("workbench keeps pause/resume controls on one operation-state source", () =
   assert.match(renderer, /mutatingActionBlockedWhileRunning\(action\)/);
   assert.match(renderer, /当前任务正在运行，请先暂停任务后再修改生产内容/);
   const topicOptions = workflow.slice(workflow.indexOf('costOperation: "topic_ideation"'), workflow.indexOf('costOperation: "topic_ideation"') + 900);
-  assert.match(topicOptions, /maxReconnectAttempts: 1/);
+  assert.match(topicOptions, /maxReconnectAttempts: 2/);
+  assert.match(topicOptions, /autoContinueJson: false/);
   assert.doesNotMatch(topicOptions, /maxReconnectAttempts: UNLIMITED_ATTEMPTS/);
 });

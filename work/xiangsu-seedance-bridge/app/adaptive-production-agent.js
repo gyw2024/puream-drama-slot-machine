@@ -117,10 +117,17 @@ class AdaptiveProductionAgent {
           : await this.execute(skill.capability, platform, currentPayload, { ...context, attempt, skill: key });
         if (typeof skill.validate === "function") {
           const verdict = await skill.validate(result, currentPayload, { ...context, attempt, skill: key });
-          if (verdict !== true && verdict !== undefined) {
-            const details = Array.isArray(verdict) ? verdict : [verdict || "skill validation failed"];
-            throw Object.assign(new Error(details.map(String).join("; ")), { code: "AGENT_SKILL_VALIDATION_FAILED", details });
-          }
+            if (verdict !== true && verdict !== undefined) {
+              const details = Array.isArray(verdict) ? verdict : [verdict || "skill validation failed"];
+              throw Object.assign(new Error(details.map(String).join("; ")), {
+                code: "AGENT_SKILL_VALIDATION_FAILED",
+                details,
+                // Creative repair needs the exact rejected draft. Keep it on the
+                // in-memory error only; provider/network failures never enter this
+                // branch and therefore cannot trigger a duplicate paid request.
+                invalidDraft: result
+              });
+            }
         }
         trace.push({ attempt, status: "completed" });
         return result;
@@ -140,6 +147,7 @@ class AdaptiveProductionAgent {
       "retryable",
       "taskId",
       "remoteSubmissionUnknown",
+      "noRemoteTaskCreated",
       "remoteGenerationPending",
       "remoteGenerationCompleted",
       "remoteUrl",
@@ -147,8 +155,23 @@ class AdaptiveProductionAgent {
       "chargeCents",
       "settlementStatus",
       "clientRequestId",
+      "idempotencyKey",
       "status",
-      "upstream"
+      "upstream",
+      "upstreamCode",
+      "upstreamStatus",
+      "upstreamDone",
+      "upstreamReceipt",
+      "noAutomaticRetry",
+      "retryRequiresExplicitResume",
+      "partialText",
+      // Structured-output consumers can recover complete source-bound items
+      // from an unfinished JSON envelope. Dropping rawText at this boundary
+      // turned recoverable provider output into repeated generation requests.
+      "rawText",
+      "rawTextLength",
+      "rawTextSha256",
+      "rawTextTruncated"
     ];
     const providerRecovery = {};
     for (const field of providerRecoveryFields) {

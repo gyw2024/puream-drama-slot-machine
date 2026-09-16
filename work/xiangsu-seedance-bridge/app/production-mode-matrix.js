@@ -1,53 +1,60 @@
 "use strict";
 
-const PROVIDER_FAMILIES = new Set(["xiangsu", "cloud"]);
-const GENERATION_MODES = new Set(["keyframe", "continuation", "smart", "storyboard_sheet"]);
+// H3 is the only production video engine. Legacy provider values are migrated
+// before this matrix is consulted, so no runtime route can fall back to another
+// video family.
+const PROVIDER_FAMILIES = new Set(["cloud"]);
+const PRODUCTION_PACKAGE_MODE = "production_package";
+const GENERATION_MODES = new Set([PRODUCTION_PACKAGE_MODE, "asset_direct", "keyframe", "continuation", "smart", "storyboard_sheet"]);
 
 function normalizeMode(value) {
   const mode = String(value || "").trim().toLowerCase();
   return GENERATION_MODES.has(mode) ? mode : "continuation";
 }
 
-function normalizeProviderFamily(value) {
-  const family = String(value || "").trim().toLowerCase();
-  return PROVIDER_FAMILIES.has(family) ? family : "xiangsu";
+function normalizeProviderFamily(_value) {
+  return "cloud";
 }
 
-function providerFamilyFor(project = {}, settings = null) {
-  const kind = String(project?.generation?.videoProviderKind || settings?.videoProvider?.kind || "").trim();
-  if (kind === "local-xiangsu") return "xiangsu";
-  if (kind === "puream-hailuo-h3" || kind === "puream-seedance") return "cloud";
-  return project?.generation?.engine === "hailuo-h3" ? "cloud" : "xiangsu";
+function providerFamilyFor(_project = {}, _settings = null) {
+  return "cloud";
 }
 
-const COMMON_DIALOGUE_LOCK = "剧本原稿台词是唯一事实源：每句原文必须完整保留、只出现一次、不得改写或合并；说话人、听者、语气、表情、身体动作和口型必须逐句绑定，听者不得抢口型。";
-const COMMON_PRODUCT_LOCK = "商品只在剧本语义触发的镜头出现；名称、包装、颜色、Logo、外形和卖点只取用户上传商品信息与商品图，禁止虚构品牌、功效或把商品硬塞进无关镜头。";
-const COMMON_SCENE_LOCK = "场景资产固定为一张2×2四角度参考板；分镜和视频只选与当前机位匹配的一格锁门窗家具、轴线、时段和光向，最终剧情画面禁止出现四宫格、边框、序号或参考板。";
-const CLOUD_SCENE_LOCK = "The scene asset is one 2-by-2 four-angle board of the same space. Use only the panel matching the current camera axis to lock doors, windows, furniture, time of day and key-light direction; never render the board, gutters, labels or panel numbers in the final shot.";
-const COMMON_FLOW_LOCK = "一键制作和分阶段制作共用本合同；入口不同不得改变帧需求、台词、商品绑定、提示词编译或提交顺序。";
-const SYSTEM_VIDEO_OUTPUT_LOCK_ZH = "【最终视频输出硬锁】只保留剧中人物对白、现场环境声和与画面同步的动作声；禁止BGM、背景音乐、配乐、歌曲和音乐性音效；禁止字幕、标题、对白文字、旁白文字、贴纸、角标、价格文字、姓名条、Logo、水印、UI及任何可读屏幕文字；禁止人物介绍、人物小传、故事简介、正面身份锚图、人物四视图或任何资产板进入剧情成片。";
-const SYSTEM_VIDEO_OUTPUT_LOCK_EN = "FINAL VIDEO OUTPUT LOCK: in-story dialogue, natural location ambience and synchronized diegetic action sounds only. No BGM, background music, score, song or musical sound effect. No subtitles, captions, titles, dialogue text, narration text, stickers, labels, price text, name straps, logos, watermarks, UI or readable on-screen text. Never render a character introduction, biography, story synopsis, frontal identity anchor, character four-view sheet or any asset board as story footage.";
+const COMMON_DIALOGUE_LOCK = "剧本原稿台词是唯一事实源：每个最终视频生成单元必须有对白表并按实际语音时窗安排完整台词，禁止零对白生成单元；静默反应、商品特写或动作留白只能作为有对白单元内部的子镜，不能单独提交。每句原文必须完整保留、只出现一次、不得改写、合并或跨镜续半句；每句分别绑定唯一说话人、唯一音色、当前嘴型、镜头所有者、听者、语气、情绪弧、表情、音量、语速、重音、气息、身体动作、站位、朝向和视线；听者闭口并给出可见反应。动作摘要和时间线不得在对白标签外使用 says/reports/asks/answers/tells 等发声语义复述台词。";
+const COMMON_STORY_GATE = "剧本前30秒必须让首次观看者明确知道主角是谁、人物关系、已发生的事件、当前核心冲突、主角目标和失败代价；前8秒有可见钩子，30秒内完成一次不可逆冲突或因果转折。禁止只给亲密、辱骂、炫富或身份悬念而不解释关系与冲突。所有模式在资产或视频任务创建前都必须通过剧本层、逐镜表演层、资产提示词对齐层三层校验，并继续执行既有完整性、时长、连续性和质量校验。";
+const COMMON_PRODUCT_LOCK = require('./commerce-authoring-policy').PRODUCT_POLICY + '\n' + require('./commerce-authoring-policy').VISUAL_POLICY;
+const COMMON_UPSTREAM_PERFORMANCE_LOCK = "所有模式必须在写剧本和拆分镜时生成并继承同一份逐镜执行表：唯一说话人和人物资产ID、逐字台词、目标语速、语气与声调弧、表情弧、动作起止、听者闭口反应、左右/前后站位、朝向视线、入场来源、前态和后态。每个最终视频任务严格10–15秒，按实际语音时窗容纳完整台词，并用按剧情需要的因果表演拍点，不固定数量完成开场/可见入场或触发、对白中的剧情动作、听者闭口反应、可见结果/交接；动作可与对白同步，任一连续无人说话间隔不超过3秒，按实际需要安排给动作、反应和有动机运镜，禁止站桩念稿和无关忙碌。冲突、揭露、受辱、反击和反转台词不得使用neutral/calm/平静兜底；必须给出起点→触发→峰值→余震的可听声调变化、可见眉眼下颌变化和推动剧情的接触/退让/夺取/指认等动作。原稿明确描写进门或进入画面的动作，须保留进入路线与因果；场景转换或机位切换可以直接呈现已在场人物，不得为正常剪辑凭空追加入场动作。人物年龄、伤妆、发型、服装、身份伪装或身体状态发生可见变化时，必须先创建并绑定同一人物的新look/wardrobe资产，后续镜持续使用该状态，禁止回跳旧形象。每个任务起音干净、收尾完整；由Agent安排真实对白与动作时窗，0.30/0.35秒仅作预留建议。禁止咂嘴、弹舌、清嗓、吸气发声、假起音、半句重启、重复或回声。只有实际可听、推动剧情的动作才安排同步剧情内音效，不对无声接触机械配音，禁止无来源音效和背景音乐。";
+const COMMON_SCENE_LOCK = "场景资产固定为空场景多角度身份参考；视频只取当前机位所需的空间布局、门窗家具、轴线、时段和光向，成片只呈现真实剧情空间，不拍入任何资产板。";
+const CLOUD_SCENE_LOCK = "The scene asset is identity-only spatial reference. Lock doors, windows, furniture topology, camera axis, time of day and key-light direction for the active shot, while rendering only the live narrative space rather than any reference board.";
+const COMMON_FLOW_LOCK = "一键制作和分阶段制作共用本合同。所有生成必须按阶段独立提交并在上一阶段落盘并完成必要校验后才进入下一阶段：剧本编写→资产清单与资产提示词→分镜图提示词→分镜视频提示词→视频任务。禁止用一次模型请求同时生成或悄悄改写多个阶段的产物；剧本和所有提示词齐备后统一交给用户确认，确认前不提交媒体生成；一键入口也只能顺序调度这些独立阶段，入口不同不得改变台词、人物/音色归属、商品绑定、提示词确认或 H3 提交顺序。";
+const SYSTEM_VIDEO_OUTPUT_LOCK_ZH = "【最终视频输出硬锁】只保留剧中人物对白、现场环境声和与画面同步的动作声；画面只呈现叙事空间、人物表演、商品动作与必要道具，保持纯剧情摄影，不叠加后期图层、图形元素、界面或可读内容，也不把参考板、资产卡或制作信息拍入成片。";
+const SYSTEM_VIDEO_OUTPUT_LOCK_EN = "FINAL VIDEO OUTPUT LOCK: keep only exact in-story dialogue, natural location ambience and synchronized diegetic action sound. Show only narrative space, performance, product action and necessary props as clean live-action photography. Keep the image free of post-production layers, graphic overlays or interface; preserve intrinsic source-required physical printing, and never film a reference board, asset card or production metadata.";
+const FINAL_VIDEO_RUNTIME_BOUNDARY_ZH = "最终成片保持纯剧情摄影与真实现场声音：画面只呈现叙事空间、人物表演、商品动作与必要道具；声音只保留人物对白、连续现场环境底噪和与画面同步的动作声；画面保持干净，不叠加后期图层、图形元素、标识、界面或可读内容；不把参考板、资产卡或制作信息拍入成片。";
+const FINAL_VIDEO_RUNTIME_BOUNDARY_EN = "FINAL VIDEO RUNTIME BOUNDARY: keep pure narrative photography and natural production sound. Show only the story space, performance, product action and necessary props. Keep exact dialogue in the audio track with continuous location ambience and synchronized diegetic action sound. Keep the image clean without post-production layers, graphic overlays or interface; preserve intrinsic source-required physical printing. Never render a reference board, asset card or production metadata as footage.";
+const FINAL_SPOKEN_CONTENT_BOUNDARY_EN = "SPOKEN CONTENT BOUNDARY: only text enclosed by <d>...</d> is spoken verbatim by its assigned character. Everything outside <d>...</d> is silent production metadata. If ownership is unclear, keep every mouth closed instead of guessing.";
 
 function systemVideoOutputLockForPrompt(prompt = "", language = "auto") {
   const source = String(prompt || "");
   const useEnglish = language === "en" || (language === "auto" && /<d>|<Picture\s+\d+>|subject_definitions/i.test(source));
-  return useEnglish ? SYSTEM_VIDEO_OUTPUT_LOCK_EN : SYSTEM_VIDEO_OUTPUT_LOCK_ZH;
+  return `${useEnglish ? FINAL_VIDEO_RUNTIME_BOUNDARY_EN : FINAL_VIDEO_RUNTIME_BOUNDARY_ZH}\n${FINAL_SPOKEN_CONTENT_BOUNDARY_EN}`;
 }
 
 function stripSystemVideoOutputLock(prompt = "") {
   return String(prompt || "")
     .replace(/\r/g, "")
     .replace(/【最终视频输出硬锁】[^\n]*/g, "")
+    .replace(/FINAL VIDEO RUNTIME BOUNDARY:[^\n]*/gi, "")
+    .replace(/最终成片保持纯剧情摄影与真实现场声音：[^\n]*/g, "")
     .replace(/FINAL VIDEO OUTPUT LOCK:[^\n]*/gi, "")
     .replace(/FINAL OUTPUT LOCK:[^\n]*/gi, "")
     .trim();
 }
 
-function ensureSystemVideoOutputLock(prompt = "", maxLength = 1900, language = "auto") {
+function ensureSystemVideoOutputLock(prompt = "", maxLength = 10000, language = "auto") {
   const source = String(prompt || "").replace(/\r/g, "").trim();
   const lock = systemVideoOutputLockForPrompt(source, language);
   const withoutDuplicate = stripSystemVideoOutputLock(source);
-  const limit = Math.max(lock.length + 80, Math.min(1990, Number(maxLength) || 1900));
+  const limit = Math.max(lock.length + 80, Math.min(10000, Number(maxLength) || 10000));
   const bodyLimit = Math.max(0, limit - lock.length - 1);
   if (withoutDuplicate.length > bodyLimit) {
     throw Object.assign(new Error(`Video prompt body is ${withoutDuplicate.length} characters but only ${bodyLimit} remain after reserving the mandatory output lock`), {
@@ -60,107 +67,82 @@ function ensureSystemVideoOutputLock(prompt = "", maxLength = 1900, language = "
   return [withoutDuplicate, lock].filter(Boolean).join("\n").trim();
 }
 
+function entry(mode, label, framePolicy, imagePolicy, videoPolicy) {
+  return Object.freeze({ key: `cloud:${mode}`, providerFamily: "cloud", mode, label, framePolicy, imagePolicy, videoPolicy });
+}
+
 const MATRIX = Object.freeze({
-  "xiangsu:keyframe": Object.freeze({
-    key: "xiangsu:keyframe",
-    providerFamily: "xiangsu",
-    mode: "keyframe",
-    label: "本地像塑 × 首尾帧",
-    framePolicy: "每镜都准备剧情首帧和尾帧；首帧是0秒事实，尾帧是结束状态，中间只补连续动作。",
-    imagePolicy: "分别编译单张9:16首帧与尾帧；尾帧必须完成状态变化，禁止复制首帧、合图或资产板。",
-    videoPolicy: "使用像塑图N/音频N编号；图1锁首帧、图2锁尾帧，不引用上一镜视频，不重开第二条动作链。"
-  }),
-  "xiangsu:continuation": Object.freeze({
-    key: "xiangsu:continuation",
-    providerFamily: "xiangsu",
-    mode: "continuation",
-    label: "本地像塑 × 视频延续",
-    framePolicy: "第一镜准备首帧和尾帧；第二镜起只准备本镜尾帧，并以已确认上一镜视频末帧作为0秒起点。",
-    imagePolicy: "首镜编译首尾关键帧；后续镜只编译尾帧结果，不得把人物合板误当首帧。",
-    videoPolicy: "视频1是上一镜完整视频且只从最后一帧续接；图N只锁本镜结束状态，禁止回放、重置站位或重新建立空间。"
-  }),
-  "xiangsu:smart": Object.freeze({
-    key: "xiangsu:smart",
-    providerFamily: "xiangsu",
-    mode: "smart",
-    label: "本地像塑 × 智能模式",
-    framePolicy: "第一镜和真实换场镜使用首尾帧；同场景连续镜使用上一镜视频末帧加本镜尾帧。",
-    imagePolicy: "系统按场景与动作连续性决定首尾帧或仅尾帧；任何镜头都不得同时走两套主控。",
-    videoPolicy: "换场镜按图1首帧/图2尾帧；同场景镜按视频1末帧/本镜尾帧，保持轴线、站位、光向和环境声。"
-  }),
-  "xiangsu:storyboard_sheet": Object.freeze({
-    key: "xiangsu:storyboard_sheet",
-    providerFamily: "xiangsu",
-    mode: "storyboard_sheet",
-    label: "本地像塑 × 逐秒分镜合图",
-    framePolicy: "每镜只准备一张按秒排序的多格合图；不生成首帧、尾帧，也不检查尾帧。",
-    imagePolicy: "合图含恰好duration个完整9:16小格，按左到右、上到下推进；每格动作/表情/构图至少一项变化。",
-    videoPolicy: "图1仅是时间规划合图，按格顺序演绎；成片禁止出现格线、序号、字幕、UI或只拍其中一格。"
-  }),
-  "cloud:keyframe": Object.freeze({
-    key: "cloud:keyframe",
-    providerFamily: "cloud",
-    mode: "keyframe",
-    label: "纯梦云端 × 首尾帧",
-    framePolicy: "每镜提交剧情首帧和尾帧；两张图是云端全参考任务的精确时间端点。",
-    imagePolicy: "分别编译单张9:16首帧与尾帧并上传云端；尾帧必须体现不可逆新状态。",
-    videoPolicy: "按海螺全参考官方分区编译英文导演提示；中文原台词只进入<d>[Chinese]块，首尾图作为0秒与结束端点。"
-  }),
-  "cloud:continuation": Object.freeze({
-    key: "cloud:continuation",
-    providerFamily: "cloud",
-    mode: "continuation",
-    label: "纯梦云端 × 视频延续",
-    framePolicy: "第一镜提交首尾帧；后续镜提交上一镜已确认视频、本镜尾帧、人物/场景/音色参考。",
-    imagePolicy: "首镜编译首尾关键帧；后续镜只编译尾帧目标，禁止伪造或重复首帧。",
-    videoPolicy: "云端必须从<Video 1>最后一帧继续，禁止回放或重新开场；中文原台词只进入各自说话人的<d>[Chinese]块。"
-  }),
-  "cloud:smart": Object.freeze({
-    key: "cloud:smart",
-    providerFamily: "cloud",
-    mode: "smart",
-    label: "纯梦云端 × 智能模式",
-    framePolicy: "第一镜/换场镜提交首尾帧；同场景连续镜提交上一镜视频与本镜尾帧，逐镜只能命中一种策略。",
-    imagePolicy: "依据场景ID、空间状态与动作链决定首尾帧或仅尾帧；换场不继承旧空间，同场不重置。",
-    videoPolicy: "外层保持海螺官方英文全参考结构；每镜按智能决策选择keyframe或continuation，中文原台词仍逐句锁在<d>[Chinese]块。"
-  }),
-  "cloud:storyboard_sheet": Object.freeze({
-    key: "cloud:storyboard_sheet",
-    providerFamily: "cloud",
-    mode: "storyboard_sheet",
-    label: "纯梦云端 × 逐秒分镜合图",
-    framePolicy: "每镜只提交一张逐秒合图及人物/场景/商品/音色参考；不生成、不校验首尾帧。",
-    imagePolicy: "合图恰好duration个完整9:16小格，每格是不同时间状态；格线和序号只是规划信息。",
-    videoPolicy: "云端按<Picture 1>面板顺序演绎但绝不渲染整张板、格线或UI；中文原台词逐句放入正确说话人的<d>[Chinese]块。"
-  })
+  "cloud:production_package": entry(
+    PRODUCTION_PACKAGE_MODE,
+    "H3 × Codex 资产包直抽",
+    "只接受通过严格校验的 .pdramapack；剧本、分镜、英文视频提示词、中文核对稿和图片参考清单均由导入包锁定，不再进入选题、写作、拆镜、提示词或资产生成阶段。",
+    "每镜严格使用导入清单中的人物、场景、道具和商品原图，保持原始顺序并直接作为多图参考；不要求、不生成任何额外镜头锚点图。禁止参考音频。",
+    "逐镜提交导入包内已批准的官方英文提示词；只保留标签内中文对白。不得重写、补写或交换说话人，不使用上一镜视频，不触发任何导入包之外的媒体生成。"
+  ),
+  "cloud:asset_direct": entry(
+    "asset_direct",
+    "H3 × 资产直投（无分镜图）",
+    "剧本和全部提示词确认后，只准备人物、场景、剧情物品/商品和音色资产；不创建首帧、尾帧或逐秒合图任务。",
+    "人物资产锁脸型/年龄/发型/体态/服装；场景四视图整张原图锁空间，禁止裁切；物品/商品锁外观和持有关系；音色只绑定所属角色。所有资产均为身份与连续性约束，不作为剧情画面。",
+    "每个 H3 任务最多保留两句完整台词，可以同一人连续两句，也可以两人一问一答。逐字内容只写入提示词，音色资产不承载对白；换人时在上一句完整结束后直接切到该说话人的机位和嘴型，听者闭口反应。"
+  ),
+  "cloud:keyframe": entry(
+    "keyframe", "H3 × 首尾帧",
+    "每镜提交首帧和尾帧，分别锁定动作前与动作完成状态。",
+    "首尾帧均为单张竖屏剧情关键帧，不使用资产板或多格合图替代。",
+    "H3 在首尾状态之间完成一条连续因果动作链，并逐句锁定说话人、嘴型、音色、听者和表演。"
+  ),
+  "cloud:continuation": entry(
+    "continuation", "H3 × 视频延续",
+    "第一镜或真实换场提交首尾帧；同场后续镜以上一镜确认视频的末状态为起点并提交本镜尾帧。",
+    "只生成当前策略真正需要的关键帧；同场后续镜不伪造首帧，换场绝不继承旧空间。",
+    "H3 在同一场景从上一镜最后状态继续，不回放、不重新开场；换场从当前首帧重新建立空间；对白仍逐句绑定唯一说话人和音色。"
+  ),
+  "cloud:smart": entry(
+    "smart", "H3 × 智能首尾帧/延续",
+    "第一镜或真实换场用首尾帧；同场景连续镜使用上一镜视频与本镜尾帧。",
+    "系统按场景ID和动作状态只选择一套主控，换场不继承旧空间，同场不重置。",
+    "H3 按逐镜策略执行，同时保持人物、声音、轴线、道具和动作状态连续。"
+  ),
+  "cloud:storyboard_sheet": entry(
+    "storyboard_sheet", "H3 × 逐秒分镜合图",
+    "每镜只提交一张按时间排序的多格合图及所需资产，不生成首尾帧。",
+    "每格都是完整等比例竖屏画面，按时间产生可见变化；合图仅作时间规划。",
+    "H3 按画格顺序推进，但成片只呈现连续剧情画面；对白逐句绑定正确说话人、音色和表演。"
+  )
 });
 
 const CLOUD_H3_RUNTIME_PROMPTS = Object.freeze({
-  keyframe: "Eight-mode matrix cloud/keyframe: use the supplied first and last narrative images as the exact temporal endpoints; preserve every exact Chinese source line once, with its assigned speaker, listener, facial expression, body tension and vocal delivery; bind only the uploaded product in story-triggered product beats.",
-  continuation: "Eight-mode matrix cloud/continuation: the first unit uses first/last narrative images; later units start only from the prior confirmed video's final frame and converge on the current end state; preserve every exact Chinese source line once with correct speaker/listener/performance and bind only the uploaded product where the story triggers it.",
-  smart: "Eight-mode matrix cloud/smart: a first unit or true scene cut uses first/last narrative images, while same-scene units continue only from the prior confirmed video's final frame toward the current end state; never mix both controls in one unit; preserve exact source dialogue and uploaded-product binding.",
-  storyboard_sheet: "Eight-mode matrix cloud/storyboard-sheet: use only the chronological portrait-panel contact sheet as a planning timeline, never render its grid, labels or UI and never require first/end frames; preserve every exact Chinese source line once with correct speaker/listener/performance and bind only the uploaded product where the story triggers it."
+  production_package: "H3 Codex production-package mode: preserve the imported English provider prompt and its locked image-reference order exactly. Submit the imported character, location, prop and product images directly as multi-image references; never require or generate a derived shot anchor. Use no audio reference and never infer, rewrite, or add dialogue outside the imported dialogue tags.",
+  asset_direct: "H3 asset-direct mode: do not infer or request storyboard frames. Keep the full unmodified four-view scene image as one reference, together with bound character and necessary prop/product assets. Each task carries all complete source Chinese lines that fit a clear legal performance. Exact words come only from dialogue tags; audio assets are timbre-only. A speaker change happens only after the prior line ends and directly switches camera and mouth ownership; listeners keep closed lips and visibly react.",
+  keyframe: "H3 keyframe mode: use the supplied first and last narrative images as exact temporal endpoints; preserve each exact Chinese source line once with its assigned speaker, listener, voice and performance.",
+  continuation: "H3 continuation mode: within the same scene, start only from the prior confirmed video's final state and converge on the current end state without replay. On a true scene cut, reset with the current first and last frames and never inherit the old space. Preserve each exact Chinese source line once with correct ownership and performance.",
+  smart: "H3 smart mode: use keyframes for the opening or a true scene cut and prior-video continuation for a same-scene shot; never mix both controls in one shot; preserve exact dialogue and reference bindings.",
+  storyboard_sheet: "H3 storyboard-sheet mode: use the chronological portrait-panel sheet only as a planning timeline and execute every state in order; preserve exact dialogue, speaker ownership, voice and performance."
 });
 
-function matrixEntry(providerFamily, mode) {
-  const family = normalizeProviderFamily(providerFamily);
+const MODE_INVARIANT_RUNTIME_LOCK = "MODE-INVARIANT STORY AND DIALOGUE LOCK: every final video generation unit contains an explicit dialogue table with complete Chinese dialogue lines assigned by the validated speech and action windows. A silent reaction, product insert, action reserve or transition may exist only as an internal camera beat inside that dialogue-bearing unit, never as a zero-dialogue provider task. Within the first 30 seconds, the film must explicitly establish the protagonist, relationship, inciting event, active conflict, protagonist goal and stakes; every later unit must add new information, cause a visible action, or change a relationship/state. Only text inside <d>[Chinese] ...</d> may be spoken. Summary and shot directions must describe physical action only and must never paraphrase speech with says, reports, asks, answers, tells, explains, announces or similar voice verbs. Conflict, humiliation, accusation, reveal, counterattack and reversal lines must never use a neutral or calm fallback: give each an audible pitch/pace/intensity arc, a visible brow-eye-jaw arc, and a causal body action. Lock every visible speaker to exactly one matching character reference; never substitute another referenced face and never create two physical instances of one identity. Preserve the established 180-degree axis: screen-left subjects face screen-right and screen-right subjects face screen-left, with the source-authored eyeline and posture, retaining safe forward-facing driving/work; address viewers only for an explicitly authored CTA. Execute an entrance only when the source authors one; a scene or camera cut may show a character already present without inventing another entrance. Any visible age, injury makeup, hairstyle, wardrobe, disguise or physical-state change requires a separately bound look asset that remains active until another visible change. The Agent schedules clean speech onset and a complete ending without mandatory lead/tail margins. Start the first syllable once with no lip smack, tongue click, throat clear, voiced inhale, false start, restart, duplicate or echo. Add synchronized diegetic sound only for actually audible motivated actions; a silent contact does not require a sound; no source-less sound and no background music. Product dialogue keeps the exact referenced product in continuous authored support or surface contact; every product shot and subshot keeps the named presenter visibly in frame with identifiable source-authored product interaction; motivated detail crops retain character and story continuity; never use a product-only or anonymous-hands-only insert. Before submission require the three passed gates: story clarity and dramatic hook; per-line dialogue, tone, emotion, action, blocking, facing and eyeline; exact package, asset, look-state, reference and prompt alignment.";
+
+function matrixEntry(_providerFamily, mode) {
   const normalizedMode = normalizeMode(mode);
-  return MATRIX[`${family}:${normalizedMode}`];
+  return MATRIX[`cloud:${normalizedMode}`];
 }
 
-function matrixEntryForProject(project = {}, settings = null, modeOverride = "") {
-  return matrixEntry(providerFamilyFor(project, settings), modeOverride || project?.generation?.mode);
+function matrixEntryForProject(project = {}, _settings = null, modeOverride = "") {
+  return matrixEntry("cloud", modeOverride || project?.generation?.mode);
 }
 
-function matrixGlobalPrompt(providerFamily, mode) {
-  const entry = matrixEntry(providerFamily, mode);
+function matrixGlobalPrompt(_providerFamily, mode) {
+  const selected = matrixEntry("cloud", mode);
   return [
-    `【八模式制作矩阵·${entry.label}·${entry.key}】`,
-    `帧与流程：${entry.framePolicy}`,
-    `分镜图提示：${entry.imagePolicy}`,
-    `视频提示：${entry.videoPolicy}`,
+    `【H3 制作矩阵·${selected.label}·${selected.key}】`,
+    `帧与流程：${selected.framePolicy}`,
+    `图像/资产提示：${selected.imagePolicy}`,
+    `H3 视频提示：${selected.videoPolicy}`,
     `台词合同：${COMMON_DIALOGUE_LOCK}`,
+    `剧情门禁：${COMMON_STORY_GATE}`,
     `商品合同：${COMMON_PRODUCT_LOCK}`,
+    `表演与入场合同：${COMMON_UPSTREAM_PERFORMANCE_LOCK}`,
     `场景合同：${COMMON_SCENE_LOCK}`,
     `入口合同：${COMMON_FLOW_LOCK}`,
     `成片输出：${SYSTEM_VIDEO_OUTPUT_LOCK_ZH}`
@@ -168,21 +150,23 @@ function matrixGlobalPrompt(providerFamily, mode) {
 }
 
 function matrixGlobalPromptForProject(project = {}, settings = null, modeOverride = "") {
-  const entry = matrixEntryForProject(project, settings, modeOverride);
-  return matrixGlobalPrompt(entry.providerFamily, entry.mode);
+  const selected = matrixEntryForProject(project, settings, modeOverride);
+  return matrixGlobalPrompt(selected.providerFamily, selected.mode);
 }
 
 function matrixRuntimeVideoPromptForProject(project = {}, settings = null, modeOverride = "") {
-  const entry = matrixEntryForProject(project, settings, modeOverride);
-  if (entry.providerFamily === "cloud") return `${CLOUD_H3_RUNTIME_PROMPTS[entry.mode]} ${CLOUD_SCENE_LOCK} ${SYSTEM_VIDEO_OUTPUT_LOCK_EN}`;
-  return `【八模式视频提交·${entry.label}·${entry.key}】${entry.videoPolicy} ${COMMON_DIALOGUE_LOCK} ${COMMON_PRODUCT_LOCK} ${COMMON_SCENE_LOCK} ${SYSTEM_VIDEO_OUTPUT_LOCK_ZH}`;
+  const selected = matrixEntryForProject(project, settings, modeOverride);
+  return `${MODE_INVARIANT_RUNTIME_LOCK} ${CLOUD_H3_RUNTIME_PROMPTS[selected.mode]} ${CLOUD_SCENE_LOCK} ${FINAL_VIDEO_RUNTIME_BOUNDARY_EN}`;
 }
 
 module.exports = {
+  PRODUCTION_PACKAGE_MODE,
   COMMON_DIALOGUE_LOCK,
+  COMMON_STORY_GATE,
   CLOUD_SCENE_LOCK,
   COMMON_FLOW_LOCK,
   COMMON_PRODUCT_LOCK,
+  COMMON_UPSTREAM_PERFORMANCE_LOCK,
   COMMON_SCENE_LOCK,
   SYSTEM_VIDEO_OUTPUT_LOCK_EN,
   SYSTEM_VIDEO_OUTPUT_LOCK_ZH,

@@ -4,12 +4,17 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { _electron: electron } = require("playwright-core");
+const { resolveUserDataDirectory } = require("../app/user-data-location");
 
 async function main() {
   const root = path.resolve(__dirname, "..");
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-  const executablePath = process.env.DRAMA_SLOT_INSTALLED_EXE
-    || path.join(process.env.LOCALAPPDATA || "", "Programs", packageJson.name, `${packageJson.build.productName}.exe`);
+  const executableCandidates = [
+    process.env.DRAMA_SLOT_INSTALLED_EXE,
+    path.join(process.env.LOCALAPPDATA || "", "Programs", "xiangsu-seedance-bridge", `${packageJson.build.productName}.exe`),
+    path.join(process.env.LOCALAPPDATA || "", "Programs", packageJson.name, `${packageJson.build.productName}.exe`)
+  ].filter(Boolean);
+  const executablePath = executableCandidates.find(candidate => fs.existsSync(candidate)) || executableCandidates[0];
   if (!fs.existsSync(executablePath)) throw new Error(`installed executable missing: ${executablePath}`);
 
   const evidenceRoot = process.env.DRAMA_SLOT_AUDIT_EVIDENCE_DIR
@@ -41,7 +46,7 @@ async function main() {
   }, null, 2), "utf8");
 
   const licenseSource = process.env.DRAMA_SLOT_AUDIT_LICENSE_SOURCE
-    || path.join(process.env.APPDATA || "", packageJson.name, "drama-license.json");
+    || path.join(resolveUserDataDirectory({ appDataPath: process.env.APPDATA || "" }), "drama-license.json");
   const localStateSource = path.join(path.dirname(licenseSource), "Local State");
   if (!fs.existsSync(licenseSource) || !fs.existsSync(localStateSource)) {
     throw new Error("installed audit requires the local activation snapshot and its Electron Local State");

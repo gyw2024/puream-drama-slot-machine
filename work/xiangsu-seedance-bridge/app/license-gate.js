@@ -5,7 +5,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { execSync } = require("node:child_process");
-const { app, safeStorage } = require("electron");
+// Pure transport helpers are also loaded by the MCP Node sidecar. Desktop
+// services are resolved only when an actual licensing operation needs them.
+const desktop = new Proxy({}, { get: (_target, key) => require("electron")[key] });
 
 /** Unified PUREAM website authorization service. */
 const DEFAULT_LICENSE_BASE_URL = "https://drama-slot.puream.cn";
@@ -23,6 +25,64 @@ const TRUSTED_PERSISTED_LICENSE_ORIGINS = new Set([
   "https://drama.puream.cn",
   "https://drama-slot.puream.cn"
 ]);
+
+// Device binding is an entitlement decision owned by the official website or
+// the short-drama sidecar.  Keep the vocabulary deliberately small: a client
+// may display the server's explicit policy, but must never infer administrator
+// status from a local field such as concurrencyAuthority.
+const DEVICE_BINDING_POLICY_BOUND = "bound";
+const DEVICE_BINDING_POLICY_MULTI_DEVICE = "multi-device";
+
+function normalizeDeviceBindingPolicy(value) {
+  if (typeof value === "string") {
+    const mode = value.trim().toLowerCase().replace(/[_\s]+/g, "-");
+    if (["unbound", "none", "unlimited", "multi-device", "multi-device-admin", "administrator-multi-device"].includes(mode)) {
+      return DEVICE_BINDING_POLICY_MULTI_DEVICE;
+    }
+    if (["bound", "single", "device-bound", "single-device"].includes(mode)) return DEVICE_BINDING_POLICY_BOUND;
+    return "";
+  }
+  if (!value || typeof value !== "object") return "";
+  return normalizeDeviceBindingPolicy(
+    value.mode
+      || value.policy
+      || value.binding
+      || value.deviceBinding
+      || value.device_binding
+      || value.scope
+      || ""
+  );
+}
+
+function extractServerDeviceBinding(data) {
+  const sources = [
+    data,
+    data?.account,
+    data?.entitlement,
+    data?.administratorEntitlement,
+    data?.administrator_entitlement
+  ].filter(item => item && typeof item === "object");
+  for (const source of sources) {
+    const raw = source.deviceBindingPolicy
+      ?? source.device_binding_policy
+      ?? source.devicePolicy
+      ?? source.device_policy;
+    const policy = normalizeDeviceBindingPolicy(raw);
+    if (policy) {
+      return {
+        policy,
+        administrator: policy === DEVICE_BINDING_POLICY_MULTI_DEVICE
+          && (source.administrator === true
+            || source.isAdministrator === true
+            || source.role === "administrator"
+            || source.role === "admin"
+            || source.type === "administrator"
+            || source.kind === "administrator")
+      };
+    }
+  }
+  return { policy: "", administrator: false };
+}
 
 function normalizeAuthorizationCode(value) {
   const code = String(value || "").replace(/[\s-]+/g, "").trim().toUpperCase();
@@ -46,7 +106,7 @@ function licenseBypassAllowed() {
   if (process.env.DRAMA_LICENSE_BYPASS !== "1") return false;
   // Never honor bypass in packaged release builds.
   try {
-    if (app?.isPackaged) return false;
+    if (desktop.app?.isPackaged) return false;
   } catch {
     /* app may be unavailable in unit tests */
   }
@@ -72,7 +132,7 @@ function getMachineId() {
 }
 
 function licenseStatePath() {
-  return path.join(app.getPath("userData"), "drama-license.json");
+  return path.join(desktop.app.getPath("userData"), "drama-license.json");
 }
 
 function replaceFileWithRetries(temporary, target) {
@@ -94,8 +154,8 @@ function encryptSecret(plain) {
   const text = String(plain || "");
   if (!text) return "";
   try {
-    if (safeStorage?.isEncryptionAvailable?.()) {
-      return `safe:${safeStorage.encryptString(text).toString("base64")}`;
+    if (desktop.safeStorage?.isEncryptionAvailable?.()) {
+      return `safe:${desktop.safeStorage.encryptString(text).toString("base64")}`;
     }
   } catch (error) {
     throw Object.assign(new Error("系统安全存储不可用，授权码未保存"), { code: "SECRET_STORAGE_UNAVAILABLE", cause: error });
@@ -108,8 +168,8 @@ function decryptSecret(stored) {
   if (!raw) return "";
   try {
     if (raw.startsWith("safe:")) {
-      if (!safeStorage?.isEncryptionAvailable?.()) return "";
-      return safeStorage.decryptString(Buffer.from(raw.slice(5), "base64"));
+      if (!desktop.safeStorage?.isEncryptionAvailable?.()) return "";
+      return desktop.safeStorage.decryptString(Buffer.from(raw.slice(5), "base64"));
     }
     if (raw.startsWith("b64:")) return Buffer.from(raw.slice(4), "base64").toString("utf8");
     // Legacy plaintext token
@@ -192,7 +252,16 @@ class DramaLicenseClient {
     this.state = typeof options.stateReader === "function" ? (options.stateReader() || {}) : readLicenseState();
     this.stateWriter = typeof options.stateWriter === "function" ? options.stateWriter : writeLicenseState;
     const explicitBaseUrl = options.baseUrl || process.env.DRAMA_LICENSE_BASE_URL || "";
-    this.baseUrl = String(explicitBaseUrl || trustedPersistedLicenseBaseUrl(this.state.baseUrl) || DEFAULT_LICENSE_BASE_URL).replace(/\/$/, "");
+    // Authorization, device binding and concurrency are server-side security
+    // boundaries. Never let a packaged-process environment variable (or a
+    // tampered persisted file) redirect those requests to an attacker-owned
+    // server that can mint fake sessions and leases. Tests may still pass one
+    // of the two official origins and mock the transport itself.
+    this.baseUrl = String(
+      trustedPersistedLicenseBaseUrl(explicitBaseUrl)
+      || trustedPersistedLicenseBaseUrl(this.state.baseUrl)
+      || DEFAULT_LICENSE_BASE_URL
+    ).replace(/\/$/, "");
     this.heartbeatTimer = null;
     this.leaseHeartbeats = new Map();
     this.offlineLeases = new Map();
@@ -228,6 +297,10 @@ class DramaLicenseClient {
       entitlementProduct: this.state.entitlementProduct || APP_ID,
       sessionAuthority: this.state.sessionAuthority || "drama-admin",
       concurrencyAuthority: this.state.concurrencyAuthority || "",
+      // Informational only. This value is copied from the last server response;
+      // it is never used to bypass storedStateMatchesMachine or lease checks.
+      deviceBindingPolicy: this.state.deviceBindingPolicy || "",
+      administratorEntitled: this.state.administratorEntitled === true,
       appId: APP_ID,
       baseUrl: this.baseUrl,
       offlineGrace: Boolean(this.state.offlineGrace),
@@ -259,7 +332,9 @@ class DramaLicenseClient {
   storedStateMatchesMachine() {
     const storedMachineId = String(this.state.machineId || "").trim();
     // Legacy states did not persist machineId; /api/auth/login remains the authoritative
-    // device-binding check because it always receives the current machineId.
+    // device-binding check because it always receives the current machineId. Do
+    // not special-case a persisted administrator/device policy here: the local
+    // JSON is user-controlled and can be tampered with between launches.
     return !storedMachineId || storedMachineId === getMachineId();
   }
 
@@ -330,6 +405,13 @@ class DramaLicenseClient {
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) {
+      if ([408, 425, 500, 502, 503, 504].includes(Number(res.status))) {
+        throw Object.assign(new Error("授权与并发服务暂时不可达，软件将沿用本机有效授权宽限"), {
+          code: "LICENSE_OFFLINE",
+          status: res.status,
+          data
+        });
+      }
       throw Object.assign(new Error(data.message || data.error || `授权失败 HTTP ${res.status}`), {
         code: data.code || "LICENSE_ERROR",
         status: res.status,
@@ -400,6 +482,13 @@ class DramaLicenseClient {
     }
     const response = await res.json().catch(() => ({}));
     if (!res.ok || response.ok === false) {
+      if ([408, 425, 500, 502, 503, 504].includes(Number(res.status))) {
+        throw Object.assign(new Error("纯梦官网授权服务暂时不可达，软件将沿用本机有效授权宽限"), {
+          code: "LICENSE_OFFLINE",
+          status: res.status,
+          data: response
+        });
+      }
       throw Object.assign(new Error(response.message || response.error || `纯梦官网授权失败 HTTP ${res.status}`), {
         code: response.code || "INVALID_CODE",
         status: res.status,
@@ -407,6 +496,7 @@ class DramaLicenseClient {
       });
     }
     const data = response.data && typeof response.data === "object" ? response.data : response;
+    const websiteDeviceBinding = extractServerDeviceBinding(data);
     const canonicalCode = normalizeAuthorizationCode(
       data.pureamAuthorizationCode || data.authorizationCode || data.activationCode || code
     );
@@ -440,6 +530,14 @@ class DramaLicenseClient {
         { code: "CONCURRENCY_AUTHORITY_INVALID" }
       );
     }
+    const sidecarDeviceBinding = extractServerDeviceBinding(concurrencySession);
+    // Prefer the sidecar's fresh entitlement response. The website response is
+    // retained as a fallback because the two official services may roll out the
+    // same policy at slightly different times. Neither value is used as a local
+    // authorization bypass; it is only surfaced as server-issued metadata.
+    const serverDeviceBinding = sidecarDeviceBinding.policy
+      ? sidecarDeviceBinding
+      : websiteDeviceBinding;
     const now = new Date().toISOString();
     this.saveState({
       token: concurrencySession.token,
@@ -453,6 +551,8 @@ class DramaLicenseClient {
       entitlementProduct: data.entitlementProduct || data.planId || "puream-website",
       sessionAuthority: WEBSITE_SESSION_AUTHORITY,
       concurrencyAuthority: ADMIN_CONCURRENCY_AUTHORITY,
+      deviceBindingPolicy: serverDeviceBinding.policy,
+      administratorEntitled: serverDeviceBinding.administrator === true,
       activatedAt: now,
       lastHeartbeatOkAt: now,
       offlineGrace: false,
@@ -497,6 +597,7 @@ class DramaLicenseClient {
       );
     }
     const websiteAccount = String(data.credentialSource || "").toUpperCase() === "PUREAM_WEBSITE";
+    const serverDeviceBinding = extractServerDeviceBinding(data);
     this.saveState({
       token: data.token,
       activationCode: canonicalCode,
@@ -509,6 +610,8 @@ class DramaLicenseClient {
       entitlementProduct: data.entitlementProduct || APP_ID,
       sessionAuthority: websiteAccount ? WEBSITE_SESSION_AUTHORITY : ADMIN_CONCURRENCY_AUTHORITY,
       concurrencyAuthority: ADMIN_CONCURRENCY_AUTHORITY,
+      deviceBindingPolicy: serverDeviceBinding.policy,
+      administratorEntitled: serverDeviceBinding.administrator === true,
       activatedAt: new Date().toISOString(),
       lastHeartbeatOkAt: new Date().toISOString(),
       offlineGrace: false,
@@ -549,7 +652,7 @@ class DramaLicenseClient {
       try {
         return await this.loginWithPureamWebsite(this.storedActivationCode());
       } catch (error) {
-        if (error.code === "LICENSE_OFFLINE") return this.enterOfflineGrace(error);
+        if (["LICENSE_OFFLINE", "CONCURRENCY_AUTHORITY_OFFLINE"].includes(String(error.code || ""))) return this.enterOfflineGrace(error);
         if (["INVALID_CODE", "DEVICE_BOUND", "USER_DISABLED", "SUBSCRIPTION_EXPIRED"].includes(String(error.code || ""))) {
           this.clearLocalSession(false, { autoReloginBlocked: true });
         }
@@ -826,5 +929,9 @@ module.exports = {
   PUREAM_WEBSITE_DESKTOP_LOGIN_URL,
   WEBSITE_SESSION_AUTHORITY,
   ADMIN_CONCURRENCY_AUTHORITY,
+  DEVICE_BINDING_POLICY_BOUND,
+  DEVICE_BINDING_POLICY_MULTI_DEVICE,
+  normalizeDeviceBindingPolicy,
+  extractServerDeviceBinding,
   OFFLINE_GRACE_MS
 };

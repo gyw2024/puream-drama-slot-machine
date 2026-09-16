@@ -8,6 +8,63 @@ const { evaluateProject } = require("./quality-lab");
 const { FoundryRuntimeStore } = require("./runtime-store");
 const { SCRIPT_UNDERSTANDING_VERSION, buildScriptUnderstanding } = require("./script-understanding");
 
+function productionSourceFingerprint(project = {}) {
+  const shotFields = shot => ({
+    id: shot?.id,
+    number: shot?.number,
+    duration: shot?.duration,
+    sceneId: shot?.sceneId,
+    sourceSceneId: shot?.sourceSceneId,
+    sceneName: shot?.sceneName || shot?.scene,
+    characterIds: shot?.characterIds || [],
+    visibleCharacterIds: shot?.visibleCharacterIds || [],
+    scenePresenceCharacterIds: shot?.scenePresenceCharacterIds || [],
+    speakerIds: shot?.speakerIds || [],
+    action: shot?.action,
+    visualBeat: shot?.visualBeat,
+    performance: shot?.performance,
+    stateBefore: shot?.stateBefore,
+    stateAfter: shot?.stateAfter,
+    causalLink: shot?.causalLink,
+    transitionReason: shot?.transitionReason,
+    dialogue: shot?.dialogue,
+    dialogueTurns: shot?.dialogueTurns || [],
+    sourceDialogueIds: shot?.sourceDialogueIds || [],
+    sourceDialogueBindings: shot?.sourceDialogueBindings || [],
+    subshots: shot?.subshots || [],
+    propBindings: shot?.propBindings || [],
+    wardrobeBindings: shot?.wardrobeBindings || []
+  });
+  return fingerprint({
+    characters: (project?.characters || []).map(item => ({
+      id: item?.id,
+      name: item?.name,
+      description: item?.description,
+      role: item?.role,
+      identity: item?.identity,
+      wardrobe: item?.wardrobe,
+      outfits: item?.outfits || []
+    })),
+    scenes: (project?.scenes || []).map(item => ({
+      id: item?.id,
+      name: item?.name,
+      description: item?.description,
+      time: item?.time,
+      layout: item?.layout
+    })),
+    shots: (project?.shots || []).map(shotFields),
+    sourceDialogueLedger: project?.script?.sourceDialogueLedger || project?.sourceDialogueLedger || [],
+    sourceSceneLedger: project?.script?.sourceSceneLedger || null,
+    productionPlan: project?.productionPlan || {},
+    product: project?.product || {},
+    generation: {
+      mode: project?.generation?.mode,
+      targetDurationSeconds: project?.generation?.targetDurationSeconds,
+      aspectRatio: project?.generation?.aspectRatio
+    }
+  });
+}
+
 class AdaptiveDramaKernel {
   constructor(options = {}) {
     this.runtime = options.runtime || new FoundryRuntimeStore(options.rootDir, options.runtimeOptions);
@@ -27,9 +84,11 @@ class AdaptiveDramaKernel {
     if (source.trim()) {
       const sourceFingerprint = fingerprint(source.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n"));
       const sourceRawSha256 = sha256(source);
+      const structuredFingerprint = productionSourceFingerprint(project);
       if (options.forceUnderstanding
         || understanding?.version !== SCRIPT_UNDERSTANDING_VERSION
         || understanding?.sourceFingerprint !== sourceFingerprint
+        || understanding?.productionSourceFingerprint !== structuredFingerprint
         || understanding?.contractFingerprint !== contract.fingerprint) {
         const userAuthored = project.productionPlan?.inputMode === "manual" && !String(project.script?.generatedFromTopicId || "").trim();
         const sourceSceneLedger = userAuthored && project.script?.sourceSceneLedger?.explicit
@@ -48,6 +107,7 @@ class AdaptiveDramaKernel {
           dialogueLedger: sourceDialogueLedger
         });
         understanding.contractFingerprint = contract.fingerprint;
+        understanding.productionSourceFingerprint = structuredFingerprint;
       }
     } else {
       understanding = null;
@@ -132,18 +192,13 @@ class AdaptiveDramaKernel {
   assertPaidGenerationReady(project, stage = "assets") {
     const prepared = this.prepareProject(project, { source: `preflight:${stage}` });
     const report = prepared.quality;
-    if (!report) throw new FoundryError("没有可生产的完整剧本", { code: "FOUNDRY_SCRIPT_REQUIRED", kind: ERROR_KINDS.USER_ACTION_REQUIRED, userAction: "provide_script" });
-    if (!report.paidGenerationAllowed) {
-      const issues = [
-        ...(report.levels?.technical?.issues || []),
-        ...(report.levels?.story?.issues || [])
-      ].filter(item => item.severity === "blocking");
-      throw new FoundryError(`V2 本地预编译未达到正式生产线，已在扣费前停止：${issues.slice(0, 5).map(item => item.message).join("；") || report.summary}`, {
-        code: "FOUNDRY_FORMAL_QUALITY_GATE_FAILED",
-        kind: ERROR_KINDS.CREATIVE_DEFECT,
-        retryable: true,
-        details: { stage, report }
-      });
+    // Kept as a compatibility entry point for existing callers.  Foundry no
+    // longer uses a subjective/creative score as an authorization system.
+    // The report remains attached for prompt improvement and traceability;
+    // concrete requirements are checked by the stage that actually needs them.
+    if (report) {
+      report.preflightStage = stage;
+      report.preflightDecision = report.paidGenerationAllowed ? "continue" : "continue_with_stage_preflight";
     }
     return prepared;
   }
@@ -157,4 +212,4 @@ class AdaptiveDramaKernel {
   }
 }
 
-module.exports = { AdaptiveDramaKernel };
+module.exports = { AdaptiveDramaKernel, productionSourceFingerprint };

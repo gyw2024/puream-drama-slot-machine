@@ -1,0 +1,5 @@
+function fixture(){
+ const character=(id,name)=>({id,name,description:'短发，灰色衬衫',descriptionEn:'',assetRequired:true,age:'30',gender:'女',role:'家人',voiceDescription:'清晰自然女声',roleType:'supporting',voiceAssetRequired:true});
+ return {story:{title:'一杯茶',synopsis:'母女回家喝茶',ending:'坐下相伴'},characters:[character('C01','小梅'),character('C02','母亲')],scenes:[{id:'SC01',name:'客厅',description:'北窗西门',descriptionEn:'',assetRequired:true,interiorExterior:'室内',time:'午后',layout:'桌在窗前',lighting:'北窗自然光',axis:'桌两侧'}],props:[],wardrobes:[],shots:[{id:'S01',sceneId:'SC01',duration:10,characterIds:['C01','C02'],visibleCharacterIds:['C01','C02'],propIds:[],wardrobeBindings:[],productVisible:false,productAction:'',opening:'小梅坐左，母亲坐右；两人空手',dialogue:[{id:'D01',speakerId:'C01',listenerIds:['C02'],addressMode:'person',onScreen:true,text:'妈，我回来了。',delivery:'温柔，眼神放松',action:'看母亲',start:1,end:4}],beats:[{id:'B01',start:0,end:10,camera:'双人中景固定',action:'小梅看着母亲说话，母亲微笑倾听',dialogueIds:['D01']}],ending:'两人仍坐原位相视',transition:'承接同一桌边',sound:'安静室内环境声'}]};
+}
+module.exports={fixture};

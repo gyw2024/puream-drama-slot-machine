@@ -10,8 +10,8 @@ const { WorkbenchStore } = require("../app/workbench-store");
 const { WorkbenchWorkflow, isTransientProviderError } = require("../app/workbench-workflow");
 
 test("an authoritative daily quota decision is terminal even through an HTTP 502 bridge response", () => {
-  const error = Object.assign(new Error("Seedance2.0mini 模型今日已达使用次数上限"), {
-    code: "SEEDANCE_DAILY_QUOTA_EXHAUSTED",
+  const error = Object.assign(new Error("H3 model daily quota has been exhausted"), {
+    code: "PROVIDER_DAILY_QUOTA_EXHAUSTED",
     status: 502,
     retryable: false
   });
@@ -26,7 +26,7 @@ function fixture(responses) {
     type: "shot_video",
     entityType: "shot",
     entityId: "S01",
-    providerKind: "local-xiangsu",
+    providerKind: "puream-hailuo-h3",
     taskId: "existing-paid-task",
     status: "running"
   });
@@ -53,7 +53,7 @@ test("provider failure without explicit retryable=true terminates the existing t
   const sample = fixture([{ ok: false, status: "failed", message: "上游已拒绝", code: "UPSTREAM_REJECTED", retryable: null }]);
   t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
   await assert.rejects(
-    () => sample.workflow.waitForSeedance(sample.job.taskId, sample.project.id, sample.job.id, sample.bridge),
+    () => sample.workflow.waitForH3(sample.job.taskId, sample.project.id, sample.job.id, sample.bridge),
     error => error.code === "UPSTREAM_REJECTED" && error.taskId === sample.job.taskId
   );
   assert.equal(sample.calls(), 1);
@@ -66,7 +66,7 @@ test("only explicit retryable=true keeps polling the same paid task", async t =>
   ]);
   t.after(() => fs.rmSync(sample.root, { recursive: true, force: true }));
   await assert.rejects(
-    () => sample.workflow.waitForSeedance(sample.job.taskId, sample.project.id, sample.job.id, sample.bridge),
+    () => sample.workflow.waitForH3(sample.job.taskId, sample.project.id, sample.job.id, sample.bridge),
     error => error.code === "UPSTREAM_FINAL"
   );
   assert.equal(sample.calls(), 2);

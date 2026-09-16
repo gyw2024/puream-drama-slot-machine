@@ -18,7 +18,7 @@ function projectFixture() {
   };
 }
 
-test("one-click supervisor rewrites a rejected script and continues the same goal", async () => {
+test("one-click supervisor preserves a rejected script without an unsolicited paid rewrite", async () => {
   let project = projectFixture();
   let pipelineCalls = 0;
   let rewriteCalls = 0;
@@ -48,14 +48,11 @@ test("one-click supervisor rewrites a rejected script and continues the same goa
     return { delivered: true };
   };
 
-  const result = await workflow.runFullPipeline(project.id, { track: false });
-  assert.deepEqual(result, { delivered: true });
-  assert.equal(pipelineCalls, 2);
-  assert.equal(rewriteCalls, 1);
-  assert.equal(rewriteOptions.fast, true);
-  assert.equal(rewriteOptions.directFast, false);
-  assert.equal(project.script.raw, "通过质检的新剧本");
-  assert.equal(project.automation.repairJournal[0].code, "FOUNDRY_FORMAL_QUALITY_GATE_FAILED");
+  await assert.rejects(workflow.runFullPipeline(project.id, { track: false }),{code:'FOUNDRY_FORMAL_QUALITY_GATE_FAILED'});
+  assert.equal(pipelineCalls, 1);
+  assert.equal(rewriteCalls, 0);
+  assert.equal(rewriteOptions, null);
+  assert.equal(project.script.raw, "旧的不合格剧本");
 });
 
 test("formal quality failures repair only affected script batches and preserve the rest", async () => {
@@ -135,11 +132,12 @@ test("external account and billing blockers are never hidden by automatic retrie
   assert.equal(workflow.autonomousPipelineExternalBlocker({ code: "FOUNDRY_FORMAL_QUALITY_GATE_FAILED", retryable: true }), false);
 });
 
-test("transient provider recovery is bounded by a hard retry cap", () => {
+test("transient provider recovery leaves the foreground for durable background continuation", () => {
   const source = fs.readFileSync(path.join(__dirname, "../app/workbench-workflow.js"), "utf8");
-  assert.doesNotMatch(source, /不设次数上限/);
   assert.match(source, /transientRetries\s*>\s*AUTONOMOUS_PIPELINE_MAX_TRANSIENT_RETRIES/);
-  assert.match(source, /AUTONOMOUS_PIPELINE_TRANSIENT_EXHAUSTED/);
+  assert.match(source, /PROVIDER_RECOVERY_WAITING/);
+  assert.match(source, /autoResume/);
+  assert.match(source, /retryAt/);
 });
 
 test("persistent relay timeouts fail over to a configured text provider within the same goal", async () => {
@@ -165,32 +163,45 @@ test("persistent relay timeouts fail over to a configured text provider within t
   assert.equal(project.automation.repairJournal[0].status, "provider_failover");
 });
 
-test("relay stream disconnects fail over instead of terminating the one-click goal", async () => {
-  const project = projectFixture();
-  const workflow = Object.create(WorkbenchWorkflow.prototype);
-  workflow.store = {
-    getProject: () => structuredClone(project),
-    getSettings: () => ({ textProviderProfiles: {
-      "puream-relay": { kind: "puream-relay", baseUrl: "https://puream.cn", model: "gpt-5-6-sol", apiKey: "relay" },
-      "openai-compatible": { kind: "openai-compatible", baseUrl: "https://example.invalid/v1", model: "backup-model", apiKey: "configured" }
-    } }),
-    saveProject: () => project
-  };
-  workflow.operationControls = new Map();
-  workflow.assertOperationActive = () => {};
-  workflow.appendAutonomousRepairJournal = (_id, entry) => { project.automation.repairJournal.unshift(entry); };
-  workflow.setAutomation = (_id, patch) => { project.automation = { ...project.automation, ...patch }; };
-  const supervisor = { repairs: 0, scriptRewrites: 0, transientRetries: 0, textProviderOverride: null, failuresByCode: new Map() };
-  const error = Object.assign(new Error("文本模型连接失败，请稍后重试"), {
-    code: "PUREAM_TEXT_STREAM_ERROR",
-    noAutomaticRetry: true
-  });
-  const recovered = await workflow.recoverAutonomousPipelineFailure("P01", error, supervisor);
-  assert.equal(recovered, true);
-  assert.equal(supervisor.textProviderOverride.kind, "openai-compatible");
-  assert.equal(project.automation.stage, "agent_provider_failover");
-  assert.equal(project.automation.repairJournal[0].code, "PUREAM_TEXT_STREAM_ERROR");
-  assert.equal(project.automation.repairJournal[0].status, "provider_failover");
+test("outer supervisor never replays a request with provider completion evidence", async t => {
+  const cases = [
+    ["explicit no-retry", { noAutomaticRetry: true }, "no_automatic_retry"],
+    ["upstream receipt", { upstreamReceipt: { requestId: "paid-1", outputTokens: 0 } }, "upstream_receipt"],
+    ["partial text", { partialText: "{\"shots\":[{\"id\":\"S01\"}" }, "partial_text"],
+    ["nested Agent cause evidence", { cause: Object.assign(new Error("inner provider error"), { partialText: "{\"shots\":[", noAutomaticRetry: true }) }, "partial_text"],
+    ["non-transient Agent wrapper evidence", { code: "AGENT_SKILL_FAILED", cause: Object.assign(new Error("inner provider error"), { partialText: "{\"shots\":[", noAutomaticRetry: true }) }, "partial_text"],
+    ["malformed JSON with receipt", { code: "MODEL_JSON_INVALID", upstreamReceipt: { requestId: "paid-json" } }, "upstream_receipt"]
+  ];
+  for (const [label, evidence, expectedEvidence] of cases) {
+    await t.test(label, async () => {
+      const project = projectFixture();
+      const workflow = Object.create(WorkbenchWorkflow.prototype);
+      workflow.store = {
+        getProject: () => structuredClone(project),
+        getSettings: () => ({ textProviderProfiles: {
+          "puream-relay": { kind: "puream-relay", baseUrl: "https://puream.cn", model: "gpt-5-6-sol", apiKey: "relay" },
+          "openai-compatible": { kind: "openai-compatible", baseUrl: "https://example.invalid/v1", model: "backup-model", apiKey: "configured" }
+        } }),
+        saveProject: () => project
+      };
+      workflow.operationControls = new Map();
+      workflow.assertOperationActive = () => {};
+      workflow.appendAutonomousRepairJournal = (_id, entry) => { project.automation.repairJournal.unshift(entry); };
+      workflow.setAutomation = (_id, patch) => { project.automation = { ...project.automation, ...patch }; };
+      const supervisor = { repairs: 0, scriptRewrites: 0, transientRetries: 0, textProviderOverride: null, failuresByCode: new Map() };
+      const error = Object.assign(new Error("provider outcome is not safe to replay"), {
+        code: "PUREAM_TEXT_STREAM_ERROR",
+        retryable: true,
+        ...evidence
+      });
+      const recovered = await workflow.recoverAutonomousPipelineFailure("P01", error, supervisor);
+      assert.equal(recovered, false);
+      assert.equal(supervisor.transientRetries, 0);
+      assert.equal(supervisor.textProviderOverride, null);
+      assert.equal(project.automation.repairJournal[0].status, "provider_replay_blocked");
+      assert.equal(project.automation.repairJournal[0].evidence, expectedEvidence);
+    });
+  }
 });
 
 test("a billed malformed unit is archived and only that missing batch is regenerated", async () => {

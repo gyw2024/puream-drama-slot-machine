@@ -43,7 +43,7 @@ body::before {
 
 .mode-shell {
   position: relative;
-  width: min(1180px, calc(100vw - 72px));
+  width: min(1380px, calc(100vw - 72px));
   height: 100vh;
   min-height: 100vh;
   margin: 0 auto;
@@ -65,7 +65,7 @@ body::before {
 .mode-intro h1 { margin: 0 0 12px; font-size: clamp(34px, 4vw, 56px); line-height: 1.05; letter-spacing: -.04em; }
 .mode-intro p { margin: 0; color: #aaa89f; font-size: 14px; line-height: 1.8; }
 
-.mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; min-height: 0; }
+.mode-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; min-height: 0; }
 .mode-card {
   position: relative;
   min-width: 0;
@@ -86,9 +86,11 @@ body::before {
 .mode-card::after { position: absolute; inset: auto -70px -120px auto; width: 260px; height: 260px; border-radius: 50%; content: ""; opacity: .09; filter: blur(20px); transition: opacity .18s ease; }
 .simple-card::after { background: var(--amber); }
 .agent-card::after { background: var(--green); }
+.package-card::after { background: var(--cyan); }
 .mode-card:hover { transform: translateY(-4px); }
 .simple-card:hover { border-color: rgba(240,165,28,.72); box-shadow: 0 30px 80px rgba(240,165,28,.1); }
 .agent-card:hover { border-color: rgba(66,234,148,.62); box-shadow: 0 30px 80px rgba(66,234,148,.08); }
+.package-card:hover { border-color: rgba(106,223,240,.66); box-shadow: 0 30px 80px rgba(106,223,240,.09); }
 .mode-card:hover::after { opacity: .17; }
 .mode-card:focus-visible { outline: 3px solid var(--cyan); outline-offset: 3px; }
 .mode-card[disabled] { cursor: wait; opacity: .62; transform: none; }
@@ -96,8 +98,10 @@ body::before {
 .mode-number { position: absolute; right: 24px; top: 19px; color: rgba(255,255,255,.1); font: 800 54px/1 ui-monospace, Consolas, monospace; }
 .mode-badge { justify-self: start; padding: 6px 10px; border-radius: 999px; color: var(--amber-soft); background: rgba(240,165,28,.11); border: 1px solid rgba(240,165,28,.25); font-size: 11px; }
 .agent-card .mode-badge { color: #9ff7c7; background: rgba(66,234,148,.09); border-color: rgba(66,234,148,.22); }
+.package-card .mode-badge { color: #b8f6ff; background: rgba(106,223,240,.09); border-color: rgba(106,223,240,.24); }
 .mode-icon { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 16px; background: linear-gradient(145deg, #eea51f, #a86100); color: #120d04; font-size: 23px; box-shadow: 0 12px 28px rgba(240,165,28,.18); }
 .agent-icon { background: linear-gradient(145deg, #54f1a3, #128451); color: #041009; box-shadow: 0 12px 28px rgba(66,234,148,.14); }
+.package-icon { background: linear-gradient(145deg, #86efff, #238a9a); color: #041114; box-shadow: 0 12px 28px rgba(106,223,240,.16); }
 .mode-copy { display: grid; gap: 9px; }
 .mode-copy strong { font-size: 27px; letter-spacing: -.02em; }
 .mode-copy small { max-width: 510px; min-height: 48px; color: #aaa99f; font-size: 13px; line-height: 1.75; }
@@ -106,6 +110,7 @@ body::before {
 .enter-label { margin-top: auto; display: flex; justify-content: space-between; align-items: center; padding-top: 17px; border-top: 1px solid rgba(255,255,255,.07); color: #e9dfcd; font-size: 13px; font-weight: 700; }
 .enter-label b { font-size: 21px; color: var(--amber); transition: transform .18s ease; }
 .agent-card .enter-label b { color: var(--green); }
+.package-card .enter-label b { color: var(--cyan); }
 .mode-card:hover .enter-label b { transform: translateX(5px); }
 
 footer { display: flex; justify-content: space-between; align-items: center; gap: 18px; color: #77776f; font-size: 11px; }
@@ -114,7 +119,7 @@ footer i { width: 7px; height: 7px; border-radius: 50%; background: var(--green)
 
 .mode-status { position: fixed; left: 50%; bottom: 28px; z-index: 10; transform: translateX(-50%); padding: 10px 15px; border: 1px solid rgba(255,100,100,.35); border-radius: 9px; background: #29100e; color: #ffd4cf; box-shadow: 0 16px 45px rgba(0,0,0,.5); font-size: 12px; }
 
-@media (max-width: 980px) {
+@media (max-width: 1180px) {
   body { overflow: auto; }
   .mode-shell { height: auto; min-height: 100vh; width: min(720px, calc(100vw - 48px)); }
   .mode-grid { grid-template-columns: 1fr; }

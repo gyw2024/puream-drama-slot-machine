@@ -60,68 +60,22 @@ function misunderstandingArcBan() {
 选题/圣经/蓝图/终审任一环节缺以上四条 → hardFailure。`;
 }
 
-function eyelineConversationCraft() {
-  return `【对视说话·视线轴硬规则·全模式全局】
-人物对话时必须「对着人说话」，禁止「对着镜头/虚空念词」。
-硬规则：
-1. 说话人眼球与面部朝向听者（或听者所在屏幕方向），禁止正脸长时间直视镜头念台词（口播广告除外且本剧禁止口播）。
-2. 一个Sxx是5–15秒连续剧情块，最多2名说话人；说话人变化时必须在块内留下准确时间边界，硬切到回应者机位并同步切换mouthOwner，优先保持为同一个H3连续视频任务。
-3. 每个有对白的 subshot 必须写清：speakerFacing（朝向谁）／listenerFacing（听者是否看说话人）／eyeline（左↔右屏幕方向）／shotType／cameraOwnerId／mouthOwnerId；每个时间段只允许一张嘴开口，但三个subshots可按台词、视线和动作执行正反打。
-4. 多人场面先建立 scenePresence；当前生成单元仍只拍0–2人。第三人侧听、见证或入场另开相邻单元；两名核心人物的自然问答保留在同一Sxx，由导演Agent编译成机位段。
-5. 图像/视频提示词必须显式写出英文或中文约束：looks at the listener's eyes / never addresses the camera。
-6.  continuityAudit / qualityReview：出现「正脸对镜念词、眼神漂出画外、说话人与听者视线互不交接」→ 必须重抽。`;
-}
+function eyelineConversationCraft(){return '【站位与发声】保留所有源稿人物与自然完整对白，不设置两人或两句上限。逐句明确真正听者（可以是群体、画外人、自言自语或授权购买引导中的观众），视线遵循交流和工作动作。站位、轴线、动作前后状态与唯一发声所有权一致；切镜按实际需要，不强制每次换人都切，不强制一直盯眼。';}
 
-function generationPhysicsCraft() {
-  return `【K3·生成物理上限·提示词必须写对职责】
-1. 海螺 H3 一次生成优先对应一个5–15秒连续剧情块，可在提示词内用精确时间码和HARD CUT执行最多4个机位段、最多3条已绑定音色；每个机位段仍只有一个cameraOwnerId与mouthOwnerId。若模型未执行切镜，本地审计只把失败块回退为原子任务并精确拼接。
-2. 每个连续剧情块只承担1条因果动作链（一个visualBeat），可以包含同一问答中的正反打、听者反应与动作结果，禁止堆互不相关事件。
-3. 【引擎分流·声音】
-   · 海螺 H3：默认「提示词一把做混音」——每个单元必须生成可听的 bed+同步SFX；禁止干声对白、禁止单元内空洞静音；non_diegetic_music 固定 N/A，禁止写 BGM/underscore/非叙事配乐。延续模式必须显式承接上一单元的底噪音色，首尾 0.3 秒不得掉声。
-   · Seedance / 其他：仍以 bed+同步SFX 写满；跨单元底噪掉声时可用 postSoundMixSheet 兜底补 bed/SFX，禁止补配乐。
-4. 跨单元拼接缝无法靠“模型跨文件接唱”完美消除；海螺路径用「同场景延续底噪指令 + 单元头尾满声」把空洞压到最低，成片仍以静音占比≤1% 为闸。
-5. 成片机器闸：静音占比＞1% 打回；成片平均镜头时长＞4 秒打回（按剪点统计）。`;
-}
+function generationPhysicsCraft(){return require('./production-content-requirements').INSTRUCTION+' 每镜按实际供应商时长范围执行完整连续剧情，源稿对白不得截断。没有固定平均镜头时长或静音比例门槛；由 Agent 审实际完整对白、无人声间隔和清晰可演性。';}
 
-function postEditBlueprintCraft() {
-  return `【后期剪辑蓝图 postEditCutlist·由 subshots 生成】
-每个生成单元输出 editCutPoints（与 subshots 对齐）：
-- cutAtSec：单元内切点秒（冲突段目标间隔 1.5–3 秒）
-- cutType：硬切/动作匹配/视线匹配/正反打/反应插镜/物证插镜
-- keepTake：从本单元素材保留的起止秒
-- reorderHint：对话链是否需要与相邻单元做正反打重组
-- eyeline：切后视线是否匹配
-禁止把「冲突段1.5–3秒一切」只写在形容词里；必须落到 cutAtSec 数字。
-后期剪辑清单生成器（postEditCutlist 提示词）负责把全片 subshots 汇总成可执行剪辑工单。`;
-}
+function postEditBlueprintCraft(){return '【剪辑蓝图】由 Agent 依据已批准的表演和因果动作给出必要切点、保留时段及衔接说明。切点按剧情需要，不强制每1.5–3秒切镜，不重排或截断完整台词；不得重放已执行的动作。';}
 
-function hailuoInModelMixCraft() {
-  return `【海螺H3·提示词一把混音·硬成功条件·仅 bed+SFX】
-每个生成单元的英文声场必须让观众听出来，不是写了就算：
-1. soundEn：连续环境底噪（具体：kitchen hood / living-room clock / street traffic / ward monitor）+ 每个可见动作的同步 SFX（落在秒点）。禁止写 BGM / underscore / score / soundtrack / non-diegetic music。
-2. overallSoundscapeEn：覆盖整段 0.00→duration，中间不得掉成干声；同场景延续单元必须写 “continues the previous unit’s bed without dropout”。只写 bed+SFX。
-3. nonDiegeticMusicEn：一律输出 N/A（官方六段字段保留，但本产品禁止背景音乐）。
-4. 唯一例外：蓝图标记的全片唯一抽音静默单元，允许 0.5–1.5 秒只留呼吸/心跳，然后重声砸入。
-5. 头尾保护：前 0.2 秒与后 0.3 秒必须有可听 bed 或同步 SFX，禁止淡出到死静音（除非本单元就是设计抽音点）。
-6. 对白完整发声；每个时间段只允许当前mouthOwnerId的一条人物声线。说话人变化时按明确秒点硬切机位和嘴型；无台词者闭口反应，最多3条已绑定人物音色，禁止错嘴或多人同时抢声道。`;
-}
+function hailuoInModelMixCraft(){return require('./production-content-requirements').INSTRUCTION+' 声场仅保留实际有依据的环境声与可听同步声，不强制每个动作配音效，不额外制造人声、片头杂音或背景音乐。实际画面和声音缺陷由 Agent 审核后定位修订。';}
 
-function postSoundMixCraft() {
-  return `【声场落地策略·海螺优先一把做 / 工单仅兜底·无配乐】
-默认（海螺 H3）：在生成提示词里按 hailuoInModelMixCraft 一把写出 bed+SFX（无配乐），目标单镜可听、延续不断档；postSoundMixSheet 只在成片静音占比＞1% 时作为救稿/补混工单（只补 bed/SFX）。
-Seedance 或其他引擎：生成阶段仍写满 soundCueSheet（bed/sfx，可保留 silenceDesign）；若跨单元掉声严重，再跑 postSoundMixSheet：
-① 全片统一 bed 轨（堵拼接缝，交叉淡化 50–150ms）
-② 按 cue 补同步 SFX 与反转前抽音
-③ 禁止铺 BGM/underscore/非叙事配乐
-④ 机器检测：静音占比≤1%。`;
-}
+function postSoundMixCraft(){return '【后期声音】由 Agent 根据实际媒体证据决定必要的环境声衔接和同步声修复；保留对白与声音身份，不重复叠加已存在音效，不按固定静音百分比返工，不强制反转前抽音或补配乐。';}
 
 function dialogueUnitMold(durationSeconds = 10) {
-  const duration = Math.max(5, Math.min(15, Math.round(Number(durationSeconds) || 10)));
-  return `【${duration}秒 Agent 连续对白块模具】${dialogueUnitPrompt(duration, { solo: false })}，末句必须在本镜结束前完整说完，并给呼吸、表情与动作结果留约20%。
+  const duration = Math.max(10, Math.min(15, Math.round(Number(durationSeconds) || 12)));
+  return `【${duration}秒 Agent 连续对白块模具】${dialogueUnitPrompt(duration, { solo: false })}，末句必须在本镜结束前完整说完，并按实际动作与完整语速安排必要余量。
 先写dialogueArc：entryCause（哪件刚发生的事实逼出首句）→speakerGoalA（人物A要什么）→speakerGoalB（人物B要什么）→newInformation（本镜只新增哪条信息）→exitConsequence（末句造成哪个可见动作或状态变化）。缺一项就不是有效对话。
-自然问答保留在同一Sxx：攻击/质问→否认/反击→揭示/落锤按剧情选2–5轮；每次speakerId变化都同步改变cameraOwnerId/mouthOwnerId并在明确时间点硬切，上一人立即闭口。每句必须改变信息、权力或行动，禁止同义复述、解释观众已看见的动作、空壳语气词和省略号顶戏。
-恰好3个连续subshots：可按起句→回应/峰值→余震/动作结果分段；每段只允许当前mouthOwner开口，但三段可正反打。逐句只写beat、delivery、body、listenerBeat；delivery合并情绪、音量、语速、重音和气口。`;
+自然问答保留在同一Sxx：攻击/质问→否认/反击→揭示/落锤按剧情需要选择完整轮次，不先规定句数；每次speakerId变化都明确发声所有权，是否切镜由实际动作决定，上一人完整结束后停止发声。每句必须改变信息、权力或行动，禁止同义复述、解释观众已看见的动作、空壳语气词和省略号顶戏。逐句填写plannedSpeechSeconds/plannedAfterBeatSeconds，每镜填写visualReserveSeconds/durationRationale，禁止统一字/秒公式。
+每个最终生成单元必须有dialogueTurns且按函数核算的时窗容纳完整台词，禁止纯动作或零对白生成单元。subshots按连续说话人轮次动态生成：同一说话人的相邻完整句合并，换speakerId才切新段；静默反应、动作建立、物证/商品插镜和动作结果只能并入首末对白段内部，禁止拆句、固定三段或增加无对白尾段。每段只允许当前mouthOwner开口并可沿180度轴线正反打。逐句只写beat、delivery、body、listenerBeat；delivery合并情绪、音量、语速、重音和气口。`;
 }
 
 function dialogueWorkedExamples() {
@@ -176,16 +130,16 @@ function audioCraft() {
 function productWindowCraft(productName = "", productEntryIndex = 0) {
   const name = String(productName || "商品").trim() || "商品";
   const bans = productAliasBanList(name).join("、") || name;
-  const base = `【商品窗口源头规则·时间闸+品类自适应因果桥双闸】
-时间闸：商品名、简称、俗称、旧款同类商品和用商品做出的动作，在窗口前一律不得出现（标题/对白/动作/visualBeat/subshots/图像提示词/视频提示词）。窗口前只铺与当前品类事实一致的生活情境，不得为了食品强造饥饿、为了百货强造疼痛或疾病。窗口开启条件：≥65%且晚于主反转。开场点名、展示、吃喝、穿戴、使用、摆放、开箱、清洁、收纳、送礼或争抢商品＝hardFailure。商品段按总时长动态占约10%–20%，不得绑定固定四镜或固定镜号。
+  const base = `【商品源头规则·共享带货编辑合同与品类事实因果链】
+${require('./commerce-editorial-contract').POLICY}
 因果闸 productCausalBridge 五桥，进入窗口必须写满至少三项：
 ①situationNeed 具体使用情境与真实需求，由商品事实决定，不得强造疼痛、饥饿、疾病或危机；
 ②whyNow 为什么此刻自然发生；
 ③action 符合品类的自然动作（吃/喝/穿戴/使用/摆放/开箱/清洁/收纳/送礼等）；
 ④observableOutcome 该品类可被镜头观察且合规的结果、体验或证据（食品可拍口感与分享反应，百货拍操作结果，服饰拍穿着变化），禁止医疗夸效和虚构；
 ⑤relationOrDecisionShift 商品动作后人物决定、关系或生活方式变化。
-旧键 currentProblem/visibleEffect/relationShift 只作历史数据承载，不能把语义拉回固定疼痛、试戴模板。缺失即判硬广重写。禁止人物停下剧情面向镜头介绍、商品段超过全片20%、前后重复同一商品动作。整体/细节可连续但必须职责不同，随后立即进入真实使用、客观结果和受益者反应；商品价值由动作结果或剧情决定自然证明。`;
-  return `${base}\n【本剧商品禁词】窗口前禁用：${bans}\n【商品窗口建议起始单元】第 ${Math.max(1, Number(productEntryIndex) || 1)} 单元起（仍须满足 ≥65% 且晚于主反转）。`;
+旧键 currentProblem/visibleEffect/relationShift 只作历史数据承载。需要、选品理由、真实特色解释、可见展示与人物决定必须有正文证据，不以字段齐全代替演绎。产品外观与使用事实保持用户原资料；不能凭空增添功能或开罐食用。`;
+  return `${base}\n本剧商品：${name}。引出时机以真实需求和选品决定为准，不由固定镜号决定。`;
 }
 
 function actBeatGrid(totalSeconds = 300, unitCount = 30) {
@@ -201,20 +155,20 @@ function actBeatGrid(totalSeconds = 300, unitCount = 30) {
   const reversalWindow = `${shotId(reversalStartIndex)}–${shotId(reversalEndIndex)}`;
   const preferredReversal = shotId(preferredReversalIndex);
   const base = `【六幕拍点网格·按全片百分比展开（含内核锚点与声音设计）】
-【合同优先级】本节只定义六幕剧情职责，不覆盖 workflow 的 mainReversalWindow / planBatchContractHints 动态镜号合同；实际批次必须服从 workflow 给出的镜号窗口与累计时长双重校验。
-【唯一主反转】全片唯一 main_reversal 只能位于65%–80%，优选约72%；本剧 ${count} 单元的动态窗口为 ${reversalWindow}，优选 ${preferredReversal}。窗口外严禁提前揭底或拖后反转。
+【合同优先级】以下六幕与百分比是可选结构参考，不限定事件数、反转镜号或每阶段长度；以用户要求和当前剧情为准。
+【主反转】根据剧情因果、铺垫和结局兑现决定位置；65%–80%只是旧案例分布，不能作为镜号或时长审核门槛。
 【机制先行】storyMechanism 只能选 rescue_repaid / kindness_misjudged / sacrifice_repaid / evidence_reversal 之一。前三类优先用“当事人/恩人已铺垫＋一个可见事实＋行动清算”，核心危机和善举要直接讲清，禁止故弄玄虚；只有 evidence_reversal 才要求 evidence1/evidence2、redHerring 和互证闭环。
-幕1 0%–13% 钩子与代价建立：前8秒危机动作+带刺短句，开场主画面只拍危机主体和至多一个阻碍者；需要见证者时只在scenePresence预埋并另开相邻单人反应/入场镜。明确受损者/阻碍者/现实代价；themeObject首次出现（非商品名）；establish开场音色motif；对白密而可说完；商品禁。
-幕2 13%–30% 变量加压A：至少2种不同加压变量且每次回指 storyCore.protagonistWound；让利益方的伤害动机变得可见；只有 evidence_reversal 才埋 redHerring；商品禁。
-幕3 30%–50% 善意代价与证明铺垫：至少1次有成本善意（不可逆损失）；前三类机制铺当事人/恩人、承诺、物件或普通观众看得懂的事实，证据谜题才埋 evidence1/evidence2；继续密对白；商品禁。
-幕4 50%–65% 加压与退路封死：换新变量加压并让善者付出更大现实代价；前三类机制允许观众看懂善者做了什么，只锁最终介入和清算，证据谜题只允许部分核验；不得写 main_reversal。
-幕5 65%–83% 主反转与行动清算：在 workflow 动态窗口 ${reversalWindow} 内且优选 ${preferredReversal} 让已铺垫的当事人/恩人/事实生效；证据谜题在此完成互证，其他机制用一个可见事实即可。反转前2–5秒安排唯一抽音静默；随后用付钱/站队/归还/担责等行动落锤。商品仍须同时满足自身动态窗口且晚于反转。
-幕6 83%–100% 回收结局：themeObject 回收+motif 音色回收；行动结果落地+主题收束；商品只承担价值落定后的自然生活行动；禁止口号独白、重复使用商品或重复道歉。`;
-  return `【本剧时长合同】总时长 ${totalSeconds} 秒 / 约 ${count} 个生成单元。\n${base}`;
+幕1 0%–13% 钩子与代价建立：前8秒危机动作+带刺短句，开场主画面保留源稿必需的全部可见人物，需要见证者时明确其站位和入场依据。明确受损者/阻碍者/现实代价；themeObject依原稿首次出现；establish开场音色motif；对白密而可说完；商品顺序服从原稿及共享带货合同。
+幕2 13%–30% 变量加压A：至少2种不同加压变量且每次回指 storyCore.protagonistWound；让利益方的伤害动机变得可见；只有 evidence_reversal 才埋 redHerring；商品顺序服从原稿及共享带货合同。
+幕3 30%–50% 善意代价与证明铺垫：至少1次有成本善意（不可逆损失）；前三类机制铺当事人/恩人、承诺、物件或普通观众看得懂的事实，证据谜题才埋 evidence1/evidence2；继续密对白；商品顺序服从原稿及共享带货合同。
+幕4 50%–65% 加压与退路封死：换新变量加压并让善者付出更大现实代价；前三类机制允许观众看懂善者做了什么，只锁最终介入和清算，证据谜题只允许部分核验；按实际剧情安排转折。
+幕5 主反转与行动清算：让已铺垫的当事人、恩人或事实通过有动机的行动产生结果。商品出现与介绍依据原稿和具体需要。不得为了结构模板强行安排抽音静默。
+幕6 83%–100% 回收结局：themeObject 回收+motif 音色回收；行动结果落地+主题收束；商品延续已有事实与剧情中的自然选择；禁止口号独白、重复使用商品或重复道歉。`;
+  return `【本剧时长合同】总时长 ${totalSeconds} 秒 / 约 ${count} 个生成单元。\n${base}\n${require('./reference-parity-prompts').COMMERCE_SOURCE_POLICY}`;
 }
 
 function planUnitDialogueGoal(durationSeconds = 10) {
-  return `${dialogueUnitPrompt(durationSeconds, { solo: false })}；一个Sxx最多2名说话人并保留自然问答，每次speakerId变化都按时间点硬切cameraOwnerId/mouthOwnerId；dialogueArc必须写entryCause/speakerGoalA/speakerGoalB/newInformation/exitConsequence；每句按attack/deflect/counter/reveal/decision之一推进，写合并delivery、body、listenerBeat；说话人看听者，末句必须在本镜结束前完整说完并造成可见后果`;
+  return `${dialogueUnitPrompt(durationSeconds, { solo: false })}；一个Sxx保留完整源稿人物与自然问答，每次speakerId变化都明确发声所有权，不强制切镜；dialogueArc必须写entryCause/speakerGoalA/speakerGoalB/newInformation/exitConsequence；每句按attack/deflect/counter/reveal/decision之一推进，写合并delivery、body、listenerBeat；说话人看听者，末句必须在本镜结束前完整说完并造成可见后果`;
 }
 
 function storyCoreCraft() {
@@ -226,7 +180,7 @@ function storyCoreCraft() {
 5. antagonistLogic 反派的利益计算。正例「弟弟认定姐姐的钱迟早是娘家的，不拿白不拿」；禁止「他就是坏」；禁止没有过错方的纯误会。
 6. moralDilemma 两个选项都有真实代价。正例「当众揭穿=母亲手术没人签字；忍下=手术费被挪走」。
 7. irreversibleChoice：第几幕、放弃了什么。正例「第4幕她把存折当众撕了，退路没了」。
-8. themeObject 贯穿物件三现：开场受辱时出现→反转时变义→结局回收。正例「一篮土鸡蛋：开场被嫌脏→反转时揭出蛋底下压着借条→结局弟弟双手送回」。注意：themeObject 可以是非售卖道具；售卖商品不得充当开场钩子。
+8. themeObject 贯穿物件三现：开场受辱时出现→反转时变义→结局回收。正例「一篮土鸡蛋：开场被嫌脏→反转时揭出蛋底下压着借条→结局弟弟双手送回」。注意：themeObject 可以是非售卖道具；售卖商品位置服从原稿及具体需求，不设置开场禁区。
 9. audienceFeeling：一个词。解气/心疼/释然。
 硬规则：九问全部是名词+动词的具体事实，禁止形容词堆砌；此后每个节拍必须能回指至少一问，回指不上就删；antagonistLogic 或 audienceFeeling 答不出具体事实＝选题当场判死。
 
@@ -274,7 +228,7 @@ function faceSlapShotCraft() {
 拍5 行动落锤：善者或有权行动者单人/双人镜，以还钱、收回钥匙、扶走老人、报警、担责、公开站队等动作终结；关联themeObject或irreversibleChoice。
 落锤后用一个结果镜展示权力、站队、资源或关系已改变，禁止只说“对不起”或让反派下一镜若无其事。
 
-【三单元正例】单元A只拍反派↔善者完成定性与反击；单元B先给物件/手部特写，再切见证者单人反应；单元C先给反派单人失态，再以善者收回钥匙的动作落锤。每个单元仍严格0–2人、三段subshots、一个主动作链。
+【三单元正例】单元A只拍反派↔善者完成定性与反击；单元B先给物件/手部特写，再切见证者单人反应；单元C先给反派单人失态，再以善者收回钥匙的动作落锤。每个单元保留全部源稿可见人物、按连续说话人轮次动态subshots、一个主动作链。
 【常见失败】五拍压进一个多人关系全景；见证人抢主角口型；只有狠话没有可见事实；落锤靠嘴不靠行动；道歉注水替代清算——全部重写。`;
 }
 
@@ -316,20 +270,20 @@ function scriptCraftGuide(options = {}) {
     : Math.floor(unitCount * 0.65);
   const phase = String(options.phase || "full");
   const density = storyDensityTargets(totalSeconds, unitCount);
-  const header = "【当前项目动态补充】这里只给本项目动态数值，不复述静态制作规则；冲突时以JSON Schema和以下数值为准。";
+  const header = "【当前项目动态补充】以下数值仅为规划示例；用户要求和原始事实优先，Agent按真实剧情安排，不作为数量或比例审核门槛。";
   const reversalStart = Math.max(1, Math.ceil(unitCount * 0.65));
   const reversalEnd = Math.max(reversalStart, Math.floor(unitCount * 0.8));
   const preferredReversal = Math.max(reversalStart, Math.min(reversalEnd, Math.round(unitCount * 0.72)));
-  const timeline = `全剧${totalSeconds}秒、约${unitCount}个单元；0–8秒危机；每30–45秒引入一个新变量，约60秒兑现小结果；唯一主反转在累计65%–80%（约S${String(reversalStart).padStart(2, "0")}–S${String(reversalEnd).padStart(2, "0")}，优选S${String(preferredReversal).padStart(2, "0")}）。反转前必须让观众看懂危机、善举、代价和利益伤害。`;
+  const timeline = `全剧目标${totalSeconds}秒、约${unitCount}个单元仅作规划参考；前8秒必须有核心冲突爆点；后续变量、结果、反转按实际因果和人物目的推进，不设固定出现频率或百分比闸门。`;
   const productWindow = productName
-    ? `商品“${productName}”仅在主反转后且累计≥65%进入（最早约S${String(productEntryIndex + 1).padStart(2, "0")}）；由剧情需求触发品类动作，再给客观结果和受益者反应。`
+    ? `商品“${productName}”由真实需求和本商品选品理由引出；不机械锁定首次出现的百分位。${require('./commerce-editorial-contract').POLICY}`
     : "本项目无商品时，不得凭空植入商品或广告口播。";
   if (phase === "story_bible") {
     return [
       header,
       timeline,
       productWindow,
-      `主线必须可复述：危险/不公正在发生→善者立刻行动并付出代价→过错方因现实利益继续伤害→已铺垫的当事人/恩人/可见事实回来清算→善者得到行动好结局。先判断是救援回报、善意误判、牺牲被侵占还是确有必要的证据谜题；前三类禁止强塞查账、红鲱鱼和隐藏身份。本片动态密度：${density.sceneMin}–${density.sceneMax} 个各有新任务的场景、至少 ${density.escalationMin} 次不同变量加压、${density.costlyKindnessMin} 次有成本善意、${density.payoffMin} 次行动回收；单一场景不得过半。signatureLine为18–22个可说汉字，能用于5秒H3音色资产视频。`
+      `主线应可复述；人物行动、代价、冲突升级和结局回收由当前故事因果决定。场景数量、反转位置和同场时长没有固定配额。前8秒呈现与主线直接相关的强爆点。signatureLine只用于独立音色素材，应适合该素材实际时长，不新增到正片对白。`
     ].join("\n\n");
   }
   if (phase === "shot_plan") {
@@ -337,7 +291,7 @@ function scriptCraftGuide(options = {}) {
       header,
       timeline,
       productWindow,
-      "只规划当前批并承接上一项stateAfter；每项给duration、dialogueGoal、dialogueArc、三段构图、声场和因果结果。dialogueArc必须说明首句触发、双方目的、新信息和末句造成的可见后果。scenePresence只管场内连续性，visibleCharacterIds严格0–2人；至少一半单人镜，第三人另开反应/入场镜。前60秒默认双人短句互动或动作-回应-反应，连续两个单元不得由同一人物独白；单人镜最多1–3句且必须伴随可见任务，禁止解释性长独白。填写focus/counterpart、shotFunction、sceneObjective、transitionReason；只输出本批JSON。",
+      "只规划当前批并承接上一项stateAfter；每项给duration、dialogueGoal、dialogueArc、按连续说话人轮次动态构图、声场和因果结果。dialogueArc必须说明首句触发、双方目的、新信息和末句造成的可见后果。scenePresence只管场内连续性，visibleCharacterIds保留全部源稿可见人物；机位按剧情动机安排，第三人保留独立站位与闭口反应。前60秒默认双人短句互动或动作-回应-反应，连续两个单元不得由同一人物独白；单人镜最多1–3句且必须伴随可见任务，禁止解释性长独白。填写focus/counterpart、shotFunction、sceneObjective、transitionReason；只输出本批JSON。",
       sharedDramaWritingContract(totalSeconds)
     ].join("\n\n");
   }
@@ -346,7 +300,7 @@ function scriptCraftGuide(options = {}) {
       header,
       timeline,
       productWindow,
-      "只写当前连续2项并沿用蓝图。先执行dialogueArc，再写逐句dialogueTurns：beat只选attack/deflect/counter/reveal/decision；delivery逐句写情绪起点→峰值、语速、音量/音高、重音和呼吸/哭腔/破音，禁止平声模板；body与listenerBeat写同步可见动作。每项恰好3个subshots；整镜只用蓝图0–2名visibleCharacterIds。顺序优先说话人近景→听者反应/反打→动作/物证/结果；每段只有一个主口型。前60秒不得连续两个单元由同一人物独白；单人镜最多1–3句短锤。",
+      "只写当前连续2项并沿用蓝图。先执行dialogueArc，再写逐句dialogueTurns：每项必须有完整台词，禁止空表；beat只选attack/deflect/counter/reveal/decision；delivery逐句写情绪起点→峰值、语速、音量/音高、重音和呼吸/哭腔/破音，禁止平声模板；body与listenerBeat写同步可见动作。每项subshots数量等于连续说话人轮次数：同一说话人的相邻完整句合并，换人再切，静默反应和动作结果并入首末对白段内部；整镜只用蓝图0–2名visibleCharacterIds，每段只有一个主口型。前60秒不得连续两个单元由同一人物独白。",
       "emotionArc和performanceBeats必须从事件和人物立场推导，落到眉眼、下颌、泪线、呼吸、手指、重心与嗓音变化：赶人要气急压迫，受辱要委屈断气或哭腔，知恩后悔要失声→破音→哭着完成短句；情绪按冲突升级，禁止全员一直平静或无差别吼叫。切镜只由台词、视线、动作、物件、入场或声音驱动，尾帧保持微动作。商品按packshot/detail/use/result/reaction拆镜，整体/细节不出现无关人脸。",
       `${sharedDramaWritingContract(totalSeconds)}\n0秒附近开口，末句在结束前完整说完，并留足反应与动作时间。H3英文提示由系统后编译，本阶段不输出hailuoPrompt。`
     ].join("\n\n");

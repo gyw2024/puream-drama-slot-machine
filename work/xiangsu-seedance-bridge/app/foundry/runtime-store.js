@@ -222,6 +222,18 @@ class FoundryRuntimeStore {
       }));
   }
 
+  listProjectStateHeaders() {
+    return this.db.prepare("SELECT project_id,revision,snapshot_sha256,contract_fingerprint,updated_at FROM project_state ORDER BY updated_at DESC")
+      .all()
+      .map(row => ({
+        projectId: String(row.project_id || ""),
+        revision: Number(row.revision) || 0,
+        snapshotSha256: String(row.snapshot_sha256 || ""),
+        contractFingerprint: String(row.contract_fingerprint || ""),
+        updatedAt: String(row.updated_at || "")
+      }));
+  }
+
   appendEvent(event = {}) {
     const createdAt = String(event.createdAt || now());
     const eventId = String(event.eventId || `evt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`);
@@ -317,7 +329,7 @@ class FoundryRuntimeStore {
     return this.transaction(() => {
       const existing = this.db.prepare("SELECT * FROM operation_outbox WHERE operation_key=?").get(operationKey);
       if (existing) {
-        if (["failed", "paused"].includes(String(existing.status || ""))) {
+        if (["failed", "paused", "waiting"].includes(String(existing.status || ""))) {
           this.db.prepare("UPDATE operation_outbox SET status='running',attempts=attempts+1,error_kind='',error_code='',updated_at=? WHERE operation_key=?")
             .run(createdAt, operationKey);
           this.appendEvent({ projectId, type: "operation.resumed", correlationId: existing.operation_id, payload: { operationKey, operationId: existing.operation_id, kind, targetId, attempt: Number(existing.attempts || 0) + 1 } });
@@ -353,7 +365,9 @@ class FoundryRuntimeStore {
     return this.transaction(() => {
       const row = this.db.prepare("SELECT * FROM operation_outbox WHERE operation_key=?").get(String(operationKey));
       if (!row) return null;
-      const status = classified.kind === ERROR_KINDS.CONTROL_SIGNAL || classified.kind === ERROR_KINDS.USER_ACTION_REQUIRED ? "paused" : "failed";
+      const status = classified.kind === ERROR_KINDS.CONTROL_SIGNAL || classified.kind === ERROR_KINDS.USER_ACTION_REQUIRED
+        ? "paused"
+        : (classified.retryable === true || classified.kind === ERROR_KINDS.PROVIDER_TRANSIENT ? "waiting" : "failed");
       this.db.prepare("UPDATE operation_outbox SET status=?,error_kind=?,error_code=?,result_json=?,updated_at=? WHERE operation_key=?")
         .run(status, classified.kind, classified.code, json({ message: classified.message, retryable: classified.retryable, details: classified.details }), updatedAt, String(operationKey));
       this.appendEvent({ projectId: row.project_id, type: "operation.failed", correlationId: row.operation_id, payload: { operationKey, kind: row.kind, targetId: row.target_id, errorKind: classified.kind, errorCode: classified.code, retryable: classified.retryable } });

@@ -3,13 +3,23 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("dramaSlot", {
+  localAgents: {
+    call: (method, ...args) => ipcRenderer.invoke("local-agents:call", method, args)
+  },
   appMode: {
     get: () => ipcRenderer.invoke("app-mode:get"),
     select: mode => ipcRenderer.invoke("app-mode:select", mode)
   },
-  simple: {
-    call: (method, ...args) => ipcRenderer.invoke("simple:call", method, args)
+  mcp: {
+    getConnectionInfo: () => ipcRenderer.invoke("mcp:get-connection-info"),
+    testConnection: () => ipcRenderer.invoke("mcp:test-connection"),
+    copyConfig: format => ipcRenderer.invoke("mcp:copy-config", format)
   },
+  simple: {
+    call: (method, ...args) => ipcRenderer.invoke("simple:call", method, args),
+    updateProduct: (projectId, product) => ipcRenderer.invoke("simple:call", "updateProduct", [projectId, product])
+  },
+  exportProjectLogs: (projectId, scope) => ipcRenderer.invoke("project:export-logs", projectId, scope),
   defaults: () => ipcRenderer.invoke("app:defaults"),
   checkUpdate: () => ipcRenderer.invoke("app:check-update"),
   installUpdate: () => ipcRenderer.invoke("app:install-update"),
@@ -20,8 +30,6 @@ contextBridge.exposeInMainWorld("dramaSlot", {
   },
   health: () => ipcRenderer.invoke("bridge:health"),
   diagnostics: () => ipcRenderer.invoke("bridge:diagnostics"),
-  startBridge: () => ipcRenderer.invoke("bridge:start"),
-  hideXiangsu: () => ipcRenderer.invoke("bridge:hide"),
   chooseMedia: (type, options = {}) => ipcRenderer.invoke("media:choose", { type, ...options }),
   chooseOutput: () => ipcRenderer.invoke("file:choose-output"),
   submit: payload => ipcRenderer.invoke("video:submit", payload),
@@ -30,6 +38,7 @@ contextBridge.exposeInMainWorld("dramaSlot", {
   workbench: {
     listProjects: () => ipcRenderer.invoke("workbench:list-projects"),
     createProject: (title, options) => ipcRenderer.invoke("workbench:create-project", title, options),
+    importProductionPackage: () => ipcRenderer.invoke("workbench:import-production-package"),
     deleteProject: projectId => ipcRenderer.invoke("workbench:delete-project", projectId),
     purgeProject: projectId => ipcRenderer.invoke("workbench:purge-project", projectId),
     listDeletedProjects: () => ipcRenderer.invoke("workbench:list-deleted-projects"),
@@ -49,13 +58,11 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     walletStatus: () => ipcRenderer.invoke("license:wallet"),
     createRechargeOrder: amountYuan => ipcRenderer.invoke("license:payment-create", amountYuan),
     rechargeOrderStatus: orderNo => ipcRenderer.invoke("license:payment-status", orderNo),
+    openTutorial: () => ipcRenderer.invoke("workbench:open-tutorial"),
     openExternal: url => ipcRenderer.invoke("shell:open-external", url),
     syncVideoJobs: options => ipcRenderer.invoke("workbench:sync-video-jobs", options || {}),
-    accountSwitchStatus: () => ipcRenderer.invoke("workbench:account-switch-status"),
-    beginAccountSwitch: projectId => ipcRenderer.invoke("workbench:begin-account-switch", projectId),
-    verifyAccountSwitch: () => ipcRenderer.invoke("workbench:verify-account-switch"),
-    cancelAccountSwitch: () => ipcRenderer.invoke("workbench:cancel-account-switch"),
     testProvider: (kind, config) => ipcRenderer.invoke("workbench:test-provider", kind, config),
+    listTextModels: config => ipcRenderer.invoke("workbench:list-text-models", config),
     chooseProduct: projectId => ipcRenderer.invoke("workbench:choose-product", projectId),
     importCandidate: (projectId, entityType, entityId, stage) => ipcRenderer.invoke("workbench:import-candidate", projectId, entityType, entityId, stage),
     importBatchMedia: (projectId, kind) => ipcRenderer.invoke("workbench:import-batch-media", projectId, kind),
@@ -64,6 +71,8 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     importFinalVideo: projectId => ipcRenderer.invoke("workbench:import-final-video", projectId),
     analyzeScript: projectId => ipcRenderer.invoke("workbench:analyze-script", projectId),
     rewriteDialogueScript: (projectId, sourceText) => ipcRenderer.invoke("workbench:rewrite-dialogue-script", projectId, sourceText),
+    adaptReferenceScript: (projectId, sourceText, instructions) => ipcRenderer.invoke("workbench:adapt-reference-script", projectId, sourceText, instructions),
+    applyScriptAdaptation: (projectId, draftId, acceptWarnings) => ipcRenderer.invoke("workbench:apply-script-adaptation", projectId, draftId, acceptWarnings),
     generateTopics: projectId => ipcRenderer.invoke("workbench:generate-topics", projectId),
     generateCompleteScript: projectId => ipcRenderer.invoke("workbench:generate-complete-script", projectId),
     controlScriptGeneration: (projectId, intent) => ipcRenderer.invoke("workbench:control-script-generation", projectId, intent),
@@ -76,21 +85,26 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     previewShotVideoPrompt: (projectId, shotId) => ipcRenderer.invoke("workbench:preview-shot-video-prompt", projectId, shotId),
     previewCharacterVideoPrompt: (projectId, characterId) => ipcRenderer.invoke("workbench:preview-character-video-prompt", projectId, characterId),
     refreshCreatorPrompts: (projectId, options) => ipcRenderer.invoke("workbench:refresh-creator-prompts", projectId, options),
-    remeshCharacterAsset: (projectId, candidateId) => ipcRenderer.invoke("workbench:remesh-character-asset", projectId, candidateId),
-    applyFaceGrid: (projectId, candidateId) => ipcRenderer.invoke("workbench:apply-face-grid", projectId, candidateId),
+    requestPromptReview: (projectId, options) => ipcRenderer.invoke("workbench:request-prompt-review", projectId, options || {}),
+    applyPromptProposal: projectId => ipcRenderer.invoke('workbench:apply-prompt-proposal',projectId),
+    confirmPromptReviewItem: (projectId, itemId, prompt) => ipcRenderer.invoke("workbench:confirm-prompt-review-item", projectId, itemId, prompt),
+    confirmAllPromptReview: (projectId, entries) => ipcRenderer.invoke("workbench:confirm-all-prompt-review", projectId, entries || []),
     generateCharacterVideo: (projectId, characterId, prompt) => ipcRenderer.invoke("workbench:generate-character-video", projectId, characterId, prompt),
     extractCharacterVoice: (projectId, characterId) => ipcRenderer.invoke("workbench:extract-character-voice", projectId, characterId),
+    ensureCharacterVoice: (projectId, characterId) => ipcRenderer.invoke("workbench:ensure-character-voice", projectId, characterId),
     listVoiceLibrary: () => ipcRenderer.invoke("workbench:list-voice-library"),
     listReusableAssets: kind => ipcRenderer.invoke("workbench:list-reusable-assets", kind),
     bindReusableAsset: (projectId, entityType, entityId, assetId) => ipcRenderer.invoke("workbench:bind-reusable-asset", projectId, entityType, entityId, assetId),
     importReusableAsset: kind => ipcRenderer.invoke("workbench:import-reusable-asset", kind),
     deleteReusableAsset: assetId => ipcRenderer.invoke("workbench:delete-reusable-asset", assetId),
+    updateReusableAssetMetadata: (assetId, metadata) => ipcRenderer.invoke("workbench:update-reusable-asset-metadata", assetId, metadata || {}),
     bindLibraryAsset: (projectId, target, assetId) => ipcRenderer.invoke("workbench:bind-library-asset", projectId, target, assetId),
     depositCharacterVoice: (projectId, characterId) => ipcRenderer.invoke("workbench:deposit-character-voice", projectId, characterId),
     bindCharacterVoiceLibrary: (projectId, characterId, voiceId) => ipcRenderer.invoke("workbench:bind-character-voice-library", projectId, characterId, voiceId),
     deleteVoiceLibraryEntry: voiceId => ipcRenderer.invoke("workbench:delete-voice-library-entry", voiceId),
     importVoiceLibrary: () => ipcRenderer.invoke("workbench:import-voice-library"),
-    generateShotVideo: (projectId, shotId, mode) => ipcRenderer.invoke("workbench:generate-shot-video", projectId, shotId, mode),
+    generateShotVideo: (projectId, shotId, mode, options = {}) => ipcRenderer.invoke("workbench:generate-shot-video", projectId, shotId, mode, options),
+    previewGenerationDependencies: (projectId, shotIds) => ipcRenderer.invoke("workbench:preview-generation-dependencies", projectId, shotIds || []),
     generateAllAssets: projectId => ipcRenderer.invoke("workbench:generate-all-assets", projectId),
     generateAllStoryboards: projectId => ipcRenderer.invoke("workbench:generate-all-storyboards", projectId),
     generateAllShotVideos: projectId => ipcRenderer.invoke("workbench:generate-all-shot-videos", projectId),
@@ -108,6 +122,8 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     discardCandidate: (projectId, candidateId) => ipcRenderer.invoke("workbench:discard-candidate", projectId, candidateId),
     discardFailedRecords: (projectId, scope) => ipcRenderer.invoke("workbench:discard-failed-records", projectId, scope),
     clearAutomationFailures: projectId => ipcRenderer.invoke("workbench:clear-automation-failures", projectId),
-    stitch: projectId => ipcRenderer.invoke("workbench:stitch", projectId)
+    stitch: projectId => ipcRenderer.invoke("workbench:stitch", projectId),
+    exportJianyingDraft: (projectId, options = {}) => ipcRenderer.invoke("workbench:export-jianying", projectId, options),
+    cancelPostProduction: projectId => ipcRenderer.invoke("workbench:cancel-post-production", projectId)
   }
 });

@@ -1,0 +1,8 @@
+file 'group-05-item-01.mp3'
+file 'group-05-item-02.mp3'
+file 'group-05-item-03.mp3'
+file 'group-05-item-04.mp3'
+file 'group-05-item-05.mp3'
+file 'group-05-item-06.mp3'
+file 'group-05-item-07.mp3'
+file 'group-05-item-08.mp3'

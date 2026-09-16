@@ -96,6 +96,32 @@ test("atomic hard-cut stitch survives a provider clip with no audio stream", asy
   assert.ok(Math.abs(audioSeconds - 2) <= 0.05, `audio duration=${audioSeconds}`);
 });
 
+test("a 70-shot exact stitch launches through a filter script without Windows ENAMETOOLONG", t => {
+  assert.equal(fs.existsSync(ffmpeg), true, "bundled FFmpeg is required");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-70-shot-stitch-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "s.mp4");
+  const output = path.join(root, "o.mp4");
+  const graphPath = path.join(root, "g.txt");
+  run([
+    "-f", "lavfi", "-i", "color=c=black:s=64x96:r=24:d=0.05",
+    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+    "-t", "0.05", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", source
+  ]);
+  const streams = Array.from({ length: 70 }, () => ({ duration: 0.05, hasAudio: true }));
+  fs.writeFileSync(graphPath, h3ExactStitchFilter(streams, 3.5, 24), "utf8");
+  const result = require("node:child_process").spawnSync(ffmpeg, [
+    "-hide_banner", "-loglevel", "error", "-y",
+    ...Array.from({ length: 70 }, () => ["-i", source]).flat(),
+    "-filter_complex_script", graphPath,
+    "-map", "[outv]", "-map", "[outa]",
+    "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-t", "3.5", output
+  ], { windowsHide: true, encoding: "utf8", timeout: 120_000 });
+  assert.equal(result.status, 0, result.stderr || result.error?.message);
+  assert.equal(fs.existsSync(output), true);
+  assert.ok(fs.statSync(output).size > 1000);
+});
+
 test("multi-frame storyboard is cropped into a take-only timeline before video submission", async t => {
   assert.equal(fs.existsSync(ffmpeg), true, "bundled FFmpeg is required");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-agent-sheet-"));

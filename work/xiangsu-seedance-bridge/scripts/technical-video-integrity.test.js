@@ -126,17 +126,18 @@ test("production-only mode reuses a paid stale candidate without audit or regene
 });
 
 test("a failed Agent generation block receives a new compact repair fingerprint", () => {
-  const base = `detailed_description:\nOne story shot.\n\n${FINAL_OUTPUT_LOCK}`;
+  const base = `subject_definitions:\n<Subject 1> (S1) comes from <Picture 1>.\n\nsummary:\nExecute the authored repair without changing story content.\n\nretention_analysis:\n<Subject 1> (S1): fully_preserved.\n\ndetailed_description:\n${FINAL_OUTPUT_LOCK}\n[Shot 1] From 0.0 to 10.0 seconds, hold a 9:16 medium close-up and complete the authored causal action.\n\noverall_soundscape:\nContinuous room tone and visibly caused action sound only.\n\nnon_diegetic_music:\nN/A`;
   const first = withGenerationBlockTechnicalRepair(base, "white edge at 3.5 seconds", "bad-candidate-a:attempt-1");
   const same = withGenerationBlockTechnicalRepair(base, "white edge at 3.5 seconds", "bad-candidate-a:attempt-1");
   const second = withGenerationBlockTechnicalRepair(base, "white edge at 3.5 seconds", "bad-candidate-b:attempt-2");
   assert.equal(first, same, "transient retry of the same repair task must remain idempotent");
   assert.notEqual(first, second, "a newly rejected candidate must force a genuinely new upstream task");
-  assert.match(first, /full-frame 9:16/);
-  assert.match(first, /direct hard cuts only/);
-  assert.match(first, /identity pictures/);
+  assert.match(first, /9:16 medium close-up/);
+  assert.match(first, /switch camera and mouth ownership together with a direct hard cut/);
+  assert.match(first, /continuous photographed story world/);
   assert.equal(first.includes(FINAL_OUTPUT_LOCK), true);
-  assert.doesNotMatch(first.replace(FINAL_OUTPUT_LOCK, ""), /[\u3400-\u9fff]/);
+  assert.match(first, /Technical redraw repair [a-f0-9]{12}/);
+  assert.doesNotMatch(first.replace(/<d>\[Chinese\][\s\S]*?<\/d>/g, ""), /[\u3400-\u9fff]/);
 });
 
 test("reference asset frames are a mandatory failure instead of valid story footage", () => {

@@ -40,6 +40,24 @@ test("bracketed Chinese scripts are classified as screenplay before dialogue", (
   assert.equal(detectUploadedScriptFormat(CUSTOMER_PATTERN), "chinese_screenplay");
 });
 
+test("parenthesized transition and action labels never become dialogue speakers", () => {
+  const ledger = parseSourceDialogueLedger(CUSTOMER_PATTERN);
+  assert.equal(ledger.length, 7);
+  assert.deepEqual([...new Set(ledger.map(line => line.speaker))], ["秦深", "小李", "林娜"]);
+  assert.equal(ledger.at(-1).text, "站那，别出声。");
+  const labels = parseSourceDialogueLedger("(转场:走廊)\n（动作：推门）\n（镜头说明：缓慢推近）\n秦深（低声）：别走。\n小李（画外）：我在门口。");
+  assert.deepEqual(labels.map(line => [line.speaker, line.text]), [["秦深", "别走。"], ["小李", "我在门口。"]]);
+});
+
+test("rehearsal bracket headings preserve only real physical locations", () => {
+  const source = "【楼道，傍晚】\n甲：灯怎么在这？\n【图书室里】\n乙：孩子在写作业。\n【收尾】\n甲：灯亮了。";
+  const ledger = buildSourceSceneLedger(source);
+  assert.deepEqual(ledger.catalogue.map(item => item.name), ["楼道", "图书室里"]);
+  const dialogue = bindDialogueLedgerToScenes(parseSourceDialogueLedger(source), ledger);
+  assert.equal(dialogue[0].sourceSceneName, "楼道");
+  assert.equal(dialogue[1].sourceSceneName, "图书室里");
+});
+
 test("compound headings and inline transitions become six concrete reusable scenes", () => {
   const ledger = buildSourceSceneLedger(CUSTOMER_PATTERN);
   assert.deepEqual(ledger.catalogue.map(item => item.name), [
@@ -197,7 +215,7 @@ test("explicit source scenes fail closed when a later stage drops them", () => {
   );
 });
 
-test("real manual analysis preserves source text but publishes no assets when Agent enhancement fails", async t => {
+test("sparse uploaded scenes retain the source and continue content repair until an external authentication blocker", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-scene-ledger-flow-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -216,24 +234,42 @@ test("real manual analysis preserves source text but publishes no assets when Ag
     bridge: {},
     locateFfmpeg: () => "",
     stagingRoot: root,
-    textGenerator: async () => {
+    textGenerator: async (_config, messages) => {
+      const user = String(messages.find(message => message.role === "user")?.content || "");
+      if(user.startsWith('{"completeSource":')){calls++;if(calls===4)throw Object.assign(new Error('Account needs sign-in'),{code:'LOCAL_AGENT_AUTH_REQUIRED'});return {sourceTimingIssues:[{exactSourceExcerpt:'林娜（拍卡）：刷卡！',message:'Separate physical scene with only two spoken characters cannot fill a 10-second unit without a silence longer than three seconds.'}]};}
+      if (user.includes("UPLOADED_TEXT_TO_STANDARDIZE:\n") || user.startsWith('{"lines":')) {
+        const sourceScenes = buildSourceSceneLedger(CUSTOMER_PATTERN);
+        const sourceLines = bindDialogueLedgerToScenes(parseSourceDialogueLedger(CUSTOMER_PATTERN), sourceScenes);
+        const actions = ["秦深看向客厅来客，抬手示意她坐下。", "秦深沿走廊走向办公室，边走边拿电话通知小李。", "小李来到办公桌前，把房产证递给秦深。", "林娜走到免税店收银台，拍下银行卡。", "林娜来到公寓门口，踹门并怒喊。", "林娜冲进集团总部大厅，停在前台质问。", "林娜推开办公室门，秦深抬掌示意她停步。"];
+        return {
+          productionScript: sourceLines.map((line, index) => [
+            `### S${String(index + 1).padStart(2, "0")}｜场景：${line.sourceSceneName}`,
+            `【人物】${line.speaker}`,
+            "【核心物品】房产证、手机、银行卡",
+            `【动作】${actions[index]}`,
+            `【对白】${line.speaker}（语气随当前行动变化）：${line.text}`,
+            "【声音】连续室内环境声与动作同步的脚步或物件接触声。",
+            "【承接】人物沿原稿给出的行进路线进入下一事件。"
+          ].join("\n")).join("\n"),
+          sourceAudit: {
+            sceneOccurrenceCount: sourceScenes.occurrences.length,
+            dialogueCount: sourceLines.length,
+            sceneOccurrences: sourceScenes.occurrences.map((scene, index) => ({ order: index + 1, physicalSceneName: scene.sceneName })),
+            preservedAllDialogue: true,
+            preservedAllScenes: true,
+            preservedAllActions: true,
+            preservedEventOrder: true,
+            noInventedDialogue: true
+          }
+        };
+      }
       calls += 1;
       throw Object.assign(new Error("simulated invalid upstream result"), { code: "TEXT_RESULT_INVALID" });
     }
   });
-  await assert.rejects(
-    workflow.analyzeScript(project.id),
-    error => error?.code === "SCRIPT_ANALYSIS_AGENT_RESULT_REQUIRED"
-      && error?.localCreativeFallbackUsed === false
-  );
-  assert.ok(calls >= 1);
-  const preserved = store.getProject(project.id);
-  assert.notEqual(preserved.currentStage, "assets");
-  assert.equal(preserved.script.raw, CUSTOMER_PATTERN);
-  assert.deepEqual(preserved.scenes || [], []);
-  assert.equal(preserved.script.analysisEnhancement.localFallbackCount, 0);
-  assert.match(preserved.automation.message, /未写入本地兜底资产/);
-  const ledger = buildSourceSceneLedger(preserved.script.raw);
+  await assert.rejects(workflow.analyzeScript(project.id),{code:'LOCAL_AGENT_AUTH_REQUIRED'});
+  const analyzed=store.getProject(project.id);assert.equal(calls,4);assert.equal(analyzed.script.raw,CUSTOMER_PATTERN);
+  const ledger = buildSourceSceneLedger(analyzed.script.raw);
   assert.deepEqual(ledger.catalogue.map(item => item.name), [
     "高档公寓客厅",
     "大平层公寓走廊",

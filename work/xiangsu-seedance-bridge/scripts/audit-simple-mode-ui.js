@@ -243,6 +243,29 @@ async function auditSimple(root, runDir, workbenchDir) {
       await page.waitForFunction(() => document.body.dataset.simpleModeReady === "true", null, { timeout: 30_000 });
     }
 
+    // The production renderer schedules the first-run guide immediately after
+    // it marks Simple mode ready. Waiting only for simpleModeReady can race that
+    // microtask: the audit may start navigation just as the modal opens and
+    // correctly intercepts the click. Exercise the real onboarding instead—
+    // wait for it, capture it, then complete it through its public control.
+    await page.waitForFunction(() => document.querySelector("#simpleGuideDialog")?.open === true, null, { timeout: 10_000 });
+    const guideAudit = await page.evaluate(() => {
+      const dialog = document.querySelector("#simpleGuideDialog");
+      return {
+        open: Boolean(dialog?.open),
+        title: document.querySelector("#simpleGuideTitle")?.textContent || "",
+        text: dialog?.textContent || "",
+        closeCount: dialog?.querySelectorAll('[data-close-dialog="simpleGuideDialog"]').length || 0
+      };
+    });
+    let guideScreenshot = "";
+    if (guideAudit.open) {
+      guideScreenshot = await capture(page, path.join(runDir, "simple-first-run-guide.png"));
+      await page.locator('#simpleGuideDialog footer [data-close-dialog="simpleGuideDialog"]').click();
+      await page.waitForFunction(() => !document.querySelector("#simpleGuideDialog")?.open);
+      await page.waitForFunction(() => localStorage.getItem("puream.simple-mode.guide.v1") === "seen");
+    }
+
     const viewMatrix = [
       { width: 1280, height: 800, zoom: 1 },
       { width: 1440, height: 900, zoom: 1 },
@@ -252,11 +275,11 @@ async function auditSimple(root, runDir, workbenchDir) {
       { width: 1280, height: 800, zoom: 2 }
     ];
     const layouts = [];
-    const screenshots = [];
+    const screenshots = guideScreenshot ? [guideScreenshot] : [];
     const visibleInternalModelNames = [];
     for (const view of viewMatrix) {
       await setWindowView(electronApp, page, view);
-      await page.locator('.nav-button[data-panel="overview"]').click();
+      await page.locator('.nav-button[data-panel="assets"]').click();
       const layout = await page.evaluate(() => {
         const visible = node => {
           const rect = node.getBoundingClientRect();
@@ -300,7 +323,7 @@ async function auditSimple(root, runDir, workbenchDir) {
         };
       });
       layouts.push({ ...view, ...layout });
-      const filePath = path.join(runDir, `simple-overview-${view.width}x${view.height}-zoom${Math.round(view.zoom * 100)}.png`);
+      const filePath = path.join(runDir, `simple-assets-${view.width}x${view.height}-zoom${Math.round(view.zoom * 100)}.png`);
       screenshots.push(await capture(page, filePath));
     }
 
@@ -309,11 +332,23 @@ async function auditSimple(root, runDir, workbenchDir) {
       await openPanel(page, panel);
       await page.waitForTimeout(panel === "library" ? 400 : 100);
       screenshots.push(await capture(page, path.join(runDir, `simple-${panel}-1440x900.png`)));
-      const forbidden = await page.evaluate(() => (document.body.innerText || "").match(/(?:\bH3\b|Hailuo|海螺)/gi) || []);
+      const forbidden = await page.evaluate(() => {
+        // The settings page intentionally shows the two local data roots. An
+        // operator may choose a folder whose ordinary path contains a model
+        // token (the audit evidence root itself contains "H3"), which is not
+        // product copy and must not be reported as an internal-name leak.
+        // Remove only those two exact path fields; all other visible UI text
+        // remains inside this adversarial check.
+        let visibleText = document.body.innerText || "";
+        for (const selector of ["#simpleRoot", "#sharedRoot"]) {
+          const pathText = document.querySelector(selector)?.innerText || "";
+          if (pathText) visibleText = visibleText.replace(pathText, "");
+        }
+        return visibleText.match(/(?:\bH3\b|Hailuo|海螺)/gi) || [];
+      });
       if (forbidden.length) visibleInternalModelNames.push({ panel, matches: forbidden });
     }
     await openPanel(page, "settings");
-    await page.locator("#textProviderKind").selectOption("openai-compatible");
     await page.waitForTimeout(100);
     const providerContract = await page.evaluate(() => {
       const visible = selector => {
@@ -324,15 +359,13 @@ async function auditSimple(root, runDir, workbenchDir) {
         return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
       };
       return {
-        kind: document.querySelector("#textProviderKind")?.value || "",
-        baseUrlVisible: visible("#textBaseUrlField"),
-        apiKeyVisible: visible("#textApiKeyField"),
-        modelVisible: visible("#textModelField"),
-        maxTokensVisible: visible("#textMaxTokensField"),
+        textProviderControls: ["#textProviderKind", "#textBaseUrlField", "#textApiKeyField", "#textModelField", "#textMaxTokensField"].filter(selector => document.querySelector(selector)),
+        fixedVideoLabel: document.querySelector(".provider-card .locked-pill")?.textContent || "",
+        videoConnectionVisible: visible("#testH3"),
         forbiddenControls: ["#generateTopics", "#generateScript", "#rewriteScript", "#topicList"].filter(selector => document.querySelector(selector))
       };
     });
-    screenshots.push(await capture(page, path.join(runDir, "simple-settings-custom-provider-1440x900.png")));
+    screenshots.push(await capture(page, path.join(runDir, "simple-settings-fixed-video-provider-1440x900.png")));
     await openPanel(page, "assets");
     await page.waitForTimeout(150);
     const imageAudit = await page.evaluate(async () => {
@@ -354,7 +387,7 @@ async function auditSimple(root, runDir, workbenchDir) {
       sharedRoot: document.querySelector("#sharedRoot")?.textContent || ""
     }));
     const axe = {};
-    for (const panel of ["overview", "script", "assets", "storyboard", "generate", "final", "tasks", "library", "settings"]) {
+    for (const panel of ["assets", "storyboard", "generate", "tasks", "library", "settings"]) {
       axe[panel] = await runAxe(page, panel);
     }
 
@@ -364,6 +397,7 @@ async function auditSimple(root, runDir, workbenchDir) {
       imageAudit,
       stageContract,
       providerContract,
+      guideAudit,
       visibleInternalModelNames,
       axe,
       screenshots
@@ -371,6 +405,9 @@ async function auditSimple(root, runDir, workbenchDir) {
 
     assert.equal(runtime.pageErrors.length, 0, `Simple renderer errors: ${runtime.pageErrors.join("\n")}`);
     assert.equal(runtime.consoleErrors.length, 0, `Simple console errors: ${runtime.consoleErrors.join("\n")}`);
+    assert.equal(guideAudit.open, true, "Fresh Simple mode must open its new-user guide");
+    assert.match(guideAudit.title, /简易模式三步使用说明/);
+    assert.ok(guideAudit.closeCount >= 2, "Simple guide must expose both close controls");
     assert.deepEqual(visibleInternalModelNames, [], "Simple mode must not expose internal video model names in visible text");
     assert.ok(layouts.every(item => !item.horizontalOverflow), "Simple mode has page-level horizontal overflow");
     assert.ok(layouts.every(item => !item.workspaceHorizontalOverflow), "Simple workspace has horizontal overflow");
@@ -378,19 +415,17 @@ async function auditSimple(root, runDir, workbenchDir) {
     assert.ok(layouts.every(item => item.topControlMaxRight <= item.windowControlSafeLeft), "Simple top controls enter the Windows title-bar control area");
     assert.ok(layouts.every(item => item.topModeSwitchVisible), "Simple mode switch must stay visible at every audited zoom level");
     assert.ok(layouts.every(item => item.topModeSwitchRect?.width >= 80 && item.topModeSwitchRect.right <= item.windowControlSafeLeft), "Simple mode switch must remain fully visible and outside the Windows title-bar controls");
-    assert.ok(layouts.every(item => item.visibleCoreNavCount === 6), "Simple mode must show exactly six core production steps");
+    assert.ok(layouts.every(item => item.visibleCoreNavCount === 3), "Simple mode must show exactly three core production steps");
     assert.ok(layouts.every(item => item.visibleSecondaryNavCount === 0 && item.moreOpen === false), "Secondary tools must stay collapsed on the main workflow");
     assert.ok(imageAudit.every(item => item.complete && item.naturalWidth > 0), "Visible Simple mode images must load");
-    assert.equal(stageContract.completedSteps, 2, "Only script and AI analysis may be complete in the seeded asset-stage project");
-    assert.ok(stageContract.assetLoadingRings >= 1, "Asset generation must expose a live loading indicator");
+    assert.equal(stageContract.completedSteps, 0, "A fresh Simple asset-stage project must not invent script or analysis completion");
+    assert.equal(stageContract.assetLoadingRings, 0, "An idle Simple asset project must not show a false loading indicator");
     assert.match(stageContract.h3Locked, /固定接入/);
     assert.match(stageContract.simpleRoot, /simple-mode/i);
     assert.doesNotMatch(stageContract.sharedRoot, /simple-mode/i);
-    assert.equal(providerContract.kind, "openai-compatible");
-    assert.equal(providerContract.baseUrlVisible, true);
-    assert.equal(providerContract.apiKeyVisible, true);
-    assert.equal(providerContract.modelVisible, true);
-    assert.equal(providerContract.maxTokensVisible, true);
+    assert.deepEqual(providerContract.textProviderControls, [], "Simple mode must not expose any text-model configuration");
+    assert.match(providerContract.fixedVideoLabel, /固定接入/);
+    assert.equal(providerContract.videoConnectionVisible, true);
     assert.deepEqual(providerContract.forbiddenControls, []);
     assert.ok(Object.values(axe).every(items => items.length === 0), "Simple mode has critical or serious accessibility violations");
     return { runtime, layouts, imageAudit, stageContract, axe, screenshots };
@@ -427,12 +462,24 @@ async function auditSelector(root, runDir, workbenchDir) {
     const axe = await runAxe(page, "");
     assert.equal(errors.length, 0, `Mode selector renderer errors: ${errors.join("\n")}`);
     assert.equal(layout.horizontalOverflow, false, "Mode selector overflows horizontally at 200% zoom");
-    assert.equal(layout.cards, 2);
-    assert.equal(layout.visibleCards, 2);
+    assert.equal(layout.cards, 3);
+    assert.equal(layout.visibleCards, 3);
     assert.deepEqual(layout.forbiddenInternalModelNames, [], "Mode selector must not expose internal video model names");
     assert.equal(axe.length, 0, "Mode selector has critical or serious accessibility violations");
     await setWindowView(electronApp, page, { width: 1280, height: 800, zoom: 1 });
-    await page.locator('[data-mode="simple"]').click();
+    await page.locator('[data-mode="package"]').click();
+    await page.waitForFunction(() => document.body.dataset.workbenchReady === "true", null, { timeout: 30_000 });
+    const selectedPackage = await page.evaluate(() => window.dramaSlot.appMode.get());
+    assert.equal(selectedPackage.ok, true);
+    assert.equal(selectedPackage.mode, "package");
+    const packageEntry = await page.evaluate(() => ({
+      importVisible: Boolean(document.querySelector("#importProductionPackage")?.offsetParent),
+      importFocused: document.activeElement?.id === "importProductionPackage",
+      importGuided: document.querySelector("#importProductionPackage")?.classList.contains("guided-next-action") === true
+    }));
+    assert.equal(packageEntry.importVisible, true);
+    assert.equal(packageEntry.importFocused || packageEntry.importGuided, true);
+    await page.evaluate(() => { void window.dramaSlot.appMode.select("simple"); });
     await page.waitForFunction(() => document.body.dataset.simpleModeReady === "true", null, { timeout: 30_000 });
     const selectedSimple = await page.evaluate(() => window.dramaSlot.appMode.get());
     assert.equal(selectedSimple.ok, true);
@@ -442,7 +489,7 @@ async function auditSelector(root, runDir, workbenchDir) {
     const switchedAgent = await page.evaluate(() => window.dramaSlot.appMode.get());
     assert.equal(switchedAgent.ok, true);
     assert.equal(switchedAgent.mode, "agent");
-    return { errors, layout, axe, selectedSimple, switchedAgent, screenshots: [screenshot100, screenshot200] };
+    return { errors, layout, axe, selectedPackage, packageEntry, selectedSimple, switchedAgent, screenshots: [screenshot100, screenshot200] };
   } finally {
     await electronApp.close();
   }

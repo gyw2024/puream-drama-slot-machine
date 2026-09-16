@@ -6,7 +6,7 @@ const { execSync } = require("node:child_process");
 
 /**
  * FFmpeg is a hard runtime dependency for continuity plates, voice extract and stitch.
- * First principle: ship it with this app. Sibling apps / PATH are fallback only.
+ * First principle: ship it with this app. PATH is the last recovery fallback.
  */
 function locateFfmpeg(options = {}) {
   const explicit = String(options.ffmpegPath || process.env.FFMPEG_PATH || "").trim();
@@ -19,6 +19,7 @@ function locateFfmpeg(options = {}) {
   }
 
   // Source / headless: repo resources next to app/
+  candidates.push(path.join(__dirname, "..", "media-tools", "ffmpeg.exe"));
   candidates.push(path.join(__dirname, "..", "resources", "media-tools", "ffmpeg.exe"));
 
   // Installed next to the executable (some portable layouts)
@@ -27,25 +28,10 @@ function locateFfmpeg(options = {}) {
     candidates.push(path.join(path.dirname(process.execPath), "media-tools", "ffmpeg.exe"));
   }
 
-  // Optional sibling installs — never primary
   const localAppData = process.env.LOCALAPPDATA || "";
-  if (localAppData) {
-    candidates.push(path.join(localAppData, "Programs", "@pureamdesktop", "resources", "media-tools", "ffmpeg.exe"));
-    candidates.push(path.join(localAppData, "Programs", "xiangsu-seedance-bridge", "resources", "media-tools", "ffmpeg.exe"));
-  }
   for (const dir of [localAppData, process.env.ProgramFiles, "C:\\ffmpeg\\bin"].filter(Boolean)) {
     candidates.push(path.join(dir, "ffmpeg", "bin", "ffmpeg.exe"));
     candidates.push(path.join(dir, "ffmpeg.exe"));
-  }
-
-  // Legacy: optional xiangsu/Douyin AR probe provided by caller
-  const xiangsu = String(options.xiangsuPath || "").trim();
-  if (xiangsu) {
-    candidates.push(
-      path.join(path.dirname(xiangsu), "Resources", "BuiltinResource", "ffmpeg", "x86_64", "ffmpeg.exe"),
-      path.join(path.dirname(xiangsu), "x64", "ffmpeg.exe"),
-      path.join(path.dirname(xiangsu), "ffmpeg.exe")
-    );
   }
 
   const found = candidates.find(candidate => candidate && fs.existsSync(candidate));

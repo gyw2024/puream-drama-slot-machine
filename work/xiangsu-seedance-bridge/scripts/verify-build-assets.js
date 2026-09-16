@@ -4,12 +4,17 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
+const {
+  catalogWithFiles,
+  validateBuiltinSfxCatalog
+} = require("../app/fixed-sfx-library");
+const { auditPostProductionContract } = require("./post-production-build-contract");
+const { verifyReleaseVersion } = require("./release-version-contract");
 
 const root = path.resolve(__dirname, "..");
+const releaseVersion = verifyReleaseVersion(require(path.join(root,"package.json")),require(path.join(root,"package-lock.json")));
 const required = [
-  { relativePath: "media-tools/ffmpeg.exe", size: 87_638_016, sha256: "2CE797A0F88D7F067180338FB227F7B1928EA727BD9A4D7A1D022F7C52AF71A3" },
-  { relativePath: "app/assets/face-grid-processor.exe", size: 11_264, sha256: "AC65468BE5376AEC7276B9D91022DD8EEDDDAAF6467DB5B852DEDBC99F78BBCA" },
-  { relativePath: "app/assets/xiangsu-window-hider.exe", size: 7_680, sha256: "5522FEC2BD7F87D491E5A76B4372DF0655D24B8C0E8E0777C30462B8BAE0374E" }
+  { relativePath: "media-tools/ffmpeg.exe", size: 87_638_016, sha256: "2CE797A0F88D7F067180338FB227F7B1928EA727BD9A4D7A1D022F7C52AF71A3" }
 ];
 
 function digest(filePath) {
@@ -35,4 +40,25 @@ if (!/^ffmpeg version 7\.1-essentials_build-www\.gyan\.dev/i.test(version)) {
   throw Object.assign(new Error(`FFmpeg 版本不匹配：${version}`), { code: "FFMPEG_VERSION_MISMATCH" });
 }
 
-process.stdout.write(`${JSON.stringify({ ok: true, version, verified }, null, 2)}\n`);
+const fixedSfxCatalog = catalogWithFiles();
+const fixedSfxAudit = validateBuiltinSfxCatalog(fixedSfxCatalog, { requireFiles: true });
+if (!fixedSfxAudit.ok) {
+  throw Object.assign(new Error(`内置固定音效库校验失败：${fixedSfxAudit.failures.slice(0, 5).join("；")}`), {
+    code: "BUILTIN_SFX_LIBRARY_INVALID",
+    audit: fixedSfxAudit
+  });
+}
+
+const postProductionAudit = auditPostProductionContract(file => fs.readFileSync(path.join(root, file)));
+const buildPackage = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+if (!(buildPackage.build.files || []).includes("app/**/*")) throw new Error("构建配置没有包含完整应用运行时");
+if (!(buildPackage.build.extraResources || []).some(item => item.from === "app/assets/builtin-sfx" && item.to === "builtin-sfx")) throw new Error("构建配置缺少可被剪映读取的实体音效资源目录");
+const sfxManifest = JSON.parse(fs.readFileSync(path.join(root, "app", "assets", "builtin-sfx", "catalog.json"), "utf8"));
+if (sfxManifest.count !== 150 || sfxManifest.effects?.length !== 150) throw new Error("内置音效清单必须恰好包含150条");
+if (new Set(sfxManifest.effects.map(item => item.id)).size !== 150 || new Set(sfxManifest.effects.map(item => item.fileName)).size !== 150) throw new Error("内置音效清单存在重复编号或重复文件");
+for (const effect of sfxManifest.effects) {
+  const file = path.join(root, "app", "assets", "builtin-sfx", "audio", effect.fileName);
+  if (path.basename(effect.fileName) !== effect.fileName || fs.statSync(file).size !== effect.bytes || digest(file).toLowerCase() !== effect.sha256) throw new Error(`内置音效实体校验失败：${effect.id}`);
+}
+
+process.stdout.write(`${JSON.stringify({ ok: true, releaseVersion, version, verified, fixedSfxAudit, postProductionAudit }, null, 2)}\n`);
