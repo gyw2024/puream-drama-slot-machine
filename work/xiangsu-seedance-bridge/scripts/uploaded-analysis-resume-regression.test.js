@@ -9,6 +9,53 @@ const { WorkbenchStore } = require("../app/workbench-store");
 const { WorkbenchWorkflow, productionDialogueLedgerFromScript } = require("../app/workbench-workflow");
 const { buildSourceSceneLedger } = require("../app/script-scene-ledger");
 
+// --- single-intake helpers (agent-analysis-entry architecture) ---
+function intakeDoc(sourceLines, options = {}) {
+  const lines = sourceLines.map((text, index) => ({
+    speaker: index % 2 ? "C02" : "C01",
+    listener: index % 2 ? "C01" : "C02",
+    text
+  }));
+  const perShot = options.perShot || 3;
+  const shotCount = Math.ceil(lines.length / perShot);
+  return {
+    format: "compact-screenplay-v2",
+    story: { title: options.title || "上传稿", synopsis: "周岚和陈立在客厅把多年误会逐句说清", ending: "双方听懂彼此并作出决定" },
+    characters: [
+      { id: "C01", name: "周岚", description: "三十多岁女性，短发，站姿挺直", assetRequired: false, role: "周岚", voiceDescription: "清晰女中音" },
+      { id: "C02", name: "陈立", description: "四十岁男性，方脸，微驼背", assetRequired: false, role: "陈立", voiceDescription: "低沉男声" }
+    ],
+    scenes: [{ id: "SC01", name: (options.sceneName || "客厅"), description: "木桌、布沙发、东侧窗和固定门口轴线", assetRequired: false }],
+    props: [],
+    shots: Array.from({ length: shotCount }, (_, k) => {
+      const local = lines.slice(k * perShot, (k + 1) * perShot);
+      return {
+        id: "S" + String(k + 1).padStart(2, "0"),
+        sceneId: "SC01",
+        duration: 12,
+        characterIds: ["C01", "C02"],
+        visibleCharacterIds: ["C01", "C02"],
+        propIds: [],
+        productVisible: false,
+        productAction: "",
+        opening: k === 0 ? "两人在客厅对坐" : "上一镜对白刚结束",
+        action: "两人隔桌对话并逐步说清事实",
+        dialogue: local.map((l, di) => ({ id: "D" + (k * perShot + di + 1), speakerId: l.speaker, listenerIds: [l.listener], addressMode: "person", onScreen: true, text: l.text, delivery: "克制", action: "说话人开口，听者注视对方" })),
+        ending: k === shotCount - 1 ? "双方听懂彼此并作出决定" : "对话继续"
+      };
+    })
+  };
+}
+function intakeMock(calls, doc) {
+  return async (_config, messages, options) => {
+    const stage = String(options?.stage || "");
+    calls.push(stage);
+    if (stage === "shot_screenplay_draft") return "完整中文剧本首稿";
+    assert.equal(stage, "shot_screenplay_structure");
+    return typeof doc === "function" ? doc() : doc;
+  };
+}
+
 function adaptationInputFor(messages) {
   const text=String(messages.find(message=>message.role==='user')?.content||'');
   try {const parsed=JSON.parse(text);if(parsed.completeSource)return 'UPLOADED_TEXT_TO_STANDARDIZE:\n'+parsed.completeSource;if(Array.isArray(parsed.lines))return 'UPLOADED_TEXT_TO_STANDARDIZE:\n'+parsed.lines.map(r=>r.text).join('\n');}catch{}
@@ -127,7 +174,7 @@ function responseFor(messages) {
   };
 }
 
-test("uploaded-script analysis compiles the completed standardization without opening chunk requests", async t => {
+test("uploaded legacy-flagged source runs one Agent intake and preserves the complete uploaded dialogue", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-analysis-resume-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -152,46 +199,27 @@ test("uploaded-script analysis compiles the completed standardization without op
     script: { raw: source }
   });
 
-  const calls = new Map();
-  const sessions = new Map();
-  let failSecondChunk = true;
+  let intakeHandler = async () => { throw new Error("intake mock installed below"); };
   const workflow = new WorkbenchWorkflow({
     store,
     bridge: {},
     locateFfmpeg: () => "",
     stagingRoot: root,
-    textGenerator: async (_config, messages, options) => {
-      const user = adaptationInputFor(messages);
-      if (user.includes("UPLOADED_TEXT_TO_STANDARDIZE:\n") || user.includes("IMMUTABLE_DIALOGUE_CHECKLIST:\n") || user.includes("TXT:\n") || user.includes("Uploaded TXT:\n")) return responseFor(messages);
-      const chunkNumber = Number(user.match(/第 (\d+)\/\d+ 段/)?.[1]) || 1;
-      calls.set(chunkNumber, (calls.get(chunkNumber) || 0) + 1);
-      sessions.set(chunkNumber, [...(sessions.get(chunkNumber) || []), String(options?.sessionId || "")]);
-      await new Promise(resolve => setTimeout(resolve, chunkNumber === 2 ? 2 : 8));
-      if (chunkNumber === 2 && failSecondChunk) {
-        failSecondChunk = false;
-        throw Object.assign(new Error("模拟长连接中断"), { code: "PUREAM_TRANSPORT_INTERRUPTED", noAutomaticRetry: true });
-      }
-      return responseFor(messages);
-    }
+    textGenerator: (...args) => intakeHandler(...args)
   });
 
+  const intakeCalls = [];
+  intakeHandler = intakeMock(intakeCalls, () => intakeDoc(Array.from({ length: 24 }, (_, i) => `第${i + 1}句，${i % 2 ? "周岚" : "陈立"}，这句话必须完整保留。`)));
   const analyzed = await workflow.analyzeScript(project.id);
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal([...calls.values()].reduce((sum, value) => sum + value, 0), 0, "no post-standardization chunk may create another billable request");
-  assert.equal(sessions.size, 0);
-  assert.equal(analyzed.productionPlan.inputMode, "manual");
+  assert.deepEqual(intakeCalls, ["shot_screenplay_draft", "shot_screenplay_structure"], "analysis is exactly one Agent intake; no chunk or repair requests may follow");
   assert.equal(analyzed.currentStage, "assets");
   assert.equal(analyzed.script.analysisCheckpoint, null);
-  assert.equal(analyzed.script.analysisEnhancement.source, "ai-standardized-local-compiler");
-  assert.equal(analyzed.script.analysisEnhancement.analysisModelCalls, 0);
-  assert.equal(analyzed.script.analysisEnhancement.formatRecoveryCount, 0);
-  assert.deepEqual(analyzed.script.analysisEnhancement.formatRecoveryChunks, []);
-  assert.equal(analyzed.script.analysisEnhancement.localFallbackCount, 0);
-  assert.deepEqual(analyzed.script.analysisEnhancement.localFallbackChunks, []);
-  assert.equal(analyzed.shots.flatMap(shot => shot.dialogueTurns || []).length, 24);
+  assert.equal(analyzed.script.analysisMethod, "shot-screenplay-direct-delivery-v1");
+  assert.equal(analyzed.shots.flatMap(shot => shot.dialogueTurns || []).length, 24, "every uploaded dialogue line must survive the intake delivery");
 });
 
-test("identical uploads reuse one verified AI standardization across H3 modes", async t => {
+test("identical uploads each complete one Agent intake and reach assets across H3 modes", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-upload-standard-cache-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -209,30 +237,29 @@ test("identical uploads reuse one verified AI standardization across H3 modes", 
       script: { raw: source }
     });
   }
-  let standardizationCalls = 0;
+  let intakeHandler = async () => { throw new Error("intake mock installed below"); };
   const workflow = new WorkbenchWorkflow({
     store,
     bridge: {},
     locateFfmpeg: () => "",
     stagingRoot: root,
-    textGenerator: async (_config, messages) => {
-      const user = adaptationInputFor(messages);
-      if (!user.includes("UPLOADED_TEXT_TO_STANDARDIZE:\n")) throw new Error("unexpected post-standardization model call");
-      standardizationCalls += 1;
-      return responseFor(messages);
-    }
+    textGenerator: (...args) => intakeHandler(...args)
   });
+  const intakeCalls = [];
+  intakeHandler = intakeMock(intakeCalls, () => intakeDoc([
+    "这是我自己的舞台。",
+    "妈，我听你唱完。"
+  ]));
   const firstAnalyzed = await workflow.analyzeScript(first.id);
   const secondAnalyzed = await workflow.analyzeScript(second.id);
-  assert.equal(standardizationCalls, 1, "one exact upload fingerprint must be standardized only once");
-  assert.equal(firstAnalyzed.script.formatAdaptation.validation.standardStructure, true);
-  assert.equal(secondAnalyzed.script.formatAdaptation.reusedFromProjectId, first.id);
-  assert.equal(secondAnalyzed.script.formatAdaptation.validation.reusedAcrossProjects, true);
-  assert.equal(secondAnalyzed.script.formatAdaptation.productionScript, firstAnalyzed.script.formatAdaptation.productionScript);
+  assert.equal(intakeCalls.length, 4, "each upload pays exactly one intake (draft + structure); no shared or extra requests");
+  assert.equal(firstAnalyzed.currentStage, "assets");
   assert.equal(secondAnalyzed.currentStage, "assets");
+  assert.equal(firstAnalyzed.shots.flatMap(shot => shot.dialogueTurns || []).length, 2);
+  assert.equal(secondAnalyzed.shots.flatMap(shot => shot.dialogueTurns || []).length, 2);
 });
 
-test("blueprint-off uploaded analysis never requests a redundant creative draft", async t => {
+test("uploaded analysis runs exactly one creative intake without redundant draft requests", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-analysis-no-progress-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -250,31 +277,24 @@ test("blueprint-off uploaded analysis never requests a redundant creative draft"
     generation: { engine: "seedance", videoProviderKind: "local-xiangsu", mode: "smart", targetDurationSeconds: 60 },
     script: { raw: source }
   });
-  let analysisCalls = 0;
+  let intakeHandler = async () => { throw new Error("intake mock installed below"); };
   const workflow = new WorkbenchWorkflow({
     store,
     bridge: {},
     locateFfmpeg: () => "",
     stagingRoot: root,
-    textGenerator: async (_config, messages) => {
-      const user = adaptationInputFor(messages);
-      if (user.includes("UPLOADED_TEXT_TO_STANDARDIZE:\n") || user.includes("IMMUTABLE_DIALOGUE_CHECKLIST:\n") || user.includes("TXT:\n") || user.includes("Uploaded TXT:\n")) return responseFor(messages);
-      analysisCalls += 1;
-      return {
-        story: { premise: "两人在客厅沟通" },
-        characters: [{ id: "C01", name: "周岚" }, { id: "C02", name: "陈立" }],
-        scenes: [{ id: "SC01", name: "客厅" }],
-        props: [],
-        shots: []
-      };
-    }
+    textGenerator: (...args) => intakeHandler(...args)
   });
+  const intakeCalls = [];
+  intakeHandler = intakeMock(intakeCalls, () => intakeDoc([
+    "你先听我说完。",
+    "我在听，你继续。"
+  ]));
   const analyzed = await workflow.analyzeScript(project.id);
-  assert.equal(analysisCalls, 0, "the standardized script must compile locally without any creative analysis request");
+  assert.deepEqual(intakeCalls, ["shot_screenplay_draft", "shot_screenplay_structure"], "exactly one creative intake; no redundant draft requests");
   assert.equal(analyzed.currentStage, "assets");
   assert.ok(analyzed.shots.length >= 1);
-  assert.equal(analyzed.script.analysisEnhancement.source, "ai-standardized-local-compiler");
-  assert.equal(analyzed.script.analysisEnhancement.formatRecoveryCount, 0);
+  assert.equal(analyzed.script.analysisMethod, "shot-screenplay-direct-delivery-v1");
   assert.notEqual(analyzed.status, "script_needs_revision");
 });
 
@@ -340,7 +360,7 @@ test("uploaded AI-first standardization checkpoints a first-byte timeout without
   assert.ok(saved.automation.retryAt);
 });
 
-test("AI-standardized compound shot fields reach assets without phantom speakers", async t => {
+test("Agent intake compound shot fields reach assets without phantom speakers", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-analysis-compound-fields-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -353,40 +373,33 @@ test("AI-standardized compound shot fields reach assets without phantom speakers
     generation: { engine: "seedance", videoProviderKind: "local-xiangsu", mode: "smart" },
     script: { raw: "雨夜，周岚推门进屋，压低声音对陈立说：‘你先听我把今天看到的事情完整说完，别急着走，等你看清这些收据上的日期，就会知道我为什么来找你。’" }
   });
-  let calls = 0;
+  let intakeHandler = async () => { throw new Error("intake mock installed below"); };
   const workflow = new WorkbenchWorkflow({
     store,
     bridge: {},
     locateFfmpeg: () => "",
     stagingRoot: root,
-    textGenerator: async (_config, messages) => {
-      calls += 1;
-      const user = adaptationInputFor(messages);
-      if (user.includes("UPLOADED_TEXT_TO_STANDARDIZE:\n")) return responseFor(messages);
-      if (user.includes("IMMUTABLE_DIALOGUE_CHECKLIST:\n") || user.includes("Uploaded TXT:\n")) {
-        return {
-          productionScript: [
-            "### S01｜场景：客厅",
-            "【动作】周岚推门进屋，陈立抬头。",
-            "【对白】周岚（压低声音）：你先听我把今天看到的事情完整说完，别急着走，等你看清这些收据上的日期，就会知道我为什么来找你。",
-            "【承接】陈立抬头听她继续说。"
-          ].join("\n")
-        };
-      }
-      return responseFor(messages);
-    }
+    textGenerator: (...args) => intakeHandler(...args)
+  });
+  const intakeCalls = [];
+  intakeHandler = intakeMock(intakeCalls, () => {
+    const doc = intakeDoc(["你先听我把今天看到的事情完整说完，别急着走，等你看清这些收据上的日期，就会知道我为什么来找你。"], { perShot: 1 });
+    doc.shots[0].characterIds = ["C01"];
+    doc.shots[0].visibleCharacterIds = ["C01"];
+    return doc;
   });
   const analyzed = await workflow.analyzeScript(project.id);
-  assert.equal(calls, 1, "one format pass is sufficient; analysis is deterministic");
+  assert.deepEqual(intakeCalls, ["shot_screenplay_draft", "shot_screenplay_structure"], "one intake delivers the compound fields directly");
   assert.equal(analyzed.currentStage, "assets");
   assert.deepEqual(analyzed.script.sourceDialogueLedger.map(item => `${item.speaker}:${item.text}`), [
     "周岚:你先听我把今天看到的事情完整说完，别急着走，等你看清这些收据上的日期，就会知道我为什么来找你。"
   ]);
   assert.ok(analyzed.characters.every(item => !["分镜名称", "镜头时长", "画面与动作", "景别与运镜"].includes(item.name)));
+  assert.ok(analyzed.shots[0].dialogueTurns.every(turn => turn.speaker === "周岚"), "no phantom speakers");
 });
 
 
-test("uploaded-script canonicalizes a returned time-range scene without a paid full-draft repair", async t => {
+test("time-range scene header in source is delivered as authored scene data without a paid re-draft", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "puream-analysis-scene-repair-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = new WorkbenchStore(root);
@@ -405,29 +418,22 @@ test("uploaded-script canonicalizes a returned time-range scene without a paid f
     generation: { engine: "seedance", videoProviderKind: "local-xiangsu", mode: "smart", targetDurationSeconds: 30 },
     script: { raw: source }
   });
-  let calls = 0;
-  const requestMessages = [];
+  let intakeHandler = async () => { throw new Error("intake mock installed below"); };
   const workflow = new WorkbenchWorkflow({
     store,
     bridge: {},
     locateFfmpeg: () => "",
     stagingRoot: root,
-    textGenerator: async (_config, messages) => {
-      const adaptation = adaptationInputFor(messages);
-      if (adaptation.includes("UPLOADED_TEXT_TO_STANDARDIZE:\n") || adaptation.includes("IMMUTABLE_DIALOGUE_CHECKLIST:\n") || adaptation.includes("TXT:\n") || adaptation.includes("Uploaded TXT:\n")) return responseFor(messages);
-      calls += 1;
-      requestMessages.push(messages.map(item => String(item.content || "")).join("\n"));
-      const response = responseFor(messages);
-      response.scenes = calls === 1
-        ? [{ id: "SC01", name: "0-10秒", description: "时间轴标题" }]
-        : [{ id: "SC01", name: "客厅", description: "木桌、布沙发、东侧窗和固定门口轴线" }];
-      return response;
-    }
+    textGenerator: (...args) => intakeHandler(...args)
   });
-
+  const intakeCalls = [];
+  intakeHandler = intakeMock(intakeCalls, () => intakeDoc([
+    "你先听我说完。",
+    "我在听。"
+  ], { perShot: 2, sceneName: "客厅" }));
   const analyzed = await workflow.analyzeScript(project.id);
-  assert.equal(calls, 0, "a source-ledger canonicalization must not open any paid full-draft analysis");
+  assert.deepEqual(intakeCalls, ["shot_screenplay_draft", "shot_screenplay_structure"], "the source time-range header never triggers a second paid pass");
   assert.deepEqual(analyzed.scenes.map(item => item.name), ["客厅"]);
   assert.ok(analyzed.scenes.every(item => !/秒|第\d+镜/.test(item.name)));
-  assert.equal(analyzed.script.analysisEnhancement.localFallbackCount, 0);
+  assert.equal(analyzed.currentStage, "assets");
 });
