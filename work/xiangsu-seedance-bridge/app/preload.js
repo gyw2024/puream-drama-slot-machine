@@ -125,6 +125,7 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     clearAutomationFailures: projectId => ipcRenderer.invoke("workbench:clear-automation-failures", projectId),
     stitch: projectId => ipcRenderer.invoke("workbench:stitch", projectId),
     retrySfxPreview: projectId => ipcRenderer.invoke("workbench:retry-sfx-preview", projectId),
+    productionView: (projectId, afterSeq = 0) => ipcRenderer.invoke("workbench:production-view", projectId, afterSeq),
     exportJianyingDraft: (projectId, options = {}) => ipcRenderer.invoke("workbench:export-jianying", projectId, options),
     cancelPostProduction: projectId => ipcRenderer.invoke("workbench:cancel-post-production", projectId)
   },

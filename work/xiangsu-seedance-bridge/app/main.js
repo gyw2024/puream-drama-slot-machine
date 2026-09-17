@@ -3607,6 +3607,11 @@ ipcMain.handle("workbench:retry-sfx-preview", async (_event, projectId) => {
   }
   catch (error) { return publicError(error); }
 });
+// T15 / §12: unified read-model + project event stream for both UIs.
+ipcMain.handle("workbench:production-view", async (_event, projectId, afterSeq) => {
+  try { return requireWorkbench().workflow.getProductionView(String(projectId || ""), { afterSeq: Number(afterSeq) || 0 }); }
+  catch (error) { return publicError(error); }
+});
 ipcMain.handle("workbench:cancel-post-production", (_event, projectId) => {
   try { return { ok: true, result: requireWorkbench().workflow.cancelPostProduction(projectId) }; }
   catch (error) { return publicError(error); }

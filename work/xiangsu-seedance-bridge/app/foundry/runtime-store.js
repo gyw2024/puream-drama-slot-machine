@@ -181,6 +181,20 @@ class FoundryRuntimeStore {
         created_at TEXT NOT NULL,
         UNIQUE(thread_id, seq)
       );
+      CREATE TABLE IF NOT EXISTS project_events (
+        project_id TEXT NOT NULL,
+        stream_seq INTEGER NOT NULL,
+        event_id TEXT UNIQUE NOT NULL,
+        epoch TEXT NOT NULL DEFAULT '',
+        operation_id TEXT NOT NULL DEFAULT '',
+        type TEXT NOT NULL,
+        stage TEXT NOT NULL DEFAULT '',
+        entity_ids_json TEXT NOT NULL DEFAULT '[]',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        occurred_at TEXT NOT NULL,
+        PRIMARY KEY(project_id, stream_seq)
+      );
+      CREATE INDEX IF NOT EXISTS idx_project_events_time ON project_events(project_id, occurred_at);
     `);
     this.migrateV2LeaseColumns();
     this.setMeta("schema", { version: RUNTIME_SCHEMA_VERSION, name: "PUREAM Adaptive Drama Compiler" });
@@ -484,6 +498,60 @@ class FoundryRuntimeStore {
     return this.db.prepare("SELECT sequence,event_id,project_id,project_revision,event_type,actor,correlation_id,causation_id,payload_json,created_at FROM audit_events WHERE project_id=? ORDER BY sequence DESC LIMIT ?")
       .all(String(projectId || ""), Math.max(1, Math.min(5_000, Number(limit) || 200)))
       .map(row => ({ ...row, payload: JSON.parse(row.payload_json || "{}") }));
+  }
+
+  // T15 / §12.3: PROJECT-LOCAL continuous event stream. stream_seq is per
+  // project (never the global audit sequence), so reduceEvents' continuity
+  // assumption holds. epoch marks stream generations (resets bump it).
+  projectEventEpoch(projectId) {
+    return String(this.getMeta(`event-epoch:${projectId}`, "e1"));
+  }
+
+  appendProjectEvents(projectId, events = []) {
+    const id = String(projectId || "");
+    if (!events.length) return { ...this.projectEventCursor(id), appended: 0 };
+    return this.transaction(() => {
+      let seq = this.db.prepare("SELECT COALESCE(MAX(stream_seq),0) AS max FROM project_events WHERE project_id=?").get(id).max;
+      const epoch = this.projectEventEpoch(id);
+      const insert = this.db.prepare("INSERT INTO project_events (project_id,stream_seq,event_id,epoch,operation_id,type,stage,entity_ids_json,payload_json,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?)");
+      for (const event of events) {
+        seq += 1;
+        insert.run(
+          id, seq,
+          String(event.eventId || `evt_${id}_${seq}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
+          epoch,
+          String(event.operationId || ""),
+          String(event.type || "operation.progress"),
+          String(event.stage || ""),
+          JSON.stringify(Array.isArray(event.entityIds) ? event.entityIds.map(String) : []),
+          JSON.stringify(event.payload && typeof event.payload === "object" ? event.payload : { text: String(event.payload ?? "") }),
+          String(event.occurredAt || now())
+        );
+      }
+      return { lastSeq: seq, epoch, appended: events.length };
+    });
+  }
+
+  listProjectEvents(projectId, afterSeq = 0, limit = 300) {
+    return this.db.prepare("SELECT stream_seq,event_id,epoch,operation_id,type,stage,entity_ids_json,payload_json,occurred_at FROM project_events WHERE project_id=? AND stream_seq>? ORDER BY stream_seq ASC LIMIT ?")
+      .all(String(projectId || ""), Math.max(0, Number(afterSeq) || 0), Math.max(1, Math.min(2_000, Number(limit) || 300)))
+      .map(row => ({
+        seq: row.stream_seq,
+        eventId: row.event_id,
+        projectId: String(projectId),
+        epoch: row.epoch,
+        operationId: row.operation_id,
+        type: row.type,
+        stage: row.stage,
+        entityIds: JSON.parse(row.entity_ids_json || "[]"),
+        payload: JSON.parse(row.payload_json || "{}"),
+        occurredAt: row.occurred_at
+      }));
+  }
+
+  projectEventCursor(projectId) {
+    const row = this.db.prepare("SELECT COALESCE(MAX(stream_seq),0) AS max FROM project_events WHERE project_id=?").get(String(projectId || ""));
+    return { lastSeq: Number(row?.max) || 0, epoch: this.projectEventEpoch(projectId) };
   }
 
   health() {

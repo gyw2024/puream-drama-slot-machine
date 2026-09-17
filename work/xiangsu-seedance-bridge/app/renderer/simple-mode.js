@@ -437,6 +437,17 @@ function stageState(project) {
 }
 
 function firstIncompleteStage(project) {
+  // T15 / §12.1: the unified read-model owns the stage decision; the local
+  // counter-based computation is only the fallback for viewless environments.
+  const view = window.ProductionView?.buildProductionView?.(project || {}, [], {});
+  const unifiedStage = view?.nextAction?.stage;
+  if (unifiedStage && !["wait", "unknown"].includes(unifiedStage)) {
+    const keyByStage = { script: "assets", assets: "assets", shots: "storyboard", videos: "videos" };
+    const key = keyByStage[unifiedStage];
+    if (unifiedStage === "post") return { label: "粗剪与剪映", panel: "post" };
+    const match = stageDefinitions.find(item => item.key === key);
+    if (match && !stageState(project)[match.key]) return match;
+  }
   const status = stageState(project);
   return stageDefinitions.find(item => !status[item.key]) || { label: "粗剪与剪映", panel: "post" };
 }

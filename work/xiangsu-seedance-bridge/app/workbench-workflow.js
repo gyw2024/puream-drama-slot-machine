@@ -16616,9 +16616,11 @@ class WorkbenchWorkflow {
           recoverableFailure: true, autoResume: false, retryAt: "", completedAt: null
         });
         this.foundryKernel?.finishOperation(foundryHandle, { ok: true, outcome: "needs_agent_review", operation, targetId: targetId || "" });
+        this.appendProductionEvents(projectId, [{ type: "operation.paused", stage: operation, operationId: opId, payload: { operation, reason: String(error.code) } }]);
         throw Object.assign(error, { expectedControl: true, reviewRequired: true });
       }
       try { this.foundryKernel?.failOperation(foundryHandle, error); } catch (runtimeError) { console.warn("[foundry] operation failure audit skipped", runtimeError?.message || runtimeError); }
+      this.appendProductionEvents(projectId, [{ type: "operation.failed", stage: operation, operationId: opId, payload: { operation, errorCode: String(error?.code || "UNKNOWN") } }]);
       if(error?.code===require('./preproduction-budget').CODE){this.setAutomation(projectId,{status:'paused',message:error.message,errorCode:error.code,resumeAfterAccountSwitch:false,autoResume:false,recoverableFailure:true});throw error;}
       if ((this.activeOperations.get(projectId)?.size || 0) > 1 && !isPipelineControlError(error)) {
         // The failed item's job retains its error. Do not pause or auto-replay
@@ -28893,6 +28895,38 @@ ${shotAnchor}
     const { ProductionRepository } = require('./production-v2/repository');
     this._productionCoordinator = new ProductionCoordinator({ repository: new ProductionRepository(runtime) });
     return this._productionCoordinator;
+  }
+
+  // T15 / §12.3: single funnel for project event emission. Event loss or a
+  // broken stream must never break production — append failures only warn.
+  appendProductionEvents(projectId, events) {
+    try { return this.foundryKernel?.runtime?.appendProjectEvents(projectId, events) || null; }
+    catch (error) { console.warn("[production-v2] event append skipped", error?.message || error); return null; }
+  }
+
+  // T15 / §12.1+§12.3: one read-model response for BOTH UIs. Cursor is read
+  // BEFORE the project snapshot, so anything appended between cursor and
+  // snapshot is included in `events` — the snapshot→subscribe handshake can
+  // never lose an event. `nextCursor` is where the next poll resumes.
+  getProductionView(projectId, options = {}) {
+    const runtime = this.foundryKernel?.runtime;
+    // §12.3 handshake: the cursor is captured BEFORE the project snapshot so
+    // any event appended between cursor and snapshot lands in `events` —
+    // nothing can be lost between "fetch snapshot" and "subscribe".
+    const cursor = runtime ? runtime.projectEventCursor(projectId) : { lastSeq: 0, epoch: "e1" };
+    const project = this.store.getProject(projectId);
+    const afterSeq = Math.max(0, Number(options.afterSeq) || 0);
+    const events = runtime ? runtime.listProjectEvents(projectId, afterSeq) : [];
+    const accountBlocked = (() => { try { return Boolean(this.scriptWorkflowState(project).accountBlocked); } catch { return false; } })();
+    const view = require('./production-v2/read-model').buildProductionView(project, [], { accountBlocked });
+    return {
+      ok: true,
+      view,
+      cursor,
+      events,
+      nextCursor: { lastSeq: events.length ? events[events.length - 1].seq : Math.max(cursor.lastSeq, afterSeq), epoch: cursor.epoch },
+      generatedAt: new Date().toISOString()
+    };
   }
 
   // T05 / §5.2: the ONLY post entry. Local selected-video preflight plus post

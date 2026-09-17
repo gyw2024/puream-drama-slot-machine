@@ -4997,7 +4997,42 @@ function renderActiveStage(force = false) {
   else if (state.stage === "console") renderConsole();
 }
 
+// T15 / §12.1: the unified production view owns WHAT the next action is; this
+// mapping only supplies the workbench-specific rich card (selector + detail).
+// Unknown ids fall back to the legacy decision so nothing regresses.
 function nextActionForProject(project = state.project) {
+  if (!project) return null;
+  const unified = window.ProductionView?.buildProductionView?.(project, [], {
+    accountBlocked: (() => { try { return scriptWorkflowState(project).accountBlocked; } catch { return false; } })()
+  });
+  const unifiedAction = unified?.nextAction;
+  if (unifiedAction?.id) {
+    const mapped = unifiedActionCard(unifiedAction, project);
+    if (mapped) return mapped;
+  }
+  return legacyNextActionForProject(project);
+}
+
+function unifiedActionCard(action, project) {
+  const id = action.id;
+  if (id === "wait_cancel" || id === "view_progress") {
+    const describe = window.AgentActivityView.describe(project.automation?.stage || project.automation?.operation, project);
+    return { title: id === "wait_cancel" ? "正在停止并保存断点" : describe.label, detail: id === "wait_cancel" ? "正在停止当前任务并保存断点。" : describe.purpose, selector: "" };
+  }
+  if (id === "view_post") {
+    const localPost = localPostProductionUiState(project);
+    return { title: `${localPost.label}正在本地处理`, detail: `${localPost.message}；不会提交上游、不会生成新素材。完成后将自动刷新成片状态。`, selector: "" };
+  }
+  if (id === "preview_final") return { title: action.title, detail: "成片已生成且与当前镜头版本一致；可播放、定位或重新编辑任一镜头。", stage: "final", selector: "#revealFinal" };
+  if (id === "start_post" || id === "view_post_queue") return { title: "下一步：粗剪与剪映草稿", detail: "分镜已就绪，可生成含音效预览的粗剪，或直接导出音效、环境音和字幕分轨的剪映草稿。", stage: "final", selector: "#stitchVideo" };
+  if (id === "open_account") return { title: "Agent 账号待恢复", detail: "当前请求因额度或登录受限而停止。正文和断点已保留，请先恢复 Agent 账号，再点击“账号恢复后继续”。", stage: "script", selector: "#liveRepairScriptBtn" };
+  if (id === "prepare_assets") return { title: `下一步：准备资产（还差 ${project.missingAssetCount ?? "部分"} 项）`, detail: "可一键生成，也可在对应卡片上传或从全局资产库绑定。", stage: "assets", selector: "#generateAllAssets" };
+  if (id === "prepare_boards") return { title: `下一步：准备分镜图（还差 ${project.missingBoardCount ?? "部分"} 镜）`, detail: "可批量生成，也可从 0 批量上传自己的分镜图。", stage: "shots", selector: "#generateAllStoryboards" };
+  if (id === "generate_videos") return { title: `下一步：生成分镜视频`, detail: "先核对每镜提示词和对白，再一键生成或批量上传视频。", stage: "videos", selector: "#generateAllVideos" };
+  return null;
+}
+
+function legacyNextActionForProject(project = state.project) {
   if (!project) return null;
   const localPost = localPostProductionUiState(project);
   if (localPost.active) {
