@@ -13,9 +13,11 @@ test('compact materialization preserves exact words/actions without inventing ti
 for(const mode of ['original','upload','adapt'])test(mode+': compact writer uses one whole-script task and explicit story/commerce/dialogue receipts',async()=>{
  const d=fixture();if(mode==='adapt')d.adaptation={title:'一杯茶',kernel:'团聚',ending:'相伴',replacements:[],productName:'',productLocks:[],warnings:[],beats:[]};
  let writes=0,reviews=0;const result=await writer.author({mode,source:mode==='original'?'':'完整原稿',generate:async(messages,o)=>{
-  if(o.stage==='shot_screenplay_write'){writes++;assert.ok(messages[0].content.startsWith(compact.RULES));assert.equal(JSON.parse(messages[1].content).mode,mode);assert.equal(JSON.parse(messages[1].content).source,mode==='original'?'':'完整原稿');assert.equal(o.deliveryPreview.kind,'screenplay-writing');assert.equal(o.responseSchema.properties.shots.items.properties.beats,undefined);assert.equal(o.responseSchema.properties.shots.items.properties.dialogue.items.properties.start,undefined);return d;}
+  // T05 延期审核：干净结构稿直接 ready；写稿拆为 draft(纯文本)+structure(文档) 两段
+  if(o.stage==='shot_screenplay_draft'){writes++;assert.equal(JSON.parse(messages[1].content).mode,mode);assert.equal(JSON.parse(messages[1].content).source,mode==='original'?'':'完整原稿');return '整稿正文一次写完';}
+  if(o.stage==='shot_screenplay_structure'){assert.equal(o.responseSchema.properties.shots.items.properties.beats,undefined);assert.equal(o.responseSchema.properties.shots.items.properties.dialogue.items.properties.start,undefined);return d;}
   reviews++;assert.ok(o.responseSchema.required.includes('criteria'));return {ok:true,storyComplete:true,sourcePreserved:true,checks:{S01:{evidence:'完整原文对应'}},criteria:{story:{passed:true,evidence:'冲突与结尾保持'},commerce:{passed:true,evidence:'本测试不带货'},dialogue:{passed:true,evidence:'原句完整一次'}},issues:[]};
- }});assert.equal(writes,1);assert.equal(reviews,1);assert.equal(result.status,'ready');
+ }});assert.equal(writes,1);assert.equal(reviews,0,'语义审核延期至提示词确认页，不随写作触发');assert.equal(result.status,'ready');
 });
 for(const mode of ['asset_direct','keyframe','storyboard_sheet'])test(mode+': compact director chooses timing, receives own source, and preserves dialogue identity',async()=>{
  let p=project(mode),calls=0;const original=structuredClone(p.shots[0].shotExecution);

@@ -64,7 +64,7 @@ test("pipeline pauses after script materialization and before paid readiness che
   assert.match(workflow, /status: "awaiting_prompt_review"/);
   assert.match(workflow, /if \(reviewGate\.required\) return project/);
   assert.match(workflow, /promptReviewWaiting/);
-  assert.match(workflow, /prompt-review-v15-explicit-addressees-and-persistent-state/);
+  assert.match(workflow, /prompt-review-v16-confirmation-inplace-editor/);
   assert.match(workflow, /translatePromptReviewText/);
 });
 

@@ -34,5 +34,6 @@ test('small source review and repair receive exact evidence and Agent verdict al
   assert.equal(o.stage,'shot_screenplay_review');reviews++;
   return {ok:reviews>1,storyComplete:true,sourcePreserved:true,checks:{S01:{evidence:'Actual source compared'}},criteria:Object.fromEntries(['story','commerce','dialogue'].map(k=>[k,{passed:true,evidence:'Compared current input'}])),issues:reviews===1?[{shotIds:['S01'],field:'performance',evidence:'Agent requests independent timing verification',repair:'Recheck actual counts and overlapping actions before splitting'}]:[]};
  }});
- assert.equal(reviews,2);assert.equal(repairs,1);assert.equal(result.status,'ready');assert.deepEqual(result.document,d);
+ // T05 延期审核：干净已存稿迁移直接 ready，不触发随稿语义审核/修复；语音证据改为在确认页分区审核中断言
+ assert.equal(reviews,0);assert.equal(repairs,0);assert.equal(result.status,'ready');assert.deepEqual(result.document,d);
 });
