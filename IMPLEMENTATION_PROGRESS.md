@@ -11,10 +11,26 @@
 | T00 基线/备份/测试环境/现状复现 | ✅ 完成 | `49e3fb0` | 校验脚本 27/27 PASS |
 | T01 权威校验与完整结果保存止漏 | ✅ 完成 | `ec96b0e` | 新测试 18/18 + 存量回归无新增失败 |
 | T02 规范合同与 SQLite CAS/迁移 | ✅ 完成 | `4ccd385` | production-v2 8 模块+repository；24/24 |
-| T03 统一错误/重试/取消与 outbox 语义 | ✅ 完成 | 见 git log `T03` | budget 句柄+热循环堵口；新测试 8/8 |
-| T03–T20 | ⬜ 未开始 | | 按主文档第 15 章顺序 |
+| T03 统一错误/重试/取消与 outbox 语义 | ✅ 完成 | `296482a` | budget 句柄+热循环堵口；新测试 8/8 |
+| T04 Agent 事件/租约/进程/完整性 | ✅ 完成 | `47b0573` | 终局分类+取消不复活+迟到结果归档；10/10+回归 42/42 |
+| T05 统一批准与弹窗 gate | ✅ 完成 | `f749241` | final 直达后期、自动弹窗许可原子化、v2 逐条批准 |
+| T06 单一提示词装配 | ✅ 完成 | `84ae6c1` | prompt-compose（P00+ruleId 去重+溯源）+入库循环预算化 |
+| T07 20 分钟软目标与预算视图 | ✅ 完成 | `deb648e` | 活动时间区间并集持久化；超标禁自动新整稿修复 |
+| T08 单条聊天后端 | ✅ 完成 | `2ad50e6` | PromptChatService+专用 Schema+线程持久化；7/7 |
+| T09 单条聊天抽屉+IPC | ✅ 完成 | `61fe10f` | main/preload 白名单 IPC+每条目"让 Agent 修改"入口 |
+| T10 资产 CRUD 白名单命令 | ✅ 完成 | `7051b64` | origin=user 人工保护、软删除、引用标记 |
+| T11 分镜 CRUD 白名单命令 | ✅ 完成 | `d0f1a45` | 稳定身份、克隆不复制对白绑定、selectedVideoSetHash |
+| T12 依赖失效闭包 | ✅ 完成 | `d0731ef` | §11.5 精确失效下游并保留成果 |
+| T13 视频状态统一协调器 | ✅ 完成 | `c5fd01c` | onArtifactCommitted 幂等入队粗剪并接入工作流 |
+| T14 净音/音效预览/分轨导出 | ✅ 完成 | `2fa6183` | roughcut-sfx 独立预览+partial_audio+只补音效重试（B08/B20） |
+| T15 统一 read-model 与事件游标 | ✅ 完成 | `7920d2b` | buildProductionView+项目专属连续 streamSeq+一致游标握手 |
+| T16 下一步按钮与引导修复 | ✅ 完成 | `1661c89` | 删除自动点击、目标可见性/弹窗/reduced-motion 校验 |
+| T17 主流 Agent 能力与事件适配 | ✅ 完成 | `f724369` | 5 客户端终局分类 fixture+版本核验证据 |
+| T18 迁移、Windows、打包与恢复 | ✅ 完成 | `76eb46a` | 存量库原地升级、legacy 三分类迁移+备份 manifest 可校验 |
+| T19 应用级破坏性测试与长稿性能 | ✅ 完成 | `3b590ae` | 事务回滚/租约接管/Agent 重启/重复折叠；37/37（T14–T20 合计） |
+| T20 清理旧循环/重复门禁/错误文案 | ✅ 完成 | 见下方 T20 记录 | 减法合同测试 5/5 |
 
-## 当前任务：无（T03 已完成，下一任务 T04）
+## 当前任务：无（T20 已完成，T00–T20 全部交付）
 
 ## 方案包缺口（如实记录）
 
@@ -154,3 +170,48 @@
 ### 边界说明（未做、留给后续任务的）
 - `agent-output-normalization` 自身修复循环、native tool receipt（createReceiptTracker）与归一化入口的权威校验接线属 T03/T04（重试预算/Agent 事件层）。
 - `stage-delivery.read` 的回执与 attempt/lease/epoch 绑定需要 T02/T03 的 operation 模型，T01 未动 read（保持 jobId+hash 校验现状）。
+
+## T14–T20 交付记录（2026-09-18，批量连续执行）
+
+### T14 净音/音效预览/分轨导出（`2fa6183`）
+- B08：`mixFixedSfxIntoVideo` 一直存在但从未被粗剪工作流调用（且被旧 build contract 明文禁止）。按 §10 新要求反转合同：净音版仍不烧音效，但粗剪完成即在同一 EDL 上产出独立 `*-roughcut-sfx-*.mp4` 含音效预览；`postAudioMode=preview_and_draft|draft_only|none`，缺省 preview_and_draft，显式设置原样保留。
+- partial_audio：clean 成功/音效失败 → `postAudioState=partial_audio`，净音版保持可预览可导出；部分批次待补时先混入已验证 cue。
+- B20：`matchStageSfx` 批次失败不再清空全部 cues——已验证批次保留，`pendingShotIds` 记录待补；重试（`retrySfxPreview`，MCP 工具 `retry_sfx_preview` 免费本地）带 `previousPlan` 只重新匹配待补镜头。
+- 新增 `scripts/t14-post-audio.test.js` 5/5；`post-production-build-contract` 更新为 audible-preview 合同（8/8）。
+
+### T15 统一 read-model 与事件游标（`7920d2b`）
+- `read-model.js` 新增 `buildProductionView(project, operations, capabilities)`：phase/stageSummary/counts/warnings/blockedReasons/nextAction/review.canAutoOpen/activeOperations/artifacts；缺字段显示 unknown/not_ready 不回落 completed；视频齐全要求 `localVerified`（§9）。
+- runtime-store 新增 `project_events` 表：项目专属连续 streamSeq（非全局 sequence），`appendProjectEvents/listProjectEvents/projectEventCursor`。
+- `getProductionView`：游标先于快照读取 → 快照→订阅握手不可能丢事件；`workbench:production-view` IPC。
+- 工作流 `runOwnedOperation` 挂 operation.started/completed/paused/failed 四类事件。
+- workbench `nextActionForProject` 与 simple-mode `firstIncompleteStage` 均改为先消费统一视图（带 legacy 兜底）。
+
+### T16 引导修复（`1661c89`）
+- 删除 `renderNextActionGuide` 中 `setTimeout(() => liveTarget.click())` 自动点击。"带我去操作"只做切 tab、scrollIntoView、focus。
+- 新增 `guideTargetVisible`：disabled/hidden/祖先 hidden/aria-hidden/computedStyle display:none/visibility:hidden 全查；弹窗打开时只允许弹窗内目标；找不到目标只给文字导航；prefers-reduced-motion 关动效。
+
+### T17 Agent 能力与事件适配（`f724369`）
+- `terminal-policy.classifyEvent` 从 codex/claude-code 扩到全部 5 个声明客户端（antigravity: event=result/error；grokbuild: turn.completed/failed+result；deepseek-harness: event 线；workbuddy: result 方言）。error_max_turns 维持 incomplete（可续）语义。
+- `agent-catalog-version` 版本核验扩到全部客户端：有官方渠道者（grokbuild/deepseek）做远端比对，其余本机核验留证。
+- 运行时事件循环分类条件从 `codex||claude-code` 改为 `definition(id)` 全覆盖。`t17-agent-evidence.test.js` 5/5。
+
+### T18 迁移/打包/恢复（`76eb46a`）
+- foundry 存量库原地升级：`migrateV2LeaseColumns` 泛化为 ensureColumns，project_state 缺 contract_fingerprint 列自动补——实测旧 schema 库（手工建旧表+插入数据）打开后数据完好。
+- `legacy-migration.js`（§14.1 三分类）：真实 userConfirmed 证据+媒体 → `legacy_imported`（status=approved 无证据不伪造）；有媒体无批准 → `authorized_media`（本地预览/粗剪/导出保留，新付费需局部授权）；全空 → `review_ready`（gate 只自动展示一次）。幂等：同 sourceRevision 重跑只校验。
+- `createMigrationManifest/verifyMigrationManifest`：备份 project.json+sha256，篡改可检出。
+- `t18-legacy-migration.test.js` 5/5。安装包实际运行验证需真机 electron-builder（本环境静态校验 build:installer/audit 脚本链完整）。
+
+### T19 应用级破坏性测试与长稿性能（`3b590ae`）
+- 事务中途崩溃 → 整体回滚、可安全重放；租约持有人崩溃 → TTL 过期后新 worker 接管、旧租约 commit 返回 stale_attempt；AgentHub 进程死亡重启 → 运行中任务标 interrupted、迟到结果归档不复活；同操作并发重复触发折叠为一个 attempt。
+- 长稿：500 镜 buildProductionView + 5000 事件 reduceEvents 均在预算内（<200ms/<1500ms）。
+
+### T20 清理减法合同（本提交）
+- `t20-cleanup-contract.test.js` 5/5：单一后期路径（final 直达+流水线末段同入口、localPostOperations 去重）；付费热循环预算化/有界化收口保持；双门禁不叠加；门禁错误 expectedControl+结构化 code；v2 路由布尔唯一（productionV2.enabled，无第二套路由布尔）。
+
+### T14–T20 测试合计
+- 新增 7 个测试文件 37/37 PASS；t00 基线 27/27 PASS；受影响存量回归（contract 8/8、agent-catalog 4/4、t04 10/10、t02+t08 31/31）无新增失败。
+
+### 未能验证的环境（如实记录）
+- Windows 安装包实际安装/启动冒烟（需 electron-builder 构建环境与真机 GUI），本次完成到静态合同+审计脚本链验证。
+- 真实 Agent CLI（codex/agy/grok/deepseek）端到端事件流与版本核验（fixture 为据）。
+- 全量 318 文件回归（8 文件挂起禁用全量，沿 T00 结论）。
