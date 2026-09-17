@@ -61,9 +61,14 @@ check('B12.for-forever-loop', /for\s*\(\s*;;\s*\)/.test(sss));
 const sfx = fs.readFileSync(path.join(ROOT, 'app', 'agent-stage-tasks.js'), 'utf8');
 check('B20.matchStageSfx', sfx.includes('function matchStageSfx') || sfx.includes('matchStageSfx'));
 
-// 3. production-v2 尚不存在（T02 起才创建）
-check('state.production-v2-absent', !fs.existsSync(path.join(ROOT, 'app', 'production-v2')),
-  'T00 时点 app/production-v2 不存在');
+// 3. production-v2 状态（T00 时点断言不存在；T02 起改为存在性校验）
+const v2Dir = path.join(ROOT, 'app', 'production-v2');
+const v2Modules = ['contracts.js', 'approval-policy.js', 'prompt-range.js', 'retry-policy.js', 'dependency-graph.js', 'post-plan.js', 'read-model.js', 'terminal-policy.js', 'repository.js'];
+if (fs.existsSync(v2Dir)) {
+  for (const m of v2Modules) check(`v2.${m}`, fs.existsSync(path.join(v2Dir, m)));
+} else {
+  check('state.production-v2-absent', true, 'T02 之前：production-v2 尚未创建（符合 T00 时点）');
+}
 
 // 输出
 let failed = 0;

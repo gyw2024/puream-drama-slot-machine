@@ -7,7 +7,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { canonicalJson, fingerprint } = require("./canonical");
 const { ERROR_KINDS, FoundryError, classifyError } = require("./errors");
 
-const RUNTIME_SCHEMA_VERSION = 1;
+const RUNTIME_SCHEMA_VERSION = 2;
 const PROJECT_SAVED_REVISION_LIMIT = 200;
 
 function now() {
@@ -136,8 +136,68 @@ class FoundryRuntimeStore {
         updated_at TEXT NOT NULL,
         UNIQUE(provider, upstream_task_id, request_fingerprint)
       );
+      CREATE TABLE IF NOT EXISTS command_log (
+        command_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        command_type TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        project_revision INTEGER NOT NULL,
+        result_json TEXT NOT NULL DEFAULT '{}',
+        event_ids_json TEXT NOT NULL DEFAULT '[]',
+        actor TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_command_project ON command_log(project_id, created_at);
+      CREATE TABLE IF NOT EXISTS approval_snapshots (
+        approval_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        epoch TEXT NOT NULL,
+        source_revision TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        status TEXT NOT NULL,
+        item_hashes_json TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        snapshot_sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_approval_project_epoch ON approval_snapshots(project_id, epoch, created_at);
+      CREATE TABLE IF NOT EXISTS prompt_chat_threads (
+        thread_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_chat_thread_item ON prompt_chat_threads(project_id, item_id, updated_at);
+      CREATE TABLE IF NOT EXISTS prompt_chat_messages (
+        message_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        role TEXT NOT NULL,
+        client_turn_id TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(thread_id, seq)
+      );
     `);
+    this.migrateV2LeaseColumns();
     this.setMeta("schema", { version: RUNTIME_SCHEMA_VERSION, name: "PUREAM Adaptive Drama Compiler" });
+  }
+
+  // T02 additive migration: operation lease columns for claim/commit CAS.
+  // Each column is added only when missing, so older databases upgrade in place.
+  migrateV2LeaseColumns() {
+    const columns = new Set(this.db.prepare("PRAGMA table_info(operation_outbox)").all().map(row => String(row.name)));
+    const additions = {
+      lease_epoch: "INTEGER NOT NULL DEFAULT 0",
+      lease_owner: "TEXT NOT NULL DEFAULT ''",
+      lease_expires_at: "TEXT NOT NULL DEFAULT ''"
+    };
+    for (const [name, definition] of Object.entries(additions)) {
+      if (!columns.has(name)) this.db.exec(`ALTER TABLE operation_outbox ADD COLUMN ${name} ${definition}`);
+    }
   }
 
   transaction(action) {
@@ -263,6 +323,16 @@ class FoundryRuntimeStore {
 
   commitProject(project, context = {}) {
     if (!project?.id) throw new FoundryError("缺少项目编号，无法提交 V2 快照", { code: "FOUNDRY_PROJECT_ID_REQUIRED", kind: ERROR_KINDS.INTERNAL_INVARIANT });
+    // Legacy entry: own transaction. Callers already inside a transaction must
+    // use commitProjectInTransaction (SQLite cannot nest BEGIN IMMEDIATE).
+    return this.transaction(() => this.commitProjectInTransaction(project, context));
+  }
+
+  // Same write as commitProject but WITHOUT opening a transaction, so command
+  // CAS flows can compose snapshot commit + command log + outbox + events in
+  // ONE atomic transaction (§4.3: 不得先返回成功，再补写队列).
+  commitProjectInTransaction(project, context = {}) {
+    if (!project?.id) throw new FoundryError("缺少项目编号，无法提交 V2 快照", { code: "FOUNDRY_PROJECT_ID_REQUIRED", kind: ERROR_KINDS.INTERNAL_INVARIANT });
     const snapshotJson = canonicalJson(project);
     const snapshotSha256 = fingerprint(project);
     const projectId = String(project.id);
@@ -274,39 +344,37 @@ class FoundryRuntimeStore {
     const eventId = String(context.eventId || `evt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`);
     const compressed = zlib.gzipSync(Buffer.from(snapshotJson, "utf8"), { level: 3 });
     const contractFingerprint = String(project.foundry?.contract?.fingerprint || "");
-    return this.transaction(() => {
-      this.db.prepare(`INSERT INTO project_state(project_id,revision,snapshot_json,snapshot_sha256,contract_fingerprint,updated_at) VALUES(?,?,?,?,?,?)
-        ON CONFLICT(project_id) DO UPDATE SET revision=excluded.revision,snapshot_json=excluded.snapshot_json,snapshot_sha256=excluded.snapshot_sha256,contract_fingerprint=excluded.contract_fingerprint,updated_at=excluded.updated_at`)
-        .run(projectId, revision, snapshotJson, snapshotSha256, contractFingerprint, createdAt);
-      this.db.prepare(`INSERT INTO project_revisions(project_id,revision,event_id,event_type,snapshot_gzip,snapshot_sha256,created_at) VALUES(?,?,?,?,?,?,?)`)
-        .run(projectId, revision, eventId, eventType, compressed, snapshotSha256, createdAt);
-      this.appendEvent({
-        eventId,
-        projectId,
-        projectRevision: revision,
-        type: eventType,
-        actor: context.actor || "system",
-        correlationId: context.correlationId || "",
-        causationId: context.causationId || "",
-        createdAt,
-        payload: {
-          snapshotSha256,
-          contractFingerprint,
-          status: String(project.status || ""),
-          stage: String(project.currentStage || ""),
-          counts: {
-            characters: Array.isArray(project.characters) ? project.characters.length : 0,
-            scenes: Array.isArray(project.scenes) ? project.scenes.length : 0,
-            shots: Array.isArray(project.shots) ? project.shots.length : 0,
-            candidates: Array.isArray(project.candidates) ? project.candidates.length : 0,
-            jobs: Array.isArray(project.jobs) ? project.jobs.length : 0
-          },
-          ...(context.payload || {})
-        }
-      });
-      this.pruneProjectSavedRevisions(projectId);
-      return { changed: true, revision, snapshotSha256, eventId };
+    this.db.prepare(`INSERT INTO project_state(project_id,revision,snapshot_json,snapshot_sha256,contract_fingerprint,updated_at) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(project_id) DO UPDATE SET revision=excluded.revision,snapshot_json=excluded.snapshot_json,snapshot_sha256=excluded.snapshot_sha256,contract_fingerprint=excluded.contract_fingerprint,updated_at=excluded.updated_at`)
+      .run(projectId, revision, snapshotJson, snapshotSha256, contractFingerprint, createdAt);
+    this.db.prepare(`INSERT INTO project_revisions(project_id,revision,event_id,event_type,snapshot_gzip,snapshot_sha256,created_at) VALUES(?,?,?,?,?,?,?)`)
+      .run(projectId, revision, eventId, eventType, compressed, snapshotSha256, createdAt);
+    this.appendEvent({
+      eventId,
+      projectId,
+      projectRevision: revision,
+      type: eventType,
+      actor: context.actor || "system",
+      correlationId: context.correlationId || "",
+      causationId: context.causationId || "",
+      createdAt,
+      payload: {
+        snapshotSha256,
+        contractFingerprint,
+        status: String(project.status || ""),
+        stage: String(project.currentStage || ""),
+        counts: {
+          characters: Array.isArray(project.characters) ? project.characters.length : 0,
+          scenes: Array.isArray(project.scenes) ? project.scenes.length : 0,
+          shots: Array.isArray(project.shots) ? project.shots.length : 0,
+          candidates: Array.isArray(project.candidates) ? project.candidates.length : 0,
+          jobs: Array.isArray(project.jobs) ? project.jobs.length : 0
+        },
+        ...(context.payload || {})
+      }
     });
+    this.pruneProjectSavedRevisions(projectId);
+    return { changed: true, revision, snapshotSha256, eventId };
   }
 
   loadRevision(projectId, revision) {
@@ -326,10 +394,15 @@ class FoundryRuntimeStore {
     const operationKey = String(input.operationKey || fingerprint({ projectId, kind, targetId, inputFingerprint }));
     const operationId = String(input.operationId || `op_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`);
     const createdAt = now();
+    // §8.5: only an explicit recovery command (or an approved retry decision)
+    // may turn failed/paused/waiting back into running and burn an attempt.
+    // Legacy callers keep the historical auto-resume by default; production-v2
+    // command paths pass autoResume:false.
+    const autoResume = input.autoResume !== false;
     return this.transaction(() => {
       const existing = this.db.prepare("SELECT * FROM operation_outbox WHERE operation_key=?").get(operationKey);
       if (existing) {
-        if (["failed", "paused", "waiting"].includes(String(existing.status || ""))) {
+        if (autoResume && ["failed", "paused", "waiting"].includes(String(existing.status || ""))) {
           this.db.prepare("UPDATE operation_outbox SET status='running',attempts=attempts+1,error_kind='',error_code='',updated_at=? WHERE operation_key=?")
             .run(createdAt, operationKey);
           this.appendEvent({ projectId, type: "operation.resumed", correlationId: existing.operation_id, payload: { operationKey, operationId: existing.operation_id, kind, targetId, attempt: Number(existing.attempts || 0) + 1 } });
