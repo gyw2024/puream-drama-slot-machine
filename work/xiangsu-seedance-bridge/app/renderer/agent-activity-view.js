@@ -2,12 +2,20 @@
  const terminal={completed:'已交付',failed:'任务未完成',cancelled:'已取消',interrupted:'任务已中断'};
  const labels={connecting:'正在连接',waiting:'等待模型响应',thinking:'正在思考',output:'正在输出正文',tool:'正在执行工具',saving:'正在保存结果'};
  function present(job,now=Date.now()){
-  const a=job.activity||{},ended=!!terminal[job.status];
+  const a=job.activity||{},ended=!!terminal[job.status],delivery=job.deliveryRecovery||{};
+  // The external Agent turn and the application-side MCP submission are two
+  // separate phases. Reporting them as one state made a finished Agent look
+  // busy for as long as the app kept resubmitting its result.
+  const agentEnded=ended||Boolean(job.agentTurnEndedAt);
+  const delivering=!ended&&delivery.state==='resubmitting';
+  const exhausted=delivery.state==='exhausted';
   const phase=ended?job.status:a.phase||(job.status==='waiting_agent'?'waiting':job.firstOutputAt?'output':job.firstEventAt?'waiting':'connecting');
   const last=Date.parse(a.lastSignalAt||a.lastEventAt||job.firstEventAt||job.createdAt);
   const seconds=Number.isFinite(last)?Math.max(0,Math.floor((now-last)/1000)):null;
-  const stale=!ended&&seconds!==null&&seconds>=30;
-  return {phase,label:ended?terminal[job.status]:stale?'等待新的状态信号':labels[phase]||'Agent 正在处理',detail:stale?`上次状态：${labels[phase]||'处理中'}；暂时无法确认当前是思考还是输出。`:'',elapsed:Math.max(0,Math.floor(((ended?Date.parse(job.completedAt||job.updatedAt):now)-Date.parse(job.createdAt))/1000))||0,seconds,characters:Number(job.outputCharacters)||0,reasoningEvents:Number(a.reasoningEvents)||0,ended,stale};
+  const stale=!ended&&!delivering&&seconds!==null&&seconds>=30;
+  const deliveryAttempts=Number(delivery.attempts)||0,deliveryMaxAttempts=Number(delivery.maxAttempts)||12;
+  const label=ended?(exhausted?'补交失败，已保留草稿':terminal[job.status]):delivering?`Agent 已结束 · 应用补交中（第 ${deliveryAttempts||1}/${deliveryMaxAttempts} 次）`:stale?'等待新的状态信号':labels[phase]||'Agent 正在处理';
+  return {phase,label,detail:stale?`上次状态：${labels[phase]||'处理中'}；暂时无法确认当前是思考还是输出。`:'',elapsed:Math.max(0,Math.floor(((ended?Date.parse(job.completedAt||job.updatedAt):now)-Date.parse(job.createdAt))/1000))||0,seconds,characters:Number(job.outputCharacters)||0,reasoningEvents:Number(a.reasoningEvents)||0,ended,stale,agentEnded,delivering,exhausted,deliveryAttempts,deliveryMaxAttempts,deliveryReason:String(delivery.reason||''),agentEndedAt:job.agentTurnEndedAt||job.completedAt||''};
  }
  function select(jobs,projectId){if(!projectId)return [];const list=jobs.filter(j=>j.projectId===projectId).sort((a,b)=>Date.parse(b.createdAt)-Date.parse(a.createdAt));const active=list.filter(j=>!terminal[j.status]);return active.length?active:list.slice(0,1);}
  // Business work and model transport are separate axes. Never infer work from a

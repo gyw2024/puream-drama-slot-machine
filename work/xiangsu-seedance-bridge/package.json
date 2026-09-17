@@ -1,6 +1,6 @@
 {
   "name": "puream-drama-slot-h3",
-  "version": "0.16.352",
+  "version": "0.16.359",
   "description": "纯梦短剧老虎机：H3 云端视频与资产直投的一键短剧生产工具",
   "main": "app/bootstrap.js",
   "author": "PUREAM",
@@ -76,7 +76,7 @@
       }
     ],
     "directories": {
-      "output": "dist-fixed-0.16.352"
+      "output": "dist-fixed-0.16.359"
     },
     "win": {
       "icon": "app/assets/app.ico",

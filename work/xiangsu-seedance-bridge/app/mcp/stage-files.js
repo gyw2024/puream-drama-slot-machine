@@ -4,8 +4,11 @@ const hash=s=>crypto.createHash('sha256').update(s).digest('hex');
 function request(dir){return JSON.parse(fs.readFileSync(path.join(dir,'request.json'),'utf8'));}
 function content(dir,name){
  if(name==='writing-task.txt'){const r=request(dir);return (r.messages||[]).map(m=>`[${m.role}]\n${typeof m.content==='string'?m.content:JSON.stringify(m.content)}`).join('\n\n');}
- if(name==='instructions.json')return JSON.stringify(require('./stage-delivery').modelView(request(dir)),null,2);
- if(name==='schema.json')return JSON.stringify(request(dir).responseSchema||{},null,2);
+ // Compact JSON on purpose. These files are delivered to the Agent in character
+ // pages (offset/nextOffset), so pretty-printing added no reading benefit while
+ // padding the payload with indentation that was paid for on every page.
+ if(name==='instructions.json')return JSON.stringify(require('./stage-delivery').modelView(request(dir)));
+ if(name==='schema.json')return JSON.stringify(request(dir).responseSchema||{});
  if(!['draft.txt','result.json','result.txt'].includes(name))throw Error('Use a named task input or output file.');
  const file=path.join(dir,'authored-'+name);
  if(fs.existsSync(file)&&fs.lstatSync(file).isSymbolicLink())throw Error('Linked output files are not permitted.');

@@ -692,6 +692,11 @@ function topicRepairContext(topics = []) {
 // shown immediately. Only a zero-valid-card response may use one explicit
 // content-continuation turn; never spend repeatedly just to fill ten slots.
 const MAX_TOPIC_CONTENT_REPAIR_ROUNDS = 1;
+// A画像 stage can be re-triggered by its own progress save; two paid draws of
+// the same asset must not run inside this window. An explicit redraw after the
+// window is unaffected, and callers may pass allowDuplicateStart for a
+// deliberate immediate re-draw.
+const IMAGE_DUPLICATE_START_WINDOW_MS = 2000;
 
 function topicTitleIdentity(value) {
   return String(value || "")
@@ -3840,6 +3845,34 @@ function referenceRoleIdentity(role = {}) {
   ].join(":");
 }
 
+// True when the confirmed reference plan differs from the actual paid manifest
+// ONLY by character images that current asset eligibility excludes (silent,
+// asset-ineligible entrants removed by the shotReferenceCharacterIds fix).
+// Relative order of all remaining roles must be identical, and audio roles
+// must match exactly. In that case the confirmed prompt was rendered for a
+// manifest that can never execute (those characters have no face asset), and
+// the deterministic re-render from the same approved story facts is the only
+// binding-correct execution text.
+function referenceManifestEligibilityAligned(project = {}, shot = {}, references = {}) {
+  const reviewedPlan = shot?.promptReviewReferencePlan;
+  if (!reviewedPlan || promptReviewReferenceManifestMatches(shot, references)) return false;
+  const actualImages = Array.isArray(references.imageRoles) ? references.imageRoles.map(referenceRoleIdentity) : [];
+  if (!actualImages.length) return false;
+  const eligibleCharacterIds = new Set(shotReferenceCharacterIds(project, shot));
+  const reviewedImages = (Array.isArray(reviewedPlan.images) ? reviewedPlan.images : [])
+    .filter(role => String(role?.type || "") !== "character"
+      || eligibleCharacterIds.has(String(role?.characterId || role?.entityId || "").trim()))
+    .map(referenceRoleIdentity);
+  if (reviewedImages.length !== actualImages.length) return false;
+  if (reviewedImages.some((value, index) => value !== actualImages[index])) return false;
+  const reviewedAudios = (Array.isArray(reviewedPlan.audios) ? reviewedPlan.audios : [])
+    .map(item => String(item?.characterId || "").trim());
+  const actualAudios = (Array.isArray(references.audios) ? references.audios : [])
+    .map(item => String(item?.characterId || "").trim());
+  return reviewedAudios.length === actualAudios.length
+    && reviewedAudios.every((value, index) => value === actualAudios[index]);
+}
+
 function promptReviewReferenceManifestMatches(shot = {}, references = {}) {
   const reviewed = shot?.promptReviewReferencePlan || {};
   const reviewedImages = Array.isArray(reviewed.images) ? reviewed.images.map(referenceRoleIdentity) : [];
@@ -6007,7 +6040,13 @@ function imageGenerationOptions(project, stage, referenceInputs = [], entity = n
   const ratio = parsed ? Number(parsed[1]) / Math.max(Number(parsed[2]), 0.001) : 1;
   const supported = [["9:16", 9 / 16], ["1:1", 1], ["16:9", 16 / 9]];
   const size = supported.slice().sort((left, right) => Math.abs(Math.log(ratio / left[1])) - Math.abs(Math.log(ratio / right[1])))[0][0];
-  return { referenceInputs, size, aspectRatio, costProjectId: project.id, costOperation: stage, ...(signal ? { signal } : {}) };
+  // dedupeScope keeps one draw of one asset from folding together with a draw
+  // of a different asset in the same stage. Without it a batch of several
+  // entities sharing a stage name would be refused as a duplicate start.
+  // When no entity identity is known the scope stays undeclared: an unknown
+  // identity must never be shared, or one asset would swallow another's draw.
+  const dedupeScope = entity?.id ? `${stage}:${entity.id}` : "";
+  return { referenceInputs, size, aspectRatio, costProjectId: project.id, costOperation: stage, dedupeScope, ...(signal ? { signal } : {}) };
 }
 
 function localUngatedHailuoPromptSpec(shot, fingerprint = "", mode = "", source = null) {
@@ -7815,8 +7854,23 @@ function shotSemanticCharacterIds(project = {}, shot = {}) {
     .map(character => String(character.id));
 }
 
+// 视频身份参考只服务两类人：本镜实际说话者（锁脸与口型，含画外发言）与已建立
+// 形象资产者。assetRequired=false 的沉默在场者（背景听者、群体）与资产侧
+// assetBearingCharacters 口径对齐，不再要求身份图，避免"在场即锁脸"与
+// "沉默者不建独立形象"两条规则互相死锁（37/42 镜必然报错的根因）。
+function shotIdentityEligibleIds(project = {}, shot = {}, ids = []) {
+  const speakerIds = new Set(uniqueDialogueTurns(project, shot)
+    .map(turn => {
+      const token = String(turn?.speakerId || turn?.speaker || "").trim();
+      return (project.characters || []).find(character => character.id === token || character.name === token)?.id || "";
+    })
+    .filter(Boolean));
+  const assetIds = new Set(assetBearingCharacters(project).map(item => String(item.id)));
+  return ids.filter(id => speakerIds.has(id) || assetIds.has(id));
+}
+
 function shotReferenceCharacterIds(project = {}, shot = {}) {
-  if (require('./agent-production-decisions').current(project,shot)) return [...shot.agentProductionDecision.item.visibleCharacterIds];
+  if (require('./agent-production-decisions').current(project,shot)) return shotIdentityEligibleIds(project, shot, [...shot.agentProductionDecision.item.visibleCharacterIds]);
   const visibleIds = visibleShotCharacterCast(project, shot);
   const speakingIds = shotSpeakingCharacterIds(project, shot);
   const directSpeakerIds = uniqueDialogueTurns(project, shot)
@@ -7841,17 +7895,17 @@ function shotReferenceCharacterIds(project = {}, shot = {}) {
   // ownership. Mentioning someone in dialogue or "has not entered" is NOT a
   // request for that person's image. Legacy incomplete plans retain discovery.
   if (shot.providerSemanticCompileSource === "ai-batch" && Array.isArray(shot.visibleCharacterIds)) {
-    return [...new Set([...directSpeakerIds, ...declaredVisibleIds])]
-      .filter(id => knownIds.has(id));
+    return shotIdentityEligibleIds(project, shot,
+      [...new Set([...directSpeakerIds, ...declaredVisibleIds])].filter(id => knownIds.has(id)));
   }
-  return [...new Set([
+  return shotIdentityEligibleIds(project, shot, [...new Set([
     ...directSpeakerIds,
     ...declaredVisibleIds,
     ...visibleIds,
     ...speakingIds,
     ...semanticIds,
     ...authoredIds
-  ])].filter(id => knownIds.has(id) && (directSpeakerIds.includes(id) || declaredVisibleIds.includes(id) || assetCharacterIds.has(id)));
+  ])].filter(id => knownIds.has(id) && (directSpeakerIds.includes(id) || assetCharacterIds.has(id))));
 }
 
 function requiredHailuoVoiceCharacterIds(project) {
@@ -15082,6 +15136,12 @@ class WorkbenchWorkflow {
     this.operationControls = new Map();
     this.liveDraftWrites = new Map();
     this.videoSubmissionPromises = new Map();
+    // Image admission. A paid draw of one asset must not start twice because a
+    // progress save re-triggered the same stage; the官网 relay path never passes
+    // through the本地 Agent hub, so it needs its own guard.
+    this.imageGenerationPromises = new Map();
+    this.imageGenerationStarts = new Map();
+    this.imageAdmissions = new Map();
     // 官网已经持久化接单并统一调度云端算力节点。对“提交响应未知”始终
     // 使用同一幂等键恢复同一任务，不因恢复次数或经过时长判失败。
     this.videoSubmissionRecoveryAttempts = UNLIMITED_ATTEMPTS;
@@ -15711,9 +15771,35 @@ class WorkbenchWorkflow {
       },
       ...(projectId ? {
         costProjectId: projectId,
-        costOperation: stage || options.costOperation || "text"
+        costOperation: stage || options.costOperation || "text",
+        dedupeScope: this.textStageDedupeScope(stage, options)
       } : {})
     };
+  }
+
+  // Admission scope for one text stage of one project.
+  //
+  // The scope must name the exact logical turn, because one stage name can cover
+  // two very different things. Evidence from real job records:
+  //   * `master_production_decisions` was started four times within 0.2-0.3s on
+  //     one project, and all four carried the SAME 42-shot set. That is one
+  //     logical turn paid for four times.
+  //   * the same stage is also able to run several shot batches in parallel
+  //     (parallelism up to 4), and a different shot set is a different paid turn.
+  // So the shot set - not the stage name, and not the project - is the identity.
+  //
+  // Everything without a declared identity returns no scope and is never folded:
+  // guessing one would either pay four times for one turn or silently drop three
+  // parallel batches.
+  textStageDedupeScope(stage, options = {}) {
+    if (typeof options.dedupeScope === "string") return options.dedupeScope;
+    const ids = options.dedupeIds || options.dedupeShotIds || options.shotIds;
+    if (Array.isArray(ids) && ids.length) {
+      const unique = [...new Set(ids.map(String).filter(Boolean))].sort();
+      if (unique.length) return `ids:${crypto.createHash('sha256').update(unique.join('\u0000')).digest('hex').slice(0, 32)}`;
+    }
+    const entityId = options.dedupeEntityId || options.entityId || options.entity?.id;
+    return entityId ? `entity:${entityId}` : "";
   }
 
   scriptGenerationOptions(projectId, stage, options = {}) {
@@ -22398,17 +22484,59 @@ ${shotAnchor}
         code: "PRODUCTION_PACKAGE_ASSET_GENERATION_FORBIDDEN"
       });
     }
-    if (options.promptPrepared !== true) {
-      await this.preparePromptReviewBundle(projectId, { autoApprove: false });
-    }
-    this.assertPromptReviewApproved(projectId);
     if (stage === "product_asset" || stage === "product_reference" || /product/i.test(String(stage || ""))) {
       throw Object.assign(new Error("商品图禁止 AI 凭空生成；请上传真实产品图，系统仅允许基于原图抠图或轻微质感优化"), { code: "PRODUCT_AI_GENERATION_FORBIDDEN" });
     }
-    const leaseTaskId = `image:${projectId}:${stage}:${entityId}:${Date.now()}`;
-    return this.withLicenseLease("image", leaseTaskId, { projectId, stage, entityId }, () => (
-      this._generateImageCandidateUnlocked(projectId, stage, entityId, promptOverride, options)
-    ));
+    // Same-project, same-stage, same-asset admission. The官网 relay path never
+    // passes through the本地 Agent hub, so image starts are guarded here as well.
+    const admissionKey = `${projectId}:${stage}:${entityId}`;
+    const activeDraw = this.imageGenerationPromises.get(admissionKey);
+    if (activeDraw) { this.noteImageAdmission(admissionKey, "merged"); return activeDraw; }
+    const startedAt = this.imageGenerationStarts.get(admissionKey) || 0;
+    const elapsedMs = Date.now() - startedAt;
+    if (startedAt && options.allowDuplicateStart !== true && elapsedMs < IMAGE_DUPLICATE_START_WINDOW_MS) {
+      this.noteImageAdmission(admissionKey, "rejected");
+      throw Object.assign(new Error(`同一项目同一阶段同一资产在 ${Math.max(0, Math.round(elapsedMs))} 毫秒内已开始抽卡（${stage} / ${entityId}），已拒绝重复启动以免重复扣费。如需重抽，请稍候再发起一次。`), {
+        code: "IMAGE_DUPLICATE_START",
+        projectId,
+        stage,
+        entityId,
+        elapsedMs
+      });
+    }
+    this.imageGenerationStarts.set(admissionKey, Date.now());
+    const pending = (async () => {
+      if (options.promptPrepared !== true) {
+        await this.preparePromptReviewBundle(projectId, { autoApprove: false });
+      }
+      this.assertPromptReviewApproved(projectId);
+      // Stable per logical draw: a queue position or a transport retry keeps the
+      // same lease and idempotency key instead of registering a new paid task.
+      const drawFingerprint = crypto.createHash("sha256").update(JSON.stringify({
+        stage,
+        entityId,
+        promptOverride,
+        revision: this.store.getProject(projectId)?.productionRevision || ""
+      })).digest("hex").slice(0, 24);
+      const leaseTaskId = `image:${projectId}:${stage}:${entityId}:${drawFingerprint}`;
+      return this.withLicenseLease("image", leaseTaskId, { projectId, stage, entityId, drawFingerprint }, () => (
+        this._generateImageCandidateUnlocked(projectId, stage, entityId, promptOverride, options)
+      ));
+    })();
+    this.imageGenerationPromises.set(admissionKey, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.imageGenerationPromises.get(admissionKey) === pending) this.imageGenerationPromises.delete(admissionKey);
+    }
+  }
+
+  // Kept so a folded or refused double-start stays visible instead of silent.
+  noteImageAdmission(admissionKey, disposition) {
+    const current = this.imageAdmissions.get(admissionKey) || { merged: 0, reused: 0, rejected: 0 };
+    current[disposition] = (current[disposition] || 0) + 1;
+    current.at = new Date().toISOString();
+    this.imageAdmissions.set(admissionKey, current);
   }
 
   async _generateImageCandidateUnlocked(projectId, stage, entityId, promptOverride = "", options = {}) {
@@ -26201,6 +26329,17 @@ ${shotAnchor}
 
   buildShotPrompt(project, settings, shot, mode, references = this.shotReferences(project, shot, mode), qualityRepair = "", qualityRepairKey = "") {
     const reviewed = !qualityRepair && approvedPromptReviewItem(project, "shot", shot?.id, "shot_video");
+    if (reviewed && promptReviewReferenceManifestMatches(shot, references)) return String(reviewed.prompt).trim();
+    if (reviewed && referenceManifestEligibilityAligned(project, shot, references)) {
+      // The confirmed text was rendered for a manifest that still enumerated
+      // asset-ineligible silent entrants (no face asset can ever back those
+      // <Picture N> slots). Submitting it against the corrected manifest would
+      // mis-bind every later picture. This mechanical re-render uses the SAME
+      // approved story facts and the exact paid manifest; no model call, new
+      // story fact, or dialogue rewrite occurs. The submission gate performs
+      // the same check and re-render comparison before accepting it.
+      return renderApprovedVideoPrompt(project, shot, references);
+    }
     if (reviewed) return String(reviewed.prompt).trim();
     const engine = projectVideoEngine(project);
     const projectMode = normalizeProjectMode(mode || project.generation?.mode);
@@ -29063,7 +29202,7 @@ ${shotAnchor}
         config: settings.imageProvider,
         prompt,
         targetPath,
-        options: imageGenerationOptions(project, stage, referenceInputs, null, this.operationControls.get(projectId)?.controller?.signal)
+        options: imageGenerationOptions(project, stage, referenceInputs, { id: asset.id || asset.name || assetId }, this.operationControls.get(projectId)?.controller?.signal)
       }, { projectId, stage, entityType: "asset", entityId: asset.id || asset.name });
     } catch (error) {
       try {
@@ -30712,6 +30851,7 @@ module.exports.latestCompleteShotVideoCandidate = latestCompleteShotVideoCandida
 module.exports.assertShotReferenceBundle = assertShotReferenceBundle;
 module.exports.renderApprovedVideoPrompt = renderApprovedVideoPrompt;
 module.exports.renderApprovedVideoPromptChinese = renderApprovedVideoPromptChinese;
+module.exports.referenceManifestEligibilityAligned = referenceManifestEligibilityAligned;
 module.exports.canonicalShotForVideoPrompt = canonicalShotForVideoPrompt;
 module.exports.selectedExistingCandidate = selectedExistingCandidate;
 module.exports.deterministicStoryboardGridCells = deterministicStoryboardGridCells;
@@ -30747,6 +30887,7 @@ module.exports.promptPerformanceText = promptPerformanceText;
 // are pure and do not expose provider credentials or perform I/O.
 module.exports.shotSemanticCharacterIds = shotSemanticCharacterIds;
 module.exports.shotReferenceCharacterIds = shotReferenceCharacterIds;
+module.exports.shotIdentityEligibleIds = shotIdentityEligibleIds;
 module.exports.shotPropMentionCorpus = shotPropMentionCorpus;
 module.exports.propMentionTokens = propMentionTokens;
 module.exports.shotVideoPropBindings = shotVideoPropBindings;

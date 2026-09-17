@@ -18,6 +18,13 @@ const AGENTS = Object.freeze([
 ]);
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const MAX_TEXT = 8 * 1024 * 1024;
+// A stage can be re-triggered by its own checkpoint save. Observed production
+// runs started the same project stage four times inside 0.19-0.45 seconds, and
+// every one of those turns completed as its own separately billed generation.
+// Admission therefore keys on the logical stage, not on the request body: the
+// body legitimately changes between those retriggers because each one reads the
+// partial result the previous one had just saved.
+const DUPLICATE_START_WINDOW_MS = 2000;
 const WORKER_TTL = 90_000;
 const hubs = new Map();
 let workbuddyPath = "";
@@ -69,6 +76,33 @@ function atomicJson(file, value) {
   fs.renameSync(temp, file);
 }
 function isFile(file) { try { return fs.statSync(file).isFile(); } catch { return false; } }
+// Why a补交 turn did not produce a final MCP receipt. Read from what the task
+// directory already recorded, so the terminal report quotes the real rejection
+// instead of a generic "timeout" or a forever-spinning "正在保存结果".
+function deliveryRejectionDiagnostic(dir) {
+  const diagnostic = { at: new Date().toISOString(), mcpResultPresent: isFile(path.join(dir, 'mcp-result.json')) };
+  try {
+    const draft = JSON.parse(fs.readFileSync(path.join(dir, 'mcp-preview-draft.json'), 'utf8'));
+    const result = draft?.result || {};
+    diagnostic.previewStatus = String(result.status || '');
+    diagnostic.findings = Array.isArray(result.findings)
+      ? result.findings.slice(0, 8).map(item => ({ path: item?.path, reason: item?.reason, requiredKeys: item?.requiredKeys }))
+      : [];
+    if (result.instruction) diagnostic.instruction = String(result.instruction).slice(0, 400);
+    if (Array.isArray(result.preview?.findings)) diagnostic.previewFindings = result.preview.findings.slice(0, 8);
+  } catch {}
+  try { const parts = require('./mcp/stage-parts').manifest(dir); diagnostic.savedParts = Array.isArray(parts) ? parts.length : 0; } catch {}
+  try { diagnostic.submissions = fs.readFileSync(path.join(dir, 'mcp-submissions.jsonl'), 'utf8').trim().split('\n').filter(Boolean).length; } catch {}
+  try {
+    const events = fs.readFileSync(path.join(dir, 'event-diagnostics.json'), 'utf8');
+    diagnostic.eventBytes = events.length;
+  } catch {}
+  try {
+    const lines = fs.readFileSync(path.join(dir, 'mcp-submissions.jsonl'), 'utf8').trim().split('\n').filter(Boolean);
+    diagnostic.lastSubmissionSha256 = lines.length ? (JSON.parse(lines.at(-1))?.value ? crypto.createHash('sha256').update(JSON.stringify(JSON.parse(lines.at(-1)).value)).digest('hex').slice(0, 16) : '') : '';
+  } catch {}
+  return diagnostic;
+}
 function inside(root, file) {
   const relative = path.relative(fs.realpathSync(root), fs.realpathSync(file));
   return relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
@@ -307,6 +341,10 @@ function ensureAntigravityWriterProfile(homeDir=process.env.USERPROFILE||os.home
 class AgentHub {
   constructor(rootDir) {
     this.root = path.resolve(rootDir); this.workers = new Map(); this.jobs = new Map(); this.controllers = new Map();
+    // Logical-stage admission. activeRequests merges concurrent callers onto one
+    // in-flight turn; stageStarts rejects a re-trigger that arrives after that
+    // turn already ended; latestByStage resolves the newest turn for a stage.
+    this.activeRequests = new Map(); this.stageStarts = new Map(); this.latestByStage = new Map(); this.stageAdmissions = new Map();
     fs.mkdirSync(this.root, { recursive: true });
     for (const dir of fs.readdirSync(this.root, { withFileTypes: true })) {
       if (!dir.isDirectory() || !/^agent_[a-f0-9-]+$/.test(dir.name)) continue;
@@ -429,27 +467,106 @@ class AgentHub {
     const versionNote=await require('./agent-catalog-version')(id,executable,runProcess,this.root);
     return {ok:true,capabilities:{...modelOptions.capabilities(id,models),source:(id==='workbuddy'?"WorkBuddy 执行入口与桌面版本缓存合并目录（缓存项不代表已在线验证）":"本机官方 CLI 模型目录")+versionNote,checkedAt:new Date().toISOString()}};
   }
+  // Admission identity for one logical stage of one project.
+  //
+  // It requires BOTH a project and an explicitly declared scope. The request body
+  // is deliberately excluded: a stage re-triggered by its own checkpoint save
+  // legitimately sends a slightly different body each time (it re-reads the
+  // partial result it just saved), and those are exactly the turns that must fold.
+  //
+  // The scope must be declared because the transport cannot tell a duplicated
+  // singleton stage from a legitimate parallel per-asset/per-batch stage. Real
+  // evidence: four `asset_execution_prompt` turns 430ms apart with four different
+  // request bodies are four different assets that each deserve their own draw,
+  // while four `master_production_decisions` turns 200-300ms apart on one project
+  // are one singleton stage started four times. Guessing here would either pay
+  // four times for one stage or silently drop three assets.
+  stageKeyOf(config, request, options = {}) {
+    const projectId = String(options.costProjectId || "");
+    // No project means no safe folding identity: a key shared by every project
+    // could serve one project another project's saved result.
+    if (!projectId) return "";
+    const scope = options.dedupeScope;
+    // An undeclared scope means "this caller did not assert a single logical
+    // turn", so no admission is applied and the turn starts exactly as before.
+    if (typeof scope !== "string" || !scope) return "";
+    return [
+      String(request?.modality || ""),
+      String(config?.id || ""),
+      projectId,
+      String(options.costOperation || options.stage || ""),
+      scope
+    ].join("|");
+  }
+  // A duplicate start is only safe to absorb when the earlier turn has a real
+  // saved artifact. Chat text alone is not a deliverable.
+  reuseCompletedTurn(job, request) {
+    if (!job) return null;
+    const dir = path.join(this.root, job.id), saved = require('./mcp/stage-delivery').read(dir);
+    if (saved) {
+      job.status = 'completed'; job.completedAt ||= new Date().toISOString(); job.mcpReceipt = saved.receipt; this.save(job);
+      return { text: request.json ? JSON.stringify(saved.value) : saved.value, jobId: job.id, agentId: job.agentId, execution: job.execution, mcpReceipt: saved.receipt, streamed: false, reused: true, foldedDuplicateStart: true };
+    }
+    const resultFile = path.join(dir, 'result.txt');
+    if (job.status === 'completed' && fs.existsSync(resultFile)) {
+      return { text: fs.readFileSync(resultFile, 'utf8'), jobId: job.id, agentId: job.agentId, execution: job.execution, streamed: false, reused: true, foldedDuplicateStart: true };
+    }
+    return null;
+  }
   async run(config, request, options = {}) {
-    if(request.modality!=='text'||!options.sessionId)return this.runFresh(config,request,options);
+    // The identical-request replay cache is only sound for session-scoped text
+    // turns: it is keyed on (session, project, config, body) and may replay a
+    // saved artifact from an earlier process run. Production turns without a
+    // session keep their original direct path, but they still pass through stage
+    // admission below, because the observed double starts arrive from exactly
+    // this path (no sessionId, no requestKey, same project and same stage).
+    if(request.modality!=='text'||!options.sessionId)return this.runAdmitted(config,request,options);
     if(options.signal?.aborted)throw fault('任务已取消。','PROVIDER_REQUEST_ABORTED');
     const recovered=request.deliveryPreview?.kind==='screenplay-repair'&&require('./screenplay-repair-delivery').recover(this.root,this.jobs.values(),options.costProjectId,request.deliveryPreview);
     if(recovered){const {job,saved}=recovered;return {text:JSON.stringify(saved.value),jobId:job.id,agentId:job.agentId,execution:job.execution,mcpReceipt:saved.receipt,streamed:false,reused:true,recoveredAuthoredRepair:true};}
     const requestKey=crypto.createHash('sha256').update(JSON.stringify({sessionId:options.sessionId,project:options.costProjectId||'',config,request})).digest('hex');
-    this.activeRequests||=new Map();
     if(this.activeRequests.has(requestKey))return this.activeRequests.get(requestKey);
     const prior=[...this.jobs.values()].find(j=>j.requestKey===requestKey);
     if(prior){
-      const dir=path.join(this.root,prior.id),saved=require('./mcp/stage-delivery').read(dir);
-      if(saved){
-        prior.status='completed';prior.completedAt||=new Date().toISOString();prior.mcpReceipt=saved.receipt;this.save(prior);
-        return {text:request.json?JSON.stringify(saved.value):saved.value,jobId:prior.id,agentId:prior.agentId,execution:prior.execution,mcpReceipt:saved.receipt,streamed:false,reused:true};
-      }
-      const resultFile=path.join(dir,'result.txt');
-      if(prior.status==='completed'&&fs.existsSync(resultFile))return {text:fs.readFileSync(resultFile,'utf8'),jobId:prior.id,agentId:prior.agentId,execution:prior.execution,streamed:false,reused:true};
+      const replayed=this.reuseCompletedTurn(prior,request);
+      if(replayed)return replayed;
     }
-    const pending=this.runFresh(config,request,{...options,requestKey,resumeJobId:prior?.id});
+    const pending=this.runAdmitted(config,request,{...options,requestKey,resumeJobId:prior?.id});
     this.activeRequests.set(requestKey,pending);
     try{return await pending;}finally{this.activeRequests.delete(requestKey);}
+  }
+  // Stage admission: one logical stage of one project may only be paid for once
+  // inside the duplicate-start window.
+  //  1) The same stage is still in flight -> fold this caller onto that turn.
+  //  2) The same stage was admitted moments ago and already ended -> reuse its
+  //     saved artifact, or refuse loudly, instead of paying for it again.
+  // A refusal is an explicit terminal answer (LOCAL_AGENT_DUPLICATE_START), not a
+  // silent drop, and it is recorded on the stage admission ledger for the验收
+  // record so the folded/refused start stays visible on the stage card.
+  async runAdmitted(config, request, options = {}) {
+    const stageKey=this.stageKeyOf(config,request,options);
+    // No declared logical-stage identity: start exactly as the transport did
+    // before admission existed.
+    if(!stageKey)return this.runFresh(config,request,options);
+    const inflight=this.activeRequests.get(stageKey);
+    if(inflight){this.noteDuplicateStart(stageKey,'merged');return inflight;}
+    const admittedAt=this.stageStarts.get(stageKey)||0, previous=this.latestByStage.get(stageKey);
+    if(previous&&options.allowDuplicateStart!==true&&Date.now()-admittedAt<DUPLICATE_START_WINDOW_MS){
+      const reused=this.reuseCompletedTurn(this.jobs.get(previous),request);
+      if(reused){this.noteDuplicateStart(stageKey,'reused');return reused;}
+      this.noteDuplicateStart(stageKey,'rejected');
+      throw Object.assign(fault(`同一项目同一阶段在 ${Math.max(0,Math.round(Date.now()-admittedAt))} 毫秒内已启动过（任务 ${previous}），已拒绝重复启动以免重复消耗额度。请等待该阶段结束后再发起。`,'LOCAL_AGENT_DUPLICATE_START'),{duplicateOfJobId:previous,stageKey});
+    }
+    const pending=this.runFresh(config,request,{...options,stageKey});
+    this.activeRequests.set(stageKey,pending);
+    try{return await pending;}finally{if(this.activeRequests.get(stageKey)===pending)this.activeRequests.delete(stageKey);}
+  }
+  // One admission decision per logical stage, kept for the验收 record and for
+  // the stage card so a folded or refused double-start is visible, not silent.
+  noteDuplicateStart(stageKey, disposition) {
+    const current=this.stageAdmissions.get(stageKey)||{merged:0,reused:0,rejected:0};
+    current[disposition]=(current[disposition]||0)+1;current.at=new Date().toISOString();
+    this.stageAdmissions.set(stageKey,current);
   }
   async runFresh(config, request, options = {}) {
     const id = config.id, agent = definition(id);
@@ -470,6 +587,12 @@ class AgentHub {
     if(options.requestKey)job.requestKey=options.requestKey;
     if(prior){job.createdAt=prior.createdAt;job.resumeCount=(prior.resumeCount||0)+1;job.previousStatus=prior.status;const oldResult=path.join(dir,'result.txt');if(fs.existsSync(oldResult))fs.renameSync(oldResult,path.join(dir,`prior-result-${job.resumeCount}.txt`));}
     job.execution=execution;if(options.retryOf)job.retryOf=options.retryOf;
+    if(options.stageKey){
+      this.stageStarts.set(options.stageKey,Date.now());
+      this.latestByStage.set(options.stageKey,jobId);
+      const admissions=this.stageAdmissions.get(options.stageKey);
+      if(admissions)job.admission={stageKey:options.stageKey,...admissions};
+    }
     fs.mkdirSync(dir,{recursive:true}); this.jobs.set(jobId,job); this.save(job);
     try {
     try { if(modality==="text"&&request.visionImages?.length){
@@ -647,12 +770,33 @@ class AgentHub {
         }
         if(!finalText)finalText=nativeChunks;
         if(id === "codex" && isFile(path.join(dir,"result.txt"))) finalText=fs.readFileSync(path.join(dir,"result.txt"),"utf8");
+        // The external Agent turn has ended here. Saving the MCP result is a
+        // separate, application-side phase and must never read as "the Agent is
+        // still thinking". Both timestamps are kept so the two phases stay
+        // distinguishable in the interface and in every later status report.
+        job.agentTurnEndedAt=new Date().toISOString();
         job.activity={...job.activity,phase:'saving',phaseStartedAt:new Date().toISOString(),lastSignalAt:new Date().toISOString()};job.message='Agent 输出结束，正在保存结果';this.save(job);report();
         if(mcpDelivery){
-          if(!savedDelivery)savedDelivery=await require('./agent-delivery-recovery').recover({read:()=>delivery.read(dir),task:promptRequest,draft:finalText||preview,signal:controller.signal,
-            status:attempt=>{job.deliveryRecoveryAttempt=attempt;job.message='Agent 正在补交同一任务的 MCP 结果，已有草稿保留';this.save(job);report();},
-            invoke:async recoveryInput=>{let failure=null;const result=await runProcess(executable,args,{cwd:dir,env,stdin:recoveryInput,signal:controller.signal,timeoutMs,onLine:line=>{let e;try{e=JSON.parse(line);}catch{return;}try{finalEvent(e);}catch(error){failure=error;}if(e.type==='error'||e.type==='turn.failed'||e.event==='error')failure||=fault('Agent 补交时返回服务失败事件','LOCAL_AGENT_RESULT_FAILED');}});if(failure)throw failure;if(result.code!==0)throw fault('Agent 补交进程未正常结束','LOCAL_AGENT_RESULT_FAILED');}
-          });
+          if(!savedDelivery){
+            const deliveryRecovery=require('./agent-delivery-recovery');
+            try{
+              savedDelivery=await deliveryRecovery.recover({read:()=>delivery.read(dir),task:promptRequest,draft:finalText||preview,signal:controller.signal,
+                diagnose:()=>deliveryRejectionDiagnostic(dir),
+                status:attempt=>{job.deliveryRecoveryAttempt=attempt;job.deliveryRecovery={...(job.deliveryRecovery||{}),state:'resubmitting',attempts:attempt,maxAttempts:deliveryRecovery.MAX_DELIVERY_RECOVERY_ATTEMPTS,startedAt:job.deliveryRecovery?.startedAt||new Date().toISOString(),lastRejection:job.deliveryRecovery?.lastRejection||null};job.message='Agent 已结束；应用正在补交同一任务的 MCP 结果，已有草稿保留';this.save(job);report();},
+                invoke:async recoveryInput=>{let failure=null;const result=await runProcess(executable,args,{cwd:dir,env,stdin:recoveryInput,signal:controller.signal,timeoutMs,onLine:line=>{let e;try{e=JSON.parse(line);}catch{return;}try{finalEvent(e);}catch(error){failure=error;}if(e.type==='error'||e.type==='turn.failed'||e.event==='error')failure||=fault('Agent 补交时返回服务失败事件','LOCAL_AGENT_RESULT_FAILED');}});if(failure)throw failure;if(result.code!==0)throw fault('Agent 补交进程未正常结束','LOCAL_AGENT_RESULT_FAILED');}
+              });
+              job.deliveryRecovery={...(job.deliveryRecovery||{}),state:'delivered',attempts:job.deliveryRecoveryAttempt||job.deliveryRecovery?.attempts||1,deliveredAt:new Date().toISOString()};
+              this.save(job);report();
+            }catch(deliveryError){
+              // Terminal, explicit failure state. The stage stops claiming that
+              // it is still saving, and the MCP-side reason is preserved both in
+              // the job record and as evidence in the task directory.
+              job.deliveryRecovery={...(job.deliveryRecovery||{}),state:'exhausted',attempts:Number.isFinite(deliveryError?.deliveryAttempts)?deliveryError.deliveryAttempts:(job.deliveryRecoveryAttempt||job.deliveryRecovery?.attempts||0),maxAttempts:deliveryRecovery.MAX_DELIVERY_RECOVERY_ATTEMPTS,lastRejection:deliveryError?.lastRejection||null,reason:deliveryError?.rejectionSummary||'',failedAt:new Date().toISOString()};
+              atomicJson(path.join(dir,'delivery-recovery-report.json'),{code:deliveryError?.code||'LOCAL_AGENT_DELIVERY_RECOVERY_FAILED',attempts:job.deliveryRecovery.attempts,maxAttempts:job.deliveryRecovery.maxAttempts,reason:job.deliveryRecovery.reason,lastRejection:job.deliveryRecovery.lastRejection,attemptRecords:deliveryError?.deliveryAttemptRecords||[]});
+              this.save(job);
+              throw deliveryError;
+            }
+          }
           job.mcpReceipt=savedDelivery.receipt;
           finalText=request.json?JSON.stringify(savedDelivery.value):savedDelivery.value;
         }

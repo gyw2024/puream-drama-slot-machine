@@ -25,3 +25,8 @@ work/video-request-monitor/
 *.sqlite3
 *.log
 *.tmp
+
+# 成品与发布包（非源码，体积大，不入库；如确需备份请走网盘/Git LFS）
+作品/
+交付/
+交付文件/

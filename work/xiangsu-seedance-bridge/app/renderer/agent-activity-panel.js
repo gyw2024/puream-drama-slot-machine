@@ -22,7 +22,17 @@
   const cards=visible.map(job=>{
    const p=view.present(job),w=view.describe(job.operation,project),part=job.deliveryProgress||{};
    const delivery=[Number.isFinite(part.savedShots)?`已保存 ${part.savedShots} 镜`:null,Number.isFinite(part.savedParts)?`已保存 ${part.savedParts} 段`:null,part.savedFiles?.length?`已保存 ${part.savedFiles.length} 个结果文件`:null].filter(Boolean).join(' · ');
-   return `<section class="agent-activity-card" data-phase="${esc(p.phase)}"><div class="agent-activity-title"><strong>${esc(w.label)}</strong><span>${esc(failure?'等待同步':p.label)}</span></div><p>${esc(w.purpose)}</p><p class="agent-activity-model">${esc(names[job.agentId]||job.agentId)} · ${esc(job.reportedModel||job.execution?.model||'当前模型')}</p><div class="agent-activity-metrics"><span>本次任务已用 <b>${Math.floor(p.elapsed/60)}分${p.elapsed%60}秒</b></span></div><p>${p.characters?`本次调用收到 ${p.characters.toLocaleString()} 字符（不代表全项目字数）`:'本次调用尚未收到结果文本；上方已保存内容不受影响。'}</p>${delivery?`<p>${esc(delivery)}</p>`:''}${p.detail?`<p class="agent-activity-wait">${esc(p.detail)}</p>`:''}${p.ended&&job.message?`<p>${esc(job.message)}</p>`:''}<small>${p.ended?'本次 Agent 调用已结束，项目是否完成以上方状态为准':p.seconds===null?'等待首个状态信号':`最近活动：${p.seconds} 秒前`} · 每 2 秒刷新</small><small>任务 ${esc(job.id)}${!w.known?` · 步骤 ${esc(job.operation)}`:''}</small></section>`;
+   // Two separate phase lines. "Agent 已结束" and "App 仍在补交" must never be
+   // collapsed back into one spinner, or a finished Agent looks like it is still
+   // thinking while the application keeps resubmitting the same result.
+   const deliveryLine=p.delivering
+     ?`<p class="agent-activity-wait"><b>Agent 本次调用已结束</b>；应用仍在补交同一任务的 MCP 结果（第 ${p.deliveryAttempts||1}/${p.deliveryMaxAttempts} 次），已有草稿保留。项目尚未完成。</p>`
+     :p.exhausted
+      ?`<p class="agent-activity-wait"><b>补交已达上限（${p.deliveryAttempts}/${p.deliveryMaxAttempts} 次），本阶段判定失败</b>；已保存的草稿与分片全部保留，可查看原因后从断点继续。</p>${p.deliveryReason?`<p class="agent-activity-wait">MCP 拒绝原因：${esc(p.deliveryReason)}</p>`:''}`
+      :p.agentEnded&&!p.ended
+       ?`<p><b>Agent 本次调用已结束</b>${p.agentEndedAt?`（${esc(new Date(p.agentEndedAt).toLocaleTimeString('zh-CN'))}）`:''}；应用正在核对并保存结果。</p>`
+       :'';
+   return `<section class="agent-activity-card" data-phase="${esc(p.phase)}" data-delivery="${esc(p.exhausted?'exhausted':p.delivering?'delivering':p.agentEnded?'agent-ended':'')}"><div class="agent-activity-title"><strong>${esc(w.label)}</strong><span>${esc(failure?'等待同步':p.label)}</span></div><p>${esc(w.purpose)}</p><p class="agent-activity-model">${esc(names[job.agentId]||job.agentId)} · ${esc(job.reportedModel||job.execution?.model||'当前模型')}</p><div class="agent-activity-metrics"><span>本次任务已用 <b>${Math.floor(p.elapsed/60)}分${p.elapsed%60}秒</b></span></div>${deliveryLine}<p>${p.characters?`本次调用收到 ${p.characters.toLocaleString()} 字符（不代表全项目字数）`:'本次调用尚未收到结果文本；上方已保存内容不受影响。'}</p>${delivery?`<p>${esc(delivery)}</p>`:''}${p.detail?`<p class="agent-activity-wait">${esc(p.detail)}</p>`:''}${(p.ended||p.delivering)&&job.message?`<p>${esc(job.message)}</p>`:''}<small>${p.ended?'本次 Agent 调用已结束，项目是否完成以上方状态为准':p.delivering?'Agent 阶段已结束，应用补交阶段的进度见上方。':p.seconds===null?'等待首个状态信号':`最近活动：${p.seconds} 秒前`} · 每 2 秒刷新</small><small>任务 ${esc(job.id)}${!w.known?` · 步骤 ${esc(job.operation)}`:''}</small></section>`;
   }).join('');
   const media=s.media.map(j=>`<section class="agent-activity-card"><div class="agent-activity-title"><strong>${esc(j.label)} ${esc(j.entity||'')}</strong><span>${esc(j.progress)}</span></div>${j.message?`<p>${esc(j.message)}</p>`:''}<small>媒体任务 ${esc(j.id)}</small></section>`).join('');
   panel.innerHTML=software+cards+media;

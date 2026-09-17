@@ -1225,6 +1225,23 @@ function candidates(entityType, entityId, stage) {
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 
+// 必需资产缺失清单：口径与资产生成侧（workbench-workflow 资产队列）及资产
+// 计数器（需资产 X / 全剧 Y）一致。此前用全量 characters/props/wardrobes 判缺，
+// "沉默在场者"（assetRequired=false）和默认服装被永远算作缺失，导致资产全部
+// 完成后引导仍卡在"准备资产"并常驻"AI 补齐全部资产"按钮。
+function missingRequiredAssets(project) {
+  return [
+    ...(project.characters || []).filter(item => item.assetRequired === true
+      && !["character_sheet", "character_three_view", "character_intro"].some(stage => chosenCandidate("character", item.id, stage))),
+    ...(project.scenes || []).filter(item => item.assetRequired !== false && !chosenCandidate("scene", item.id, "scene_asset")),
+    ...(project.assetLibraries?.props || []).filter(item => item.assetRequired === true && !chosenCandidate("library", item.id, "prop_asset")),
+    ...(project.assetLibraries?.wardrobes || []).filter(item => item.changeRequired !== false
+      && !(item.characterId && String(item.id || "") === `wardrobe_${item.characterId}`)
+      && !/默认服装|日常服装|常服/.test(String(item.name || ""))
+      && !chosenCandidate("library", item.id, "wardrobe_asset"))
+  ];
+}
+
 function chosenCandidate(entityType, entityId, stage) {
   const allMatches = candidates(entityType, entityId, stage);
   const manuallySelected = allMatches.find(item => item.selected === true && item.manualSelectionOverride === true && item.filePath);
@@ -2389,8 +2406,23 @@ function renderAssets(force = false) {
   });
   if (!force && signature === state.assetsRenderSignature) return;
   state.assetsRenderSignature = signature;
-  $("#characterCount").textContent = `${assetCharacters.length} / ${project.characters.length}`;
-  $("#sceneCount").textContent = assetScenes.length;
+  // Both counters answer the same question: how many assets will actually be
+  // produced, out of everything the script contains. A bare "8 / 13" looked
+  // like progress that would eventually reach 13/13, so a correct skip
+  // (silent relatives, a voice-only announcer, a crowd) read as missing work.
+  // The label says which number is which; the tooltip says why the rest are not
+  // produced. Neither counter gates production and neither changes the
+  // assetRequired decision itself.
+  const characterTotal = (project.characters || []).length;
+  const characterCounter = $("#characterCount");
+  characterCounter.textContent = `需资产 ${assetCharacters.length} / 全剧 ${characterTotal}`;
+  characterCounter.title = skippedCharacters.length
+    ? `全剧 ${characterTotal} 个角色中，${assetCharacters.length} 个需要建立形象资产；其余 ${skippedCharacters.length} 个按剧本设定不需要单独形象（沉默在场者、画外音或报幕、群体等），名单见下方"未建立独立资产"。`
+    : `全剧 ${characterTotal} 个角色都需要建立形象资产。`;
+  const sceneTotal = (project.scenes || []).length;
+  const sceneCounter = $("#sceneCount");
+  sceneCounter.textContent = `需资产 ${assetScenes.length} / 全剧 ${sceneTotal}`;
+  sceneCounter.title = `全剧 ${sceneTotal} 个场景中，${assetScenes.length} 个需要建立场景资产。`;
   const characterCards = assetCharacters.length ? assetCharacters.map(character => {
     const sheet = chosenCandidate("character", character.id, "character_sheet");
     const portrait = chosenCandidate("character", character.id, "character_three_view");
@@ -2541,7 +2573,13 @@ function renderAssets(force = false) {
     });
     if ($("#generateAllAssets")) $("#generateAllAssets").hidden = true;
   } else if ($("#generateAllAssets")) {
-    $("#generateAllAssets").hidden = false;
+    // 资产全部就绪后不再引导"补齐"：按钮隐藏（单项重新抽卡仍留在各卡片上），
+    // 避免与"本阶段已完成，可继续下一生产阶段"的引导自相矛盾。
+    const missingNow = missingRequiredAssets(project);
+    $("#generateAllAssets").hidden = missingNow.length === 0;
+    $("#generateAllAssets").title = missingNow.length
+      ? ""
+      : "全部必需资产已就绪，无需补齐；单项可在对应卡片重新抽卡。";
   }
 }
 
@@ -4996,12 +5034,7 @@ function nextActionForProject(project = state.project) {
     ? {title:'下一步：接收已有镜头与资产',detail:'编剧已写好逐镜执行稿，沿用原镜头编号、对白、人物和物品绑定，随后逐镜转换提示词。',stage:'script',selector:'#analyzeScript'}
     : { title: "下一步：整理为逐镜执行稿", detail: "Agent 保留原稿对白与事件，整理每个片段的时长、资产、动作和衔接；原稿可下载。", stage: "script", selector: "#analyzeScript" };
   const packageDirect = isProductionPackageProject(project);
-  const missingAssets = packageDirect ? [] : [
-    ...(project.characters || []).filter(item => !["character_sheet", "character_three_view", "character_intro"].some(stage => chosenCandidate("character", item.id, stage))),
-    ...(project.scenes || []).filter(item => !chosenCandidate("scene", item.id, "scene_asset")),
-    ...(project.assetLibraries?.props || []).filter(item => !chosenCandidate("library", item.id, "prop_asset")),
-    ...(project.assetLibraries?.wardrobes || []).filter(item => !chosenCandidate("library", item.id, "wardrobe_asset"))
-  ];
+  const missingAssets = packageDirect ? [] : missingRequiredAssets(project);
   if (missingAssets.length) return { title: `下一步：准备资产（还差 ${missingAssets.length} 项）`, detail: "可一键生成，也可在对应卡片上传或从全局资产库绑定。", stage: "assets", selector: "#generateAllAssets" };
   const mode = String(project.generation?.mode || "keyframe");
   const missingBoards = ["asset_direct", "production_package"].includes(mode) ? [] : (project.shots || []).filter(shot => mode === "storyboard_sheet"

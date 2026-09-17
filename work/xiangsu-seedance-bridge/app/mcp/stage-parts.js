@@ -12,6 +12,33 @@ function partCursor(parts={}){
 }
 function kindOf(schema,state,field,data){return schema?.type||(state.kinds||{})[field]||(Array.isArray(Object.values(state.fields[field]||{})[0]??data)?'array':'single');}
 function fragmentSchema(schema){if(schema.type==='array')return {type:'array',items:schema.items};if(schema.type==='object'){const part=structuredClone(schema);delete part.required;delete part.minProperties;return part;}return schema;}
+// Top-level shape of a declared schema, for the MCP tool advertisements only.
+//
+// The exact output schema reaches the Agent through instructions.json, which the
+// transport requires it to read in full. Advertising a second complete copy in
+// the tool definitions put the very same 80k-character schema into the context
+// twice more — permanently, on every turn. Tool discovery now advertises the
+// shape it needs to know what to submit (declared fields, list/object kinds,
+// required names) and defers the exact nested structure to instructions.json.
+// Nothing is validated against this skeleton: submit_stage_result and
+// stage_result_part still check real data against the full schema, so an Agent
+// that consults instructions.json is unaffected and one that does not receives
+// the same needs_revision feedback as before.
+function interfaceSkeleton(schema,depth=5){
+ if(!schema||typeof schema!=='object'||Array.isArray(schema))return {};
+ const out={};
+ if(typeof schema.type==='string')out.type=schema.type;
+ if(schema.const!==undefined)out.const=schema.const;
+ // Long enums are instance data, not interface shape; short ones help the Agent.
+ if(Array.isArray(schema.enum)&&schema.enum.length<=12)out.enum=schema.enum;
+ if(schema.additionalProperties===false)out.additionalProperties=false;
+ if(depth<=1)return out;
+ if(Array.isArray(schema.anyOf))out.anyOf=schema.anyOf.map(branch=>interfaceSkeleton(branch,depth-1));
+ if(schema.properties){out.properties={};for(const [key,value]of Object.entries(schema.properties))out.properties[key]=interfaceSkeleton(value,depth-1);}
+ if(schema.items)out.items=interfaceSkeleton(schema.items,depth-1);
+ if(Array.isArray(schema.required))out.required=schema.required;
+ return out;
+}
 function decodeData(value,schema){
  if(!['object','array'].includes(schema?.type))return {data:value};
  let candidate=value,decodedJsonEnvelope=false;
@@ -64,4 +91,4 @@ function assemble(dir){
  }
  return {data,findings};
 }
-module.exports={stage,manifest,assemble,fragmentSchema,decodeData,partCursor};
+module.exports={stage,manifest,assemble,fragmentSchema,interfaceSkeleton,decodeData,partCursor};
