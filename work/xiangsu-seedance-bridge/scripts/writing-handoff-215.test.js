@@ -53,7 +53,7 @@ test('real writer orchestration preserves interrupted shot draft without reporti
 });
 const renderer=fs.readFileSync(appPath('renderer/workbench.js'),'utf8');
 const stateFunction=renderer.slice(renderer.indexOf('function scriptWorkflowState('),renderer.indexOf('\nfunction renderScriptTask('));
-const uiState=vm.runInNewContext('('+stateFunction+')');
+const uiState=vm.runInNewContext('('+stateFunction+')',{videoStatusApi:require(appPath('workbench-status'))});
 test('UI recovery stage follows the same accepted source revision as the backend',()=>{
  const {project}=fixture();project.script={raw:'完整正文',authoredWithoutDurationTarget:false,adaptiveAuthoring:{status:'ready',text:'完整正文'}};
  project.automation={operation:'idea_script',status:'failed',errorCode:'SCRIPT_NOT_MATERIALIZED'};

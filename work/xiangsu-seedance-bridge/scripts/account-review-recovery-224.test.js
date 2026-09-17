@@ -5,7 +5,7 @@ const source=fs.readFileSync(require.resolve('../app/renderer/workbench.js'),'ut
 const stateFn=source.slice(source.indexOf('function scriptWorkflowState('),source.indexOf('\nfunction renderScriptTask('));
 for(const status of ['failed','paused_remote','paused_account'])test('account blocker outranks old review in '+status,()=>{
  const p={automation:{operation:'idea_script',status,errorCode:'LOCAL_AGENT_QUOTA'},script:{raw:'原稿',adaptiveAuthoring:{status:'needs_review',audit:{issues:[{message:'旧审核'}]}}}};
- const c={};vm.createContext(c);vm.runInContext(stateFn,c);const r=c.scriptWorkflowState(p);assert.equal(r.recoveryKind,'account');assert.equal(r.accountBlocked,true);assert.equal(r.active,false);assert.equal(r.paused,true);
+ const c={videoStatusApi:require('../app/workbench-status')};vm.createContext(c);vm.runInContext(stateFn,c);const r=c.scriptWorkflowState(p);assert.equal(r.recoveryKind,'account');assert.equal(r.accountBlocked,true);assert.equal(r.active,false);assert.equal(r.paused,true);
 });
 test('account continuation does not authorize another rewrite or skip unfinished review',async()=>{
  for(const status of ['needs_review','review_pending']){
