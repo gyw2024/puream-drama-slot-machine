@@ -21337,12 +21337,15 @@ ${shotAnchor}
   async authorFinalH3PromptBlocks(projectId, options = {}) {
     const settings=this.store.getSettings(),signal=this.operationControls.get(projectId)?.controller.signal;
     if(settings.generation?.agentDecisionAuthority===true)return this.authorAgentProductionDecisions(projectId,options);
+    // T03: coordinator-owned repair budget shared by the authoring run and its
+    // source-recovery re-entry loop, so retries across both consume one run-level budget.
+    const repairBudget=require('./production-v2/budget').createRepairBudget();
     let currentOptions={...options};
     for(;;){
       try{return await require('./h3-final-prompt-editor').author({
         getProject:()=>this.store.getProject(projectId),saveProject:project=>this.store.saveProject(project),generate:this.generateText.bind(this),
         optionsFor:this.productionTextOptions.bind(this),settings,projectId,shotIds:currentOptions.shotIds,findingsByShot:currentOptions.findingsByShot,
-        parallelism:require('./preproduction-performance').CONCURRENCY,signal
+        parallelism:require('./preproduction-performance').CONCURRENCY,signal,budget:repairBudget
       });}catch(error){
         if(error.code!=='H3_SOURCE_PLANNING_REPAIR_REQUIRED')throw error;
         const findingsByShot=Object.fromEntries(error.sourceTimingIssues.map(row=>[row.shotId,[row]]));
@@ -21935,6 +21938,8 @@ ${shotAnchor}
       applyItem:(project,item,display,execution,at)=>this.applyPromptReviewItem(project,item,display,execution,at),
       generate:(config,messages,opts)=>this.generateText(config,messages,this.productionTextOptions(projectId,opts.costOperation||'prompt_confirmation_edit',opts)),
       signal:options.signal||this.operationControls.get(projectId)?.controller?.signal,
+      // T03: coordinator-owned repair budget for the review/edit rounds.
+      budget:options.budget||require('./production-v2/budget').createRepairBudget(),
       status:message=>this.setAutomation(projectId,{status:'awaiting_prompt_review',stage:'prompt_review',message,autoResume:false})});
   }
 
@@ -29644,12 +29649,22 @@ ${shotAnchor}
       } catch (error) {
         this.assertOperationActive(projectId);
         let activeError = error;
+        // T03: 修复链再入必须有限。恢复函数抛出的错误大多是终态信号
+        // （预算耗尽/取消/后台断点恢复），重喂回恢复流程曾形成无 sleep
+        // 的热循环（PROVIDER_RECOVERY_WAITING + retryable:true 命中
+        // transient 分支反复抛出自身）。这里只允许少量嵌套修复
+        // （恢复动作自身抛出的新可恢复错误），终态信号一律直接上抛。
+        let repairChain = 0;
         while (true) {
           this.assertOperationActive(projectId);
           let recovered;
           try {
             recovered = await this.recoverAutonomousPipelineFailure(projectId, activeError, supervisor);
           } catch (repairError) {
+            const repairCode = String(repairError?.code || "").trim().toUpperCase();
+            const terminal = repairError?.noAutomaticRetry
+              || ["PROVIDER_RECOVERY_WAITING", "AUTONOMOUS_PIPELINE_REPAIR_EXHAUSTED", "AUTONOMOUS_PIPELINE_TRANSIENT_EXHAUSTED", "PROVIDER_REQUEST_ABORTED"].includes(repairCode);
+            if (terminal || ++repairChain > 3) throw repairError;
             activeError = repairError;
             continue;
           }
@@ -29903,7 +29918,9 @@ ${shotAnchor}
     const code = String(error?.code || "OPERATION_FAILED").trim().toUpperCase();
     // 终态错误不得再次进入恢复流程：恢复自身抛出的 EXHAUSTED 若被外层
     // catch 后重喂回来，会形成无 sleep 的热循环（旧缺陷，一并堵住）。
-    if (code === "AUTONOMOUS_PIPELINE_REPAIR_EXHAUSTED" || code === "AUTONOMOUS_PIPELINE_TRANSIENT_EXHAUSTED") return false;
+    // PROVIDER_RECOVERY_WAITING 同理：它本身就是重试预算耗尽的终态信号，
+    // 且 retryable:true 会让它命中 transient 分支再次抛出自身（热循环）。
+    if (code === "AUTONOMOUS_PIPELINE_REPAIR_EXHAUSTED" || code === "AUTONOMOUS_PIPELINE_TRANSIENT_EXHAUSTED" || code === "PROVIDER_RECOVERY_WAITING") return false;
     const count = (supervisor.failuresByCode.get(code) || 0) + 1;
     supervisor.failuresByCode.set(code, count);
     if (this.autonomousPipelineExternalBlocker(error)) return false;

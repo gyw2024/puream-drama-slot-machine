@@ -11,10 +11,10 @@
 | T00 基线/备份/测试环境/现状复现 | ✅ 完成 | `49e3fb0` | 校验脚本 27/27 PASS |
 | T01 权威校验与完整结果保存止漏 | ✅ 完成 | `ec96b0e` | 新测试 18/18 + 存量回归无新增失败 |
 | T02 规范合同与 SQLite CAS/迁移 | ✅ 完成 | `4ccd385` | production-v2 8 模块+repository；24/24 |
-| T03 统一错误/重试/取消与 outbox 语义 | ⬜ 未开始 | | retry-policy 接入各模型调用层 |
+| T03 统一错误/重试/取消与 outbox 语义 | ✅ 完成 | 见 git log `T03` | budget 句柄+热循环堵口；新测试 8/8 |
 | T03–T20 | ⬜ 未开始 | | 按主文档第 15 章顺序 |
 
-## 当前任务：无（T02 已完成，下一任务 T03）
+## 当前任务：无（T03 已完成，下一任务 T04）
 
 ## 方案包缺口（如实记录）
 
@@ -56,9 +56,42 @@
 - 未做真实付费模型/媒体调用（按规范须用户明确授权后才实机验证）。
 - `evidence/` 参考测试（66 项）无原始文件，无法对照。
 
+## T03 交付记录（2026-09-18）
+
+### 实际修改文件与函数
+1. `app/production-v2/budget.js`（新增）：coordinator 侧统一预算句柄 `createRepairBudget`——全部决策/消耗经 `production-v2/retry-policy`（单一权威）；`nextWorkUnit()` 重置单元计数（策略固定 2/单元）、`runRepairs` 跨单元累计至 `maxRunRepairs`（默认 12）；`consumeRepair` 预算先于调用消耗、耗尽抛 `REPAIR_BUDGET_EXHAUSTED`；`decide()` 暴露统一错误决策（stop/reconcile/pause/repair）。
+2. `app/agent-output-normalization.js` `recover`：无界 `for(;;)` 接入预算——默认自建 work-unit 句柄（maxRunRepairs:2 = 三个声明策略恰好 3 次模型调用）；接受 `options.repairBudget` 共享句柄；入口预检 `budget.exhausted`（耗尽句柄零付费调用即终态）；耗尽抛 `AGENT_EVIDENCE_PENDING` + `repairBudgetExhausted:true` + `noAutomaticRetry:true`（与 repeats>=3 同型，保留 accepted 行）。
+3. `app/h3-final-prompt-editor.js` `author`：接受 `budget`（缺省自建）；每镜修复上限 2（`repairTries` 映射，一轮=批内全部未完成镜各计 1）；每修复轮 `consumeRepair`（批=work unit，`nextWorkUnit`）；超限镜头进 `stranded` 并以既有终态错误 `H3_FINAL_EDIT_NEEDS_REPAIR` 抛出（`shotIds` 含 stranded、`repairBudgetExhausted` 标记），已完成镜头全部保留。
+4. `app/prompt-review-editor.js` `run`：接受 `budget`；外层复审轮（round>0）consume，耗尽 → `waiting/reason:repair_budget` 优雅暂停（既有 UX）；内层修改会话 = work unit，三个付费 continue 路径（requestTargetIds 续供、越界 edits、应用失败）均 consume，耗尽 → 同款暂停。不再存在无界付费循环。
+5. `app/workbench-workflow.js`：
+   - `recoverAutonomousPipelineFailure` 顶部终态守卫补 `PROVIDER_RECOVERY_WAITING`（**P0 热循环修复**：该码 `retryable:true` 会命中 transient 分支再次抛出自身，被外层 catch 重喂后无 sleep 无限循环；原守卫只堵了两个 `*_EXHAUSTED` 码）。
+   - `runFullPipeline` 调用方：re-feed 有限化（`repairChain>3` 或终态码/noAutomaticRetry 直接 `throw repairError`），保留恢复动作自身抛出新可恢复错误的嵌套修复能力。
+   - `authorFinalH3PromptBlocks`：coordinator 自建 `repairBudget`，author 与源稿修复重入循环共享同一句柄。
+   - `editPromptReviewDocument`：注入 `budget`（经 `prompt-review-proposal.propose` → `editor.edit` → `run`）。
+6. `scripts/t03-retry-budget.test.js`（新增 8 用例）。
+
+### 旧行为如何失效、新行为在哪里生效
+- 旧：`recover` 在模型每次返回**不同**非法输出时永不收敛（指纹去重只挡重复输出），持续付费；`h3 author`/`prompt-review run` 修复轮无上限。新：全部经同一 retry-policy 预算，耗尽即终态暂停/错误，证据保留，可显式续跑。
+- 旧：transient 预算（4 次）耗尽后 `PROVIDER_RECOVERY_WAITING` 被调用方重喂 → 每次 `transientRetries+=1` → 再抛 → **无 sleep 热循环**（附：`transientRetries` 由 structure/transient 两路径共享，任一耗尽即触发）。新：终态守卫 + 调用方上抛，循环必终止。
+- 新增命令路径 outbox 入队：`repository.enqueueOperationInTransaction` 直接插 `queued`、从不调 `beginOperation`，天然无自动恢复；测试固化该语义（幂等入队、attempts=0、显式 claim 才领取、取消不复活）。**后续 T05+ 新命令路径必须统一走 `repository.enqueueOperation`，禁止绕过直写 operation_outbox。**
+
+### 测试（原始数字）
+- `node --test scripts/t03-retry-budget.test.js` → **8 pass / 0 fail**。
+- 存量回归：agent-output-normalization 4/0、codex-text-receipt 5/0、local-agent-admission 16/0、agent-delivery-recovery 5/0、firstpass-structural-218 8/1（**存量失败**——已用 `git stash` 对照 HEAD 版本复跑，同为 `not ok 5`，与 T03 无关）。
+- t00 基线校验 PASS；t01 18/18；t02 24/24 复跑全绿；4 个改动文件 `node --check` 语法通过。
+
+### 未能验证的环境
+- 未实机跑一键全流程（真实付费模型）验证恢复路径的新行为；恢复函数分支极多（30+ 错误码），本次仅源码级 + 单测覆盖关键堵口。
+- `firstpass-structural-218` 的存量失败（AGENT_EVIDENCE_PENDING vs PROVIDER_REQUEST_ABORTED，audit-progress 诊断优先生效）本身像真缺陷，已记入下方遗留。
+
+### 遗留与风险
+- **存量失败待办**：`firstpass-structural-218` not ok 5——取消信号应优先于 audit-progress 的 unchanged-receipt 诊断。属既有行为缺陷，非 T03 引入；建议单开修复（涉及 audit-progress.request 的 signal 优先级）。
+- h3 每镜 2 次修复上限是行为收紧：极端场景（某镜需 3+ 轮才收敛）现在会提前进入终态、保留已完成镜头待显式续跑。符合规范"不为收敛而无限付费"，但若用户反馈"以前能跑过的现在停了"，按此口径解释。
+
 ### 下一任务
-- **T03 统一错误、重试、取消与 outbox 语义**：把 `production-v2/retry-policy.js` 接入实际模型调用层——`agent-output-normalization.js` 修复循环、`h3-final-prompt-editor.js`、`prompt-review-editor.js` 全部从 coordinator 侧注入同一 budget handle（替换各自独立的重试计数）；`workbench-workflow.js/recoverAutonomousPipelineFailure` 不得在 budget exhausted 后 continue；新增命令路径的 outbox 入队统一走 `repository.enqueueOperation`（`autoResume:false`）。首个文件：`app/agent-output-normalization.js`。
-- **注意**：`05-阶段与命令合同.md` 缺失，T03 起涉及字段/IPC 合同时按主文档第 4/8 章正文执行，并在各任务记录中注明推定口径。
+- **T04 Agent 事件、租约、进程与完整性**（主文档第 15 章：验收=终局判断正确、取消不复活、所有输出可恢复）。入口：`local-agent-runtime.js`（job 终局判定）+ T02 已就绪的 `claimOperation/commitOperation` 租约接线。取消路径用 T03 的 `budget.cancel()`/decide(stop) 贯穿。
+
+
 
 ## T02 交付记录（2026-09-17）
 

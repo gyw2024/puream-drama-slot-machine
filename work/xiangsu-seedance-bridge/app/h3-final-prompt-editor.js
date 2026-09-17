@@ -62,7 +62,7 @@ const DELIVERED_ITEM={type:'object',required:['shotId','detailedDescriptionEn','
 const SOURCE_FINDING={type:'object',required:['shotId','status','reason'],properties:{shotId:{type:'string',minLength:1},status:{const:'source_planning_repair_required'},reason:{type:'string',minLength:1}}};
 const DELIVERY_SCHEMA={type:'object',required:['items'],properties:{items:{type:'array',items:{anyOf:[DELIVERED_ITEM,SOURCE_FINDING]}}}};
 
-async function author({getProject,saveProject,generate,optionsFor,settings,projectId,shotIds,findingsByShot={},parallelism=1,signal}) {
+async function author({getProject,saveProject,generate,optionsFor,settings,projectId,shotIds,findingsByShot={},parallelism=1,signal,budget}) {
   const selected = new Set(shotIds || getProject().shots.map(s=>s.id));
   const initial=getProject();
   // Recompile only unchanged, previously authored structured drafts. Preserve history and validate again.
@@ -76,14 +76,42 @@ async function author({getProject,saveProject,generate,optionsFor,settings,proje
   const done=s=>current(s)&&(!feedbackKey(s)||s.finalPromptEditing?.feedbackFingerprint===feedbackKey(s));
   const pending=initial.shots.filter(s=>selected.has(s.id)&&s.providerSemanticCompileSource==='ai-batch'&&!done(s));
   const sourceFindings=new Map();
+  // T03: unified repair budget (production-v2/retry-policy via budget handle).
+  // The coordinator injects its run-wide handle; the default scopes this
+  // authoring run as its own budget. Per-shot unit cap (2 repairs) is tracked
+  // locally because one repair round covers a whole batch of work units; the
+  // shared handle enforces the run-level round cap. Exhaustion retains every
+  // completed shot and throws the same terminal repair error as before —
+  // never another blind paid round.
+  const handle=budget||require('./production-v2/budget').createRepairBudget();
+  const repairTries=new Map();const stranded=[];
   const size=5;
   const batches=[];for(let i=0;i<pending.length;i+=size)batches.push(pending.slice(i,i+size));
   await require('./preproduction-performance').mapBatches(batches,parallelism,async batch=>{
     const sources=batch.map(shot=>{const source=sourceFor(shot);return {...source,deliveryFixedWords:require('./final-prose-budget').deliveryFixedWords(source,getProject(),shot)};}),byId=new Map(batch.map(s=>[s.id,s]));
     let remaining=batch,prior=batch.filter(s=>feedbackKey(s)||s.finalPromptDraft?.fingerprint===fingerprint(s)).map(s=>({shotId:s.id,issues:findingsByShot[s.id]||s.finalPromptDraft?.issues,previous:s.finalPromptDraft?.item||s.finalPromptEditing,repairScope:'Correct only the listed findings. Preserve exact dialogue, identities, supplied numeric times, all unaffected events and the complete bilingual mirror. Return the complete corrected item.'}));
+    handle.nextWorkUnit();
     for(let attempt=0;remaining.length;attempt++){
       await new Promise(setImmediate);
       require('./agent-stage-tasks').throwIfCancelled(signal);
+      if(attempt>0){
+        for(const shot of remaining)repairTries.set(shot.id,(repairTries.get(shot.id)||0)+1);
+        const overBudget=remaining.filter(s=>repairTries.get(s.id)>2);
+        if(overBudget.length){
+          stranded.push(...overBudget.map(s=>s.id));
+          prior.push(...overBudget.map(s=>({shotId:s.id,issues:['per-shot repair budget exhausted; retained for explicit resume']})));
+          remaining=remaining.filter(s=>repairTries.get(s.id)<=2);
+        }
+        if(remaining.length){
+          try{handle.consumeRepair('h3_final_editor_round');}
+          catch{
+            stranded.push(...remaining.map(s=>s.id));
+            prior.push(...remaining.map(s=>({shotId:s.id,issues:['run repair budget exhausted; retained for explicit resume']})));
+            remaining=[];
+          }
+        }
+        if(!remaining.length)break;
+      }
       const requestShots=sources.filter(s=>remaining.some(r=>r.id===s.shotId));
       const key=hash(sources),latest=getProject(),journal=latest.finalEditorProgress?.[key]||{};
       const messages=[{role:'system',content:INSTRUCTION},{role:'user',content:JSON.stringify({shots:requestShots,previousFindings:prior})}];
@@ -114,7 +142,7 @@ async function author({getProject,saveProject,generate,optionsFor,settings,proje
       for(const shot of remaining)if(!seen.has(shot.id))prior.push({shotId:shot.id,issues:['required shot omitted']});
       remaining=remaining.filter(s=>!sourceFindings.has(s.id)&&!done(getProject().shots.find(p=>p.id===s.id)));
     }
-    if(remaining.length)throw Object.assign(Error('Final H3 editing needs targeted repair; completed shots are retained'),{code:'H3_FINAL_EDIT_NEEDS_REPAIR',shotIds:remaining.map(s=>s.id),findings:prior});
+    if(remaining.length||stranded.length)throw Object.assign(Error('Final H3 editing needs targeted repair; completed shots are retained'),{code:'H3_FINAL_EDIT_NEEDS_REPAIR',shotIds:[...remaining.map(s=>s.id),...stranded],findings:prior,repairBudgetExhausted:stranded.length>0});
   });
   if(sourceFindings.size)throw Object.assign(Error('Agent 请求复核源稿的可执行性；已保留完成镜头'),{code:'H3_SOURCE_PLANNING_REPAIR_REQUIRED',sourceTimingIssues:[...sourceFindings.values()]});
   return getProject();
