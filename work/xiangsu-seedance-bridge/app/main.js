@@ -2103,7 +2103,34 @@ function requireSimpleMode() {
   return { store: simpleModeStore, workflow: simpleModeWorkflow };
 }
 
-async function promptReviewPreflight(context, projectId, options = {}) {
+// T05 / §5.2: the unified per-intent preflight. `intent` names the action
+// (every legacy call site already passes requestedAction); production-v2
+// projects resolve per-item approvals instead of re-entering the whole-script
+// confirmation. Legacy projects keep the existing requestPromptReview flow.
+async function preflightCommand(context, projectId, intent, targets = [], options = {}) {
+  let project;
+  try { project = context.store.getProject(projectId); } catch { project = null; }
+  if (project?.productionV2?.enabled) {
+    try {
+      if (intent === "generateAllShotVideos") {
+        context.workflow.assertApprovedItemsForEntities(project, { entityType: "shot", entityIds: targets.map(String), intent: "分镜视频生成" });
+      } else if (intent === "generateAllAssets") {
+        context.workflow.assertApprovedItemsForEntities(project, { entityIds: targets.map(String), intent: "资产生成" });
+      }
+      // Other intents are pure checks in v2: the initial whole-script gate is
+      // driven solely by the approval lifecycle (mayAutoOpen + display permit).
+      return null;
+    } catch (error) {
+      if (error?.code === "PROMPT_ITEM_APPROVAL_REQUIRED") {
+        return { ok: true, reviewRequired: true, itemApproval: { intent, itemIds: error.itemIds }, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
+      }
+      throw error;
+    }
+  }
+  return promptReviewPreflightLegacy(context, projectId, options);
+}
+
+async function promptReviewPreflightLegacy(context, projectId, options = {}) {
   const gate = await context.workflow.requestPromptReview(projectId, options);
   if (!gate.required) return null;
   return {
@@ -2111,6 +2138,12 @@ async function promptReviewPreflight(context, projectId, options = {}) {
     reviewRequired: true,
     project: projectForRendererFrom(context, projectId, { reconcile: false })
   };
+}
+
+// Unified entry: every legacy call site funnels through preflightCommand.
+// options.requestedAction is the per-site intent annotation.
+async function promptReviewPreflight(context, projectId, options = {}) {
+  return preflightCommand(context, projectId, String(options.requestedAction || ""), options.shotIds || [], options);
 }
 
 function projectForRendererFrom(context, projectId, { reconcile = true } = {}) {
@@ -3193,6 +3226,15 @@ ipcMain.handle("workbench:confirm-prompt-review-item", async (_event, projectId,
     const context = requireWorkbench();
     await context.workflow.confirmPromptReviewItem(projectId, itemId, prompt);
     return { ok: true, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
+  } catch (error) { return publicError(error); }
+});
+// T05 / §5.1: atomic per-epoch auto-open display permit for the initial
+// whole-script confirmation.
+ipcMain.handle("workbench:consume-prompt-review-auto-open", async (_event, projectId) => {
+  try {
+    const context = requireWorkbench();
+    const result = context.workflow.consumePromptReviewAutoOpenPermit(projectId);
+    return { ok: true, consumed: result.consumed, alreadyConsumed: result.alreadyConsumed, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:confirm-all-prompt-review", async (_event, projectId, entries) => {

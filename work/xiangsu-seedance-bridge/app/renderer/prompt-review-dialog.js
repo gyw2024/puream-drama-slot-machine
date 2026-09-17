@@ -356,12 +356,25 @@
         // Pending evidence remains readable; it is not an approval.
         const key = reviewKey(project);
         if (root.open) render();
+        // T05 / §5.1 (B05): auto-open is gated by the persistent, atomically
+        // consumed display permit — not by a session-local key that a reload
+        // could re-arm. The dialog is never force-looped; the manual entry
+        // point ("继续确认提示词") stays available.
         if (autoOpen
           && window.ReviewReceiptState.needsConfirmation(project?.promptReview)
+          && !project?.promptReview?.autoOpenConsumedAt
           && key !== autoOpenedKey) {
           autoOpenedKey = key;
-          // A project switch before this microtask must not open another draft.
-          queueMicrotask(() => { if (reviewKey(project) === key && window.ReviewReceiptState.needsConfirmation(project?.promptReview)) open(); });
+          queueMicrotask(async () => {
+            if (!project || reviewKey(project) !== key) return;
+            if (!window.ReviewReceiptState.needsConfirmation(project?.promptReview)) return;
+            try {
+              const permit = await window.api?.workbench?.consumePromptReviewAutoOpenPermit?.(project.id);
+              if (permit && permit.ok && permit.consumed === false) return; // already shown once
+              if (permit?.project) { project = permit.project; autoOpenedKey = reviewKey(project); }
+            } catch { return; } // no bridge: stay closed rather than loop
+            if (reviewKey(project) === key && window.ReviewReceiptState.needsConfirmation(project?.promptReview)) open();
+          });
         }
       },
       open,

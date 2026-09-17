@@ -88,6 +88,7 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     requestPromptReview: (projectId, options) => ipcRenderer.invoke("workbench:request-prompt-review", projectId, options || {}),
     applyPromptProposal: projectId => ipcRenderer.invoke('workbench:apply-prompt-proposal',projectId),
     confirmPromptReviewItem: (projectId, itemId, prompt) => ipcRenderer.invoke("workbench:confirm-prompt-review-item", projectId, itemId, prompt),
+    consumePromptReviewAutoOpenPermit: projectId => ipcRenderer.invoke("workbench:consume-prompt-review-auto-open", projectId),
     confirmAllPromptReview: (projectId, entries) => ipcRenderer.invoke("workbench:confirm-all-prompt-review", projectId, entries || []),
     generateCharacterVideo: (projectId, characterId, prompt) => ipcRenderer.invoke("workbench:generate-character-video", projectId, characterId, prompt),
     extractCharacterVoice: (projectId, characterId) => ipcRenderer.invoke("workbench:extract-character-voice", projectId, characterId),

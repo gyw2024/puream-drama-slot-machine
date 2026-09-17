@@ -21961,6 +21961,74 @@ ${shotAnchor}
     });
   }
 
+  // T05 / §5.2: v2 per-item approval boundary. A production-v2 project needs
+  // only the items actually required by this intent to be individually
+  // confirmed (real userConfirmed receipts) — an unrelated project-wide hash
+  // drift must not re-lock every paid action behind the whole-script gate.
+  // Legacy projects keep assertPromptReviewApproved unchanged.
+  assertApprovedItems(project, requiredItemIds, intent = "media") {
+    const items = new Map((project.promptReview?.items || []).map(item => [String(item.id), item]));
+    const receiptState = require('./renderer/review-receipt-state');
+    const missing = [];
+    for (const id of (requiredItemIds || []).map(String)) {
+      const item = items.get(id);
+      // Real userConfirmed receipt only — an empty issues list or an Agent's
+      // "approved" string is not a human approval (review-receipt-state rule).
+      if (!item || receiptState.confirmed(item) !== true) missing.push(id);
+    }
+    if (missing.length) {
+      throw Object.assign(new Error(`本次${intent}所需的 ${missing.length} 条提示词还未由用户确认（${missing.slice(0, 8).join("、")}）；相关内容保留，不会提交付费任务。`), {
+        code: "PROMPT_ITEM_APPROVAL_REQUIRED",
+        expectedControl: true,
+        reviewRequired: true,
+        itemIds: missing,
+        intent
+      });
+    }
+    return true;
+  }
+
+  // T05 / §5.2: entity-scoped variant used by media generation entries. It
+  // selects the review items belonging to the given entities (any stage) and
+  // requires a real userConfirmed receipt on each. Only reached when the
+  // project opted into production-v2 routing; legacy projects keep the
+  // whole-bundle gate.
+  assertApprovedItemsForEntities(project, { entityType = "", entityIds = [], stages = [], intent = "媒体生成" } = {}) {
+    const wanted = new Set((entityIds || []).map(String));
+    const stageSet = new Set((stages || []).map(String));
+    const items = (project.promptReview?.items || []).filter(item =>
+      (!entityType || item.entityType === entityType)
+      && (!wanted.size || wanted.has(String(item.entityId)))
+      && (!stageSet.size || stageSet.has(String(item.stage))));
+    const receiptState = require('./renderer/review-receipt-state');
+    const missing = items.filter(item => receiptState.confirmed(item) !== true).map(item => String(item.id));
+    if (!items.length || missing.length) {
+      const sample = missing.slice(0, 8).join("、") || "未找到对应条目";
+      throw Object.assign(new Error(`本次${intent}所需的 ${items.length ? missing.length : "全部"} 条提示词还未由用户确认（${sample}）；相关内容保留，不会提交付费任务。`), {
+        code: "PROMPT_ITEM_APPROVAL_REQUIRED",
+        expectedControl: true,
+        reviewRequired: true,
+        itemIds: missing,
+        intent
+      });
+    }
+    return true;
+  }
+
+  // T05 / §5.1: the initial whole-script confirmation auto-opens at most once
+  // per review lifecycle. The display permit is consumed atomically in the
+  // main process so a renderer reload, a second window or a re-render can no
+  // longer re-trigger the dialog from a session-local key (B05). Closing the
+  // dialog is NOT approval; the manual entry point stays available.
+  consumePromptReviewAutoOpenPermit(projectId) {
+    const project = this.store.getProject(projectId);
+    const review = project.promptReview;
+    if (!review || review.autoOpenConsumedAt) return { consumed: false, alreadyConsumed: true, project };
+    const updated = { ...project, promptReview: { ...review, autoOpenConsumedAt: new Date().toISOString() } };
+    const saved = this.store.saveProject(updated);
+    return { consumed: true, alreadyConsumed: false, project: saved };
+  }
+
   async requestPromptReview(projectId, options = {}) {
     let project = this.store.getProject(projectId);
     // Imported/legacy AI approvals do not authorize media submission. Reuse
@@ -27541,7 +27609,16 @@ ${shotAnchor}
     // Workflow-level gate: UI/main-process preflight is helpful but cannot be
     // the only boundary. No dependency generation or paid submission may run
     // until every asset, storyboard and shot-video prompt is confirmed.
-    this.assertPromptReviewApproved(projectId);
+    // production-v2 routing (T05): per-item approval for the shots actually
+    // being submitted; legacy projects keep the whole-bundle gate.
+    {
+      const gateProject = this.store.getProject(projectId);
+      const shotIds = (Array.isArray(options.shotIds) && options.shotIds.length)
+        ? options.shotIds.map(String)
+        : (gateProject.shots || []).map(shot => String(shot.id));
+      if (gateProject.productionV2?.enabled) this.assertApprovedItemsForEntities(gateProject, { entityType: "shot", entityIds: shotIds, intent: "分镜视频生成" });
+      else this.assertPromptReviewApproved(projectId);
+    }
     const capturePaidVideoState = () => {
       const current = this.store.getProject(projectId);
       return {
@@ -27993,7 +28070,15 @@ ${shotAnchor}
     }
     // Keep the asset boundary inside the workflow as well as the renderer/main
     // IPC layer, so internal, resumed and batch calls cannot bypass review.
-    this.assertPromptReviewApproved(projectId);
+    // production-v2 routing (T05): per-item approval for the assets actually
+    // planned; legacy projects keep the whole-bundle gate.
+    {
+      const gateProject = this.store.getProject(projectId);
+      if (gateProject.productionV2?.enabled) {
+        const plannedIds = this.buildAssetBatchPlan(projectId).map(item => String(item.entityId));
+        this.assertApprovedItemsForEntities(gateProject, { entityIds: plannedIds, intent: "资产生成" });
+      } else this.assertPromptReviewApproved(projectId);
+    }
     this.reconcileProjectCharacterReferences(projectId);
     this.ensureProjectShotScenes(projectId);
     this.syncReferenceLibraries(projectId);
@@ -28690,6 +28775,14 @@ ${shotAnchor}
     const repairedReferences = this.reconcileProjectCharacterReferences(projectId);
     let project = this.store.getProject(projectId);
     const actions = [];
+    // T05 / §5.2 (B02): "final" performs ONLY local checks (selected videos
+    // readable, directory usable). Upstream asset/storyboard repair belongs to
+    // assets/shots/videos entry points — local rough-cut must never become a
+    // re-run of pre-production.
+    if (targetStage === "final") {
+      this.assertSelectedVideosReadable(project, this.store.getSettings());
+      return { project, actions, repairedReferences };
+    }
     if (isProductionPackageMode(project?.generation?.mode)) {
       const requestedShotIds = Array.isArray(options.shotIds) && options.shotIds.length
         ? new Set(options.shotIds.map(String))
@@ -28780,9 +28873,42 @@ ${shotAnchor}
     return { project, actions, repairedReferences };
   }
 
+  // T05 / §5.2: the ONLY post entry. Local selected-video preflight plus post
+  // work — never prompt preparation, never upstream media generation, never a
+  // whole-script confirmation. Reachable directly and from runPipelineFromStage.
+  assertSelectedVideosReadable(project, settings) {
+    const shots = Array.isArray(project?.shots) ? project.shots : [];
+    if (!shots.length) throw Object.assign(new Error("当前项目还没有分镜，无法进入粗剪。"), { code: "POST_SHOTS_EMPTY" });
+    const missing = [];
+    for (const shot of shots) {
+      const selected = candidateReady(project, "shot", shot.id, "shot_video", settings)
+        || selectedOrLatest(project, "shot", shot.id, "shot_video")
+        || latestCompleteShotVideoCandidate(project, shot.id);
+      if (!selected?.filePath || !fs.existsSync(selected.filePath)) missing.push(shot.id);
+    }
+    if (missing.length) {
+      throw Object.assign(new Error(`以下分镜还没有本地可读的选定视频：${missing.join("、")}。请先完成视频下载验证或手动导入。`), { code: "POST_SELECTED_VIDEO_MISSING", shotIds: missing });
+    }
+    return { shotCount: shots.length };
+  }
+
+  async startPostFromSelectedVideos(projectId, options = {}) {
+    const project = this.store.getProject(projectId);
+    this.assertSelectedVideosReadable(project, this.store.getSettings());
+    this.setAutomation(projectId, { stage: "stitch", message: "视频已齐，直接进入本地粗剪：不重建提示词，不补生成上游资产" });
+    this.assertOperationActive(projectId);
+    return this.stitchProject(projectId, options);
+  }
+
   async runPipelineFromStage(projectId, fromStage = "assets", options = {}) {
     if (options.track !== false) {
       return this.runTrackedOperation(projectId, "pipeline_from_stage", fromStage, () => this.runPipelineFromStage(projectId, fromStage, { ...options, track: false }));
+    }
+    // T05 / §5.2 (B01): "final" exits before the pre-production path. Local
+    // rough-cut must not rebuild creative prompts or re-trigger the initial
+    // whole-script confirmation gate.
+    if (fromStage === "final") {
+      return this.startPostFromSelectedVideos(projectId, options);
     }
     const order = ["script", "assets", "shots", "videos", "final"];
     const start = Math.max(0, order.indexOf(fromStage));
