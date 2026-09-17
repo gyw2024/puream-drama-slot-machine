@@ -139,7 +139,8 @@ test("first-run mode choice, later switching, cloud video lock and Simple allowl
   assert.match(simpleCss, /\.hidden\s*\{\s*display:\s*none\s*!important/);
   assert.match(agent, /id="switchSimpleMode"/);
   assert.match(agent, /value="production_package"/);
-  assert.match(agent, /Codex 资产包直抽/);
+  assert.match(agent, /id="importProductionPackage"/);
+  assert.match(agent, /导入资产包/);
   assert.match(agent, /id="settingsSwitchSimpleMode"/);
 });
 

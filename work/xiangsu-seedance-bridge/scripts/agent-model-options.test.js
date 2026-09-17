@@ -52,7 +52,9 @@ test("visible streaming filters reasoning/tool data and keeps final result separ
 test("topic stage excludes shot contracts while later stages retain them",()=>{
  const w=require("../app/workbench-workflow");const topic=w.topicIdeationRuntimePrompt({},{});
  assert.doesNotMatch(topic,/screenSide|0\.30秒|3秒动作|10–15秒/);assert.match(topic,/highlights/);
- assert.match(w.h3TextStageDirective("units"),/screenSide/);
+ // screenSide/depth/facing/eyeline 账本合同移入共享写作合同；stage 指令保留镜头边界规则
+ assert.match(require("../app/drama-writing-contract").sharedDramaWritingContract(),/screenSide/);
+ assert.match(w.h3TextStageDirective("units"),/镜头边界/);
 });
 test("Codex/API confirmation follows saved bound route and no obsolete API-only confirmation",()=>{
  const s=fs.readFileSync(path.join(__dirname,"../app/renderer/workbench.js"),"utf8");
