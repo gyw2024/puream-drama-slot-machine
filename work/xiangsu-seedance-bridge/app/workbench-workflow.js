@@ -162,6 +162,7 @@ const {
 } = require("./production-liveness");
 const {
   buildApprovedHailuoPrompt,
+  compactGeneratedPromptBoilerplate,
   dialogueAlignedVisualWindows,
   dialogueTimingPlan,
   sanitizeVisualPromptCue
@@ -6633,6 +6634,31 @@ function canonicalShotForVideoPrompt(project = {}, shot = {}) {
   return sanitizeShotVisualCues(canonicalShotSource);
 }
 
+// puream-video-adapters hard-rejects any H3 payload above 9800 characters. A
+// reference-rich shot can cross that line after a legit rewrite, which used to
+// end in HAILUO_PROMPT_TOO_LONG_LOCAL with no user action available. Only
+// compiler-owned scaffolding is shortened here; dialogue blocks, reference
+// bindings, timed actions and the 180-degree/identity contracts never change.
+// Anything still above the limit is returned untouched so the provider check
+// reports its own explicit error instead of a silently altered performance.
+const HAILUO_TRANSPORT_PROMPT_LIMIT = 9800;
+const HAILUO_TRANSPORT_PROMPT_TARGET = 9700;
+function fitHailuoTransportLimit(prompt) {
+  const source = String(prompt || "");
+  if (source.length <= HAILUO_TRANSPORT_PROMPT_TARGET) return source;
+  const candidates = [source];
+  try {
+    candidates.push(compactGeneratedPromptBoilerplate(source, HAILUO_TRANSPORT_PROMPT_TARGET));
+  } catch { /* compaction is best-effort */ }
+  const dialogueBlocks = source.match(/<d>[\s\S]*?<\/d>/gi) || [];
+  const eligible = candidates.filter(text => (
+    String(text).length <= HAILUO_TRANSPORT_PROMPT_LIMIT
+    && dialogueBlocks.every(block => String(text).includes(block))
+  ));
+  if (!eligible.length) return source;
+  return eligible.reduce((shortest, text) => (String(text).length < String(shortest).length ? text : shortest));
+}
+
 function renderApprovedVideoPrompt(project = {}, shot = {}, references = {}) {
   const canonicalShot = canonicalShotForVideoPrompt(project, shot);
   const turns = uniqueDialogueTurns(project, canonicalShot);
@@ -6651,12 +6677,12 @@ function renderApprovedVideoPrompt(project = {}, shot = {}, references = {}) {
   // option or a dialogue owner does not prove any audio was actually supplied.
   const audios = references.referenceAudioMode !== "image_only" && turns.length && Array.isArray(references.audios)
     ? references.audios : [];
-  return compactFullReferencePrompt(buildApprovedHailuoPrompt({
+  return fitHailuoTransportLimit(compactFullReferencePrompt(buildApprovedHailuoPrompt({
       project,
       shot: canonicalShot,
       references: { ...references, images, imageRoles, audios },
       dialogueTurns: turns
-  }));
+  })));
 }
 
 function chineseAuthoringValue(value, fallback = "") {
@@ -8460,6 +8486,13 @@ function promptReviewCanonicalShots(project = {}) {
     // canonical turns above. Moving base fields between turn.metadata and the
     // turn itself must not invalidate 68 user-confirmed production prompts.
     delete next.dialogue;
+    // Provider-compile mirrors are runtime derivatives of the approved prompt,
+    // stamped during video preflight AFTER approval. Hashing them makes every
+    // preflight invalidate its own approval (PROMPT_CONFIRMATION_REQUIRED loop).
+    delete next.providerVideoPrompt;
+    delete next.providerVideoPromptLanguage;
+    delete next.providerVideoPromptCompiledAt;
+    delete next.providerVideoPromptSourceHash;
     return next;
   });
 }

@@ -30,3 +30,7 @@ work/video-request-monitor/
 作品/
 交付/
 交付文件/
+
+# 运行期临时产物（应用运行时自动生成，约 80MB，非源码）
+work/xiangsu-seedance-bridge/tmp/
+work/xiangsu-seedance-bridge/app/tmp/
