@@ -20173,11 +20173,24 @@ class WorkbenchWorkflow {
     {
       const screenplay=require('./shot-screenplay'),project=this.store.getProject(projectId),settings=this.store.getSettings();
       const source=String(sourceText||project.script?.raw||'');
-      const result=await screenplay.author({source,mode:'upload',reviewExecution:require('./unified-audit-policy').executionProfile(settings),product:project.product,runtimePolicy:require('./film-runtime-policy').adaptation(source),checkpoint:project.script.dialogueShotPreparation,
-        signal:this.operationControls.get(projectId)?.controller?.signal,
-        generate:(m,o)=>this.generateText(settings.textProvider,m,this.productionTextOptions(projectId,o.stage,o)),
-        status:message=>this.setAutomation(projectId,{stage:'dialogue_rewrite',message}),
-        save:dialogueShotPreparation=>{const live=this.store.getProject(projectId);live.script={...live.script,dialogueShotPreparation};this.store.saveProject(live);}});
+      let result;
+      try {
+        result=await screenplay.author({source,mode:'upload',reviewExecution:require('./unified-audit-policy').executionProfile(settings),product:project.product,runtimePolicy:require('./film-runtime-policy').adaptation(source),checkpoint:project.script.dialogueShotPreparation,
+          signal:this.operationControls.get(projectId)?.controller?.signal,
+          generate:(m,o)=>this.generateText(settings.textProvider,m,this.productionTextOptions(projectId,o.stage,o)),
+          status:message=>this.setAutomation(projectId,{stage:'dialogue_rewrite',message}),
+          save:dialogueShotPreparation=>{const live=this.store.getProject(projectId);live.script={...live.script,dialogueShotPreparation};this.store.saveProject(live);}});
+      } catch (error) {
+        // 授权控制/证据等待类按原语义上抛；其余上游失败一律转 agentRequired 合同，
+        // 保留用户原稿且禁止本地模板改写。
+        if (isScriptControlError(error) || error?.expectedControl) throw error;
+        throw agentCreativeOutputRequired(
+          error,
+          "DIALOGUE_REWRITE_AGENT_RESULT_REQUIRED",
+          "对白改写 Agent 未返回可验证结果，已保留用户原稿且未使用本地模板改写",
+          { stage: "dialogue_rewrite_author" }
+        );
+      }
       const latest=this.store.getProject(projectId);latest.script={...latest.script,originalRaw:latest.script.originalRaw||source,raw:result.text,shotScreenplay:screenplay.makeRecord(result.document,result.text,result.contentReview||result.reviews.at(-1),'upload'),analysis:null};
       latest.currentStage='script';this.store.saveProject(latest);return this.store.getProject(projectId);
     }
@@ -20186,14 +20199,27 @@ class WorkbenchWorkflow {
     const source = String(sourceText || "").replace(/\r/g, "").trim();
     if (!source) throw Object.assign(new Error("请选择包含人物对白的 TXT 或 Markdown 文件"), { code: "DIALOGUE_DRAFT_REQUIRED", localValidation: true });
     const parserSource = source.replace(/\s{2,}(?=(?:[A-Za-zＡ-Ｚａ-ｚ]|甲|乙|丙|丁|角色\s*\d+)\s*[：:])/g, "\n");
-    const understoodDialogue = await require('./source-understanding').understand({
-      source: parserSource,
-      rows: parseSourceDialogueLedger(parserSource),
-      checkpoint: project.script?.dialogueUnderstanding,
-      generate: (messages, opts) => this.generateText(settings.textProvider, messages, this.productionTextOptions(projectId, opts.stage, opts)),
-      save: record => { project.script = { ...project.script, dialogueUnderstanding: record }; this.store.saveProject(project); },
-      status: message => this.setAutomation(projectId, { message })
-    });
+    // 理解阶段也是 Agent 创作调用：上游失败必须走 agentRequired 合同，
+    // 保留用户原稿且禁止本地模板改写（与分块改写段同一终态语义）。
+    let understoodDialogue;
+    try {
+      understoodDialogue = await require('./source-understanding').understand({
+        source: parserSource,
+        rows: parseSourceDialogueLedger(parserSource),
+        checkpoint: project.script?.dialogueUnderstanding,
+        generate: (messages, opts) => this.generateText(settings.textProvider, messages, this.productionTextOptions(projectId, opts.stage, opts)),
+        save: record => { project.script = { ...project.script, dialogueUnderstanding: record }; this.store.saveProject(project); },
+        status: message => this.setAutomation(projectId, { message })
+      });
+    } catch (error) {
+      if (isScriptControlError(error)) throw error;
+      throw agentCreativeOutputRequired(
+        error,
+        "DIALOGUE_REWRITE_AGENT_RESULT_REQUIRED",
+        "对白改写 Agent 的上游理解阶段未返回可验证结果，已保留用户原稿且未使用本地模板改写",
+        { stage: "dialogue_understanding" }
+      );
+    }
     const sourceLedger = understoodDialogue.rows.map((row,index)=>({...row,id:`D${String(index+1).padStart(3,'0')}`}));
     if (!sourceLedger.length) {
       throw Object.assign(new Error("没有识别到“人物名：对白”格式；请参考 A：内容、B：内容，每句单独一行"), {
