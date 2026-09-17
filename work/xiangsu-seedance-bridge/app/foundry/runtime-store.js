@@ -200,18 +200,24 @@ class FoundryRuntimeStore {
     this.setMeta("schema", { version: RUNTIME_SCHEMA_VERSION, name: "PUREAM Adaptive Drama Compiler" });
   }
 
-  // T02 additive migration: operation lease columns for claim/commit CAS.
-  // Each column is added only when missing, so older databases upgrade in place.
+  // T02/T18 additive migration: legacy databases upgrade in place. Each
+  // missing column is added only when absent, so older stores (including
+  // pre-v2 project_state without the contract fingerprint) open cleanly.
   migrateV2LeaseColumns() {
-    const columns = new Set(this.db.prepare("PRAGMA table_info(operation_outbox)").all().map(row => String(row.name)));
-    const additions = {
+    const ensureColumns = (table, additions) => {
+      const columns = new Set(this.db.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name)));
+      for (const [name, definition] of Object.entries(additions)) {
+        if (!columns.has(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+      }
+    };
+    ensureColumns("operation_outbox", {
       lease_epoch: "INTEGER NOT NULL DEFAULT 0",
       lease_owner: "TEXT NOT NULL DEFAULT ''",
       lease_expires_at: "TEXT NOT NULL DEFAULT ''"
-    };
-    for (const [name, definition] of Object.entries(additions)) {
-      if (!columns.has(name)) this.db.exec(`ALTER TABLE operation_outbox ADD COLUMN ${name} ${definition}`);
-    }
+    });
+    ensureColumns("project_state", {
+      contract_fingerprint: "TEXT NOT NULL DEFAULT ''"
+    });
   }
 
   transaction(action) {
