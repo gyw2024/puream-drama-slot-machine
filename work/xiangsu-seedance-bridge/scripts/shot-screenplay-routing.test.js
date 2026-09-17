@@ -66,14 +66,15 @@ test('legacy analyzed text reaches Agent intake once before five-shot batch conv
  const flow=new WorkbenchWorkflow({store:{getProject:()=>structuredClone(p),saveProject:x=>(p=x),getSettings:()=>settings},bridge:{}});
  flow.setAutomation=()=>{};flow.productionTextOptions=(_id,stage,o)=>({...o,stage});
  flow.generateText=async(_config,m,o)=>{calls.push(o.stage);
-  if(o.stage==='shot_screenplay_write')return doc;
+  if(o.stage==='shot_screenplay_draft')return p.script.raw;
+  if(o.stage==='shot_screenplay_structure')return doc;
   if(o.stage==='shot_screenplay_review')return {ok:true,storyComplete:true,sourcePreserved:true,checks:doc.shots.map(s=>({shotId:s.id,evidence:'Complete source checked'})),issues:[]};
   assert.equal(o.stage,'master_production_decisions');const input=JSON.parse(m[1].content);
   assert.equal(input.shots.length,2);assert.equal(input.completeOriginalSource,undefined);
   return {items:input.shots.map(s=>item(s.shotExecution))};
  };
  await flow.authorAgentProductionDecisions(p.id);const first=[...calls];
- assert.equal(calls.filter(s=>s==='shot_screenplay_write').length,1);assert.equal(calls.filter(s=>s==='master_production_decisions').length,1);
+ assert.equal(calls.filter(s=>s==='shot_screenplay_structure').length,1);assert.equal(calls.filter(s=>s==='master_production_decisions').length,1);
  assert.ok(screenplay.runtimeCurrent(p));await flow.authorAgentProductionDecisions(p.id);assert.deepEqual(calls,first);
 });
 test('a distant edit cannot discard an in-flight shot, while its own neighbor and actor changes invalidate it',async()=>{
@@ -97,7 +98,7 @@ for(const mode of ['asset_direct','keyframe','storyboard_sheet'])test(`${mode}: 
   calls.push(o.stage);assert.equal(o.stage,'master_production_decisions');assert.ok(calls.length<=3,'no unexpected retry');
   const input=JSON.parse(m[1].content);groups.push(input.shots.length);assert.ok(input.shots.length<=5);active++;peak=Math.max(peak,active);await new Promise(setImmediate);active--;
   for(const field of ['completeOriginalSource','wholeFilmSource','filmRuntimeBudget','wholeFilmRuntimePlan','acceptedDecisions'])assert.equal(input[field],undefined,field);
-  assert.equal(input.shots[0].referenceSpeechGrid,undefined);assert.match(m[0].content,/writer has already directed this exact shot/);
+  assert.equal(input.shots[0].referenceSpeechGrid,undefined);assert.match(m[0].content,/导演结构化决定作者/);assert.match(m[0].content,/只执行指定目标镜的完整剧本/);
   assert.doesNotMatch(m[0].content,/DO NOT import old generated timing|Then fit speech around|Choose 10-15 seconds/,'fixed-screenplay conversion must not receive replanning instructions');
   assert.ok(!m[0].content.includes(require('../app/screenplay-execution-authority').FORMAT),'video director must not inherit screenplay-writing output format');
   assert.ok(m[0].content.includes(require('../app/screenplay-execution-authority').CONTACT_CONTINUITY),'all modes receive the same physical contact reasoning');
@@ -113,29 +114,31 @@ for(const mode of ['asset_direct','keyframe','storyboard_sheet'])test(`${mode}: 
 test('a failed pending writing request resumes with the same session, without discarding the checkpoint',async()=>{
  let saved,session;const d=fixture(),input={topic:{title:'resume'},save:s=>{saved=structuredClone(s);}};
  await assert.rejects(screenplay.author({...input,generate:async(_m,o)=>{session=o.sessionId;throw Object.assign(Error('network interrupted'),{code:'NETWORK'});}}),{code:'NETWORK'});
- const result=await screenplay.author({...input,checkpoint:saved,generate:async(_m,o)=>{if(o.stage==='shot_screenplay_write'){assert.equal(o.sessionId,session);return d;}return {ok:true,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'source matches'}],issues:[]};}});
+ const result=await screenplay.author({...input,checkpoint:saved,generate:async(_m,o)=>{if(o.stage==='shot_screenplay_draft'){assert.equal(o.sessionId,session);return '完整中文剧本首稿';}if(o.stage==='shot_screenplay_structure')return d;return {ok:true,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'source matches'}],issues:[]};}});
  assert.equal(result.status,'ready');assert.equal(result.attempts.length,1);
 });
 
-test('repair resume reuses its audit and exact pending request rather than reviewing or rewriting again',async()=>{
- const d=fixture();let saved,repairSession,reviews=0,writes=0;
+test('repair resume reuses its exact pending request rather than drafting, structuring or repairing with a new session',async()=>{
+ const d=fixture();let saved,repairSession,structures=0,drafts=0;
  const input={topic:{title:'repair resume'},save:s=>{saved=structuredClone(s);}};
+ const bad=structuredClone(d);bad.shots[0].sceneId='__missing_scene__';
  await assert.rejects(screenplay.author({...input,generate:async(_m,o)=>{
-  if(o.stage==='shot_screenplay_write'){writes++;return d;}
-  if(o.stage==='shot_screenplay_review'){reviews++;return {ok:false,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'state mismatch'}],issues:[{shotIds:['S01'],field:'ending',evidence:'state mismatch',repair:'retain seated pose'}]};}
-  if(o.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(_m);
-  repairSession=o.sessionId;throw Object.assign(Error('network'),{code:'NETWORK'});
+  if(o.stage==='shot_screenplay_draft'){drafts++;return '完整中文剧本首稿';}
+  if(o.stage==='shot_screenplay_structure'){structures++;return bad;}
+  if(o.stage==='shot_screenplay_repair'){repairSession=o.sessionId;throw Object.assign(Error('network'),{code:'NETWORK'});}
+  throw Object.assign(Error('unexpected stage '+o.stage),{code:'NETWORK'});
  }}),{code:'NETWORK'});
+ // 结构修复预算耗尽后进入本地协议修复；断点已带完整文档，恢复时不得重跑起草/结构。
  let repaired=false;const result=await screenplay.author({...input,checkpoint:saved,generate:async(_m,o)=>{
-  if(!repaired){assert.equal(o.stage,'shot_screenplay_repair');assert.equal(o.sessionId,repairSession);repaired=true;return {shots:[{...d.shots[0],ending:'两人原位坐着相视'}],additions:[],characters:[],scenes:[],props:[],wardrobes:[]};}
-  assert.equal(o.stage,'shot_screenplay_review');reviews++;return {ok:true,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'state matches'}],issues:[]};
- }});assert.equal(result.status,'ready');assert.equal(writes,1);assert.equal(reviews,2);
+  if(!repaired){assert.equal(o.stage,'shot_screenplay_repair');assert.equal(o.sessionId,repairSession);repaired=true;return {shots:[{...structuredClone(d.shots[0]),characterIds:d.shots[0].characterIds}],additions:[],characters:[],scenes:[],props:[],wardrobes:[]};}
+  throw Object.assign(Error('unexpected stage '+o.stage),{code:'NETWORK'});
+ }});assert.equal(result.status,'ready');assert.equal(drafts,1);assert.equal(structures,3);assert.equal(repaired,true);
 });
 
 test('local Agent idempotency shares a running call and replays a committed receipt without invoking the model',async t=>{
  const fs=require('fs'),path=require('path'),{AgentHub}=require('../app/local-agent-runtime'),delivery=require('../app/mcp/stage-delivery');
  const root=fs.mkdtempSync(path.resolve(__dirname,'../../../.codex_tests/TASK-20260913-AGENT-295/request-replay-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
- let calls=0;const fake={root,jobs:new Map(),save:()=>{},runFresh:async function(config,request,options){calls++;await new Promise(r=>setTimeout(r,5));const id='agent_replay',dir=path.join(root,id);fs.mkdirSync(dir);const job={id,agentId:config.id,status:'running',requestKey:options.requestKey};this.jobs.set(id,job);fs.writeFileSync(path.join(dir,'request.json'),JSON.stringify({...request,jobId:id}));fs.writeFileSync(path.join(dir,'job.json'),JSON.stringify(job));delivery.submit(dir,{text:'原话（完整）'});return {text:'原话（完整）',jobId:id};}};
+ let calls=0;const fake=Object.assign(Object.create(AgentHub.prototype),{root,jobs:new Map(),activeRequests:new Map(),stageStarts:new Map(),latestByStage:new Map(),save:()=>{},runFresh:async function(config,request,options){calls++;await new Promise(r=>setTimeout(r,5));const id='agent_replay',dir=path.join(root,id);fs.mkdirSync(dir);const job={id,agentId:config.id,status:'running',requestKey:options.requestKey};this.jobs.set(id,job);fs.writeFileSync(path.join(dir,'request.json'),JSON.stringify({...request,jobId:id}));fs.writeFileSync(path.join(dir,'job.json'),JSON.stringify(job));delivery.submit(dir,{text:'原话（完整）'});return {text:'原话（完整）',jobId:id};}});
  const invoke=()=>AgentHub.prototype.run.call(fake,{id:'workbuddy'},{modality:'text',json:false,messages:[]},{sessionId:'one-request',costProjectId:'test'});
  const both=await Promise.all([invoke(),invoke()]);assert.equal(calls,1);assert.deepEqual(both[0],both[1]);
  const replay=await invoke();assert.equal(calls,1);assert.equal(replay.text,'原话（完整）');assert.equal(replay.reused,true);
@@ -165,7 +168,7 @@ test('nested response-shape feedback identifies the actual extra field instead o
 
 test('a cached pending prompt bundle resumes preparation after interruption',async()=>{
  let p={promptReview:{status:'pending',items:[{id:'shot:S01:shot_video'}]},shots:[]},calls=0;
- const workflow={store:{getProject:()=>p,saveProject:x=>(p=x)},promptReviewIsCurrent:()=>true,preparePromptReviewBundle:async()=>{calls++;p.promptReview.status='ready';return p;}};
+ const workflow={store:{getProject:()=>p,saveProject:x=>(p=x)},promptReviewIsCurrent:(_p,state)=>state!=='approved',preparePromptReviewBundle:async()=>{calls++;p.promptReview.status='ready';return p;}};
  const result=await require('../app/workbench-workflow').WorkbenchWorkflow.prototype.requestPromptReview.call(workflow,'test',{requireCompleteDelivery:true});
  assert.equal(calls,1);assert.equal(result.project.promptReview.status,'ready');assert.equal(result.project.automation.status,'awaiting_prompt_review');
 });
