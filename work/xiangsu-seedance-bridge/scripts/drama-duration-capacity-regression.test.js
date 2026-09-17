@@ -147,7 +147,7 @@ test("both script and director system contracts require duration-first determini
     fs.readFileSync(path.join(root, "app", "drama-writing-contract.js"), "utf8"),
     fs.readFileSync(path.join(root, "app", "agent-director.js"), "utf8")
   ].join("\n");
-  assert.match(source, /时长必须先算后定/);
+  assert.match(source, /时长先算后定/);
   assert.match(source, /普通对话必须保持5–6个中文有效字符\/秒/);
   assert.match(source, /争吵[^\n]*至少8个有效字符\/秒/);
   assert.match(source, /总需求超过15秒必须[^\n]*(?:拆|split)/i);

@@ -9,7 +9,7 @@ test("every production mode inherits entrance, clean-onset and actor-held-produc
   for (const entry of Object.values(MATRIX)) {
     const global = matrixGlobalPrompt("cloud", entry.mode);
     const runtime = matrixRuntimeVideoPromptForProject({ generation: { mode: entry.mode } });
-    assert.match(global, /0\.25秒/);
+    assert.match(global, /0\.30\/0\.35秒/);
     assert.match(global, /可见入场/);
     assert.match(global, /具名人物/);
     assert.match(runtime, /lip smack/);

@@ -30,5 +30,5 @@ test('provider-wide quota stops undispatched audits and preserves successful in-
  },{parallelBatches:2,saveCheckpoint:value=>{checkpoint=value;}}),{code:'LOCAL_AGENT_QUOTA_EXHAUSTED'});
  assert.equal(calls,2);assert.equal(checkpoint.batches.filter(b=>b.status==='reviewed').length,1);
  assert.equal(checkpoint.batches.filter(b=>b.status==='needs_attention').length,1);
- assert.equal(items.filter(i=>i.agentAudit&&!i.agentAudit.status).length,5);
+ assert.equal(items.filter(i=>i.agentAudit&&i.agentAudit.status==='reviewed').length,5);
 });

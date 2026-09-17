@@ -89,13 +89,16 @@ test("live upgrade audit preserves recoverable deleted projects as SQLite author
 });
 
 test("character assets use one exact solid background contract", () => {
-  const prompts = fs.readFileSync(path.join(repo, "app", "prompt-library.js"), "utf8");
+  const prompts = require(path.join(repo, "app", "canonical-prompt-defaults.json"));
   const workflow = fs.readFileSync(path.join(repo, "app", "workbench-workflow.js"), "utf8");
-  for (const source of [prompts, workflow]) {
-    assert.match(source, /#E9E9E9/);
-    assert.match(source, /禁止渐变、烟雾、云纹/);
-  }
-  assert.match(prompts, /正面、左侧 90 度、右侧 90 度、背面/);
-  assert.match(prompts, /禁止肖像大头、半身插图/);
+  const assetPrompt = fs.readFileSync(path.join(repo, "app", "physical-asset-prompt.js"), "utf8");
+  // 角色纯色背景合同：#E9E9E9 现权威于 workbench-workflow、物理资产提示词与内置模板 JSON
+  assert.match(assetPrompt, /#E9E9E9/);
+  assert.match(assetPrompt, /无渐变、布景、地平线、黑边或装饰光/);
+  assert.match(assetPrompt, /正面、左侧90度、右侧90度、背面/);
+  assert.match(assetPrompt, /无第五个人影、特写插图或第二身份/);
+  assert.match(JSON.stringify(prompts), /#E9E9E9/);
+  assert.match(workflow, /#E9E9E9/);
+  assert.match(workflow, /禁止渐变、烟雾、云纹/);
   assert.match(workflow, /画面四边不得出现黑色填充/);
 });

@@ -47,7 +47,9 @@ test("internal H3 blocks are never promoted as complete shot videos", () => {
 test("renderer keeps project selector aligned with loaded project and explains empty queue", () => {
   assert.ok(rendererSource.includes('const selector = $("#projectSelect")'));
   assert.ok(rendererSource.includes("const automationActive = automationIsActive(project)"));
-  assert.ok(rendererSource.includes("\\u89c6\\u9891\\u4efb\\u52a1\\u5c1a\\u672a\\u63d0\\u4ea4"));
+  // 空视频队列说明文案：空态 emptyText 逐镜解释当前状态（等待抽卡/生成中/失败原因）
+  assert.ok(rendererSource.includes("emptyText: videoState.key === \"generating\""));
+  assert.ok(rendererSource.includes("等待抽卡"));
   assert.match(rendererSource, /hiddenFromAssetUi !== true/);
   assert.match(rendererSource, /incompleteShotVideo !== true/);
 });

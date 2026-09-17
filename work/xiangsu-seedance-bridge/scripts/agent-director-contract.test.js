@@ -46,7 +46,8 @@ test("every H3 authoring entry uses the same continuous-block provider contract"
     assert.doesNotMatch(source, /one to five timed camera|one to five timed|最多5个按时间码|2[–-]5轮|15秒、3音色、5机位|final word by \d/i, `${file} still contains a superseded H3 packing contract`);
   }
   assert.match(joined, /at most two complete dialogue lines/i);
-  assert.match(joined, /最多2句完整台词/);
+  // 连续块台词合同：第三句开新任务、禁止拆句（原中文“最多2句完整台词”已并入该英文合同）
+  assert.match(joined, /A third line starts the next task; never split a sentence/);
   assert.match(joined, /音频[^。\n]*只[^。\n]*音色/);
   assert.match(joined, /四视图[^。\n]*(?:整张|原始文件整张)[^。\n]*(?:不裁切|不裁)/);
 });

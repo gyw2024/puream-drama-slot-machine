@@ -9,9 +9,10 @@ test('source-review version migration retains unchanged asset designs and shot c
  assert.deepEqual(writer.issues(record.document),[]);assert.equal(record.document.characters[0].visualDesign,undefined);
  const prior=structuredClone(project);let calls=[];
  const workflow={store:{getProject:()=>structuredClone(project),saveProject:p=>project=p,getSettings:()=>({textProvider:{}})},operationControls:new Map(),setAutomation:()=>{},productionTextOptions:(_id,_stage,opts)=>opts,
- generateText:async(_provider,m,o)=>{calls.push(o.stage);assert.equal(o.stage,'shot_screenplay_review');return {ok:true,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'Source reviewed against current requirements.'}],issues:[]};}};
+ generateText:async(_provider,m,o)=>{calls.push(o.stage);return {ok:true,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'Source reviewed against current requirements.'}],issues:[]};}};
  await require('../app/agent-analysis-entry').analyze(workflow,project.id,{forceReanalysis:true});
- assert.deepEqual(calls,['shot_screenplay_review']);assert.ok(writer.runtimeCurrent(project));
+ // 版本迁移复用已存完整稿：不再触发付费重审（内容审核延期至提示词确认页），资产设计与镜头候选保持原样
+ assert.deepEqual(calls,[],'version migration must not restart writer or paid review');assert.ok(writer.runtimeCurrent(project));
  assert.deepEqual(project.characters[0].visualDesign,prior.characters[0].visualDesign);assert.equal(project.characters[0].imagePath,prior.characters[0].imagePath);
  assert.deepEqual(project.scenes[0].visualDesign,prior.scenes[0].visualDesign);assert.deepEqual(project.shots[0].finalPromptEditing,prior.shots[0].finalPromptEditing);
 });
