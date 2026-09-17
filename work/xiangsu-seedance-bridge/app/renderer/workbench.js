@@ -5082,6 +5082,18 @@ function legacyNextActionForProject(project = state.project) {
   return { title: "本项目已完成", detail: "可播放、定位或重新编辑任一镜头；修改后指引会自动回到对应步骤。", stage: "final", selector: "#revealFinal" };
 }
 
+// T16 / §12.2: a guide target is only real when it is actually visible and
+// enabled in the CURRENT view — including every ancestor.
+function guideTargetVisible(node) {
+  if (!node || node.disabled || node.hidden) return false;
+  for (let current = node; current; current = current.parentElement) {
+    if (current.hidden || current.getAttribute?.("aria-hidden") === "true") return false;
+    const style = window.getComputedStyle(current);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+  }
+  return true;
+}
+
 function renderNextActionGuide(project = state.project) {
   const guide = $("#nextActionGuide");
   if (!guide) return;
@@ -5092,18 +5104,28 @@ function renderNextActionGuide(project = state.project) {
     guide.innerHTML = "";
     return;
   }
+  // §12.2: while a modal/dialog is open, background guidance is paused — only
+  // targets inside the modal itself may stay highlighted.
+  const openModal = document.querySelector("dialog[open], .modal.open, [role='dialog'][aria-modal='true']");
   const stageSelector = action.stage && state.stage !== action.stage ? `.stage-button[data-stage="${action.stage}"]` : "";
   const selectors = stageSelector ? [stageSelector] : (Array.isArray(action.selectors) && action.selectors.length ? action.selectors : [action.selector || ""]);
-  const targets = selectors.map(selector => selector ? document.querySelector(selector) : null).filter(Boolean);
+  const targets = selectors
+    .map(selector => selector ? document.querySelector(selector) : null)
+    .filter(node => guideTargetVisible(node) && (!openModal || openModal.contains(node)));
   const target = targets[0] || null;
-  targets.forEach(node => { if (!node.disabled && !node.hidden) node.classList.add("guided-next-action"); });
+  targets.forEach(node => node.classList.add("guided-next-action"));
   guide.hidden = false;
   guide.innerHTML = `<i aria-hidden="true"></i><div><b>${escapeHtml(action.title)}</b><p>${escapeHtml(action.detail)}</p></div>${target ? `<button type="button" id="goNextAction">带我去操作</button>` : ""}`;
   $("#goNextAction")?.addEventListener("click", () => {
     const liveTarget = document.querySelector(selectors[0]);
-    if (!liveTarget || liveTarget.disabled) return;
-    liveTarget.scrollIntoView({ behavior: "smooth", block: "center" });
-    window.setTimeout(() => liveTarget.click(), 220);
+    // §12.2 hard rule: guidance may switch tabs, scroll, focus and highlight.
+    // The user ALWAYS presses the real operation button themselves — clicking
+    // it for them could start a paid generation without consent.
+    if (!guideTargetVisible(liveTarget)) return;
+    if (action.stage && state.stage !== action.stage) switchStage(action.stage);
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    liveTarget.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
+    try { liveTarget.focus({ preventScroll: true }); } catch { liveTarget.focus(); }
   });
 }
 
