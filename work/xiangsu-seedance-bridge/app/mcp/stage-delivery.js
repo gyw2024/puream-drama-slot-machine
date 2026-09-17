@@ -78,7 +78,14 @@ function submit(dir,input){
  write(path.join(dir,'mcp-result.json'),{receipt,value});
  return {ok:true,...receipt,instruction:'The submitted result has been saved. You may finish this task. Do not repeat the full content in chat.'};
 }
-function read(dir){try{const r=JSON.parse(fs.readFileSync(path.join(dir,'mcp-result.json'),'utf8'));const req=JSON.parse(fs.readFileSync(path.join(dir,'request.json'),'utf8'));if(r.receipt.jobId!==req.jobId||crypto.createHash('sha256').update(JSON.stringify(r.value)).digest('hex')!==r.receipt.sha256)return null;return r;}catch{return null;}}
+function read(dir){try{const r=JSON.parse(fs.readFileSync(path.join(dir,'mcp-result.json'),'utf8'));const req=JSON.parse(fs.readFileSync(path.join(dir,'request.json'),'utf8'));if(r.receipt.jobId!==req.jobId||crypto.createHash('sha256').update(JSON.stringify(r.value)).digest('hex')!==r.receipt.sha256)return null;
+ // T04 receipt binding: a saved result is only a current, usable delivery while
+ // the task itself is not cancelled/interrupted/failed. A cancelled task keeps
+ // its artifact on disk as evidence, but read() no longer hands it out as the
+ // live result — cancel must never be overridden by an old receipt.
+ const jobFile=path.join(dir,'job.json');
+ if(fs.existsSync(jobFile)){const job=JSON.parse(fs.readFileSync(jobFile,'utf8'));if(['cancelled','interrupted','failed'].includes(job.status))return null;}
+ return r;}catch{return null;}}
 function launch(dir){
  const packaged=__dirname.includes('app.asar');
  const script=packaged?path.join(process.resourcesPath,'mcp','stage-delivery-entry.js'):path.join(__dirname,'stage-delivery-server.js');

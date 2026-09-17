@@ -402,7 +402,13 @@ class AgentHub {
       if(job.modality==='image'){const dir=path.join(this.root,jobId),receipt=JSON.parse(fs.readFileSync(path.join(dir,'result.json'),'utf8'));if(safeRaster(receipt.imagePath,dir).sha256!==receipt.sha256)throw fault('已交付图片发生变化。','LOCAL_AGENT_RESULT_STALE');}
       return {ok:true,status:'completed',reused:true};
     }
-    if (!job || job.status !== "running" || job.workerId !== workerId || job.claimToken !== claimToken) throw fault("任务已取消、已结束或归属不符，不能覆盖结果。", "LOCAL_AGENT_RESULT_STALE");
+    if (!job || job.status !== "running" || job.workerId !== workerId || job.claimToken !== claimToken) {
+      // T04: a late result after cancel/interrupt must NOT revive the job, but
+      // it is also real model output that was already paid for — archive it as
+      // a candidate artifact so nothing is lost, then refuse the overwrite.
+      if (job) this.archiveLateResult(job, { text, data, imagePath, imageTool, error });
+      throw fault("任务已取消、已结束或归属不符，不能覆盖结果。" + (job ? "迟到结果已归档到任务的 late-results 目录备查。" : ""), "LOCAL_AGENT_RESULT_STALE");
+    }
     const dir = path.join(this.root,jobId);
     if (error) { job.status = "failed"; job.message = "外部 Agent 未完成任务，现有项目与资产已保留；请检查该 Agent 后重试。"; this.save(job); return { ok: true, status: job.status }; }
     if (job.modality === "image") {
@@ -421,6 +427,18 @@ class AgentHub {
     if (!job) throw fault("未找到此 Agent 任务。", "LOCAL_AGENT_JOB_MISSING");
     if (!TERMINAL.has(job.status)) { job.status = "cancelled"; job.message = "任务已取消；外部 Agent 应停止处理，迟到结果不会覆盖项目。"; this.save(job); this.controllers.get(jobId)?.abort(); }
     return { ok: true, status: job.status };
+  }
+  // T04: archive a late/stale result as an immutable candidate artifact. The
+  // job keeps its terminal status — archived output never revives it.
+  archiveLateResult(job, payload) {
+    try {
+      const dir = path.join(this.root, job.id, "late-results");
+      fs.mkdirSync(dir, { recursive: true });
+      const existing = fs.readdirSync(dir).filter(n => /^late-\d+-/.test(n)).length;
+      const file = path.join(dir, `late-${existing + 1}-${Date.now()}.json`);
+      atomicJson(file, { receivedAt: new Date().toISOString(), jobStatusAtReceipt: job.status, payload });
+      return file;
+    } catch { return null; }
   }
   async probe(id, profile = {}) {
     if (!definition(id)) throw fault("请选择支持的 Agent。", "LOCAL_AGENT_UNKNOWN");
@@ -648,6 +666,8 @@ class AgentHub {
         if (job.status !== "completed") throw fault(job.message,job.status === "cancelled" ? "PROVIDER_REQUEST_ABORTED" : "LOCAL_AGENT_FAILED");
       } else {
         let args, env, stdin="", finalText="", nativeChunks="", eventFailure=null, preview="", lastProgress=0;
+        const terminalPolicy=require('./production-v2/terminal-policy');
+        let terminalClassified=null;
         const eventTrace=[];
         const codexReceipt=id==='codex'&&modality==='text'?require('./codex-text-receipt').createTracker():null;let processExitCode;
         const receiptTracker=id==='workbuddy'&&request.json&&request.responseSchema?require('./typed-output-receipt').createReceiptTracker(request.responseSchema,unwrapTypedEnvelope):null;
@@ -730,6 +750,23 @@ class AgentHub {
           const errorDiagnostic=terminalError?JSON.stringify(terminalError).replace(/(?:Bearer\s+)[^\s"\\]+/gi,'Bearer [redacted]').replace(/((?:api[_-]?key|token|password|secret)["'\s]*[:=]["'\s]*)[^\s,"'}]+/gi,'$1[redacted]').replace(/https?:\/\/[^\s"\\]+/g,'[redacted-url]').slice(0,2400):undefined;
           eventTrace.push({type:e.type||e.event||e.method||"unknown",stepType:e.step_update?.step_type,toolName:e.step_update?.tool_name||e.message?.content?.find(c=>c.type==="tool_use")?.name,toolNames:e.type==="system"?e.tools:undefined,mcpServers:e.type==="system"?e.mcp_servers:undefined,toolFeedback:e.message?.content?.filter(c=>c.type==="tool_result").map(c=>({isError:c.is_error,content:String(c.content).slice(0,1600)})),status:e.status||e.result?.status,errorDiagnostic,keys:Object.keys(e),resultKeys:e.result&&typeof e.result==="object"?Object.keys(e.result):undefined,deniedActionCount:Array.isArray(e.result?.denied_actions)?e.result.denied_actions.length:undefined});
           if(Array.isArray(e.result?.denied_actions)&&e.result.denied_actions.length&&!e.result.response)eventFailure=fault("Agent 因工具审批未获准而没有交付正文；本次未绕过权限或切换 API。纯写作应使用无工具配置后重试。","LOCAL_AGENT_TOOL_DENIED");
+          // T04 terminal-event classification: structured agents (codex,
+          // claude-code) get their real terminal events recorded via
+          // production-v2/terminal-policy. An item/message completion is text
+          // accumulation, never business completion; only turn.completed /
+          // result / turn.failed change the recorded terminal state.
+          if(id==='codex'||id==='claude-code'){
+            const classified=terminalPolicy.classifyEvent(id,e);
+            if(classified.status!=='running'){
+              terminalClassified=classified;
+              job.terminalEvent={status:classified.status,finishReason:classified.finishReason,at:new Date().toISOString()};
+              if(typeof e.usage==='object'&&e.usage)job.usage=e.usage;
+              const providerRequestId=e.response?.id||e.result?.response?.id||e.result?.id;
+              if(typeof providerRequestId==='string'&&providerRequestId)job.providerRequestId=providerRequestId.slice(0,160);
+              const sessionIdentity=e.session_id||e.sessionId||e.result?.session_id||e.result?.sessionId;
+              if(typeof sessionIdentity==='string'&&sessionIdentity)job.sessionId=sessionIdentity.slice(0,160);
+            }
+          }
           if(!job.firstEventAt)job.firstEventAt=new Date().toISOString();
           const reportedModel=e.init?.model||e.model;
           if(typeof reportedModel==="string"&&reportedModel.length<160)job.reportedModel=reportedModel;
@@ -819,6 +856,15 @@ class AgentHub {
           atomicJson(path.join(dir,"result.json"),{imagePath:image.file,imageTool:result.imageTool,sha256:image.sha256});
         } else fs.writeFileSync(path.join(dir,"result.txt"),finalText,"utf8");
         if(modality==='text')job.outputCharacters=finalText.length;
+        // T04: record the evidence level behind "completed". A real terminal
+        // event (turn.completed / result) or a valid MCP receipt is authoritative;
+        // a bare process exit is legacy evidence only and is labelled as such —
+        // business validation downstream stays the actual acceptance gate.
+        if(!job.mcpReceipt){
+          if(terminalClassified&&terminalClassified.status==='transport_complete')job.terminalEvidence='terminal_event';
+          else if(terminalClassified&&terminalClassified.status==='failed')job.terminalEvidence='terminal_error_event';
+          else job.terminalEvidence='process_exit_only';
+        } else job.terminalEvidence='mcp_receipt';
         job.status="completed";job.completedAt=new Date().toISOString();job.elapsedMs=Date.now()-Date.parse(job.createdAt);job.message="Agent 已交付结果，应用继续校验。";this.save(job);
       }
       if(modality === "image")return {...JSON.parse(fs.readFileSync(path.join(dir,"result.json"),"utf8")),jobId,agentId:id};
