@@ -750,12 +750,11 @@ class AgentHub {
           const errorDiagnostic=terminalError?JSON.stringify(terminalError).replace(/(?:Bearer\s+)[^\s"\\]+/gi,'Bearer [redacted]').replace(/((?:api[_-]?key|token|password|secret)["'\s]*[:=]["'\s]*)[^\s,"'}]+/gi,'$1[redacted]').replace(/https?:\/\/[^\s"\\]+/g,'[redacted-url]').slice(0,2400):undefined;
           eventTrace.push({type:e.type||e.event||e.method||"unknown",stepType:e.step_update?.step_type,toolName:e.step_update?.tool_name||e.message?.content?.find(c=>c.type==="tool_use")?.name,toolNames:e.type==="system"?e.tools:undefined,mcpServers:e.type==="system"?e.mcp_servers:undefined,toolFeedback:e.message?.content?.filter(c=>c.type==="tool_result").map(c=>({isError:c.is_error,content:String(c.content).slice(0,1600)})),status:e.status||e.result?.status,errorDiagnostic,keys:Object.keys(e),resultKeys:e.result&&typeof e.result==="object"?Object.keys(e.result):undefined,deniedActionCount:Array.isArray(e.result?.denied_actions)?e.result.denied_actions.length:undefined});
           if(Array.isArray(e.result?.denied_actions)&&e.result.denied_actions.length&&!e.result.response)eventFailure=fault("Agent 因工具审批未获准而没有交付正文；本次未绕过权限或切换 API。纯写作应使用无工具配置后重试。","LOCAL_AGENT_TOOL_DENIED");
-          // T04 terminal-event classification: structured agents (codex,
-          // claude-code) get their real terminal events recorded via
-          // production-v2/terminal-policy. An item/message completion is text
-          // accumulation, never business completion; only turn.completed /
-          // result / turn.failed change the recorded terminal state.
-          if(id==='codex'||id==='claude-code'){
+          // T04/T17 terminal-event classification: EVERY claimed client gets
+          // structured terminal classification via production-v2/terminal-
+          // policy (fixtures per client in scripts/t17). An item/message
+          // completion is text accumulation, never business completion.
+          if(definition(id)){
             const classified=terminalPolicy.classifyEvent(id,e);
             if(classified.status!=='running'){
               terminalClassified=classified;
