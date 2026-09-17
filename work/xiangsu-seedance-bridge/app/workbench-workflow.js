@@ -15218,6 +15218,9 @@ class WorkbenchWorkflow {
       });
     }
     this.preproductionBudget = new (require('./preproduction-budget').Budget)(this.store);
+    // T13: videos→rough-cut coordinator, backed by the foundry outbox. Used
+    // only for production-v2 routed projects; legacy paths are untouched.
+    this._productionCoordinator = null;
     this.generateText = (config, messages, options = {}) => this.preproductionBudget.run(options, budgetOptions => this.executeAdaptiveCapability(
       "text",
       config?.kind || "default",
@@ -28873,6 +28876,16 @@ ${shotAnchor}
     return { project, actions, repairedReferences };
   }
 
+  get productionCoordinator() {
+    if (this._productionCoordinator) return this._productionCoordinator;
+    const runtime = this.foundryKernel?.runtime;
+    if (!runtime) return null;
+    const { ProductionCoordinator } = require('./production-v2/coordinator');
+    const { ProductionRepository } = require('./production-v2/repository');
+    this._productionCoordinator = new ProductionCoordinator({ repository: new ProductionRepository(runtime) });
+    return this._productionCoordinator;
+  }
+
   // T05 / §5.2: the ONLY post entry. Local selected-video preflight plus post
   // work — never prompt preparation, never upstream media generation, never a
   // whole-script confirmation. Reachable directly and from runPipelineFromStage.
@@ -29043,6 +29056,13 @@ ${shotAnchor}
       this.setAutomation(projectId, { stage: "shot_videos", message: "正在补齐缺失的分镜视频" });
       this.assertOperationActive(projectId);
       await this.generateAllShotVideos(projectId, { track: false, promptPrepared: true });
+      // T13 / §9.2: completion is detected by re-checking the AUTHORITATIVE
+      // snapshot, not by trusting the array result. pending tasks wait for
+      // their own verified-download events to re-trigger the coordinator.
+      const afterVideos = this.store.getProject(projectId);
+      if (afterVideos.productionV2?.enabled && this.productionCoordinator) {
+        this.productionCoordinator.onArtifactCommitted(afterVideos, { settings: this.store.getSettings() });
+      }
     }
     if (shouldRun("final")) {
       this.setAutomation(projectId, { stage: "stitch", message: "正在拼接并验收完整短剧" });

@@ -46,8 +46,8 @@ check('B04.preparePromptReviewBundle', wf.includes('preparePromptReviewBundle'))
 check('B04.generateAllShotVideos', wf.includes('async generateAllShotVideos('));
 check('B04.generateAllAssets', wf.includes('async generateAllAssets('));
 check('B08.stitchProjectLocal', wf.includes('async stitchProjectLocal('));
-check('B09.视频完成->粗剪缺统一触发器', wf.includes('stitchProject(') && !wf.includes('onArtifactCommitted'),
-  'onArtifactCommitted 尚不存在（待 T13 引入）');
+check('B09.视频完成->粗剪统一触发器（T13 已引入）', wf.includes('stitchProject(') && wf.includes('onArtifactCommitted') && wf.includes('productionCoordinator'),
+  'coordinator.onArtifactCommitted 已接入工作流（T13 交付后状态）');
 
 const prd = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'prompt-review-dialog.js'), 'utf8');
 check('B05.prompt-review-dialog.sync', prd.includes('sync('));
