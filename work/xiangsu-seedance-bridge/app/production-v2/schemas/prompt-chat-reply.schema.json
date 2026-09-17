@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "assistantMessage", "replacementDisplay", "proposedExecutionPrompt", "changeReasons", "dependencyFindings"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["proposal", "needs_decision"] },
+    "assistantMessage": { "type": "string", "minLength": 1 },
+    "replacementDisplay": { "type": ["string", "null"] },
+    "proposedExecutionPrompt": { "type": ["string", "null"] },
+    "changeReasons": { "type": "array", "items": { "type": "string" } },
+    "dependencyFindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["targetId", "reason"],
+        "properties": { "targetId": { "type": "string" }, "reason": { "type": "string" } }
+      }
+    }
+  }
+}
