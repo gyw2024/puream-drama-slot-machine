@@ -156,17 +156,17 @@ function createFixture(t) {
     targetDurationSeconds: 180
   };
   project.characters = [
-    { id: "C01", name: "林岚", description: "四十五岁母亲，短发，深蓝针织衫", voiceDescription: "中低音，克制但有力量", signatureLine: "这份尊严，我自己拿回来。", promptOverrides: {} },
-    { id: "C02", name: "周强", description: "四十八岁男人，灰色夹克，神情强硬", voiceDescription: "偏低粗粝，急促强硬", signatureLine: "你别在这里装清高。", promptOverrides: {} }
+    { id: "C01", name: "林岚", description: "四十五岁母亲，短发，深蓝针织衫", voiceDescription: "中低音，克制但有力量", signatureLine: "这份尊严，我自己拿回来。", assetRequired: true, promptOverrides: {} },
+    { id: "C02", name: "周强", description: "四十八岁男人，灰色夹克，神情强硬", voiceDescription: "偏低粗粝，急促强硬", signatureLine: "你别在这里装清高。", assetRequired: true, promptOverrides: {} }
   ];
   project.scenes = [{ id: "SC01", name: "老旧客厅", description: "傍晚，旧沙发与木茶几，门在画面右侧，宾客虚化", promptOverrides: {} }];
   project.assetLibraries = {
-    props: [{ id: "P01", name: "牛皮纸档案袋", description: "边角磨损，封口完整", coreStory: true, promptOverrides: {} }],
+    props: [{ id: "P01", name: "牛皮纸档案袋", description: "边角磨损，封口完整", coreStory: true, assetRequired: true, promptOverrides: {} }],
     wardrobes: [],
     voices: []
   };
   project.product = { name: "暖心阅读灯", sellingPoints: "柔和照明，触控调光", imagePath: "", publicUrl: "" };
-  project.script = { raw: "完整三分钟剧本测试原稿", sourceFingerprint: "script-fixture" };
+  project.script = { raw: "完整三分钟剧本测试原稿", sourceFingerprint: require("crypto").createHash("sha256").update("完整三分钟剧本测试原稿").digest("hex"), analyzedAt: new Date().toISOString() };
   project.shots = [{
     id: "S01",
     number: 1,
@@ -229,6 +229,36 @@ function createFixture(t) {
     ],
     promptOverrides: {}
   }];
+  // The fixture represents an already-analyzed legacy project: a current
+  // shotScreenplay record with a matching per-shot execution fingerprint keeps
+  // preparePromptReviewBundle from re-entering the paid Agent intake.
+  const screenplayModule = require("../app/shot-screenplay");
+  const execution = {
+    id: "S01", sceneId: "SC01", duration: 12,
+    characterIds: ["C01", "C02"], visibleCharacterIds: ["C01", "C02"],
+    propIds: ["P01"], productVisible: true, productAction: "林岚把档案袋按在茶几上。",
+    opening: "档案袋在林岚手中，周强站在茶几对面。",
+    action: "林岚把档案袋按在茶几上，周强伸手去抢，林岚按住不退。",
+    dialogue: [
+      { id: "D001", speakerId: "C01", listenerIds: ["C02"], addressMode: "person", onScreen: true, text: "这份证据，你今天必须看清楚！", delivery: "压住怒火起句，重咬必须，尾音抬高", action: "右手按住档案袋，肩背前压" },
+      { id: "D002", speakerId: "C02", listenerIds: ["C01"], addressMode: "person", onScreen: true, text: "你以为一张纸就能翻案？", delivery: "虚张声势地顶回去，翻案二字压重", action: "手指停在半空，下颌绷紧" }
+    ],
+    ending: "档案袋被压在茶几上，周强的手停在半空。"
+  };
+  project.shots[0].shotExecution = execution;
+  project.shots[0].shotExecutionFingerprint = screenplayModule.hash(execution);
+  const document = {
+    format: "compact-screenplay-v2",
+    story: { title: "H3资产直投", synopsis: "林岚与周强围绕档案袋展开激烈攻防。", ending: "档案袋被按在茶几上，双方僵持。" },
+    characters: [
+      { id: "C01", name: "林岚", description: "四十五岁母亲，短发，深蓝针织衫", assetRequired: false, role: "母亲", voiceDescription: "中低音，克制但有力量" },
+      { id: "C02", name: "周强", description: "四十八岁男人，灰色夹克，神情强硬", assetRequired: false, role: "对手", voiceDescription: "偏低粗粝，急促强硬" }
+    ],
+    scenes: [{ id: "SC01", name: "老旧客厅", description: "傍晚，旧沙发与木茶几，门在画面右侧，宾客虚化", assetRequired: false }],
+    props: [{ id: "P01", name: "牛皮纸档案袋", description: "边角磨损，封口完整", assetRequired: true }],
+    shots: [execution]
+  };
+  project.script.shotScreenplay = screenplayModule.makeRecord(document, project.script.raw, {}, "original");
   store.saveProject(project);
   const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: root });
   return { root, store, workflow, projectId: created.id };
@@ -323,7 +353,7 @@ test("asset-direct image-only review contains identity, scene, object and H3 vid
   assert.equal(prepared.promptReview.counts.storyboards, 0);
 
   const propItem = prepared.promptReview.items.find(item => item.stage === "prop_asset");
-  assert.match(propItem.prompt, /写实影视道具资产图/);
+  assert.match(propItem.prompt, /写实资产图/);
   assert.match(propItem.prompt, /牛皮纸档案袋/);
   assert.doesNotMatch(propItem.prompt, /单张分镜关键帧/);
   const sceneItem = prepared.promptReview.items.find(item => item.stage === "scene_asset");
@@ -365,7 +395,7 @@ test("asset-direct image-only review contains identity, scene, object and H3 vid
   assert.equal(paidImageCalls, 0);
   const approved = await workflow.confirmAllPromptReview(projectId);
   assert.equal(approved.promptReview.status, "approved");
-  await workflow.generateImageCandidate(projectId, "character_intro", "C01", "", { promptPrepared: true });
+  await workflow.generateImageCandidate(projectId, "character_intro", "C01", "", { promptPrepared: true, allowDuplicateStart: true });
   assert.equal(paidImageCalls, 1);
   assert.equal(store.getProject(projectId).promptReview.status, "approved");
 });
@@ -396,14 +426,14 @@ test("asset-direct initial identity and scene anchors need no impossible predece
 
   const firstIdentity = await workflow.generateImageCandidate(projectId, "character_intro", "C01", "", { promptPrepared: true });
   assert.equal(calls.at(-1).references.length, 0, "the first identity portrait is the anchor and cannot require itself");
-  const secondIdentity = await workflow.generateImageCandidate(projectId, "character_intro", "C01", "", { promptPrepared: true });
+  const secondIdentity = await workflow.generateImageCandidate(projectId, "character_intro", "C01", "", { promptPrepared: true, allowDuplicateStart: true });
   assert.equal(calls.at(-1).references.length, 1, "a reroll must preserve the already selected identity");
   assert.equal(calls.at(-1).references[0].candidateId, firstIdentity.id);
   assert.notEqual(secondIdentity.id, firstIdentity.id);
 
   const firstScene = await workflow.generateImageCandidate(projectId, "scene_asset", "SC01", "", { promptPrepared: true });
   assert.equal(calls.at(-1).references.length, 0, "the first scene board establishes its own spatial anchor");
-  await workflow.generateImageCandidate(projectId, "scene_asset", "SC01", "", { promptPrepared: true });
+  await workflow.generateImageCandidate(projectId, "scene_asset", "SC01", "", { promptPrepared: true, allowDuplicateStart: true });
   assert.equal(calls.at(-1).references.length, 1, "a scene reroll must preserve the selected set topology");
   assert.equal(calls.at(-1).references[0].candidateId, firstScene.id);
 
@@ -458,6 +488,7 @@ test("asset-direct compiles one bounded semantic batch once and reuses it before
     const response = {
       items: [{
         shotId: "S01",
+        events: [{ id: "E01", actorIds: ["C01"], offscreenActorIds: [], propIds: ["P01"], usesProduct: false, start: 0, end: 4, after: [], continuityActionIds: [], throughoutDialogueIds: [], recordedSpeech: null, descriptionEn: "C01 presses P01 from her right hand onto the coffee table.", descriptionZh: "林岚用右手把档案袋按到桌面。" }],
         actionEn: "C01 presses P01 onto the table; C02 reaches for P01; C01 pins P01 down without retreating.",
         stateBeforeEn: "C01 holds P01 while C02 stands across the table.",
         stateAfterEn: "P01 is pinned to the table and C02's reaching hand stops in midair.",
