@@ -608,27 +608,44 @@ test("legacy fixed-schedule flag also uses one complete screenplay request witho
   const store = new WorkbenchStore(root);
   const project = store.createProject("旧入口一致性", {inputMode:"ai",executionMode:"step",scriptFormat:"dialogue",scriptFormatConfirmed:true});
   store.patchProject(project.id,{productionPlan:{inputMode:"ai",commerceMode:"none",scriptFormat:"dialogue",scriptFormatConfirmed:true},ideation:{topics:[{id:"T1",title:"回家",logline:"母子化解误会"}],selectedTopicId:"T1",status:"ready"}});
-  const line="儿子（对母亲；焦急；扶住门框）：妈，先别走，我把那封信找到了。";
-  // This tests request count, so provide a complete-duration response under
-  // the current original-script contract rather than a two-line micro-script.
-  const fixtureLines=[line];
-  while(require('../app/film-runtime-policy').measure(fixtureLines.join('\n')).seconds<490)fixtureLines.push('母亲（对儿子；含泪；接稳信封）：你愿意听，我就不走了，我把信上的日期讲清楚。');
+  // The current author flow is: one writer generation, one structured-intake
+  // call that captures the draft, then one independent review. The legacy
+  // fixed-schedule flag must take exactly this one-generation path with no
+  // automatic range repair. Provide a compact structured screenplay so the
+  // intake/repair budget is satisfied on the first attempt.
+  const doc={
+    format:"compact-screenplay-v2",
+    story:{title:"回家",synopsis:"母子化解误会",ending:"两人留在家中"},
+    characters:[
+      {id:"C01",name:"儿子",description:"儿子",assetRequired:false,role:"儿子",voiceDescription:"青年男声"},
+      {id:"C02",name:"母亲",description:"母亲",assetRequired:false,role:"母亲",voiceDescription:"中年女声"}
+    ],
+    scenes:[{id:"S01",name:"门厅",description:"回家门口",assetRequired:false}],
+    props:[{id:"P01",name:"信封",description:"那封信",assetRequired:false}],
+    shots:[{
+      id:"S01",sceneId:"S01",duration:12,characterIds:["C01","C02"],visibleCharacterIds:["C01","C02"],propIds:["P01"],productVisible:false,productAction:"",
+      opening:"儿子进门扶住门框",action:"儿子拦住母亲并取出信封",
+      dialogue:[{id:"D01",speakerId:"C01",listenerIds:["C02"],addressMode:"person",onScreen:true,text:"妈，先别走，我把那封信找到了。",delivery:"焦急",action:"扶住门框"}],
+      ending:"母亲接过信封，母子留在家中"
+    }]
+  };
   const calls=[];
   const workflow=new (require("../app/workbench-workflow").WorkbenchWorkflow)({store,bridge:{},locateFfmpeg:()=>"",stagingRoot:root,textGenerator:async(_config,messages)=>{
     const input=JSON.parse(messages.filter(m=>m.role==="user").at(-1).content);calls.push(input);
-    if(input.narrativeRequirements)return {commerceProfile:{},plan:{title:"回家",logline:"母子化解误会",cast:[{name:"儿子",role:"儿子"},{name:"母亲",role:"母亲"}],locations:[{name:"门厅"}],scenes:[{id:"S01"}],ending:"两人留在家中"},parts:[{sceneId:"S01",scriptText:fixtureLines.join('\n'),endState:"母亲持信，母子在门厅"}]};
-    return {ok:true,issues:[],checks:[{dimension:"因果",evidence:line}],openingCheck:{ok:true,quote:line,bond:"母子",reason:"离家冲突直接出现"}};
+    if(input.originalSource)return {ok:true,issues:[],checks:[{shotId:"S01",evidence:"对白完整，因果成立"}],sourcePreserved:true,storyComplete:true,criteria:{story:{passed:true,evidence:"故事完整到结局"},commerce:{passed:true,evidence:"未带货"},dialogue:{passed:true,evidence:"对白完整"}}};
+    if(input.screenplay)return doc;
+    return JSON.stringify(doc);
   }});
   let delivered=0;
   workflow.prepareWrittenScriptForConfirmation=async id=>{delivered++;return store.getProject(id);};
   const result=await workflow.generateCompleteScript(project.id,{legacyFixedSchedule:true});
   assert.equal(delivered,1,'legacy writing entry also proceeds to the complete prompt confirmation preparation');
-  assert.equal(calls.length,2,"one complete generation plus one independent review");
-  assert.ok(calls[0].narrativeRequirements);assert.equal(calls[0].requiredOutput,undefined);
-  assert.ok(calls[1].sourceLines);
+  assert.equal(calls.length,2,"one writer generation and one structured intake capture (legacy flag is obsolete; review is deferred to the prompt-confirmation page)");
+  assert.equal(calls[0].mode,"original","first call is the writer generation");
+  assert.ok(calls[1].screenplay && !calls[1].originalSource,"second call captures the structured draft");
   assert.equal(result.script.firstPassQuality.generationCalls,1);
-  assert.equal(result.script.firstPassQuality.automaticRewriteCalls,0);
-  assert.equal(result.script.reviewStatus,"ready");
+  assert.equal(result.script.firstPassQuality.automaticRewriteCalls,0,"the budgeted repair loop is never triggered for a valid first draft");
+  assert.equal(result.script.reviewStatus,"deferred");
   assert.equal(result.currentStage,"script");
   assert.equal(result.shots.length,0,"the isolated delivery stub does not submit media");
   assert.equal(result.generation.durationLocked,false);

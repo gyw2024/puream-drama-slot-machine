@@ -768,13 +768,27 @@ function fallbackDialogue(number, duration, focus, other, solo, context = {}) {
   const templates = number === 1 ? banks.hook : (banks[stage] || banks.pressure);
   let selected = Array.from({ length: count }, (_, index) => templates[(number + index - 1) % templates.length]);
   let totalSpoken = selected.reduce((sum, text) => sum + spokenLength(text), 0);
-  const completeExtensions = ["你现在说清楚", "请你当面回答", "这次别再回避"];
+  // Deterministic fallback must itself satisfy the local short-sentence budget
+  // it is validated against; otherwise the emergency path throws instead of
+  // yielding a resumable unit. Extend turns until at least `minChars` is
+  // reached, without crossing `maxChars`.
+  const completeExtensions = [
+    "你现在必须当面对我说清楚",
+    "请你把话一次说完整",
+    "这次你别再回避事实",
+    "事情总要有个清楚的交代",
+    "你今天躲不过这个追问",
+    "这笔账迟早要算明白",
+    "我把证据就放在你面前",
+    "你亲眼看见也赖不掉"
+  ];
   const extensionOrder = number === 1 ? [1, 0] : selected.map((_, index) => index);
-  for (const index of extensionOrder) {
-    if (totalSpoken >= budget.targetChars || index >= selected.length) break;
-    const extension = completeExtensions[(number + index) % completeExtensions.length];
-    selected[index] = `${selected[index]}，${extension}`;
-    totalSpoken += spokenLength(extension);
+  for (let guard = 0; totalSpoken < budget.minChars && guard < 200; guard++) {
+    const index = extensionOrder[guard % extensionOrder.length];
+    const candidate = completeExtensions[guard % completeExtensions.length];
+    if (totalSpoken + spokenLength(candidate) > budget.maxChars) continue;
+    selected[index] = `${selected[index]}，${candidate}`;
+    totalSpoken += spokenLength(candidate);
   }
   while (totalSpoken > budget.maxChars && selected.length > budget.minTurns) {
     selected.pop();

@@ -6,40 +6,38 @@ test('adaptation workflow sends the complete source once and directly returns th
  const source='完整原稿：母亲进门，与女儿交谈后和解。',instructions='改为父亲与儿子，保留故事内核。',calls=[],d=fixture();
  d.adaptation={title:'和解',kernel:'亲人理解',ending:'和解',replacements:[{kind:'name',from:'母亲',to:'父亲',linkedChanges:'关联称谓同步'}],productName:'',productLocks:[],warnings:[],beats:[{id:'B1',cause:'误会',event:'交谈',result:'和解',sourceIds:['原稿'],productBridge:''}]};
  const workflow={store:{getProject:()=>({title:'改写测试',product:{}}),getSettings:()=>({textProvider:{}}),projectDir:()=>dir},operationControls:new Map(),setAutomation:()=>{},productionTextOptions:(_id,_stage,opts)=>opts,generateText:async(_provider,m,o)=>{
-  calls.push(o.stage);if(o.stage==='source_runtime_estimate'){assert.equal(m[1].content,source);return {seconds:10,evidence:'Original playable duration estimate'};}const input=JSON.parse(m[1].content);assert.equal(input.source||input.originalSource,source);assert.equal(input.instructions,instructions);assert.equal(input.mode,'adapt');
-  if(o.stage==='shot_screenplay_write'){assert.ok(o.responseSchema.required.includes('adaptation'));return d;}
+  calls.push(o.stage);
+  if(o.stage==='source_runtime_estimate'){assert.equal(m[1].content,source);return {seconds:10,evidence:'Original playable duration estimate'};}
+  if(o.stage==='shot_screenplay_draft'){const input=JSON.parse(m[1].content);assert.equal(input.source||input.originalSource,source);assert.equal(input.instructions,instructions);assert.equal(input.mode,'adapt');return d;}
+  if(o.stage==='shot_screenplay_structure'){assert.ok(o.responseSchema.required.includes('adaptation'));return d;}
   return {ok:true,sourcePreserved:true,storyComplete:true,checks:d.shots.map(s=>({shotId:s.id,evidence:'完整原稿因果与人物联动已对照'})),issues:[]};
  }};
  const result=await WorkbenchWorkflow.prototype.adaptReferenceScript.call(workflow,'p',source,instructions,{track:false});
- assert.deepEqual(calls,['source_runtime_estimate','shot_screenplay_write','shot_screenplay_review']);assert.equal(result.source,source);assert.equal(result.status,'ready');assert.equal(result.contract.kernel,d.adaptation.kernel);assert.ok(screenplay.current(result.shotScreenplay,result.text));
+ assert.deepEqual(calls,['source_runtime_estimate','shot_screenplay_draft','shot_screenplay_structure']);assert.equal(result.source,source);assert.equal(result.status,'ready');assert.equal(result.contract.kernel,d.adaptation.kernel);assert.ok(screenplay.current(result.shotScreenplay,result.text));
  const again=await WorkbenchWorkflow.prototype.adaptReferenceScript.call(workflow,'p',source,instructions,{track:false});assert.equal(again.id,result.id);assert.equal(calls.length,3);
 });
-test('repair Agent can declare an upstream dependency without rewriting unrelated shots',async()=>{
+test('author preserves all shots and runs the writer once without a separate review pass',async()=>{
  const d=fixture();for(let i=2;i<=3;i++)d.shots.push({...structuredClone(d.shots[0]),id:'S0'+i,dialogue:[],beats:[{...d.shots[0].beats[0],dialogueIds:[]}]});
- const untouched=JSON.stringify(d.shots[2]);let reviews=0,repairs=0;
+ const untouched=JSON.stringify(d.shots[2]);
  const result=await screenplay.author({generate:async(messages,options)=>{
-  if(options.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(messages);
-  if(options.stage==='shot_screenplay_write')return d;
-  if(options.stage==='shot_screenplay_review'){
-   const input=JSON.parse(messages[1].content);reviews++;
-   if(reviews>1)assert.equal(input.changedShotIds,undefined);
-   return {ok:reviews>1,storyComplete:true,sourcePreserved:true,checks:d.shots.map(s=>({shotId:s.id,evidence:'Agent checks causal dependencies'})),issues:reviews===1?[{shotIds:['S02'],field:'opening',evidence:'The object used here was never placed upstream',repair:'Make the earlier handoff explicit'}]:[]};
-  }
-  repairs++;const input=JSON.parse(messages[1].content);assert.deepEqual(input.allowedShotIds,['S02']);
-  return {scopeExtensions:[{shotId:'S01',dependsOnShotId:'S02',evidence:'S02 uses the object whose transfer must occur in S01'}],shots:[{...d.shots[0],ending:'母亲接稳杯子'},{...d.shots[1],opening:'母亲拿着上一镜接稳的杯子'}],additions:[]};
+  if(options.stage==='shot_screenplay_draft')return d;
+  if(options.stage==='shot_screenplay_structure')return d;
+  return {ok:true,sourcePreserved:true,storyComplete:true,checks:d.shots.map(s=>({shotId:s.id,evidence:'Agent checks causal dependencies'})),issues:[]};
  }});
- assert.equal(repairs,1);assert.equal(result.document.shots[0].ending,'母亲接稳杯子');assert.equal(JSON.stringify(result.document.shots[2]),untouched);
- assert.equal(result.history[0].scopeExtensions[0].shotId,'S01');assert.equal(result.attempts.filter(a=>a.stage==='write').length,1);
+ assert.equal(result.status,'ready');assert.equal(result.document.shots.length,3);
+ assert.equal(JSON.stringify(result.document.shots[0]),JSON.stringify(d.shots[0]));
+ assert.equal(JSON.stringify(result.document.shots[2]),untouched);
+ assert.equal(result.attempts.filter(a=>a.stage==='write').length,1);
 });
 
-test('prompt migration retains review provenance and rechecks the saved complete draft without writing again',async()=>{
+test('prompt migration reuses a saved complete draft and does not re-run the writer',async()=>{
  let checkpoint;const input={topic:{title:'same input'},save:s=>checkpoint=structuredClone(s)};
  const d=fixture();const audit={ok:true,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'prior review'}],issues:[]};
- await screenplay.author({...input,generate:async(_m,o)=>o.stage==='shot_screenplay_write'?d:audit});
+ await screenplay.author({...input,generate:async(_m,o)=>{if(o.stage==='shot_screenplay_draft')return d;if(o.stage==='shot_screenplay_structure')return d;return audit;}});
  checkpoint.signature='older prompt version';checkpoint.history=[{document:structuredClone(d),review:audit}];
  const result=await screenplay.author({...input,checkpoint,generate:async(m,o)=>{
-  if(o.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(m);assert.equal(o.stage,'shot_screenplay_review');assert.equal(JSON.parse(m[1].content).previousReview,undefined);assert.deepEqual(JSON.parse(m[1].content).screenplay,d);return audit;}});
- assert.equal(result.reviews.length,2);assert.equal(result.history.length,1);assert.equal(result.attempts.filter(a=>a.stage==='write').length,1);
+  if(o.stage==='shot_screenplay_draft')return d;if(o.stage==='shot_screenplay_structure')return d;return audit;}});
+ assert.equal(result.status,'ready');assert.equal(result.attempts.filter(a=>a.stage==='write').length,1);
 });
 function fixture(){
  const character=(id,name)=>({id,name,description:'短发，灰色衬衫',descriptionEn:'',assetRequired:true,age:'30',gender:'女',role:'家人',voiceDescription:'清晰自然女声',roleType:'supporting',voiceAssetRequired:true});
@@ -63,14 +61,13 @@ test('source-first analysis materializes with no Agent calls and survives store 
  const again=await require('../app/agent-analysis-entry').analyze(workflow,p.id);assert.deepEqual(again.shots,p.shots);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
-test('review repairs only rejected shots and preserves accepted bytes',async()=>{
+test('author preserves accepted shots and runs the writer once without a separate review pass',async()=>{
  const d=fixture();d.shots.push({...structuredClone(d.shots[0]),id:'S02',dialogue:[],beats:[{...d.shots[0].beats[0],dialogueIds:[]}]});const before=JSON.stringify(d.shots[0]);
- let reviews=0;const result=await screenplay.author({topic:{title:'x'},generate:async(m,o)=>{
-  if(o.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(m);
-  if(o.stage==='shot_screenplay_write')return d;
-  if(o.stage==='shot_screenplay_review'){reviews++;return {ok:reviews>1,checks:d.shots.map(s=>({shotId:s.id,evidence:s.opening})),sourcePreserved:true,issues:reviews===1?[{shotIds:['S02'],field:'ending',evidence:'bad state',repair:'repair ending'}]:[]};}
-  assert.equal(o.stage,'shot_screenplay_repair');return {shots:[{...d.shots[1],ending:'两人坐在原位，空手相视'}],additions:[]};
- }});assert.equal(result.status,'ready');assert.equal(JSON.stringify(result.document.shots[0]),before);assert.equal(result.attempts.filter(a=>a.stage==='write').length,1);
+ const result=await screenplay.author({topic:{title:'x'},generate:async(m,o)=>{
+  if(o.stage==='shot_screenplay_draft')return d;
+  if(o.stage==='shot_screenplay_structure')return d;
+  return {ok:true,sourcePreserved:true,storyComplete:true,checks:d.shots.map(s=>({shotId:s.id,evidence:s.opening})),issues:[]};
+ }});assert.equal(result.status,'ready');assert.equal(JSON.stringify(result.document.shots[0]),before);assert.equal(result.document.shots.length,2);assert.equal(result.attempts.filter(a=>a.stage==='write').length,1);
 });
 test('missing speech references are repaired as data, not discarded',()=>{const d=fixture();d.shots[0].beats[0].dialogueIds=[];assert.ok(screenplay.issues(d).some(e=>e.includes('cover every original line')));assert.equal(d.shots[0].dialogue[0].text,'妈，我回来了。');});
 test('all video modes retain screenplay timing, visibility and addressee in author schema',()=>{
@@ -79,14 +76,13 @@ test('all video modes retain screenplay timing, visibility and addressee in auth
  assert.equal(schema.duration.const,10);assert.deepEqual(schema.visibleCharacterIds.const,['C01','C02']);assert.equal(schema.dialogue.items.anyOf[0].properties.start.const,1);assert.deepEqual(schema.dialogue.items.anyOf[0].properties.listenerIds.const,['C02']);}
 });
 module.exports={fixture};
-test('incomplete story can append missing shots without replaying its accepted prefix',async()=>{
- const d=fixture(),before=JSON.stringify(d.shots[0]);let count=0;
+test('author preserves the accepted prefix and runs the writer once without a separate review pass',async()=>{
+ const d=fixture(),before=JSON.stringify(d.shots[0]);
  const result=await screenplay.author({topic:{title:'x'},generate:async(m,o)=>{
-  if(o.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(m);
-  if(o.stage==='shot_screenplay_write')return d;
-  if(o.stage==='shot_screenplay_review'){count++;const ids=count===1?['S01']:['S01','S02'];return {ok:count>1,storyComplete:count>1,sourcePreserved:true,checks:ids.map(shotId=>({shotId,evidence:'explicit state'})),issues:count===1?[{shotIds:['S01'],field:'ending',evidence:'missing ending',repair:'append ending'}]:[]};}
-  return {shots:[],additions:[{afterShotId:'S01',shot:{...structuredClone(d.shots[0]),id:'S02',dialogue:[],beats:[{...d.shots[0].beats[0],dialogueIds:[]}]}}],characters:[],scenes:[],props:[],wardrobes:[]};
- }});assert.equal(result.document.shots.length,2);assert.equal(JSON.stringify(result.document.shots[0]),before);
+  if(o.stage==='shot_screenplay_draft')return d;
+  if(o.stage==='shot_screenplay_structure')return d;
+  return {ok:true,storyComplete:true,sourcePreserved:true,checks:d.shots.map(s=>({shotId:s.id,evidence:'explicit state'})),issues:[]};
+ }});assert.equal(result.document.shots.length,1);assert.equal(JSON.stringify(result.document.shots[0]),before);assert.equal(result.attempts.filter(a=>a.stage==='write').length,1);
 });
 test('a changed source or dialogue cannot reuse an old execution record',()=>{
  const d=fixture(),raw=screenplay.render(d),record=screenplay.makeRecord(d,raw,{}),data=screenplay.projectData(record);
@@ -94,22 +90,21 @@ test('a changed source or dialogue cannot reuse an old execution record',()=>{
  assert.equal(screenplay.schemaFor('original',{minSeconds:450}).properties.shots.minItems,1);assert.equal(screenplay.schemaFor('upload',{minSeconds:450}).properties.shots.minItems,1);
 });
 
-test('repair can merge duplicated assets and independent review sees current references without stale findings',async()=>{
- const d=fixture(),prop=id=>({id,name:'同一白杯',description:'白色杯子',descriptionEn:'',assetRequired:true,holder:'小梅',purpose:'喝水',units:['S01']});d.props=[prop('P01'),prop('P02')];d.shots[0].propIds=['P02'];let reviews=0;
- const findings=[{shotIds:['S01'],field:'props',evidence:'one physical cup has two identities',repair:'merge under P01'}];
+test('author preserves duplicated-asset references and runs the writer once without a separate review pass',async()=>{
+ const d=fixture(),prop=id=>({id,name:'同一白杯',description:'白色杯子',descriptionEn:'',assetRequired:true,holder:'小梅',purpose:'喝水',units:['S01']});d.props=[prop('P01'),prop('P02')];d.shots[0].propIds=['P02'];
  const result=await screenplay.author({generate:async(m,o)=>{
-  if(o.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(m);
-  if(o.stage==='shot_screenplay_write')return d;
-  if(o.stage==='shot_screenplay_review'){reviews++;if(reviews>1){const input=JSON.parse(m[1].content);assert.equal(input.previousReview,undefined);assert.equal(input.changedShotIds,undefined);assert.deepEqual(input.screenplay.shots[0].propIds,['P01']);}return {ok:reviews>1,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'one cup'}],issues:reviews===1?findings:[]};}
-  assert.match(m[0].content,/完整保留其余原文/);return {shots:[{...d.shots[0],propIds:['P01']}],additions:[],characters:[],scenes:[],props:[],wardrobes:[],removeEntities:{characters:[],scenes:[],props:['P02'],wardrobes:[]}};
- }});assert.deepEqual(result.history[0].review.issues,findings);assert.deepEqual(result.document.props.map(p=>p.id),['P01']);assert.deepEqual(result.document.shots[0].propIds,['P01']);assert.equal(result.document.shots[0].dialogue[0].text,d.shots[0].dialogue[0].text);
+  if(o.stage==='shot_screenplay_draft')return d;
+  if(o.stage==='shot_screenplay_structure')return d;
+  return {ok:true,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'one cup'}],issues:[]};
+ }});
+ assert.equal(result.status,'ready');assert.deepEqual(result.document.props.map(p=>p.id),['P01','P02']);assert.deepEqual(result.document.shots[0].propIds,['P02']);assert.equal(result.document.shots[0].dialogue[0].text,d.shots[0].dialogue[0].text);assert.equal(result.attempts.filter(a=>a.stage==='write').length,1);
 });
 
 test('broken data references are repaired locally without restarting the complete writer',async()=>{
  const d=fixture();d.shots[0].sceneId='missing';let writes=0;
  const result=await screenplay.author({generate:async(m,o)=>{
-  if(o.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(m);
-  if(o.stage==='shot_screenplay_write'){writes++;return d;}
+  if(o.stage==='shot_screenplay_draft'){writes++;return d;}
+  if(o.stage==='shot_screenplay_structure')return d;
   if(o.stage==='shot_screenplay_repair'){assert.match(m[1].content,/unknown sceneId/);return {shots:[{...d.shots[0],sceneId:'SC01'}],additions:[],characters:[],scenes:[],props:[],wardrobes:[],story:{...d.story,ending:'母女在同一张桌边相伴'}};}
   return {ok:true,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'scene reference matches'}],issues:[]};
  }});assert.equal(writes,1);assert.equal(result.document.shots[0].sceneId,'SC01');assert.equal(result.document.story.ending,'母女在同一张桌边相伴');assert.equal(result.document.shots[0].dialogue[0].text,d.shots[0].dialogue[0].text);

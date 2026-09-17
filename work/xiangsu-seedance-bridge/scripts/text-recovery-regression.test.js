@@ -28,6 +28,7 @@ test("dialogue binding collapses duplicated shot/subshot views to one authored l
 
 test("production text attempts use twenty minutes and one receipt-aware recovery", () => {
   const options = WorkbenchWorkflow.prototype.productionTextOptions.call({
+    textStageDedupeScope: WorkbenchWorkflow.prototype.textStageDedupeScope,
     operationControls: new Map(),
     setAutomation() {}
   }, "project-test", "asset_prompt", { timeoutMs: 90_000, maxReconnectAttempts: 1 });
@@ -38,6 +39,7 @@ test("production text attempts use twenty minutes and one receipt-aware recovery
 test("production text rate-limit recovery exposes the provider wait without changing the logical task", () => {
   const updates = [];
   const options = WorkbenchWorkflow.prototype.productionTextOptions.call({
+    textStageDedupeScope: WorkbenchWorkflow.prototype.textStageDedupeScope,
     operationControls: new Map(),
     setAutomation(_projectId, update) { updates.push(update); }
   }, "project-rate-limit", "topics", {});

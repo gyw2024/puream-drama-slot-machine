@@ -161,7 +161,7 @@ function createFixture(t) {
   ];
   project.scenes = [{ id: "SC01", name: "老旧客厅", description: "傍晚，旧沙发与木茶几，门在画面右侧，宾客虚化", promptOverrides: {} }];
   project.assetLibraries = {
-    props: [{ id: "P01", name: "牛皮纸档案袋", description: "边角磨损，封口完整", promptOverrides: {} }],
+    props: [{ id: "P01", name: "牛皮纸档案袋", description: "边角磨损，封口完整", coreStory: true, promptOverrides: {} }],
     wardrobes: [],
     voices: []
   };
@@ -283,6 +283,10 @@ test("asset-direct never revives a visually rejected stale library identity", t 
 
 test("asset-direct image-only review contains identity, scene, object and H3 video prompts but no audio, storyboard or character-video task", async t => {
   const { store, workflow, projectId } = createFixture(t);
+  // The fixture project is already authored (shots/dialogue are defined
+  // explicitly), so prompt-review bundle compilation must not re-run the
+  // auth-gated screenplay separation. Skip it for this offline unit test.
+  workflow.analyzeScript = async () => workflow.store.getProject(projectId);
   const plan = workflow.buildAssetBatchPlan(projectId);
   const kinds = plan.map(item => item.kind);
   assert.ok(kinds.includes("character_intro"));

@@ -221,17 +221,23 @@ test("topic JSON parser accepts a root array without weakening other schemas", (
 
 test("topic source prompt opens creative space and only borrows the reference story kernel", () => {
   const prompt = topicIdeationRuntimePrompt({ prompts: {}, promptModes: {} }, { generation: { videoEngine: "hailuo-h3" } });
-  assert.match(prompt, /自由发散一批真正不同的“如果……会怎样”故事/);
-  assert.match(prompt, /storyMechanism只在故事成形后选择最接近的一项作为标签/);
-  assert.match(prompt, /剧情带货系统编写规则/);
-  assert.match(prompt, /人物关系、职业、地点、道具、证据、事件顺序、具体反转、结局动作、标题句式和对白都要重新创造/);
+  // Creative freedom: causal-chain-different stories, no fixed relationship /
+  // location / evidence / reversal quota filling.
+  assert.match(prompt, /先构思因果链不同的故事/);
+  assert.match(prompt, /不按固定关系、地点、证据或反转配额填空/);
+  // Commerce handling is explained inline, not as a separate system module, and
+  // non-commerce never implants a product.
+  assert.match(prompt, /带货模式说明需求如何从剧情发生/);
+  assert.match(prompt, /非带货不植入/);
+  // Confirmed/unaffected content is preserved across transport continuation.
+  assert.match(prompt, /保留未受影响的内容和用户确认版本/);
+  assert.match(prompt, /Preserve completed cards on transport continuation/);
   assert.equal(REFERENCE_STORY_KERNELS.length, 0);
   assert.doesNotMatch(prompt, /K01 带货案例 R01/);
   assert.doesNotMatch(prompt, /K19 带货案例 R25/);
-  assert.match(prompt, /此前可见需求→为什么此刻使用→人物怎样使用→镜头可见的客观结果→关系或决定怎样变化/);
-  assert.match(prompt, /判断重复要看完整因果链/);
-  assert.match(prompt, /如果本轮提前结束，已经完整写好的题也必须保留/);
-  assert.doesNotMatch(prompt, /T01–T03 rescue_repaid|机制配额固定|conflictDomain 必须各不相同/);
+  // The fixed-quota / slot-filling wording is gone; only the task schema is required.
+  assert.doesNotMatch(prompt, /机制配额固定|conflictDomain 必须各不相同/);
+  assert.match(prompt, /T01–T10/);
 });
 
 test("topic schema asks for ten while the runtime transport can close on a non-empty partial result", () => {
@@ -258,18 +264,21 @@ test("topic schema asks for ten while the runtime transport can close on a non-e
   ]);
 });
 
-test("only an explicitly selected commerce mode requires product details before topic generation", () => {
-  assert.deepEqual(topicProductReadiness({ productionPlan: { commerceMode: "none" }, product: {} }), {
+test("a product present requires complete product details before topic generation", () => {
+  // commerceMode is derived from product presence: a name or image makes the
+  // project "natural"; otherwise it is "none" and no product gating applies.
+  assert.deepEqual(topicProductReadiness({ product: {} }), {
     commerceMode: "none", required: false, ready: true, missing: []
   });
-  const missing = topicProductReadiness({ productionPlan: { commerceMode: "natural" }, product: {} });
+  const missing = topicProductReadiness({ product: { name: "暖心阅读灯" } });
+  assert.equal(missing.commerceMode, "natural");
   assert.equal(missing.required, true);
   assert.equal(missing.ready, false);
-  assert.deepEqual(missing.missing, ["上传商品图", "填写商品名称"]);
+  assert.deepEqual(missing.missing, ["上传商品图"]);
   const readyProject = {
-    productionPlan: { commerceMode: "explicit" },
     product: { imagePath: __filename, name: "暖心阅读灯", sellingPoints: "柔和阅读光；旋钮调节", price: "29.9元", offer: "无促销", purchaseInstructions: "点击左下角头像进入橱窗购买" }
   };
+  assert.equal(topicProductReadiness(readyProject).commerceMode, "natural");
   assert.equal(topicProductReadiness(readyProject).ready, true);
 });
 
@@ -278,8 +287,7 @@ test("commerce mode with incomplete product context stops locally without callin
     id: "project-commerce-product-first",
     activity: [],
     ideation: { status: "draft", topics: [] },
-    productionPlan: { commerceMode: "natural" },
-    product: { imagePath: "", name: "", sellingPoints: "" },
+    product: { imagePath: "", name: "暖心阅读灯", sellingPoints: "" },
     generation: { engine: "hailuo-h3" },
     textProviderDiagnostics: { failures: [] }
   };
@@ -415,7 +423,7 @@ test("commerce mode changes adapt the topic and never resume a script from the w
   const project = {
     activity: [],
     productionPlan: { commerceMode: "none", scriptFormat: "production" },
-    product: { imagePath: __filename, name: "暖心阅读灯", sellingPoints: "柔和阅读光" },
+    product: {},
     ideation: {
       selectedTopicId: "topic-1",
       topics: [{ ...validTopicFixture()[0], id: "topic-1", title: "灯亮以后", productPlacement: "暖心阅读灯帮助母女和解" }],
@@ -647,7 +655,7 @@ test("a valid seven-card Agent response is displayed immediately without a paid 
     id: "project-topic-partial-repair",
     activity: [],
     ideation: { status: "draft", topics: [] },
-    product: { name: "暖腰贴", sellingPoints: "日常保暖支撑" },
+    product: { name: "暖腰贴", sellingPoints: "日常保暖支撑", imagePath: __filename },
     generation: { engine: "hailuo-h3" },
     textProviderDiagnostics: { failures: [] }
   };
@@ -906,7 +914,7 @@ test("a non-empty zero-valid Gemini result gets one bounded AI repair carrying t
     id: "project-topic-zero-valid-repair",
     activity: [],
     ideation: { status: "draft", topics: [] },
-    product: { name: "暖腰贴", sellingPoints: "日常保暖支撑" },
+    product: { name: "暖腰贴", sellingPoints: "日常保暖支撑", imagePath: __filename },
     generation: { engine: "hailuo-h3" },
     textProviderDiagnostics: { failures: [] }
   };

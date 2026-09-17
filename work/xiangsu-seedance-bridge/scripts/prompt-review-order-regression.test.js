@@ -2,6 +2,46 @@ function continuityFixture(payload){return {shots:(payload.requestedShotIds||(pa
 function designFixture(payload){return {items:(payload.items||[]).map(i=>({id:i.id,descriptionZh:'synthetic source-grounded design fixture',descriptionEn:i.id.startsWith('character:')?'One fictional adult has short dark hair, a neutral closed-mouth posture, and plain consistent clothing.':'One reusable empty room has fixed door geometry, a wooden table, plain walls and consistent soft daylight.',designChoices:[],gender:'male'}))};}
 "use strict";
 
+// Deterministic schema-driven responder for the agent stages the production
+// pipeline invokes during prompt-review compilation. The refactor centralized
+// system prompts (now Chinese) and added new stages, so the legacy
+// content-string branch matching no longer fires; this produces a structurally
+// valid delivery for every stage from its responseSchema.
+function fillBySchema(schema, payload) {
+  const fillObject = (node, fixed = {}) => {
+    const obj = {};
+    for (const k of (node && node.required) || []) obj[k] = (k in fixed) ? fixed[k] : sample(node.properties && node.properties[k]);
+    return obj;
+  };
+  const sample = (node) => {
+    if (!node) return undefined;
+    if (node.anyOf) return fillObject(node.anyOf[0]);
+    if (node.const !== undefined) return node.const;
+    if (Array.isArray(node.enum)) return node.enum.includes("source_supported") ? "source_supported" : node.enum[0];
+    if (node.type === "object") return fillObject(node);
+    if (node.type === "array") {
+      const item = node.items;
+      const enumKey = ["id", "shotId", "entityId"].find(k => item && item.properties && item.properties[k] && Array.isArray(item.properties[k].enum));
+      if (enumKey) return item.properties[enumKey].enum.map(v => fillObject(item, { [enumKey]: v }));
+      if (item && item.anyOf) {
+        const n = node.minItems != null ? node.minItems : item.anyOf.length;
+        return Array.from({ length: n }, (_, i) => fillObject(item.anyOf[i % item.anyOf.length]));
+      }
+      if (item && item.properties && item.properties.id && Array.isArray(payload && payload.items)) {
+        return (payload.items || []).map(it => fillObject(item, { id: it.id != null ? it.id : (it.shotId || it.id) }));
+      }
+      const n = node.minItems != null ? node.minItems : (node.maxItems != null ? node.maxItems : 1);
+      return Array.from({ length: n }, () => sample(item));
+    }
+    if (node.type === "string") return node.minLength ? "x".repeat(Math.max(node.minLength, 30)) : "x".repeat(30);
+    if (node.type === "integer") return (node.minimum != null) ? node.minimum + Math.min(2, ((node.maximum != null ? node.maximum : node.minimum) - node.minimum)) : 1;
+    if (node.type === "number") return (node.minimum != null) ? node.minimum + 1 : 1;
+    if (node.type === "boolean") return true;
+    return "value";
+  };
+  return fillObject(schema);
+}
+
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -17,6 +57,11 @@ async function promptTranslationGenerator(_config, messages, opts) {
   if(messages[0]?.content.includes('Plan ONE shared physical continuity'))return continuityFixture(payload);
   if(messages[0]?.content.includes('source-grounded casting and set designer'))return designFixture(payload);
   if(messages[0]?.content.includes('You own the COMPLETE executable image prompt'))return {items:payload.items.map(item=>({id:item.id,promptEn:item.priorPrompt,promptZh:'完整中文资产提示词：保持来源人物、场景与物件。',resolution:'source_supported',reason:'Deterministic fixture for prompt ordering; preserve the supplied prompt.',sourceEvidence:[payload.script||'fixture asset description']}))};
+  const op=opts&&opts.costOperation;
+  if(op==='asset_execution_prompt'||op==='asset_visual_design'||op==='native_identity_cues'||op==='source_prop_inventory'||op==='film_runtime_director_plan'||/^storyboard_still_/.test(op||'')||/^h3_asset_direct_semantics_batch_/.test(op||'')){
+    const schema=opts&&opts.responseSchema; if(schema)return fillBySchema(schema,payload);
+  }
+  if(op==='manual_direction_translation')return {items:(payload.items||[]).map(it=>({id:it.id,translation:it.text||'English direction'}))};
   if((opts?.stage||opts?.costOperation)==='master_production_decisions'||messages[0]?.content.includes('RECORDED CANONICAL DIALOGUE:'))return {items:payload.shots.map(s=>{const ids=[...new Set((s.dialogue?.length?s.dialogue.map(d=>d.speakerId):payload.characters.map(c=>c.id)))];return {shotId:s.id,identityContractVersion:1,duration:10,visibleCharacterIds:ids,visiblePropIds:[],productVisible:!!(s.shotExecution?.productVisible??s.productVisible),objectStates:[],states:ids.map(characterId=>({characterId,openingEn:'Standing in the source location.',openingZh:'source',endingEn:'Standing in the same source location.',endingZh:'source'})),environmentEn:'One quiet source location with consistent physical geometry.',environmentZh:'source',events:[{id:'action',actorIds:ids,offscreenActorIds:[],propIds:[],usesProduct:!!(s.shotExecution?.productVisible??s.productVisible),start:.3,end:9,after:[],continuityActionIds:[],throughoutDialogueIds:[],recordedSpeech:null,descriptionEn:'The character completes the source action in a continuous movement.',descriptionZh:'source'}],cameras:[{at:0,size:'medium',angle:'front',movement:'locked',subjectIds:ids}],dialogue:(s.shotExecution?.dialogue||s.dialogue||[]).map((d,i)=>({id:d.id,start:.5+i*2,end:2+i*2,deliveryEn:'Clear and firm.',deliveryZh:'source',listenerIds:[],addressMode:'self'})),summaryEn:'A source action reaches its visible result.',soundscapeEn:'Quiet continuous room tone.'};})};
   if(payload.kind&&payload.shots)return {items:payload.shots.map(s=>{const f={descriptionEn:'One still photograph shows the recurring character standing in the source room, with stable posture, closed mouth, fixed clothing and readable room geometry.',visibleCharacterIds:s.visibleCharacterIds};return {shotId:s.shotId,...(payload.kind==='frames'?{start:f,end:f}:{panels:Array.from({length:Math.ceil(s.duration)},(_,i)=>({...f,second:i,timeSecond:i===Math.ceil(s.duration)-1?s.duration:i}))})};})};
   if(opts?.agentStage==='review'&&Array.isArray(payload.items))return {items:payload.items.map(i=>({id:i.id,issues:[]}))};

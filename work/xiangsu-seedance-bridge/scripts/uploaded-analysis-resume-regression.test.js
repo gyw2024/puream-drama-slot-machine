@@ -85,47 +85,43 @@ function responseFor(messages) {
   const contract = system.match(/当前片段必须恰好输出 (\d+) 个 shots，duration 依次严格写为 ([^\n]+) 秒/);
   const count = Number(contract?.[1]) || 1;
   const durations = String(contract?.[2] || "10").split("、").map(Number);
+  // The current intake schema is compact-screenplay-v2; emit a conforming
+  // structured document so the budgeted intake/repair loop accepts the first
+  // captured draft instead of exhausting the repair budget.
   return {
-    story: { premise: "周岚和陈立在客厅把多年误会逐句说清", ending: "双方听懂彼此并作出决定" },
+    format: "compact-screenplay-v2",
+    story: { title: "事实推进", synopsis: "周岚和陈立在客厅把多年误会逐句说清", ending: "双方听懂彼此并作出决定" },
     characters: [
-      { id: "C01", name: "周岚", description: "三十多岁女性，短发，站姿挺直", identitySignature: "短发、左眉小痣、挺直站姿", voiceDescription: "清晰女中音", signatureLine: "你听我说完" },
-      { id: "C02", name: "陈立", description: "四十岁男性，方脸，微驼背", identitySignature: "方脸、眼袋、微驼背", voiceDescription: "低沉男声", signatureLine: "我现在明白了" }
+      { id: "C01", name: "周岚", description: "三十多岁女性，短发，站姿挺直", assetRequired: false, role: "周岚", voiceDescription: "清晰女中音" },
+      { id: "C02", name: "陈立", description: "四十岁男性，方脸，微驼背", assetRequired: false, role: "陈立", voiceDescription: "低沉男声" }
     ],
-    scenes: [{ id: "SC01", name: "客厅", description: "木桌、布沙发、东侧窗和固定门口轴线", time: "夜" }],
+    scenes: [{ id: "SC01", name: "客厅", description: "木桌、布沙发、东侧窗和固定门口轴线", assetRequired: false }],
     props: [],
     shots: Array.from({ length: count }, (_, shotIndex) => {
       const local = ledger.filter((_, index) => index % count === shotIndex);
       const duration = durations[shotIndex] || 10;
       return {
         id: `S${String(shotIndex + 1).padStart(2, "0")}`,
-        title: `事实推进${shotIndex + 1}`,
+        sceneId: "SC01",
         duration,
-        characters: ["周岚", "陈立"],
-        scenePresenceCharacterIds: ["C01", "C02"],
+        characterIds: ["C01", "C02"],
         visibleCharacterIds: ["C01", "C02"],
-        scene: "客厅",
+        propIds: [],
+        productVisible: false,
+        productAction: "",
+        opening: "上一句刚结束",
         action: "两人隔桌对话并逐步说清事实",
-        visualBeat: "说话人开口、听者反应、关系推进",
-        stateBefore: "上一句刚结束",
-        stateAfter: "新事实被听懂",
-        startFrame: "说话人准备开口",
-        endFrame: "听者消化信息",
-        sourceDialogueBindings: local.map(item => ({
-          sourceDialogueId: item.id,
+        dialogue: local.map((item, di) => ({
+          id: `${String(shotIndex + 1).padStart(2, "0")}-${di + 1}`,
+          speakerId: item.speaker === "周岚" ? "C01" : "C02",
           listenerIds: [item.speaker === "周岚" ? "C02" : "C01"],
-          subshotNumber: 1,
-          intent: "说明事实",
-          emotion: item.tone,
-          body: item.tone,
-          listenerBeat: "准确接住信息"
+          addressMode: "person",
+          onScreen: true,
+          text: String(item.text || ""),
+          delivery: item.tone || "平静",
+          action: "说话人开口，听者反应"
         })),
-        subshots: [
-          { start: 0, end: duration / 3, visibleCharacterIds: ["C01", "C02"], action: "说话人开口", sourceDialogueIds: local.map(item => item.id) },
-          { start: duration / 3, end: duration * 2 / 3, visibleCharacterIds: ["C01", "C02"], action: "听者反应" },
-          { start: duration * 2 / 3, end: duration, visibleCharacterIds: ["C01", "C02"], action: "关系推进" }
-        ],
-        productMention: false,
-        productShotType: "none"
+        ending: "新事实被听懂"
       };
     })
   };
