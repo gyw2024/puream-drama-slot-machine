@@ -114,7 +114,8 @@ test('complete story can split an overloaded shot without rewriting its neighbor
  const d=fixture(),first=structuredClone(d.shots[0]);first.dialogue.push({...first.dialogue[0],id:'D02',text:'我们先坐下，再慢慢说。'});first.beats[0].dialogueIds.push('D02');d.shots=[first,{...structuredClone(first),id:'S02',dialogue:[],beats:[{...first.beats[0],dialogueIds:[]}]}];const neighbor=JSON.stringify(d.shots[1]);let reviews=0,repairs=0;
  const result=await screenplay.author({generate:async(m,o)=>{
   if(o.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(m);
-  if(o.stage==='shot_screenplay_write')return d;
+  if(o.stage==='shot_screenplay_draft')return '原始稿正文：母亲接稳杯子，两镜衔接。';
+  if(o.stage==='shot_screenplay_structure')return d;
   const input=JSON.parse(m[1].content);
   if(o.stage==='shot_screenplay_review'){reviews++;return {ok:reviews>1,storyComplete:true,sourcePreserved:true,checks:input.screenplay.shots.map(s=>({shotId:s.id,evidence:'dialogue and transitions checked'})),issues:reviews===1?[{shotIds:['S01'],field:'timing',evidence:'two complete lines need separate performances',repair:'split after the first complete line'}]:[]};}
   repairs++;assert.equal(input.completing,false);assert.match(m[0].content,/不能建议延长|审核建议不是命令/);
@@ -127,7 +128,8 @@ test('Agent can merge adjacent silent sections while retaining every original li
  const d=fixture(),second={...structuredClone(d.shots[0]),id:'S02',dialogue:[],beats:[{...d.shots[0].beats[0],dialogueIds:[]}]},third={...structuredClone(second),id:'S03'};d.shots.push(second,third);const untouched=JSON.stringify(third);let reviews=0;
  const result=await screenplay.author({generate:async(m,o)=>{
   if(o.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(m);
-  if(o.stage==='shot_screenplay_write')return d;
+  if(o.stage==='shot_screenplay_draft')return '原始稿正文：母亲与女儿相邻静场，保留全部原句。';
+  if(o.stage==='shot_screenplay_structure')return d;
   if(o.stage==='shot_screenplay_review'){const input=JSON.parse(m[1].content),draft=input.screenplay;if(reviews){assert.equal(input.previousChangedShots,undefined);assert.equal(input.changedShotIds,undefined);}return {ok:++reviews>1,storyComplete:true,sourcePreserved:true,checks:draft.shots.map(s=>({shotId:s.id,evidence:'whole source correspondence checked'})),issues:reviews===1?[{shotIds:['S01','S02'],field:'timing',evidence:'the adjacent section is silent',repair:'merge while retaining the original words'}]:[]};}
   assert.ok(o.responseSchema.properties.removeShotIds);return {shots:[{...d.shots[0],ending:second.ending}],removeShotIds:['S02'],story:{...d.story,synopsis:d.story.synopsis+' S01+S02→S01'},additions:[],characters:[],scenes:[],props:[],wardrobes:[]};
  }});assert.deepEqual(result.document.shots.map(s=>s.id),['S01','S03']);assert.deepEqual(result.document.shots[0].dialogue,d.shots[0].dialogue);assert.equal(JSON.stringify(result.document.shots[1]),untouched);assert.equal(result.attempts.filter(x=>x.stage==='write').length,1);

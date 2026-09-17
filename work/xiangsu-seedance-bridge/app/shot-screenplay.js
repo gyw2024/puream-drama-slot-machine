@@ -169,7 +169,21 @@ async function author({source='',topic=null,product={},mode='original',instructi
   require('./agent-stage-tasks').throwIfCancelled(signal);
   if(!state.document||!Array.isArray(state.document.shots)||!state.document.shots.length||(state.writerText&&state.status==='structuring')){
    status(state.document?'Agent 正在修复逐镜数据交付，原稿与完成镜头保留':'正在一次写出完整逐镜剧本，提前确定对白、动作、资产和衔接');
-   const draft=await require('./screenplay-stage-separation').prepare({state,input,schema:schemaFor(mode,runtimePolicy),generate,save,status,signal,issues});
+   let draft=null;
+   try{
+    draft=await require('./screenplay-stage-separation').prepare({state,input,schema:schemaFor(mode,runtimePolicy),generate,save,status,signal,issues});
+   }catch(error){
+    // T07/§7.5: the paid structure-repair budget is capped (2 per prepare).
+    // Exhaustion must not discard the saved draft: inside the authoring flow
+    // the saved document plus its intake issues continue into the LOCAL
+    // protocol-repair path below (no writer restart, no new paid intake).
+    if(error?.code==='REPAIR_BUDGET_EXHAUSTED'&&state.document?.shots?.length){
+     state.deliveryIssues=Array.isArray(state.intakeIssues)&&state.intakeIssues.length?state.intakeIssues.slice():issues(state.document);
+     state.status='reviewing';save(state);
+     await new Promise(setImmediate);continue;
+    }
+    throw error;
+   }
    state.document=draft;state.deliveryIssues=issues(draft);state.attempts.push({stage:'write',issues:state.deliveryIssues,at:new Date().toISOString()});save(state);
    if(state.deliveryIssues.length){await new Promise(setImmediate);continue;}
   }
