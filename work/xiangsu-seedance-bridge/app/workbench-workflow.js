@@ -30110,6 +30110,17 @@ ${shotAnchor}
     // PROVIDER_RECOVERY_WAITING 同理：它本身就是重试预算耗尽的终态信号，
     // 且 retryable:true 会让它命中 transient 分支再次抛出自身（热循环）。
     if (code === "AUTONOMOUS_PIPELINE_REPAIR_EXHAUSTED" || code === "AUTONOMOUS_PIPELINE_TRANSIENT_EXHAUSTED" || code === "PROVIDER_RECOVERY_WAITING") return false;
+    // T07 / §7.5: once the persisted 20-minute soft target is reached, no NEW
+    // whole-script repair round starts automatically. Running tasks finish;
+    // the user decides explicitly whether to continue past the target.
+    try { this.preproductionBudget?.assertCanStartNewWholeScriptRepair?.(projectId); }
+    catch (softTargetError) {
+      if (softTargetError?.code === 'SOFT_TARGET_NO_NEW_REPAIRS') {
+        this.setAutomation(projectId, { status: 'paused', message: softTargetError.message, errorCode: softTargetError.code, autoResume: false, recoverableFailure: true });
+        return false;
+      }
+      throw softTargetError;
+    }
     const count = (supervisor.failuresByCode.get(code) || 0) + 1;
     supervisor.failuresByCode.set(code, count);
     if (this.autonomousPipelineExternalBlocker(error)) return false;

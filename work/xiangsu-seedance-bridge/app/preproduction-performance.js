@@ -1,8 +1,33 @@
 'use strict';
 
-const VERSION='preproduction-15m-v1';
-const TARGET_MS=15*60_000;
+// T07 / §7.1: the fixed performance contract is 20 minutes of ACTIVE wall
+// time from the start-text command to every necessary text saved, coverage
+// verified, bilingual prompts ready and the initial confirmation openable.
+// Human topic-selection wait is reported separately; image/video generation,
+// human final approval and rough-cut are outside the text target. The target
+// is a soft goal — never a hard kill for a task that is mid-submission.
+const VERSION='preproduction-20m-v1';
+const TARGET_MS=20*60_000;
 const CONCURRENCY=4;
+// Per-operation timing fields for the 20-minute report (§16.3): queue wait,
+// first artifact, model wall time, validation and repair counts are recorded
+// per operation and aggregated per run — no phase is hidden from the stat.
+const METRIC_FIELDS=Object.freeze(['queueMs','firstArtifactMs','modelMs','validationMs','repairCount']);
+function createOperationTimer({ now = () => Date.now() } = {}) {
+  let queuedAt = now(), startedAt = null, firstArtifactAt = null;
+  return {
+    markStarted() { startedAt ||= now(); this.queueMs = Math.max(0, startedAt - queuedAt); },
+    markFirstArtifact() { if (firstArtifactAt === null) firstArtifactAt = now(); },
+    snapshot() {
+      const start = startedAt ?? now();
+      return {
+        queueMs: Math.max(0, (startedAt ?? now()) - queuedAt),
+        firstArtifactMs: firstArtifactAt === null ? null : Math.max(0, firstArtifactAt - queuedAt),
+        modelMs: Math.max(0, now() - start)
+      };
+    }
+  };
+}
 function isPreparation(options={}) {
   return options.latencyProfile===VERSION && !/post[_ .-]|sfx|actual_media/i.test(String(options.costOperation||options.stage||''));
 }
@@ -40,4 +65,4 @@ function progress(project,stage,text) {
   const labels={topics:'选题',h3_final_editor:'分镜提示词',film_continuity_director:'全片连续性规划',prompt_agent_audit:'提示词审核',source_editorial_review:'带货与场景审核',asset_visual_design:'资产形象设计'};
   return labels[stage]?`${labels[stage]} · ${text}`:text;
 }
-module.exports={VERSION,TARGET_MS,CONCURRENCY,isPreparation,executionConfig,mapBatches,progress};
+module.exports={VERSION,TARGET_MS,CONCURRENCY,METRIC_FIELDS,createOperationTimer,isPreparation,executionConfig,mapBatches,progress};
