@@ -8,12 +8,13 @@
 
 | 任务 | 状态 | 提交 | 备注 |
 |---|---|---|---|
-| T00 基线/备份/测试环境/现状复现 | ✅ 完成 | `49e3fb0` | 校验脚本 19/19 PASS |
-| T01 权威校验与完整结果保存止漏 | ✅ 完成 | 见 git log `T01` | 新测试 18/18 + 存量回归无新增失败 |
-| T02 规范合同与 SQLite CAS/迁移 | ⬜ 未开始 | | 建 app/production-v2/，迁入附录 B 合同 |
+| T00 基线/备份/测试环境/现状复现 | ✅ 完成 | `49e3fb0` | 校验脚本 27/27 PASS |
+| T01 权威校验与完整结果保存止漏 | ✅ 完成 | `ec96b0e` | 新测试 18/18 + 存量回归无新增失败 |
+| T02 规范合同与 SQLite CAS/迁移 | ✅ 完成 | `4ccd385` | production-v2 8 模块+repository；24/24 |
+| T03 统一错误/重试/取消与 outbox 语义 | ⬜ 未开始 | | retry-policy 接入各模型调用层 |
 | T03–T20 | ⬜ 未开始 | | 按主文档第 15 章顺序 |
 
-## 当前任务：无（T01 已完成，下一任务 T02）
+## 当前任务：无（T02 已完成，下一任务 T03）
 
 ## 方案包缺口（如实记录）
 
@@ -56,7 +57,34 @@
 - `evidence/` 参考测试（66 项）无原始文件，无法对照。
 
 ### 下一任务
-- **T02 规范合同与 SQLite CAS/迁移**：创建 `app/production-v2/`，誊录附录 B 7 个参考模块（contracts/approval-policy/prompt-range/retry-policy/dependency-graph/post-plan/read-model，.cjs→.js，调整相对引用），补写合同测试（替代缺失的 `tests/reference-contracts.test.cjs`），再接 `app/foundry/runtime-store.js` 的 `expectedRevision` CAS 与迁移。首个文件：`app/production-v2/contracts.js`。
+- **T03 统一错误、重试、取消与 outbox 语义**：把 `production-v2/retry-policy.js` 接入实际模型调用层——`agent-output-normalization.js` 修复循环、`h3-final-prompt-editor.js`、`prompt-review-editor.js` 全部从 coordinator 侧注入同一 budget handle（替换各自独立的重试计数）；`workbench-workflow.js/recoverAutonomousPipelineFailure` 不得在 budget exhausted 后 continue；新增命令路径的 outbox 入队统一走 `repository.enqueueOperation`（`autoResume:false`）。首个文件：`app/agent-output-normalization.js`。
+- **注意**：`05-阶段与命令合同.md` 缺失，T03 起涉及字段/IPC 合同时按主文档第 4/8 章正文执行，并在各任务记录中注明推定口径。
+
+## T02 交付记录（2026-09-17）
+
+### 实际修改文件
+- `app/production-v2/`（新建 9 个文件）：`contracts.js`、`approval-policy.js`、`prompt-range.js`、`retry-policy.js`、`dependency-graph.js`、`post-plan.js`、`read-model.js`、`terminal-policy.js`（以上 8 个为附录 B 全文誊录，require 路径 `.cjs`→`.js`）、`repository.js`（新写：commitCommand CAS/幂等、claim/commitOperation 租约、cancelOperation、approval_snapshots）。
+- `app/foundry/runtime-store.js`：`RUNTIME_SCHEMA_VERSION` 1→2；migrate 新增 `command_log`/`approval_snapshots`/`prompt_chat_threads`/`prompt_chat_messages` 四表；`operation_outbox` 增 `lease_epoch`/`lease_owner`/`lease_expires_at`（PRAGMA table_info 检查后 ALTER，原地升级）；`commitProject` 拆出 `commitProjectInTransaction`（无 BEGIN 版本，供命令 CAS 单事务组合）；`beginOperation` 增 `autoResume` 选项（默认 true 保留旧行为，v2 命令路径传 false——§8.5 不擅自恢复失败任务）。
+- `scripts/t02-production-v2-contracts.test.js`（新增 24 用例）、`scripts/t00-baseline-check.js`（production-v2 断言从"不存在"改为存在性校验）。
+
+### 旧行为如何失效、新行为在哪里生效
+- 旧：项目级快照提交无 expectedRevision，并发写互相覆盖（B17）。新：`repository.commitCommand` 在 BEGIN IMMEDIATE 内读行版本比较，冲突抛 `REVISION_CONFLICT`；同 commandId 同输入幂等重放原结果，不同输入抛 `IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_INPUT`。
+- 旧：`beginOperation` 自动把 failed/paused/waiting 拉回 running（§8.5 四层重试叠加根源之一）。新：`autoResume:false` 时重放仅返回原状态；显式恢复仍走默认路径（旧调用方零破坏）。
+- 旧：无任何租约概念，outbox 操作可能被并发执行。新：`claimOperation` 发放 lease epoch（排队/过期/无主可领取），`commitOperation` 校验 epoch+inputHash，取消后提交返回 `cancelled`（取消不复活）。
+- 初次批准快照：`approval-policy` 哈希白名单 + `approval_snapshots` 表已就绪（T05 接线）。
+
+### 测试（原始数字）
+- `node --test scripts/t02-production-v2-contracts.test.js` → **24 pass / 0 fail**。
+- 存量回归 `foundry-v2-architecture` → 15 pass / 2 fail（**与 T00 基线 15/2 一致，存量失败**）。
+- `node scripts/t00-baseline-check.js` → 27/27 PASS。
+
+### 未能验证的环境
+- 迁移仅在新建库上验证；**未在真实存量 foundry-v2.sqlite（旧项目数据）上跑升级路径**——下次应用启动时首次触发，需在 T18 打包前用真实数据备份实测。
+- node:sqlite 为实验特性（Node 22 现状，与既有代码一致）。
+
+### 遗留与风险
+- `repository.js` 尚未被任何 UI/MCP/workflow 调用（按方案设计，T03 起逐入口接线；未接线前不影响现网行为，也不宣称任何用户可见改进）。
+- `prompt_chat_*` 两表已建但无读写代码（T08 使用）。
 
 ## T01 交付记录（2026-09-17）
 
