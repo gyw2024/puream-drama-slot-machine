@@ -63,12 +63,12 @@ test("shared contract makes dialogue, causal action, performance and blocking co
   const en = dialogueFirstActionContractEn();
   assert.match(DIALOGUE_FIRST_ACTION_CONTRACT_VERSION, /dialogue-action-performance/);
   assert.match(zh, /默认10–15秒/);
-  assert.match(zh, /2–4个可见表演拍点/);
+  // 拍点数量从固定 2–4 改为「必要的可见表演拍点，不固定数量」；英文合同并入强制用户内容要求
+  assert.match(zh, /按剧情安排必要的可见表演拍点，不固定数量/);
   assert.match(zh, /绝不按镜号奇偶交替左右/);
   assert.match(zh, /起点→触发→峰值→余震/);
-  assert.match(en, /DIALOGUE, ACTION, AND PERFORMANCE/);
-  assert.match(en, /two to four visible performance beats/);
-  assert.match(en, /Never alternate left and right by shot number/);
+  assert.match(en, /MANDATORY USER CONTENT REQUIREMENTS/);
+  assert.match(en, /The Agent must examine and repair authored content/);
   assert.match(sharedDramaWritingContract(300), /对白、动作与表演共同推进合同/);
 });
 
