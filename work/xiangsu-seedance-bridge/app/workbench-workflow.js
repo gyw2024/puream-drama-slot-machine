@@ -11202,14 +11202,14 @@ async function detectHeadArtifactTrimSeconds(ffmpeg, filePath, durationSeconds =
 
 async function mixFixedSfxIntoVideo(ffmpeg, baseVideoPath, outputPath, plan, catalog, finalDir) {
   const allCues = (Array.isArray(plan?.shots) ? plan.shots : []).flatMap(shot => Array.isArray(shot?.cues) ? shot.cues : []);
+  // T14: the base (clean roughcut) is never consumed on a no-op path — the
+  // caller keeps it previewable and records an explicit skipped state.
   if (!allCues.length) {
-    fs.renameSync(baseVideoPath, outputPath);
-    return { applied: false, cueCount: 0, warning: "" };
+    return { applied: false, cueCount: 0, warning: "音效计划没有可用 cue；已保留净音粗剪" };
   }
   const catalogById = new Map(catalog.map(item => [item.id, item]));
   const cues = allCues.map(cue => ({ ...cue, asset: catalogById.get(cue.effectId) })).filter(cue => cue.asset?.filePath && fs.existsSync(cue.asset.filePath));
   if (!cues.length) {
-    fs.renameSync(baseVideoPath, outputPath);
     return { applied: false, cueCount: 0, warning: "固定音效计划没有可读取的素材，已保留无音效粗剪版" };
   }
   const uniqueAssets = [];
@@ -11261,6 +11261,15 @@ async function mixFixedSfxIntoVideo(ffmpeg, baseVideoPath, outputPath, plan, cat
   } finally {
     try { fs.rmSync(filterScriptPath, { force: true }); } catch {}
   }
+}
+
+// T14 / §10: postAudioMode governs the audible sfx preview. Explicit user
+// choices are always preserved; everything else defaults to preview_and_draft
+// so the roughcut is actually audible instead of an empty track plan.
+const POST_AUDIO_MODES = Object.freeze(["preview_and_draft", "draft_only", "none"]);
+function postAudioModeOf(project) {
+  const value = String(project?.postAudioMode || "").trim();
+  return POST_AUDIO_MODES.includes(value) ? value : "preview_and_draft";
 }
 
 function splitForAnalysis(text, maxChars = 2400) {
@@ -30588,6 +30597,74 @@ ${shotAnchor}
     return this.runLocalPostProduction(projectId, "roughcut", (signal, progress) => this.stitchProjectLocal(projectId, signal, progress), options);
   }
 
+  // T14 / B08+B20: retry only the pending sfx batches and rebuild the audible
+  // preview from the existing clean roughcut — videos are never re-cut.
+  async retrySfxPreview(projectId, options = {}) {
+    return this.runLocalPostProduction(projectId, "roughcut", (signal, progress) => this.retrySfxPreviewLocal(projectId, signal, progress), options);
+  }
+
+  async retrySfxPreviewLocal(projectId, signal = null, progress = () => {}) {
+    const project = this.store.getProject(projectId);
+    const plan = project.postProductionSfxPlan;
+    const basePath = project.roughCutVideoPath;
+    if (postAudioModeOf(project) === "none") {
+      throw Object.assign(new Error("当前项目已关闭音效预览；如需恢复请先把音效模式改回 preview_and_draft"), { code: "SFX_PREVIEW_DISABLED" });
+    }
+    if (!plan || !basePath || !fs.existsSync(basePath)) {
+      throw Object.assign(new Error("没有可重试的音效预览：请先完成一次净音粗剪"), { code: "SFX_RETRY_UNAVAILABLE" });
+    }
+    const ffmpeg = this.locateFfmpeg();
+    if (!ffmpeg) throw Object.assign(new Error("未找到本地媒体处理组件 FFmpeg，请检查H3安装或重新安装纯梦短剧老虎机"), { code: "FFMPEG_NOT_FOUND" });
+    const settings = this.store.getSettings();
+    const catalog = catalogWithFiles();
+    const catalogAudit = validateBuiltinSfxCatalog(catalog, { requireFiles: true });
+    // Rebuild the evidence view exactly as the stitch saw it (trimmed
+    // durations), so the stored evidence key matches and validated cues are
+    // reused instead of re-matched.
+    const trims = new Map((project.roughCutAudioCleanup?.shots || []).map(item => [item.shotId, item]));
+    const sfxProject = {
+      ...project,
+      shots: (project.shots || []).map(shot => {
+        const trim = trims.get(shot.id);
+        return { ...shot, trimStartSeconds: Number(trim?.trimmedHeadSeconds) || 0, duration: Number(trim?.outputDurationSeconds) || shot.duration };
+      })
+    };
+    progress(plan.pendingShotIds?.length ? `正在补配 ${plan.pendingShotIds.length} 镜音效` : "正在校验音效计划");
+    const refreshed = await require("./agent-stage-tasks").matchStageSfx(sfxProject, settings, catalog, this.generateText, { signal, progress, previousPlan: plan });
+    const audit = validateFixedSfxPlan(refreshed, catalog, { requireFiles: true });
+    audit.libraryAudit = catalogAudit;
+    const finalDir = this.store.assetDir(projectId, "final");
+    let mixResult = { applied: false, mode: postAudioModeOf(project) === "preview_and_draft" ? "separate-draft-tracks" : "partial_audio", cueCount: 0, plannedCueCount: refreshed.cueCount || 0, warning: refreshed.warning || "" };
+    if (postAudioModeOf(project) === "preview_and_draft" && refreshed.cueCount > 0) {
+      const sfxPreviewPath = path.join(finalDir, `${slug(project.title)}-roughcut-sfx-${Date.now()}.mp4`);
+      try {
+        const mix = await mixFixedSfxIntoVideo(ffmpeg, basePath, sfxPreviewPath, refreshed, catalog, finalDir);
+        mixResult = {
+          ...mixResult, ...mix,
+          mode: mix.applied ? (refreshed.pendingShotIds?.length ? "partial_audio" : "preview_and_draft") : "separate-draft-tracks",
+          sfxVideoPath: mix.applied ? sfxPreviewPath : null,
+          warning: refreshed.pendingShotIds?.length ? `净音粗剪已完成；${refreshed.pendingShotIds.length} 镜音效待补` : mix.warning
+        };
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        try { fs.rmSync(sfxPreviewPath, { force: true }); } catch {}
+        mixResult = { ...mixResult, applied: false, sfxVideoPath: null, mode: "partial_audio", warning: `净音粗剪已完成；音效预览生成失败：${error.message}`, errorCode: "SFX_PREVIEW_FAILED" };
+      }
+    }
+    const current = this.store.getProject(projectId);
+    current.postProductionSfxPlan = refreshed;
+    current.postProductionSfxAudit = audit;
+    current.postProductionMixResult = mixResult;
+    current.postAudioMode = POST_AUDIO_MODES.includes(String(current.postAudioMode)) ? current.postAudioMode : postAudioModeOf(current);
+    current.postAudioState = mixResult.mode === "partial_audio" ? "partial_audio"
+      : mixResult.sfxVideoPath ? "preview_ready"
+      : current.postAudioMode === "draft_only" ? "draft_only" : "preview_skipped";
+    if (current.postAudioState === "partial_audio") current.postAudioMessage = mixResult.warning || `净音粗剪已完成；${refreshed.pendingShotIds?.length || 0} 镜音效待补`;
+    else delete current.postAudioMessage;
+    this.store.saveProject(current);
+    return { ok: true, state: current.postAudioState, mixResult, sfxPlan: { status: refreshed.status, cueCount: refreshed.cueCount, pendingShotIds: refreshed.pendingShotIds || [] } };
+  }
+
   async stitchProjectLocal(projectId, signal = null, progress = () => {}) {
     // Local editing consumes existing videos only. Missing upstream assets
     // must never make a rough-cut button start billable generation.
@@ -30734,7 +30811,10 @@ ${shotAnchor}
       const fixedSfxCatalog = catalogWithFiles();
       const catalogAudit = validateBuiltinSfxCatalog(fixedSfxCatalog, { requireFiles: true });
       // SFX are an editable draft layer, not a prerequisite for video delivery.
-      postProductionSfxPlan = await require("./agent-stage-tasks").matchStageSfx({ ...project, shots: finalStreams },settings,fixedSfxCatalog,this.generateText,{signal,progress});
+      // A stored plan with the same evidence key is reused so re-cuts never
+      // re-pay the agent for already-validated batches (T14/B20).
+      const previousSfxPlan = project.postProductionSfxPlan?.evidenceKey ? project.postProductionSfxPlan : null;
+      postProductionSfxPlan = await require("./agent-stage-tasks").matchStageSfx({ ...project, shots: finalStreams },settings,fixedSfxCatalog,this.generateText,{signal,progress,previousPlan:previousSfxPlan});
       postProductionSfxAudit = validateFixedSfxPlan(postProductionSfxPlan, fixedSfxCatalog, { requireFiles: true });
       postProductionSfxAudit.libraryAudit = catalogAudit;
       progress("正在输出无附加音效、无烧录字幕的净音粗剪视频");
@@ -30773,7 +30853,62 @@ ${shotAnchor}
         });
       }
       fs.renameSync(roughCutBasePath, outputPath);
-      postProductionMixResult = { applied: false, mode: "separate-draft-tracks", cueCount: 0, plannedCueCount: postProductionSfxPlan?.cueCount || 0, warning: postProductionSfxPlan.warning || (catalogAudit.ok ? "" : "部分内置音效缺失，粗剪不受影响；导出草稿时会跳过缺失音效并列明") };
+      // T14 / B08: the audible sfx preview is produced on the same EDL right
+      // after the clean cut. separate-draft-tracks alone never made the
+      // roughcut audible — the preview file is the deliverable users play.
+      const audioMode = postAudioModeOf(project);
+      postProductionMixResult = {
+        applied: false,
+        mode: audioMode === "preview_and_draft" ? "preview_and_draft" : "separate-draft-tracks",
+        cueCount: 0,
+        plannedCueCount: postProductionSfxPlan?.cueCount || 0,
+        warning: postProductionSfxPlan.warning || (catalogAudit.ok ? "" : "部分内置音效缺失，粗剪不受影响；导出草稿时会跳过缺失音效并列明")
+      };
+      if (audioMode === "preview_and_draft") {
+        if (postProductionSfxPlan?.cueCount > 0 && !postProductionSfxPlan.pendingShotIds?.length) {
+          progress("正在混入音效生成含音效预览");
+          const sfxPreviewPath = path.join(finalDir, `${slug(project.title)}-roughcut-sfx-${Date.now()}.mp4`);
+          try {
+            const mix = await mixFixedSfxIntoVideo(ffmpeg, outputPath, sfxPreviewPath, postProductionSfxPlan, fixedSfxCatalog, finalDir);
+            postProductionMixResult = {
+              ...postProductionMixResult, ...mix,
+              mode: mix.applied ? "preview_and_draft" : "separate-draft-tracks",
+              sfxVideoPath: mix.applied ? sfxPreviewPath : null,
+              plannedCueCount: postProductionSfxPlan.cueCount
+            };
+          } catch (error) {
+            if (signal?.aborted) throw error;
+            try { fs.rmSync(sfxPreviewPath, { force: true }); } catch {}
+            postProductionMixResult = {
+              ...postProductionMixResult, applied: false, sfxVideoPath: null,
+              mode: "partial_audio",
+              warning: `净音粗剪已完成；音效预览生成失败：${error.message}`,
+              errorCode: "SFX_PREVIEW_FAILED"
+            };
+          }
+        } else if (postProductionSfxPlan?.cueCount > 0) {
+          // Some batches are still pending: publish the partial preview with
+          // the cues that are already validated instead of failing the cut.
+          progress(`净音粗剪已完成；${postProductionSfxPlan.pendingShotIds.length} 镜音效待补，先混入已匹配部分`);
+          const sfxPreviewPath = path.join(finalDir, `${slug(project.title)}-roughcut-sfx-${Date.now()}.mp4`);
+          try {
+            const mix = await mixFixedSfxIntoVideo(ffmpeg, outputPath, sfxPreviewPath, postProductionSfxPlan, fixedSfxCatalog, finalDir);
+            postProductionMixResult = {
+              ...postProductionMixResult, ...mix,
+              mode: mix.applied ? "partial_audio" : "separate-draft-tracks",
+              sfxVideoPath: mix.applied ? sfxPreviewPath : null,
+              plannedCueCount: postProductionSfxPlan.cueCount,
+              warning: `净音粗剪已完成；${postProductionSfxPlan.pendingShotIds.length} 镜音效待补`
+            };
+          } catch (error) {
+            if (signal?.aborted) throw error;
+            try { fs.rmSync(sfxPreviewPath, { force: true }); } catch {}
+            postProductionMixResult = { ...postProductionMixResult, applied: false, sfxVideoPath: null, mode: "partial_audio", warning: `净音粗剪已完成；音效预览生成失败：${error.message}`, errorCode: "SFX_PREVIEW_FAILED" };
+          }
+        } else {
+          postProductionMixResult = { ...postProductionMixResult, mode: "partial_audio", warning: postProductionSfxPlan?.warning || "净音粗剪已完成；本次没有可用音效 cue，音效预览待补", errorCode: postProductionSfxPlan?.errorCode || "SFX_PLAN_EMPTY" };
+        }
+      }
     }
     const applyRoughCutEvidence = targetProject => {
       targetProject.roughCutAudioCleanup = {
@@ -30785,6 +30920,17 @@ ${shotAnchor}
       targetProject.postProductionSfxPlan = postProductionSfxPlan;
       targetProject.postProductionSfxAudit = postProductionSfxAudit;
       targetProject.postProductionMixResult = postProductionMixResult;
+      // T14: explicit outcome state. partial_audio keeps the clean cut
+      // previewable/exportable while marking the sfx work incomplete.
+      const audioMode = postAudioModeOf(targetProject);
+      targetProject.postAudioMode = POST_AUDIO_MODES.includes(String(targetProject.postAudioMode)) ? targetProject.postAudioMode : audioMode;
+      targetProject.postAudioState = audioMode === "none" ? "none"
+        : postProductionMixResult?.mode === "partial_audio" ? "partial_audio"
+        : postProductionMixResult?.sfxVideoPath ? "preview_ready"
+        : audioMode === "draft_only" ? "draft_only" : "preview_skipped";
+      if (targetProject.postAudioState === "partial_audio") {
+        targetProject.postAudioMessage = postProductionMixResult?.warning || `净音粗剪已完成；${postProductionSfxPlan?.pendingShotIds?.length || 0} 镜音效待补`;
+      }
       targetProject.roughCutVideoPath = outputPath;
       targetProject.roughCutInputFingerprint = inputFingerprint;
       return targetProject;
@@ -31010,6 +31156,7 @@ module.exports.savePromptReviewWithStableFingerprint = savePromptReviewWithStabl
 module.exports.finalizeVideoPromptForSubmission = finalizeVideoPromptForSubmission;
 module.exports.detectHeadArtifactTrimSeconds = detectHeadArtifactTrimSeconds;
 module.exports.mixFixedSfxIntoVideo = mixFixedSfxIntoVideo;
+module.exports.postAudioModeOf = postAudioModeOf;
 module.exports.activeBlueprintFailures = activeBlueprintFailures;
 module.exports.scriptQualityGateOptions = scriptQualityGateOptions;
 module.exports.executeShotVideoBatch = executeShotVideoBatch;

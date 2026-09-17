@@ -46,6 +46,17 @@ class LocalPostProductionAgent {
     return this.wait(operationId, input.project_id);
   }
 
+  // T14: retry only pending sfx batches; videos are never re-cut.
+  async runSfxPreviewRetry(projectId) {
+    const input = { project_id: String(projectId || "") };
+    await this.call("get_project", input);
+    await this.call("get_production_status", input);
+    const started = await this.call("retry_sfx_preview", input);
+    const operationId = String(started.operation?.operationId || "");
+    if (!operationId) throw Object.assign(new Error("MCP 未返回音效补配任务编号"), { code: "MCP_LOCAL_AGENT_NO_OPERATION" });
+    return this.wait(operationId, input.project_id);
+  }
+
   async cancel(projectId) {
     return this.call("cancel_post_production", { project_id: String(projectId || "") });
   }

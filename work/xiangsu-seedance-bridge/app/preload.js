@@ -124,6 +124,7 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     discardFailedRecords: (projectId, scope) => ipcRenderer.invoke("workbench:discard-failed-records", projectId, scope),
     clearAutomationFailures: projectId => ipcRenderer.invoke("workbench:clear-automation-failures", projectId),
     stitch: projectId => ipcRenderer.invoke("workbench:stitch", projectId),
+    retrySfxPreview: projectId => ipcRenderer.invoke("workbench:retry-sfx-preview", projectId),
     exportJianyingDraft: (projectId, options = {}) => ipcRenderer.invoke("workbench:export-jianying", projectId, options),
     cancelPostProduction: projectId => ipcRenderer.invoke("workbench:cancel-post-production", projectId)
   },

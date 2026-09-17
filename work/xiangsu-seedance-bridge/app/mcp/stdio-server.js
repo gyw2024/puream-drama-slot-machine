@@ -163,6 +163,10 @@ function registerTools(server) {
     title: "本地净音粗剪", description: "仅处理已有分镜，音效和字幕不烧录到视频。不新生成媒体、不扣费。",
     inputSchema: z.object({ project_id: projectId }), annotations: mutationAnnotations()
   });
+  registerAppTool(server, "retry_sfx_preview", {
+    title: "补配音效预览", description: "仅补配待补镜头的音效并从既有净音粗剪重建含音效预览；不重剪视频、不新生成媒体、不扣费。",
+    inputSchema: z.object({ project_id: projectId }), annotations: mutationAnnotations()
+  });
   registerAppTool(server, "export_jianying_draft", {
     title: "生成剪映草稿", description: "将已有分镜、独立音效轨道和可编辑字幕导出为本地剪映草稿；不调用生成服务。",
     inputSchema: z.object({ project_id: projectId, draft_root: z.string().optional() }), annotations: mutationAnnotations({ idempotent: true })

@@ -3597,6 +3597,16 @@ ipcMain.handle("workbench:export-jianying", async (_event, projectId, options) =
   try { return { ok: true, result: await requireWorkbench().workflow.exportJianyingDraft(projectId, options || {}) }; }
   catch (error) { return publicError(error); }
 });
+// T14 / §10: retry only pending sfx batches and rebuild the audible preview
+// from the existing clean roughcut; videos are never re-cut.
+ipcMain.handle("workbench:retry-sfx-preview", async (_event, projectId) => {
+  try {
+    requireWorkbench();
+    if (!localPostProductionAgent) throw Object.assign(new Error("本地粗剪 Agent 尚未就绪，请稍后重试"), { code: "MCP_LOCAL_AGENT_UNAVAILABLE" });
+    return { ok: true, result: await localPostProductionAgent.runSfxPreviewRetry(projectId) };
+  }
+  catch (error) { return publicError(error); }
+});
 ipcMain.handle("workbench:cancel-post-production", (_event, projectId) => {
   try { return { ok: true, result: requireWorkbench().workflow.cancelPostProduction(projectId) }; }
   catch (error) { return publicError(error); }

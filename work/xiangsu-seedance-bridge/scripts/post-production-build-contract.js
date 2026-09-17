@@ -28,7 +28,16 @@ function auditPostProductionContract(readFile) {
   has(subtitles, /module\.exports\s*=\s*\{[^}]*buildSubtitles[^}]*toSrt/s, "subtitle/SRT public functions are missing");
   for (const method of ["exportJianyingDraft", "cancelPostProduction", "stitchProjectLocal"]) assert.ok(text.get(workflow).includes(`${method}(`), `workflow method ${method} is missing`);
   has(workflow, /separate-draft-tracks/, "rough-cut must retain separate track mode");
-  assert.doesNotMatch(text.get(workflow), /await\s+mixFixedSfxIntoVideo\s*\(/, "rough-cut workflow still burns new SFX into MP4");
+  // T14 / §10: the CLEAN roughcut still never burns SFX in — but the workflow
+  // must produce a separate audible roughcut-sfx preview with an explicit
+  // partial_audio fallback and a retry that never re-cuts videos.
+  has(workflow, /await\s+mixFixedSfxIntoVideo\s*\(/, "audible sfx preview is not produced in the rough-cut workflow");
+  has(workflow, /roughcut-sfx-/, "missing separate roughcut-sfx- preview output; sfx must not overwrite the clean roughcut");
+  has(workflow, /partial_audio/, "partial_audio outcome state is missing");
+  has(workflow, /postAudioMode/, "postAudioMode setting is missing");
+  has(workflow, /retrySfxPreview\(/, "sfx-only retry entry is missing");
+  assert.match(readFile("app/agent-stage-tasks.js").toString(), /pendingShotIds/, "agent-stage-tasks must track pending sfx shots instead of discarding validated batches");
+  assert.ok(text.get("app/mcp/stdio-server.js").includes('registerAppTool(server, "retry_sfx_preview"'), "missing unbilled sfx retry MCP tool");
 
   // Execute only the preload adapter in a JS VM with mocked Electron imports.
   // No Electron process, browser, window, IPC server or real user data is used.
@@ -60,7 +69,7 @@ function auditPostProductionContract(readFile) {
     has(`app/renderer/${mode}.js`, /window\.createPostProductionPanel\(/, "shared panel controller not wired");
     has(`app/renderer/${mode}.css`, /\.post-production-panel/, "shared panel styling not packaged");
   }
-  for (const method of ["stitchProject", "exportJianyingDraft", "cancelPostProduction", "refresh"]) assert.ok(text.get("app/renderer/post-production-panel.js").includes(`data-post-action="${method}"`), `missing recoverable UI action ${method}`);
+  for (const method of ["stitchProject", "exportJianyingDraft", "cancelPostProduction", "refresh", "retrySfxPreview"]) assert.ok(text.get("app/renderer/post-production-panel.js").includes(`data-post-action="${method}"`), `missing recoverable UI action ${method}`);
   return { ok: true, mode: "static-source-and-mocked-preload-only", files, nativeWindowLaunched: false, paidRequests: 0, preloadChannels: calls.map(row => row[0]), mcpTools: ["stitch_final_video", "export_jianying_draft", "cancel_post_production"] };
 }
 

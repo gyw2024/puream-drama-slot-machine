@@ -440,6 +440,9 @@ class McpAppController {
       audit_actual_media: () => this.workflow.auditActualMedia(projectId, { shotIds:input.shot_ids,python:input.python_path,model:input.asr_model_path,device:input.asr_device||'cpu',evidencePython:input.evidence_python_path,audioModel:input.audio_model_path,activeSpeakerRepo:input.active_speaker_repo_path }),
       repair_media_quality: () => this.workflow.repairFailedMedia(projectId),
       stitch_final_video: () => this.workflow.stitchProject(projectId, { executionPath: "mcp_local_agent" }),
+      // T14: retry only the pending sfx batches and rebuild the audible
+      // preview from the existing clean roughcut — never re-cuts videos.
+      retry_sfx_preview: () => this.workflow.retrySfxPreview(projectId, { executionPath: "mcp_local_agent" }),
       export_jianying_draft: () => this.workflow.exportJianyingDraft(projectId, { draftRoot: input.draft_root || "" }),
       generate_character_video: () => this.workflow.generateCharacterVideo(projectId, requireText(input.character_id, "character_id"), String(input.prompt || "")),
       // A single-shot MCP action is the exact equivalent of the reviewed UI

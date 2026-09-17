@@ -40,7 +40,7 @@
     host.classList.add("post-production-panel");
     host.innerHTML = `<div class="post-panel-heading"><div><span class="post-kicker">EDITABLE · LOCAL DRAFT</span><h3>剪映可编辑草稿</h3><p>视频、剧情音效和环境音分轨保存，默认不生成字幕轨。音效不烧录进粗剪视频，进入剪映后可分别修改。</p></div><span class="post-local-badge">本地处理 · 不生成新素材</span></div>
       <div class="post-task-state" role="status" aria-live="polite" data-post="status">请选择项目。</div>
-      <div class="post-panel-actions"><button class="outline-button" type="button" data-post-action="stitchProject">生成无叠加音效粗剪</button><button class="primary-button" type="button" data-post-action="exportJianyingDraft">一键生成剪映草稿</button><button class="outline-button" type="button" data-post-action="cancelPostProduction" disabled>取消本地后期</button><button class="outline-button" type="button" data-post-action="refresh">刷新状态</button></div>
+      <div class="post-panel-actions"><button class="outline-button" type="button" data-post-action="stitchProject">生成无叠加音效粗剪</button><button class="outline-button" type="button" data-post-action="retrySfxPreview" hidden>补配音效预览</button><button class="primary-button" type="button" data-post-action="exportJianyingDraft">一键生成剪映草稿</button><button class="outline-button" type="button" data-post-action="cancelPostProduction" disabled>取消本地后期</button><button class="outline-button" type="button" data-post-action="refresh">刷新状态</button></div>
       <p class="post-panel-hint" data-post="hint">可先粗剪再导出，也可直接导出已有分镜；不会自动抽卡或扣费。</p>
       <details class="post-destination"><summary>草稿保存位置（留空自动检测）</summary><label for="${prefix}-root">本机剪映草稿根目录<input id="${prefix}-root" type="text" data-post="root" spellcheck="false" autocomplete="off" placeholder="留空自动检测；也可填写可写的本地目录"></label><p>项目目录始终保留一份完整草稿。未检测到剪映目录时仍可导出，不会中断制作。</p></details>
       <p class="post-panel-error" data-post="error" role="alert" hidden></p>
@@ -76,6 +76,12 @@
               : hasShots ? `当前项目 ${count} 个分镜。导出时会检查所选视频文件。` : "尚无分镜；请先导入或创建分镜。";
       host.dataset.postState = busy ? "running" : error ? "failed" : task.status || "idle";
       button("stitchProject").disabled = !hasShots || busy;
+      // T14: the retry only appears when audio work is actually incomplete;
+      // it never re-cuts videos, so it stays enabled with existing shots.
+      const sfxPending = project?.postAudioState === "partial_audio" || (Array.isArray(project?.postProductionSfxPlan?.pendingShotIds) && project.postProductionSfxPlan.pendingShotIds.length > 0);
+      const retryButton = button("retrySfxPreview");
+      retryButton.hidden = !sfxPending;
+      retryButton.disabled = !hasShots || busy;
       button("exportJianyingDraft").disabled = !hasShots || busy;
       button("cancelPostProduction").disabled = !busy || cancelPending;
       button("refresh").disabled = !id;
@@ -159,7 +165,7 @@
       if (!target || target.disabled) return;
       const action = target.dataset.postAction;
       const project = getProject();
-      if (action === "stitchProject" || action === "exportJianyingDraft") { await run(action); return; }
+      if (action === "stitchProject" || action === "exportJianyingDraft" || action === "retrySfxPreview") { await run(action); return; }
       try {
         if (action === "refresh") { errors.delete(project?.id); await refresh(project?.id); }
         else if (action === "cancelPostProduction") {
