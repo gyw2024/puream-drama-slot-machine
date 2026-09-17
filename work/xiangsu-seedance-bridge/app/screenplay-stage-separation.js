@@ -12,12 +12,15 @@ const WRITER_ROLE_BODY=[
  'original：按选题一次完成原创；upload：保留原稿全部对白、身份与因果，整理为上述格式，不自由改写；adapt：一次完成整稿改写，保留故事内核、信息、反转、结局及商品成交逻辑，按用户要求改变表层人物或场景。原稿保留，必要标准化改动在文末简列依据。原创遵循本次时长目标，改写相对原稿上下不超过30秒。'
 ].join('\n\n');
 const WRITER_POLICY_RULE_IDS=['authority','speech','gaps','causality','story','identity','product_facts','commerce','product_visual','clean_output'];
-// Composed once at module load (inputs are static); every request reuses the
-// same provenance so the shipped prompt is auditable byte for byte.
+// T06 修正：写稿与审核共享的写稿要求（production-content-requirements）必须随
+// 单一装配进入 writer system，否则只覆盖审核侧；按 ruleId 去重并留溯源。
 const WRITER_COMPOSED=compose({
   stage:'shot_screenplay_draft', roleId:'P02', policyVersion:'P00+P02+policy-rules',
   baseBoundary:P00_BOUNDARY, roleBody:WRITER_ROLE_BODY,
-  creativePolicy:WRITER_POLICY_RULE_IDS.map(id=>({ruleId:id,body:prompts.rule(id)}))
+  creativePolicy:[
+    {ruleId:'content_requirements',body:require('./production-content-requirements').INSTRUCTION},
+    ...WRITER_POLICY_RULE_IDS.map(id=>({ruleId:id,body:prompts.rule(id)}))
+  ]
 });
 const WRITER_RULES=WRITER_COMPOSED.system;
 const WRITER_PROVENANCE=WRITER_COMPOSED.provenance;
