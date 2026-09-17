@@ -313,12 +313,12 @@ for (const mode of MODES) {
       const scenePrompt = workflow.compileImagePrompt(project, config, "scene_asset", project.scenes[0]);
       assert.match(scenePrompt, /16:9/u);
       assert.match(scenePrompt, /2[×x]2/u);
-      assert.match(scenePrompt, /主轴.{0,8}正向/u);
-      assert.match(scenePrompt, /同轴反向|反向轴/u);
-      assert.match(scenePrompt, /左侧45度/u);
-      assert.match(scenePrompt, /右侧45度/u);
-      assert.match(scenePrompt, /无人/u);
-      assert.match(scenePrompt, /同一.*拓扑.*光/u);
+      assert.match(scenePrompt, /forward/u);
+      assert.match(scenePrompt, /reverse/u);
+      assert.match(scenePrompt, /left 45 degrees/u);
+      assert.match(scenePrompt, /right 45 degrees/u);
+      assert.match(scenePrompt, /No live actors|严禁出现任何真人/u);
+      assert.match(scenePrompt, /同一空间、同一时段、同一光向/u);
 
       const propPrompt = workflow.compileImagePrompt(project, config, "prop_asset", project.assetLibraries.props[0]);
       assert.match(propPrompt, /单个道具|只生成/u);
@@ -330,7 +330,7 @@ for (const mode of MODES) {
         const imagePrompt = workflow.compileImagePrompt(project, config, stage, shotItem);
         if (stage === "storyboard_start") {
           assert.match(imagePrompt, /本张首帧强制状态/u);
-          assert.match(imagePrompt, /动作.*前|起始/u);
+          assert.match(imagePrompt, /动作.*前|起始|exact opening instant/u);
           assert.match(imagePrompt, /一张严格 9:16/u);
           assert.match(imagePrompt, /禁止.*拼图/u);
         } else if (stage === "storyboard_end") {

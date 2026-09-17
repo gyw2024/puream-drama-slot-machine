@@ -10,10 +10,13 @@ test('a historical fingerprint mismatch preserves the draft without silently app
  assert.equal(screenplay.hasSavedDraft({raw,shotScreenplay:record}),true);
  assert.equal(screenplay.hasSavedDraft({raw:raw+'changed',shotScreenplay:record}),false);
  const stages=[];
- await screenplay.author({source:raw,mode:'upload',draftDocument:record.document,generate:async(_m,o)=>{
+ const result=await screenplay.author({source:raw,mode:'upload',draftDocument:record.document,generate:async(_m,o)=>{
   stages.push(o.stage);return {ok:true,storyComplete:true,sourcePreserved:true,checks:d.shots.map(s=>({shotId:s.id,evidence:'checked source'})),issues:[]};
  }});
- assert.deepEqual(stages,['shot_screenplay_review']);
+ assert.deepEqual(stages,[],'a preserved draft must not pay for an in-author review');
+ assert.equal(result.status,'ready');
+ assert.deepEqual(result.document,d,'the historical draft is preserved verbatim');
+ assert.equal(result.contentReview.status,'deferred','semantic acceptance is deferred to the confirmation page, never silently approved');
 });
 test('repeat writing clicks share a single operation and existing draft bypasses the writer',async()=>{
  const d=fixture(),raw=screenplay.render(d),p={id:'p',script:{raw,shotScreenplay:screenplay.makeRecord(d,raw,{})}};
@@ -39,8 +42,10 @@ test('technical request changes re-review a checkpoint rather than erasing it',a
  const review=async()=>({ok:true,storyComplete:true,sourcePreserved:true,checks:d.shots.map(s=>({shotId:s.id,evidence:'checked'})),issues:[]});
  await screenplay.author({topic,product,draftDocument:d,generate:review,save:s=>{checkpoint=structuredClone(s);}});
  checkpoint.signature='old-prompt-version';let stages=[];
- await screenplay.author({topic,product,checkpoint,generate:async(m,o)=>{stages.push(o.stage);return review();}});
- assert.deepEqual(stages,['shot_screenplay_review']);
+ const result=await screenplay.author({topic,product,checkpoint,generate:async(m,o)=>{stages.push(o.stage);return review();}});
+ assert.deepEqual(stages,[],'a checkpoint re-review is deferred, not erased or repaid');
+ assert.equal(result.status,'ready');assert.deepEqual(result.document,d);
+ assert.equal(result.contentReview.status,'deferred');
 });
 test('preview rejects malformed fields before formatting and reports their paths',()=>{
  const result=require('../app/mcp/stage-preview').preview({json:true,responseSchema:{type:'object',required:['items'],properties:{items:{type:'array'}}},deliveryPreview:{kind:'master-production-decision',project:{}}},{data:{}});
@@ -54,7 +59,7 @@ test('commercial terms change the creative input identity and shared commerce ru
  p.product.price='两罐29.9元';p.product.offer='厂家活动：两罐包邮';p.product.purchaseInstructions='点击头像进入橱窗购买';
  assert.equal(workflow.ideaSignatureMatchesProject(before,p),false);
  assert.equal(workflow.ideaSignatureMatchesProject(workflow.ideaSignature(p),p),true);
- assert.ok(screenplay.RULES.includes(require('../app/commerce-performance-system-prompt').SYSTEM_PROMPT));
+ assert.ok(require('../app/screenplay-stage-separation').WRITER_RULES.includes(require('../app/generation-prompts').rule('commerce')),'shared commerce rules reach the writer system prompt');
  assert.match(screenplay.REVIEW_RULES,/product.price、offer、purchaseInstructions/);
 });
 test('review identity slots expose the exact missing shot before accepting a receipt',async()=>{
@@ -64,6 +69,8 @@ test('review identity slots expose the exact missing shot before accepting a rec
  assert.ok(findings.some(f=>f.path==='$.checks.S02'));
  audit.checks.S02={evidence:'second source checked'};
  assert.deepEqual(require('../app/agent-output-normalization').inspect(audit,schema),[]);
- const result=await screenplay.author({draftDocument:d,generate:async(m,o)=>{assert.equal(o.responseSchema.properties.checks.type,'object');return audit;}});
- assert.equal(result.status,'ready');assert.deepEqual(result.reviews[0].checks.map(c=>c.shotId),['S01','S02']);
+ const stages=[];
+ const result=await screenplay.author({draftDocument:d,generate:async(m,o)=>{stages.push(o.stage);return audit;}});
+ assert.deepEqual(stages,[],'a clean authored draft defers semantic review to the confirmation page');
+ assert.equal(result.status,'ready');assert.equal(result.contentReview.status,'deferred');
 });
