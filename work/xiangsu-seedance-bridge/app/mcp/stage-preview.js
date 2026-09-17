@@ -3,8 +3,9 @@ function preview(request,input){
  // Preview and commit must accept the same envelope before rendering. Otherwise
  // missing fields become generic formatter exceptions (or literal undefined).
  if(request.json&&request.responseSchema){
-  const findings=require('../agent-output-normalization').inspect(input?.data,request.responseSchema);
-  if(findings.length)return {ok:false,status:'needs_revision',findings,instruction:'Correct these exact data fields in this same task, preserving all other authored content.'};
+  // Same authoritative verdict as submit: conforms() decides, inspect() explains.
+  const verdict=require('../typed-output-receipt').validateSubmittedValue(input?.data,request.responseSchema);
+  if(!verdict.valid)return {ok:false,status:'needs_revision',findings:verdict.findings,instruction:'Correct these exact data fields in this same task, preserving all other authored content.'};
  }
  const context=request.deliveryPreview;
  if(context?.kind==='screenplay-writing')return {ok:true,status:'ready',constructionFacts:require('../authoring-workspace').sourceFacts(input?.data),instruction:require('../authoring-workspace').DATA_INSTRUCTION};

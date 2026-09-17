@@ -8,12 +8,12 @@
 
 | 任务 | 状态 | 提交 | 备注 |
 |---|---|---|---|
-| T00 基线/备份/测试环境/现状复现 | ✅ 完成 | 见 git log `T00` | 校验脚本 19/19 PASS |
-| T01 权威校验与完整结果保存止漏 | ⬜ 未开始 | | stage-delivery submit/read + typed-output-receipt |
+| T00 基线/备份/测试环境/现状复现 | ✅ 完成 | `49e3fb0` | 校验脚本 19/19 PASS |
+| T01 权威校验与完整结果保存止漏 | ✅ 完成 | 见 git log `T01` | 新测试 18/18 + 存量回归无新增失败 |
 | T02 规范合同与 SQLite CAS/迁移 | ⬜ 未开始 | | 建 app/production-v2/，迁入附录 B 合同 |
 | T03–T20 | ⬜ 未开始 | | 按主文档第 15 章顺序 |
 
-## 当前任务：无（T00 已完成，下一任务 T01）
+## 当前任务：无（T01 已完成，下一任务 T02）
 
 ## 方案包缺口（如实记录）
 
@@ -56,4 +56,40 @@
 - `evidence/` 参考测试（66 项）无原始文件，无法对照。
 
 ### 下一任务
-- **T01 权威校验与完整结果保存止漏**：`app/mcp/stage-delivery.js` `submit`（`inspect` 空即放行 → `conforms` 优先）、`read`（回执绑定 attempt/cancel/source）、`app/typed-output-receipt.js` 加 `validateSchemaSupported` 与规范化比较。首个文件：`app/typed-output-receipt.js`。
+- **T02 规范合同与 SQLite CAS/迁移**：创建 `app/production-v2/`，誊录附录 B 7 个参考模块（contracts/approval-policy/prompt-range/retry-policy/dependency-graph/post-plan/read-model，.cjs→.js，调整相对引用），补写合同测试（替代缺失的 `tests/reference-contracts.test.cjs`），再接 `app/foundry/runtime-store.js` 的 `expectedRevision` CAS 与迁移。首个文件：`app/production-v2/contracts.js`。
+
+## T01 交付记录（2026-09-17）
+
+### 实际修改文件与函数
+1. `app/typed-output-receipt.js`：
+   - 新增 `stableStringify`/`sameJson`（规范化 JSON：key 排序）；`conforms` 的 enum/const/uniqueItems 改用规范化比较——对象 key 顺序不再影响语义判定。
+   - 新增 `validateSchemaSupported(schema)`：schema 感知遍历（properties/patternProperties/$defs 内是名字非关键字；enum/const/type 是数据），返回 `{ok, unsupported:[{path,keyword}]}`。
+   - 新增 `validateSubmittedValue(value,schema)`：**conforms 决定有效性，inspect 只解释**——inspect 漏报时兜底默认 finding，非法值不可能再被放行。
+   - `format` 关键字按 draft-07 注解接受（实测 11 个存量任务 schema 含 format；不加会把真实任务全部打回）。其余未知关键字维持 fail-closed。
+2. `app/mcp/stage-delivery.js` `submit`：responseSchema 分支从「inspect findings 空=通过」改为 `validateSubmittedValue` 权威判定（规范 §8.3 原文要求）。
+3. `app/mcp/stage-preview.js` `preview`：同款 inspect 漏报漏洞，同一模式修复（规范 §8.3：预览适用同一权威校验）。
+4. `app/local-agent-runtime.js`（run/runFresh 任务装配，request.json 写入前）：新增 responseSchema 前置校验——不支持的 schema 抛 `LOCAL_AGENT_SCHEMA_UNSUPPORTED`（noAutomaticRetry），任务直接 failed。程序配置错误不再进入模型修复，也不会在提交门变成永久死门。
+5. `app/mcp/app-controller.js`：
+   - `safeResult(value, artifactStore)`：大结果（>120KB）**先完整落盘**（临时文件+原子更名+哈希回读校验）再返回引用 `{artifactRef, sha256, byteLength, preview, previewTruncated:true, resultComplete:true, readMethod:"read_operation_result"}`；磁盘失败时 `resultComplete:false`+错误码，绝不把丢失的结果谎报为已保存（规范 §8.7 / B16）。
+   - 新增 `readOperationResult` + `read_operation_result` 分页方法：artifactRef 不透明、只能经操作注册表解析（拒绝任意 filePath）；读取时校验登记哈希；分页返回 UTF-8 总字节与字符位 offset/nextOffset。
+   - 新增 `safeOperationResult(record, result)` 并接入 `startOperation` 完成路径。
+6. `scripts/t01-validation-contract.test.js`（新增 18 个用例）。
+
+### 旧行为如何失效、新行为在哪里生效
+- 旧：`submit`/`preview` 用 `inspect()` 返回数组空否判有效性 → inspect 不认识的关键字/漏报场景下，schema 非法结果照常 `saved`。新：`validateSubmittedValue` 以 `conforms` 为唯一权威，两处调用点替换完成（mcp-submissions.jsonl 流水保留）。
+- 旧：`run()` 装配任务时不检查 schema 支持范围，坏 schema 到提交门才表现为「永远 needs_revision」死门。新：request.json 写入前抛程序错误并标 job failed。
+- 旧：`safeResult` 大结果只回 24KB 预览，正文丢弃不可恢复。新：完整 artifact 落盘于 `<rootDir>/mcp-operations/artifacts/<operationId>.json`，MCP 客户端用 `read_operation_result` 分页取回。
+
+### 测试（原始数字）
+- `node --test scripts/t01-validation-contract.test.js` → **18 pass / 0 fail**。
+- 存量回归：mcp-stage-delivery 15/0、stage-output-schemas 3/0、response-schema-routing 2/0、antigravity-output-schema 4/0、codex-text-receipt 5/0、semantic-schema-214 3/0、submission-agent-review 5/0、hailuo-final-submission-integrity 4/1（**与 T00 基线 4/1 一致，存量失败，非本次引入**）。
+- 合计本轮 36/36（t01+mcp-stage-delivery+stage-output-schemas 复跑）。
+
+### 未能验证的环境
+- 未跑全量 318 文件回归（8 个文件挂起，禁用全量；已跑受影响模块全集）。
+- 未实机验证 MCP 客户端（Codex/Claude）真实调用 `read_operation_result` 的互操作。
+- 未做 Electron/Windows 打包验证（T18）。
+
+### 边界说明（未做、留给后续任务的）
+- `agent-output-normalization` 自身修复循环、native tool receipt（createReceiptTracker）与归一化入口的权威校验接线属 T03/T04（重试预算/Agent 事件层）。
+- `stage-delivery.read` 的回执与 attempt/lease/epoch 绑定需要 T02/T03 的 operation 模型，T01 未动 read（保持 jobId+hash 校验现状）。

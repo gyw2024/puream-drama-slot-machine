@@ -51,14 +51,44 @@ function requireExistingPath(value, label, expected = "file") {
   return target;
 }
 
-function safeResult(value) {
+// T01: large results are persisted COMPLETELY first (temp file + atomic rename
+// + hash verification); the returned reference is generated only after the
+// artifact is durable on disk. A storage failure can never report
+// resultComplete=true, so no caller mistakes a lost result for a saved one.
+function writeOperationArtifact(dir, artifactId, text) {
+  const artifactDir = path.join(dir, "artifacts");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  const target = path.join(artifactDir, `${artifactId}.json`);
+  const temp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, text, "utf8");
+  fs.renameSync(temp, target);
+  const sha256 = crypto.createHash("sha256").update(text).digest("hex");
+  const verified = crypto.createHash("sha256").update(fs.readFileSync(target, "utf8")).digest("hex");
+  if (verified !== sha256) throw Object.assign(new Error("artifact hash verification failed"), { code: "MCP_ARTIFACT_HASH_MISMATCH" });
+  return { artifactRef: `operation-result:${artifactId}`, sha256, byteLength: Buffer.byteLength(text) };
+}
+
+const SAFE_RESULT_INLINE_LIMIT = 120_000;
+const SAFE_RESULT_PREVIEW_BYTES = 24_000;
+function safeResult(value, artifactStore = null) {
   if (value === undefined) return null;
+  let text;
+  try { text = JSON.stringify(value); } catch { return { summary: String(value) }; }
+  if (text.length <= SAFE_RESULT_INLINE_LIMIT) {
+    try { return JSON.parse(text); } catch { return { summary: String(value) }; }
+  }
+  const base = {
+    truncated: true,
+    byteLength: Buffer.byteLength(text),
+    preview: text.slice(0, SAFE_RESULT_PREVIEW_BYTES),
+    previewTruncated: true
+  };
+  if (!artifactStore) return { ...base, resultComplete: false };
   try {
-    const text = JSON.stringify(value);
-    if (text.length <= 120_000) return JSON.parse(text);
-    return { truncated: true, byteLength: Buffer.byteLength(text), preview: text.slice(0, 24_000) };
-  } catch {
-    return { summary: String(value) };
+    const saved = writeOperationArtifact(artifactStore.dir, artifactStore.id, text);
+    return { ...base, resultComplete: true, artifactRef: saved.artifactRef, sha256: saved.sha256, readMethod: "read_operation_result" };
+  } catch (error) {
+    return { ...base, resultComplete: false, artifactError: String(error?.code || "MCP_ARTIFACT_WRITE_FAILED") };
   }
 }
 
@@ -127,6 +157,42 @@ class McpAppController {
     return { ...record };
   }
 
+  safeOperationResult(record, result) {
+    return safeResult(result, this.operationDirectory ? { dir: this.operationDirectory, id: record.operationId } : null);
+  }
+
+  // Paginated, hash-verified read of a persisted large operation result. The
+  // artifact_ref is opaque and only resolves through the operation registry —
+  // caller-supplied file paths are never opened.
+  readOperationResult(input) {
+    if (!this.operationDirectory) throw Object.assign(new Error("当前工作区不支持结果文件读取"), { code: "MCP_OPERATION_ARTIFACT_UNAVAILABLE" });
+    const record = this.operationRecord(requireText(input.operation_id, "operation_id"));
+    const artifactRef = requireText(input.artifact_ref, "artifact_ref");
+    if (artifactRef !== `operation-result:${record.operationId}`) {
+      throw Object.assign(new Error("结果引用与操作不匹配"), { code: "MCP_OPERATION_ARTIFACT_NOT_FOUND" });
+    }
+    const file = path.join(this.operationDirectory, "artifacts", `${record.operationId}.json`);
+    if (!fs.existsSync(file)) throw Object.assign(new Error("结果文件不存在"), { code: "MCP_OPERATION_ARTIFACT_NOT_FOUND" });
+    const text = fs.readFileSync(file, "utf8");
+    const sha256 = crypto.createHash("sha256").update(text).digest("hex");
+    if (record.result?.sha256 && record.result.sha256 !== sha256) {
+      throw Object.assign(new Error("结果文件校验失败：内容与登记哈希不一致"), { code: "MCP_ARTIFACT_HASH_MISMATCH" });
+    }
+    const offset = Math.max(0, Math.floor(Number(input.offset) || 0));
+    const length = Math.min(24_000, Math.max(1, Math.floor(Number(input.length) || 12_000)));
+    const end = Math.min(text.length, offset + length);
+    return {
+      ok: true,
+      artifactRef,
+      sha256,
+      totalBytes: Buffer.byteLength(text),
+      totalCharacters: text.length,
+      offset,
+      nextOffset: end < text.length ? end : null,
+      chunk: text.slice(offset, end)
+    };
+  }
+
   startOperation(action, projectId, runner, params = {}) {
     if (BILLABLE_ACTIONS.has(action) && params.confirm_billable !== true) {
       throw Object.assign(new Error("该操作可能调用付费模型；请显式传入 confirm_billable=true"), { code: "MCP_BILLABLE_CONFIRMATION_REQUIRED" });
@@ -157,7 +223,7 @@ class McpAppController {
           updatedAt: new Date().toISOString(),
           completedAt: new Date().toISOString(),
           message: "操作完成",
-          result: safeResult(result)
+          result: this.safeOperationResult(record, result)
         });
         this.saveOperationOutcome(record);
       })
@@ -252,6 +318,7 @@ class McpAppController {
     }
     if (method === "get_text_provider_events") return { ok: true, events: listTextProviderEvents(input.limit) };
     if (method === "get_operation") return { ok: true, operation: this.operationRecord(input.operation_id) };
+    if (method === "read_operation_result") return this.readOperationResult(input);
     if (method === "list_reusable_assets") return { ok: true, assets: this.store.listReusableAssets(String(input.kind || "")) };
     if (method === "list_archived_projects") return { ok: true, projects: this.store.listDeletedProjects() };
     if (method === "test_text_provider") {
@@ -391,4 +458,4 @@ class McpAppController {
   }
 }
 
-module.exports = { McpAppController, BILLABLE_ACTIONS, publicLicenseSnapshot };
+module.exports = { McpAppController, BILLABLE_ACTIONS, publicLicenseSnapshot, safeResult, writeOperationArtifact, SAFE_RESULT_INLINE_LIMIT };

@@ -59,7 +59,12 @@ function submit(dir,input){
  let findings=[];
  if(request.json){
   if(value===undefined)findings=[{path:'$.data',reason:'Submit the authored JSON value in data, not in chat or a quoted JSON string.'}];
-  else if(request.responseSchema)findings=require('../agent-output-normalization').inspect(value,request.responseSchema);
+  else if(request.responseSchema){
+   // Authoritative verdict: conforms() decides; inspect() only explains.
+   // An empty findings array can no longer smuggle a schema-invalid result.
+   const verdict=require('../typed-output-receipt').validateSubmittedValue(value,request.responseSchema);
+   if(!verdict.valid)findings=verdict.findings;
+  }
   else if((request.requiredKeys||[]).some(k=>!value||!Object.hasOwn(value,k)))findings=[{path:'$.data',reason:'Missing requested fields',requiredKeys:request.requiredKeys}];
  }else if(typeof value!=='string'||!value.trim())findings=[{path:'$.text',reason:'Submit the complete authored text.'}];
  if(findings.length)return {ok:true,status:'needs_revision',savedDraft:true,findings,instruction:'Continue this SAME task. Correct the submitted data using the original source; preserve already correct content. Call submit_stage_result again. Do not report task failure or ask the user to restart.'};
