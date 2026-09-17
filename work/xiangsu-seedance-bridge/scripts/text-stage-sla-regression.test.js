@@ -30,7 +30,7 @@ test("analysis is bounded, auto-recovers incomplete AI structure, and prompt com
   assert.doesNotMatch(workflowSource, /agent-plus-local-auto-repair/);
   assert.match(workflowSource, /const maxAttempts = 1/);
   assert.match(workflowSource, /buildFallbackHailuoPromptSpec/);
-  assert.match(workflowSource, /compileSource = "deterministic-local-preservation"/);
+  assert.match(workflowSource, /source: "deterministic-local-preservation"/);
 });
 
 test("timeout resume preserves the paid logical session id", () => {

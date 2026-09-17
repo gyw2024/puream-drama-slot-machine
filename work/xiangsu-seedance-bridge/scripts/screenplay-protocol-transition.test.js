@@ -9,12 +9,14 @@ for(const mode of ['original','upload','adapt'])test(mode+': incomplete referenc
   calls.push(o.stage);
   if(o.stage==='shot_screenplay_draft'){assert.equal(o.json,false);assert.equal(o.responseSchema,undefined);return '完整中文剧本首稿';}
   if(o.stage==='shot_screenplay_structure'){assert.equal(o.agentStage,'planning');return doc;}
-  if(o.stage==='shot_screenplay_repair'){const input=JSON.parse(m[1].content);assert.ok(input.allowedShotIds.includes('S03'));return {shots:[{...structuredClone(d.shots[2]),sceneId:correctSceneId}],additions:[],characters:[],scenes:[],props:[],wardrobes:[]};}
+  if(o.stage==='shot_screenplay_repair'){const input=JSON.parse(m[1].content);assert.ok(input.allowedShotIds.includes('S3'));assert.match(input.findings.map(f=>f.evidence).join(';'),/unknown sceneId/);return {shots:[{...structuredClone(d.shots[2]),sceneId:correctSceneId,characterIds:['C01','C02']}],additions:[],characters:[],scenes:[],props:[],wardrobes:[]};}
   return approved(m);
  }});
  assert.equal(result.status,'ready');assert.deepEqual(writer.issues(result.document),[]);
  assert.equal(calls.filter(s=>s==='shot_screenplay_draft').length,1);
- assert.equal(calls.filter(s=>s==='shot_screenplay_structure').length,1);
+ // 结构修复预算：intake 首次 + 每轮 prepare 内 2 次带 deliveryIssues 反馈的修复尝试，
+ // mock 始终返回坏引用稿 → 预算耗尽 salvage 到本地协议修复（repair 阶段，见 T07/§7.5）。
+ assert.equal(calls.filter(s=>s==='shot_screenplay_structure').length,3);
  assert.equal(calls.filter(s=>s==='shot_screenplay_repair').length,1);
  assert.equal(calls.filter(s=>s==='shot_screenplay_review').length,0);
  for(const index of [0,1,3,4,5])assert.deepEqual(result.document.shots[index],original.shots[index]);
@@ -26,6 +28,6 @@ test('resume with migrated signature re-runs intake and repairs the invalid auth
  await assert.rejects(writer.author({mode:'upload',source:'original',save:s=>{checkpoint=structuredClone(s);if(s.document)controller.abort();},signal:controller.signal,generate:async(m,o)=>{if(o.stage==='shot_screenplay_draft')return '完整中文剧本首稿';if(o.stage==='shot_screenplay_structure')return doc;assert.fail('unexpected stage '+o.stage);}}),{code:'PROVIDER_REQUEST_ABORTED'});
  assert.ok(checkpoint.document,'interrupted intake must keep the structured draft');
  checkpoint.signature='old-build-signature';let repaired=0;
- const r=await writer.author({mode:'upload',source:'original',checkpoint,generate:async(m,o)=>{assert.notEqual(o.stage,'shot_screenplay_draft');assert.notEqual(o.stage,'shot_screenplay_structure');if(o.stage==='shot_screenplay_repair'){repaired++;return {shots:[{...structuredClone(doc.shots[2]),sceneId:correctSceneId}],additions:[],characters:[],scenes:[],props:[],wardrobes:[]};}return approved(m);}});
+ const r=await writer.author({mode:'upload',source:'original',checkpoint,generate:async(m,o)=>{assert.notEqual(o.stage,'shot_screenplay_draft');assert.notEqual(o.stage,'shot_screenplay_structure');if(o.stage==='shot_screenplay_repair'){repaired++;return {shots:[{...structuredClone(doc.shots[2]),sceneId:correctSceneId,characterIds:['C01','C02']}],additions:[],characters:[],scenes:[],props:[],wardrobes:[]};}return approved(m);}});
  assert.equal(repaired,1);assert.equal(r.status,'ready');assert.deepEqual(writer.issues(r.document),[]);
 });
