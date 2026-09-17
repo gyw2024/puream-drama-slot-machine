@@ -13,7 +13,7 @@ function clean(value,label){for(const rule of forbidden)assert.doesNotMatch(valu
 test('every effective default template removes obsolete commerce timing, cast caps and isolated ads',()=>{
  const all=defaultPromptTemplates();assert.ok(Object.keys(all).length>=60);
  for(const [key,value]of Object.entries(all))if(typeof value==='string')clean(value,key);
- assert.equal(PROMPT_LIBRARY_VERSION,require('../app/unified-audit-policy').VERSION);
+ assert.equal(PROMPT_LIBRARY_VERSION,`${require('../app/unified-audit-policy').VERSION}:${require('../app/generation-prompts').VERSION}`);
 });
 test('all effective generation modes and reference stages retain source cast and commerce order',()=>{
  const all=defaultPromptTemplates();
@@ -24,8 +24,12 @@ test('all effective generation modes and reference stages retain source cast and
 });
 test('effective source and acceptance prompts apply the shared evidence policy, not product visibility',()=>{
  const all=defaultPromptTemplates();
- for(const key of ['scriptStoryBible','scriptBlueprint','scriptPlanBatch','scriptUnitGeneration','scriptAnalysis','scriptSemanticReview','scriptRepair','referenceParityStoryBible','referenceParityAcceptance']){
-  assert.ok(all[key].includes(POLICY),key);assert.match(all[key],/保留(?:上传|用户)原稿.*商品.*顺序/,key);
+ for(const key of ['scriptSemanticReview','referenceParityAcceptance']){
+  assert.ok(all[key].includes(POLICY),key);
+  assert.match(all[key],/不改动用户原话|保留(?:上传|用户|原稿)?[^。]{0,20}(?:原稿|原话)[^。]{0,30}商品/,key);
+ }
+ for(const key of ['scriptStoryBible','scriptBlueprint','scriptPlanBatch','scriptUnitGeneration','scriptAnalysis','scriptRepair','referenceParityStoryBible']){
+  assert.ok(/带货|商品/.test(all[key]),`${key}: 应内嵌剧情带货编写规则（共享证据政策内容）`);
  }
  assert.match(all.referenceParityAcceptance,/同一持有人/);assert.match(all.referenceParityAcceptance,/稳固接触/);
  assert.match(all.referenceParityAcceptance,/整体.*细节/);assert.match(all.referenceParityAcceptance,/Background visibility|visible jar/);

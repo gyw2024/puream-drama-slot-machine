@@ -32,7 +32,14 @@ function applySceneRepair(original,repair){
   let text=original.scriptText;
   if(repair.replacements.length&&repair.replacements.every(p=>Number.isInteger(p.fromLine)&&Number.isInteger(p.toLine))){
    const lines=text.split('\n'),patches=[...repair.replacements].sort((a,b)=>a.fromLine-b.fromLine);let priorEnd=0;
-   for(const p of patches){if(p.fromLine<1||p.toLine<p.fromLine||p.toLine>lines.length||p.fromLine<=priorEnd||typeof p.after!=='string')throw Error('场次行号修改越界、重叠或超过五行非空正文，原場未覆盖');priorEnd=p.toLine;}
+   for(const p of patches){if(p.fromLine<1||p.toLine<p.fromLine||p.toLine>lines.length||p.fromLine<=priorEnd||typeof p.after!=='string')throw Error('场次行号修改越界、重叠或超过五行非空正文，原場未覆盖');
+    // T06/214: a reviewer may fix a few lines, but must never silently rewrite the
+    // whole scene in one undifferentiated block. A blank separator inside the
+    // range proves it is a structured partial edit; a contiguous run of over five
+    // non-blank lines with no separator is a forbidden full-scene rewrite.
+    const replaced=lines.slice(p.fromLine-1,p.toLine),nonBlank=replaced.filter(l=>l.trim()!=='');
+    if(!replaced.some(l=>l.trim()==='')&&nonBlank.length>5)throw Error('场次修复不得一次性整段重写全场景：无空行分隔的连续超过五行非空正文，原場未覆盖');
+    priorEnd=p.toLine;}
    for(const p of patches.reverse())lines.splice(p.fromLine-1,p.toLine-p.fromLine+1,p.after);
    return {...original,scriptText:lines.join('\n'),endState:repair.endState};
   }

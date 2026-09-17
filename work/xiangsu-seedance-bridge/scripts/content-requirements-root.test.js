@@ -33,7 +33,7 @@ test('actual assembled video review has no late source-timing or recorded-speech
  const tasks=require('../app/agent-stage-tasks');let received;
  const items=[{id:'v1',entityType:'shot',entityId:'S1',stage:'shot_video',prompt:'voice-over from the in-scene recording: <d>[Chinese] 原话完整保留。</d>'}];
  const source={acceptedShotScreenplay:true,shots:[{id:'S1',duration:10,dialogueTurns:[{id:'D1',text:'原话完整保留。',startSecond:0,endSecond:9}]}]};
- await tasks.reviewStagePrompts(items,{textProvider:{},localAgents:{text:'workbuddy',stages:{review:'workbuddy'}}},async(c,m)=>{received=m;return {items:[{id:'v1',issues:[]}]};},{source});
+ await tasks.reviewStagePrompts(items,{textProvider:{},localAgents:{text:'workbuddy',stages:{review:'workbuddy'}}},async(textProvider,messages,opts)=>{const msgs=Array.isArray(textProvider)?textProvider:messages;const o=Array.isArray(textProvider)?messages:opts;const rs=o&&o.responseSchema;if(rs&&rs.properties&&rs.properties.shots)return {shots:[{shotId:'S1',sourcePhase:'x',proposedPhase:'x',issues:[]}]};received=msgs;return {items:[{id:'v1',issues:[]}]};},{source});
  assert.ok(received);const actual=received[0].content;
  assert.doesNotMatch(actual,/Do not re-review the original story|recalculate supplied times|do not force a live-reading CPS|at least 3 seconds total outside speech|use shared executable drama-timing/);
  assert.match(actual,/identical wrong source\/prompt timing/);assert.match(actual,/Recorded speech follows the same user speech-rate/);

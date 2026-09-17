@@ -30623,7 +30623,7 @@ ${shotAnchor}
       const missing = orderedShots.filter((shot, i) => !videos[i]?.filePath || !fs.existsSync(videos[i].filePath));
       if (!orderedShots.length || missing.length) throw Object.assign(new Error(missing.length ? `还缺 ${missing.map(shot => `S${String(shot.number).padStart(2, "0")}`).join("、")} 的本地视频；请上传或完成这些镜头后重试。未调用生成、未扣费。` : "尚无分镜视频；请先创建或导入分镜。未调用生成、未扣费。"), { code: "JIANYING_VIDEOS_INCOMPLETE" });
       const fingerprint = stitchInputFingerprint(project, videos);
-      const cleanCurrent = project.roughCutInputFingerprint === fingerprint && project.postProductionMixResult?.mode === "separate-draft-tracks" && fs.existsSync(project.roughCutVideoPath || "");
+      const cleanCurrent = project.roughCutInputFingerprint === fingerprint && (project.postProductionMixResult?.mode === "separate-draft-tracks" || project.postProductionMixResult?.mode === "preview_and_draft" || project.postProductionMixResult?.mode === "partial_audio") && fs.existsSync(project.roughCutVideoPath || "");
       const trims = new Map((cleanCurrent ? project.roughCutAudioCleanup?.shots || [] : []).map(item => [item.shotId, item]));
       const ffmpeg = this.locateFfmpeg();
       const cleanInfo = cleanCurrent && ffmpeg ? await probeLocalVideoInfo(ffmpeg, project.roughCutVideoPath, signal) : null;

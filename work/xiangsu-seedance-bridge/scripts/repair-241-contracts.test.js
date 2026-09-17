@@ -41,8 +41,18 @@ test('equivalent saved timing aliases reuse review; a real timing edit still req
  const t=require('../app/agent-stage-tasks'),config={textProvider:{},localAgents:{text:'codex',stages:{review:'codex'},providers:{codex:{model:'test-model'}}}};
  const items=()=>[{id:'shot:S01',entityType:'shot',entityId:'S01',stage:'shot_video',prompt:'Exact fixed prompt.'}];
  const source={shots:[{id:'S01',dialogueTurns:[{sourceDialogueId:'D01',text:'原台词',speakerId:'C01',start:1,end:3,startSecond:1,endSecond:3}]}]};let calls=0,checkpoint;
- const generate=async()=>{calls++;return {items:[{id:'shot:S01',issues:[]}]};};const opts={source,saveCheckpoint:c=>{checkpoint=structuredClone(c);}};
- await t.reviewStagePrompts(items(),config,generate,opts);delete source.shots[0].dialogueTurns[0].start;delete source.shots[0].dialogueTurns[0].end;
- await t.reviewStagePrompts(items(),config,generate,{...opts,checkpoint});assert.equal(calls,1);
- source.shots[0].dialogueTurns[0].startSecond=1.1;await t.reviewStagePrompts(items(),config,generate,{...opts,checkpoint});assert.equal(calls,2);
+ // mock 按当前 schema 分支：chronology 评审回 shots 行；批量评审回 items 行。
+ // 注意两种调用约定：批量 generate(textProvider, messages, opts)，chronology generate(messages, opts)。
+ const generate=async(a,b,c)=>{
+  calls++;
+  const messages=Array.isArray(a)?a:b,opts=Array.isArray(a)?b:c;
+  const rs=opts&&opts.responseSchema;
+  if(rs&&rs.properties&&rs.properties.shots){
+   return {shots:[{shotId:'S01',sourcePhase:'夜间连续场景',proposedPhase:'夜间连续场景',issues:[]}]};
+  }
+  return {items:[{id:'shot:S01',issues:[]}]};
+ };const opts={source,saveCheckpoint:c=>{checkpoint=structuredClone(c);}};
+ await t.reviewStagePrompts(items(),config,generate,opts);const afterFirst=calls;delete source.shots[0].dialogueTurns[0].start;delete source.shots[0].dialogueTurns[0].end;
+ await t.reviewStagePrompts(items(),config,generate,{...opts,checkpoint});assert.equal(calls,afterFirst,'别名等价输入（start/end 与 startSecond/endSecond 相同）应复用，不新增评审调用');
+ source.shots[0].dialogueTurns[0].startSecond=1.1;await t.reviewStagePrompts(items(),config,generate,{...opts,checkpoint});assert.equal(calls,afterFirst+2,'真实时间编辑（startSecond 改变）应触发一次完整重审：批量 + 时间线核对各一次');
 });

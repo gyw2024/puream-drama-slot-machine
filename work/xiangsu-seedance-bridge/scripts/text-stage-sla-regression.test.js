@@ -24,11 +24,11 @@ test("every AI text generation path shares the twenty-minute attempt window", ()
 
 test("analysis is bounded, auto-recovers incomplete AI structure, and prompt compilers preserve local technical output", () => {
   assert.match(workflowSource, /localUploadedAnalysisChunk/);
-  assert.match(workflowSource, /agent-plus-source-ledger-format-recovery/);
+  assert.match(workflowSource, /bindSourceDialogueLedgerToAnalysis/);
   assert.match(workflowSource, /localFallbackCount:\s*0/);
   assert.doesNotMatch(workflowSource, /未写入本地兜底资产/);
   assert.doesNotMatch(workflowSource, /agent-plus-local-auto-repair/);
-  assert.match(workflowSource, /const maxCompileAttempts = 1/);
+  assert.match(workflowSource, /const maxAttempts = 1/);
   assert.match(workflowSource, /buildFallbackHailuoPromptSpec/);
   assert.match(workflowSource, /compileSource = "deterministic-local-preservation"/);
 });

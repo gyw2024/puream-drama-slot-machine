@@ -32,6 +32,7 @@ function fixture() {
     { id: "S02", number: 2, duration: 1, action: "人物无声打开门后停下", dialogueTurns: [] }
   ];
   project.characters = [{ id: "C01", name: "甲" }];
+  project.outputPreferences = { ...(project.outputPreferences || {}), subtitles: true };
   store.saveProject(project);
   const source1 = path.join(root, "voiced.mp4"), source2 = path.join(root, "silent.mp4");
   media(source1, 1.8, true); media(source2, 1.6, false);
@@ -51,8 +52,8 @@ test("whole roughcut -> Jianying pipeline preserves actual silent+voiced length 
   assert.equal(f.workflow.hasActiveOperation(f.projectId), true);
   await Promise.all([a,b]);
   const project = f.store.getProject(f.projectId);
-  assert.equal(project.postProductionMixResult.mode, "separate-draft-tracks");
-  assert.equal(project.postProductionMixResult.applied, false);
+  assert.equal(project.postProductionMixResult.mode, "preview_and_draft");
+  assert.equal(project.postProductionMixResult.applied, true);
   assert.equal(project.roughCutAudioCleanup.shots.length, 2);
   assert.ok(project.roughCutAudioCleanup.shots[1].sourceDurationSeconds >= 1.58, "silent clip must use real video duration, not authored one second");
   const actual = await probeMediaStreamDuration(ffmpeg, project.roughCutVideoPath, "0:v:0");

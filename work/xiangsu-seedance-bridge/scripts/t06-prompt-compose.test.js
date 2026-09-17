@@ -66,7 +66,7 @@ test('screenplay 装配：P00 边界只出现一次，十条政策规则已去�
   assert.ok(rules.includes('authority') === false, '来源引用不进入正文');
   for (const marker of ['只负责一次写完中文标准分镜剧本']) assert.ok(rules.includes(marker));
   assert.equal(separation.WRITER_PROVENANCE.stage, 'shot_screenplay_draft');
-  assert.equal(separation.WRITER_PROVENANCE.sources.filter(s => s.kind === 'creative-policy').length, 10, '十条政策规则全部入编');
+  assert.equal(separation.WRITER_PROVENANCE.sources.filter(s => s.kind === 'creative-policy').length, 11, '十一条政策规则（含 content_requirements）全部入编');
   // intake 同样经 composer 装配
   assert.ok(separation.INTAKE_RULES.includes('【共同边界】'));
   assert.ok(separation.INTAKE_PROVENANCE.systemHash);

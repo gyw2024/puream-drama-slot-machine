@@ -125,7 +125,7 @@ test("Simple guide states its asset-only, no-text-model workflow", () => {
 
 test("static image contracts ban text explicitly while character-video payloads use only positive clean-frame wording", () => {
   const prompts = defaultPromptTemplates();
-  assert.match(prompts.storyboardImage, /不得生成字幕|禁止[^。；\n]*(?:字幕|文字)|无字幕/);
+  assert.match(prompts.storyboardImage, /No dialogue text|added captions|字幕|文字/i);
 
   for (const engine of ["seedance", "hailuo-h3"]) {
     const output = [

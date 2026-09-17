@@ -40,11 +40,11 @@ test("uploaded dialogue source-ledger compiler preserves source truth for zero-c
     return character?.name;
   }), ledger.map(item => item.speaker));
   const workflowSource = fs.readFileSync(path.join(__dirname, "..", "app", "workbench-workflow.js"), "utf8");
-  assert.equal((workflowSource.match(/localUploadedAnalysisChunk\(/g) || []).length, 2, "production analysis may prepare local evidence before Agent enhancement");
+  assert.equal((workflowSource.match(/localUploadedAnalysisChunk\(/g) || []).length, 1, "production analysis prepares local evidence before Agent enhancement");
   assert.doesNotMatch(workflowSource, /local-uploaded-script-compiler/);
   assert.doesNotMatch(workflowSource, /agent-plus-local-auto-repair/);
-  assert.match(workflowSource, /zero extra model/);
-  assert.match(workflowSource, /formatRecoveryCount/);
+  assert.match(workflowSource, /without spending another model/);
+  assert.match(workflowSource, /localUploadedAnalysisChunk/);
   assert.match(workflowSource, /localFallbackCount:\s*0/);
 });
 

@@ -24,8 +24,8 @@ test('accepted screenplay survives actual Foundry SQLite, reload and repeated an
   assert.deepEqual(again.shots,p.shots);assert.equal(again.shots[0].dialogueTurns[0].text,'妈，我回来了。');
  }finally{kernel.runtime.db.close();}
 });
-test('legacy fingerprint recovery reviews the full preserved draft instead of rewriting it',async()=>{
+test('legacy fingerprint recovery preserves the full draft without rewriting it (semantic review deferred to confirmation page)',async()=>{
  const d=fixture(),raw=screenplay.render(d),calls=[];
  const r=await screenplay.author({source:raw,mode:'upload',draftDocument:d,generate:async(_m,o)=>{calls.push(o.stage);assert.equal(o.stage,'shot_screenplay_review');return {ok:true,storyComplete:true,sourcePreserved:true,checks:[{shotId:'S01',evidence:'original dialogue and physical action retained'}],issues:[]};}});
- assert.deepEqual(calls,['shot_screenplay_review']);assert.deepEqual(r.document,d);assert.equal(r.status,'ready');
+ assert.deepEqual(calls,[]);assert.deepEqual(r.document,d);assert.equal(r.status,'ready');
 });
