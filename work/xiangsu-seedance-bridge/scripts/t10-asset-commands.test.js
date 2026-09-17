@@ -56,7 +56,7 @@ test('asset.remove: 未引用可软删；被引用时拒绝并列出引用镜', 
   project.shots[0].participants.push(project.characters[0].id);
   put(project);
   assert.throws(() => run(repo, 'c2', 'asset.remove', { assetId: project.characters[0].id }),
-    e => e.code === 'ASSET_REFERENCED' && e.shotIds.includes('s1'));
+    e => e.code === 'ASSET_REFERENCED' && e.details.shotIds.includes('s1'));
   // 显式 archive 才允许
   run(repo, 'c3', 'asset.remove', { assetId: project.characters[0].id, mode: 'archive' });
   project = loadProject(store);
