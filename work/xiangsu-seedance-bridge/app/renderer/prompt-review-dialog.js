@@ -169,7 +169,7 @@
           ${conflict?`<details open class="settings-note"><summary>Agent 已更新此条，您的未保存编辑仍保留</summary><pre style="max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere">${escapeHtml(storedDisplayPrompt(item))}</pre><button type="button" class="outline-button" data-use-agent-edit="${escapeHtml(item.id)}">采用 Agent 修改</button></details>`:''}
           ${item.editOrigin==='agent'?'<p class="settings-note">Agent 已定点修改，请确认当前版本。</p>':''}<label class="prompt-review-editor-label"><span>${isEnglish ? `完整中文查看与编辑稿（${displayPrompt.length} 字）` : `完整提示词（${displayPrompt.length} 字）`}</span><textarea class="prompt-review-text" data-prompt-review-text="${escapeHtml(item.id)}" data-display-length="${displayPrompt.length}" aria-label="${escapeHtml(item.label || item.id)}${isEnglish ? "完整中文译文" : "完整提示词"}" spellcheck="false" ${editorBusy()?'readonly aria-readonly="true"':''}>${escapeHtml(displayPrompt)}</textarea></label>
           ${executionPreview}
-          <div class="prompt-review-item-actions"><span>${escapeHtml(actionHint)}</span><button type="button" class="outline-button" data-confirm-prompt-item="${escapeHtml(item.id)}" ${submitting || editorBusy() || review.status === "pending" ? "disabled" : ""}>${confirmLabel}</button></div>
+          <div class="prompt-review-item-actions"><span>${escapeHtml(actionHint)}</span><button type="button" class="outline-button" data-chat-prompt-item="${escapeHtml(item.id)}" ${submitting || editorBusy() || review.status === "pending" ? "disabled" : ""} title="在右侧抽屉中与本条提示词多轮对话，只改本条">让 Agent 修改</button><button type="button" class="outline-button" data-confirm-prompt-item="${escapeHtml(item.id)}" ${submitting || editorBusy() || review.status === "pending" ? "disabled" : ""}>${confirmLabel}</button></div>
         </article>`;
         return html;
       });
@@ -337,6 +337,23 @@
       }
       const itemButton = event.target.closest("[data-confirm-prompt-item]");
       if (itemButton) confirmItem(itemButton.dataset.confirmPromptItem);
+      // T09 / §6.1: per-item multi-turn chat entry. The drawer owns the
+      // thread; the dialog only supplies the item and its live textarea.
+      const chatButton = event.target.closest("[data-chat-prompt-item]");
+      if (chatButton) {
+        const itemId = chatButton.dataset.chatPromptItem;
+        const item = activeItems().find(entry => entry.id === itemId);
+        if (!item || !project) return;
+        const textarea = list.querySelector(`[data-prompt-review-text="${CSS.escape(itemId)}"]`);
+        global.PromptChatDrawer?.open?.({
+          projectId: project.id,
+          item: { ...item, itemRevision: Number(item.itemRevision || 0) },
+          textarea,
+          onApplied: async nextProject => {
+            if (nextProject) { project = nextProject; options.setProject?.(nextProject); render(); }
+          }
+        }).catch(error => setMessage(error.message || "无法打开单条修改会话。", "error"));
+      }
     });
     root.querySelector("#confirmAllPrompts")?.addEventListener("click", confirmAll);
     root.querySelector("#closePromptReviewDialog")?.addEventListener("click", close);

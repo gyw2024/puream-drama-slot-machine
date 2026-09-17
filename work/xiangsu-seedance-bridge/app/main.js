@@ -3230,6 +3230,94 @@ ipcMain.handle("workbench:confirm-prompt-review-item", async (_event, projectId,
 });
 // T05 / §5.1: atomic per-epoch auto-open display permit for the initial
 // whole-script confirmation.
+// T08/T09 / §6.3: single-item prompt chat. One whitelist API, shared by
+// workbench, simple mode and MCP. The adapter maps prompt-review items to
+// chat items; only THIS item's display/execution prompt fields and its own
+// revision may change — never other items, never the whole-project gate.
+function promptChatService() {
+  if (promptChatService.instance) return promptChatService.instance;
+  const context = requireWorkbench();
+  const { PromptChatService } = require("./production-v2/prompt-chat");
+  const findItem = (projectId, itemId) => {
+    const project = context.store.getProject(projectId);
+    const item = project?.promptReview?.items?.find(entry => entry.id === String(itemId));
+    if (!item) return null;
+    return {
+      itemId: String(itemId),
+      itemRevision: Number(item.itemRevision || 0),
+      displayText: String(item.displayPrompt || item.prompt || ""),
+      executionPrompt: String(item.prompt || ""),
+      meta: { relatedFacts: {} }
+    };
+  };
+  promptChatService.instance = new PromptChatService({
+    db: foundryKernel?.runtime?.db,
+    loadItem: findItem,
+    saveItem: (projectId, itemId, { displayText, executionPrompt, expectedItemRevision }) => {
+      const project = context.store.getProject(projectId);
+      const item = project?.promptReview?.items?.find(entry => entry.id === String(itemId));
+      if (!item) throw Object.assign(new Error("该条目不存在。"), { code: "ITEM_NOT_FOUND" });
+      if (Number(expectedItemRevision) !== Number(item.itemRevision || 0)) {
+        throw Object.assign(new Error("你编辑期间该条已有更新；提案已保留。"), { code: "EDIT_CONFLICT" });
+      }
+      item.displayPrompt = displayText;
+      item.prompt = executionPrompt;
+      item.itemRevision = Number(item.itemRevision || 0) + 1;
+      // Applying a chat edit re-opens THIS item for confirmation only; other
+      // confirmed items keep their approval and the initial gate is untouched.
+      if (item.status === "confirmed") {
+        item.status = "pending";
+        item.userConfirmed = false;
+        item.chatEditedAt = new Date().toISOString();
+      }
+      context.store.saveProject(project);
+      return { itemRevision: item.itemRevision };
+    },
+    model: async ({ messages, schema }) => {
+      const settings = context.store.getSettings();
+      const data = await context.workflow.generateText(settings.textProvider, messages, {
+        json: true,
+        responseSchema: schema,
+        costProjectId: null,
+        costOperation: "prompt_chat_turn",
+        maxTokens: 4000,
+        latencyProfile: require("./preproduction-performance").VERSION
+      });
+      return data;
+    }
+  });
+  return promptChatService.instance;
+}
+
+function publicOk(value) { return { ok: true, ...value }; }
+
+ipcMain.handle("prompt-chat:create-thread", async (_event, projectId, itemId, expectedItemRevision) => {
+  try { return publicOk(promptChatService().createThread({ projectId, itemId, expectedItemRevision })); }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("prompt-chat:send-turn", async (_event, projectId, threadId, clientTurnId, scope, instruction) => {
+  try { return publicOk(await promptChatService().sendTurn({ projectId, threadId, clientTurnId, scope, instruction })); }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("prompt-chat:get-thread", async (_event, projectId, threadId, afterMessageId) => {
+  try { return publicOk(promptChatService().getThread({ projectId, threadId, afterMessageId })); }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("prompt-chat:apply-proposal", async (_event, projectId, threadId, proposalId, expectedItemRevision, baseHash) => {
+  try {
+    const result = promptChatService().applyProposal({ projectId, threadId, proposalId, expectedItemRevision, baseHash });
+    return publicOk({ ...result, project: projectForRendererFrom(requireWorkbench(), projectId, { reconcile: false }) });
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("prompt-chat:discard-proposal", async (_event, projectId, threadId, proposalId) => {
+  try { return publicOk(promptChatService().discardProposal({ projectId, threadId, proposalId })); }
+  catch (error) { return publicError(error); }
+});
+ipcMain.handle("prompt-chat:cancel-turn", async (_event, projectId, threadId, turnId) => {
+  try { return publicOk(promptChatService().cancelTurn({ projectId, threadId, turnId })); }
+  catch (error) { return publicError(error); }
+});
+
 ipcMain.handle("workbench:consume-prompt-review-auto-open", async (_event, projectId) => {
   try {
     const context = requireWorkbench();

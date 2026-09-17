@@ -126,5 +126,14 @@ contextBridge.exposeInMainWorld("dramaSlot", {
     stitch: projectId => ipcRenderer.invoke("workbench:stitch", projectId),
     exportJianyingDraft: (projectId, options = {}) => ipcRenderer.invoke("workbench:export-jianying", projectId, options),
     cancelPostProduction: projectId => ipcRenderer.invoke("workbench:cancel-post-production", projectId)
+  },
+  // T08/T09 / §6.3: single-item prompt chat whitelist API.
+  promptChat: {
+    createThread: (projectId, itemId, expectedItemRevision) => ipcRenderer.invoke("prompt-chat:create-thread", projectId, itemId, expectedItemRevision),
+    sendTurn: (projectId, threadId, clientTurnId, scope, instruction) => ipcRenderer.invoke("prompt-chat:send-turn", projectId, threadId, clientTurnId, scope, instruction),
+    getThread: (projectId, threadId, afterMessageId) => ipcRenderer.invoke("prompt-chat:get-thread", projectId, threadId, afterMessageId),
+    applyProposal: (projectId, threadId, proposalId, expectedItemRevision, baseHash) => ipcRenderer.invoke("prompt-chat:apply-proposal", projectId, threadId, proposalId, expectedItemRevision, baseHash),
+    discardProposal: (projectId, threadId, proposalId) => ipcRenderer.invoke("prompt-chat:discard-proposal", projectId, threadId, proposalId),
+    cancelTurn: (projectId, threadId, turnId) => ipcRenderer.invoke("prompt-chat:cancel-turn", projectId, threadId, turnId)
   }
 });
