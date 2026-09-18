@@ -67,7 +67,11 @@ function performanceTimelineFailures(shot, prompt, options = {}) {
       if (segments.some(item => item.start > start + 0.02 && item.start < end - 0.02)) failures.push(`${label}: camera cut crosses the spoken sentence`);
     }
   }
-  failures.push(...require('./shot-performance-contract').silenceFailures(turns,duration));
+  // Editorial silence is planner-authored: planPerformanceTimeline distributes the
+  // visual reserve (lead, interior gaps, tail) and surfaces it via editorialAdvisories.
+  // Validating the planner's own output must not turn those advisories into hard
+  // failures; explicit delivery gates use shot-performance-contract.silenceFailures.
+
   if (unused.length) failures.push("final prompt has extra or repeated dialogue events");
   // New authored beats carry explicit ownership. Legacy prose is not treated
   // as reliable machine-readable ownership and must be reviewed separately.

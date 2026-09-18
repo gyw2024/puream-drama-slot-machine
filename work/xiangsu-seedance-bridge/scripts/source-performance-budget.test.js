@@ -23,7 +23,7 @@ test('prices budget spoken decimal and integer syllables while source remains im
 });
 test('sequential before and after actions count outside complete source speech, not hidden in end state',()=>{
  const row={shotId:'S01',actionPhases:[phase('before',3,'stop and crouch'),phase('after',7,'collect vegetables, summon worker, worker arrives')]};
- const crowded=evaluateBudget(row,[{text:'阿姨，先别急着站，你哪儿疼？我帮你打电话。'},{text:'没伤着，就是脚滑了。菜撒了，耽误你送快递。'}]);assert.ok(crowded.requiredSeconds>15);assert.ok(crowded.issues.length);
+ const crowded=evaluateBudget(row,[{text:'阿姨，先别急着站，你哪儿疼？我帮你打电话。'},{text:'没伤着，就是脚滑了。菜撒了，耽误你送快递。'}]);assert.ok(crowded.requiredSeconds>15);assert.ok(crowded.advisories.some(x=>/regroup complete lines/.test(x)),'v8 reports overflow as a regroup advisory, not a hard issue');assert.deepEqual(crowded.issues,[]);
  const split=evaluateBudget(row,[{text:'没伤着，就是脚滑了。菜撒了，耽误你送快递。'}]);assert.ok(split.requiredSeconds<=15);assert.ok(split.advisories.some(x=>/continuous silence/.test(x)));assert.deepEqual(split.issues,[]);
 });
 test('budget validates every unit, overlap and source dialogue',()=>{
@@ -48,7 +48,8 @@ test('legal 5-6 cps interval fits the real 16-second-at-nominal regression witho
  for(let i=0;i<turns.length;i++){const b=require('../app/drama-timing').speechWindowBounds(turns[i].text,turns[i]);assert.ok(planned[i]>=b.minSeconds&&planned[i]<=b.maxSeconds);}
  const impossible=evaluateBudget({...row,actionPhases:[phase('before',.3,'closed mouth'),phase('after',9,'longer real actions')]},turns);
  assert.ok(impossible.requiredSeconds>15);
- assert.ok(impossible.issues.length);
+ assert.ok(impossible.advisories.some(x=>/regroup complete lines/.test(x)),'v8 reports overflow as a regroup advisory, not a hard issue');
+ assert.deepEqual(impossible.issues,[]);
  const raw='### S15｜场景：走廊\n【人物】韩雪、张秀兰\n【核心物品】照片、布袋\n【动作】张秀兰离开后，韩雪收好照片，提起布袋转身。\n'+turns.map((t,i)=>'【对白】'+(i?'张秀兰（对韩雪；欣慰）':'韩雪（对张秀兰；温和）')+'：'+t.text).join('\n')+'\n【声音】脚步与衣料声。\n【承接】韩雪持袋面向门。';
  const project={script:{raw,formatAdaptation:{performanceBudgets:[row]}}};
  const parsed=parseAiStandardizedProductionScript(raw,project),semantic=h3AssetDirectSemanticSource({...project,...JSON.parse(JSON.stringify(parsed))});

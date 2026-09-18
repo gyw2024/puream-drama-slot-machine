@@ -18,7 +18,11 @@ test('active reference templates do not request isolated faceless product insert
 test('shared performance policy no longer imposes a contradictory fixed silent reserve',()=>{
  const source=require('node:fs').readFileSync(require.resolve('../app/drama-writing-contract'),'utf8');
  assert.doesNotMatch(source,/Reserve at least 3 seconds outside speech/);
- assert.match(source,/restrained calm, suppression and silence may be intentional/);
+ // The shared performance policy moved to shot-performance-contract (unified-audit-policy
+ // INSTRUCTION): calm delivery is ordinary speech and silence metrics are advisory.
+ const policy=require('../app/shot-performance-contract').DIRECTIVE;
+ assert.match(policy,/Calm information questions are ordinary speech/);
+ assert.match(policy,/silence percentage are examples, not mandatory creative tests/);
 });
 test('explicit imported phrase separators remain boundaries without becoming spoken slash words',()=>{
  const {accept}=require('../app/source-understanding'),{catalog}=require('../app/indexed-production-plan'),{groups}=require('../app/source-dialogue-groups');
@@ -36,7 +40,7 @@ test('whole-film schema catalogs grow linearly and preserve per-shot anchor vali
 });
 test('deferred global compilation survives lost shot flags and review entry preserves pending status',async()=>{
  const {WorkbenchWorkflow,hasPendingPromptCompilation}=require('../app/workbench-workflow');let p={id:'p',shots:[{id:'S1'}],h3AssetDirectSemanticCompile:{status:'deferred'},promptReview:{status:'pending',items:[{id:'asset'}]}};assert.equal(hasPendingPromptCompilation(p),true);
- const ctx={store:{getProject:()=>p,saveProject:v=>(p=v)},promptReviewIsCurrent:()=>true,preparePromptReviewBundle:async()=>p};const r=await WorkbenchWorkflow.prototype.requestPromptReview.call(ctx,'p');assert.equal(r.project.promptReview.status,'pending');assert.equal(r.required,true);
+ const ctx={store:{getProject:()=>p,saveProject:v=>(p=v)},promptReviewIsCurrent:(_p,state)=>state!=='approved',preparePromptReviewBundle:async()=>p};const r=await WorkbenchWorkflow.prototype.requestPromptReview.call(ctx,'p');assert.equal(r.project.promptReview.status,'pending');assert.equal(r.required,true);
 });
 
 test('short dialogue with meaningful silence remains authorable without forced source merging',()=>{const {planPerformanceTimeline,performanceTimelineFailures}=require('../app/drama-performance-timeline');const turns=[{text:'回家了。',speakerId:'C1'}],p=planPerformanceTimeline(turns,15);assert.equal(p.windows.length,1);assert.ok(p.editorialAdvisories.some(s=>s.includes('continuous silence')));assert.deepEqual(performanceTimelineFailures({duration:p.duration,dialogueTurns:turns.map((t,i)=>({...t,...p.windows[i]}))},''),[]);});
