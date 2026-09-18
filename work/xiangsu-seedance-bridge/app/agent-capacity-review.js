@@ -1,7 +1,8 @@
 'use strict';
 const crypto=require('node:crypto');
 async function review({source,result,checked,generate,checkpoint,save=()=>{}}){
- const diagnostics=checked.performance.issues;
+ const capacityAdvisories = (checked.advisories || []).filter(a => /regroup complete lines|exceeds/i.test(a.message || '')).map(a => `${a.shotId}: ${a.message}`);
+ const diagnostics = [...checked.performance.issues, ...capacityAdvisories];
  if(!diagnostics.length||!require('./agent-production-document').current(result?.agentDocument))return checked;
  const key=crypto.createHash('sha256').update(JSON.stringify({source,document:result.agentDocument})).digest('hex');
  let verdict=checkpoint?.key===key?checkpoint.verdict:null;

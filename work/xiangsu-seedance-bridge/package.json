@@ -1,6 +1,6 @@
 {
   "name": "puream-drama-slot-h3",
-  "version": "0.16.359",
+  "version": "0.16.360",
   "description": "纯梦短剧老虎机：H3 云端视频与资产直投的一键短剧生产工具",
   "main": "app/bootstrap.js",
   "author": "PUREAM",
@@ -8,7 +8,9 @@
   "private": true,
   "scripts": {
     "version": "node scripts/release-version-contract.js --sync",
-    "test": "node --test scripts/*.test.js",
+    "test": "node scripts/run-tests.js",
+    "test:js": "node --test scripts/*.test.js",
+    "test:cjs": "node --test scripts/*.test.cjs",
     "verify:build-assets": "node scripts/verify-build-assets.js",
     "prepare:build-assets": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-build-assets.ps1",
     "sync:drama-skill": "node scripts/sync-drama-skill.js --write",
@@ -76,7 +78,7 @@
       }
     ],
     "directories": {
-      "output": "dist-fixed-0.16.359"
+      "output": "dist-fixed-0.16.360"
     },
     "win": {
       "icon": "app/assets/app.ico",

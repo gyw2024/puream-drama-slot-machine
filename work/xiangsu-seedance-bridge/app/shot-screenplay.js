@@ -123,7 +123,7 @@ function runtimeCurrent(project){
    &&JSON.stringify((s.dialogueTurns||[]).map(t=>({id:t.sourceDialogueId||t.id,speakerId:t.speakerId,text:t.text||t.spokenText})))===JSON.stringify(e.dialogue.map(t=>({id:t.id,speakerId:t.speakerId,text:t.text})));
  });
 }
-async function author({source='',topic=null,product={},mode='original',instructions='',runtimePolicy=null,reviewExecution=null,generate,checkpoint,draftDocument=null,preparedText='',reviewFeedback=null,save=()=>{},status=()=>{},signal}){
+async function author({source='',topic=null,product={},mode='original',instructions='',runtimePolicy=null,reviewExecution=null,deferReview=null,generate,checkpoint,draftDocument=null,preparedText='',reviewFeedback=null,save=()=>{},status=()=>{},signal}){
  if(runtimePolicy?.kind==='adaptation'){const resolved=await require('./adaptation-runtime-evidence').resolve({source,contract:runtimePolicy,execution:reviewExecution,checkpoint,generate,signal,save:runtimeEstimate=>{checkpoint={...checkpoint,runtimeEstimate};save(checkpoint);}});Object.assign(runtimePolicy,resolved);}
  const writingScale=mode==='original'&&runtimePolicy?{scope:'planning guidance, not a fixed shot-count gate',suggestedShots:Math.ceil(runtimePolicy.targetSeconds/15),targetSeconds:runtimePolicy.targetSeconds,dialogueTimingGuidance:'按真实对白时窗安排：普通对白5–6有效中文字/秒，愤怒质问等至少8字/秒；各镜及跨镜无人说话间隔不超过3秒，不能用全片平均字数代替逐句安排。',instruction:'一次写完包括结尾在内的全部片段，不是只写第一场的若干镜头。每镜优先用人物对话推进；第一镜前8秒必须出现具体、可见的强烈冲突或反转爆点，并建立人物关系，不用数镜无对白气氛铺垫。'}:null;
  const input={version:VERSION,requirementsVersion:require('./production-content-requirements').VERSION,reviewExecution,mode,source,topic,product,...(instructions?{instructions}:{}),...(reviewFeedback?{reviewFeedback}:{}),runtimePolicy:require('./film-runtime-policy').agentPolicy(runtimePolicy),writingScale,authoringDiscipline:AUTHORING_DISCIPLINE,productClaimAuthority:require('./product-claim-authority').packet(product)};const signature=hash(input);
@@ -184,13 +184,14 @@ async function author({source='',topic=null,product={},mode='original',instructi
     }
     throw error;
    }
-   state.document=draft;state.deliveryIssues=issues(draft);state.attempts.push({stage:'write',issues:state.deliveryIssues,at:new Date().toISOString()});save(state);
+   state.document=draft;state.status='reviewing';state.deliveryIssues=issues(draft);state.attempts.push({stage:'write',issues:state.deliveryIssues,at:new Date().toISOString()});save(state);
    if(state.deliveryIssues.length){await new Promise(setImmediate);continue;}
   }
   // Semantic audits belong to the complete prompt-confirmation document.
   // Preserve a previous unfinished review/patch as evidence; never restart a
   // writer solely because an old content receipt was negative.
-  if(!state.deliveryIssues?.length){
+  const shouldDefer = deferReview !== false && !reviewFeedback && !state.activeAudit;
+  if(shouldDefer && !state.deliveryIssues?.length){
    state.contentReview=require('./text-review-policy').deferred(state.activeAudit||state.reviews?.at(-1));
    state.status='ready';state.documentComplete=true;state.completedAt=new Date().toISOString();state.text=render(state.document);
    save(state);status('完整逐镜稿已保存，内容审核将在全部提示词完成后的确认页内执行');return state;
@@ -220,7 +221,7 @@ async function author({source='',topic=null,product={},mode='original',instructi
   const missingCriteria=!deliveryRepair&&compact.isCompact(state.document)&&['story','commerce','dialogue'].filter(key=>typeof audit.criteria?.[key]?.passed!=='boolean'||!String(audit.criteria?.[key]?.evidence||'').trim());
   if(missingCriteria?.length){delete state.activeAudit;state.reviewDeliveryIssues=[`分别补齐剧情story、带货commerce、对白完整dialogue的明确结论与正文证据，当前缺少：${missingCriteria.join(', ')}。不带货也需说明适用依据，不得空白。`];save(state);continue;}
   if(!deliveryRepair&&compact.isCompact(state.document)&&Object.values(audit.criteria).some(c=>!c.passed)&&!audit.issues.length){delete state.activeAudit;state.reviewDeliveryIssues=['有分项未通过，请列出对应原文证据、shotIds和修订目的，不能同时返回空issues。'];save(state);continue;}
-  if(!state.pendingRepairPatch&&!state.repairDeliveryIssues?.length&&audit.issues?.length&&!state.deliveryIssues?.length){
+  if(!reviewFeedback?.decision&&!state.pendingRepairPatch&&!state.repairDeliveryIssues?.length&&audit.issues?.length&&!state.deliveryIssues?.length){
    const primaryAudit=audit;
    audit=await require('./source-finding-verification').verify({input:{mode,originalSource:source,topic,product,instructions,runtimePolicy:require('./film-runtime-policy').agentPolicy(runtimePolicy),screenplay:state.document,productClaimAuthority:require('./product-claim-authority').packet(product),...(reviewFeedback?{downstreamReviewFeedback:reviewFeedback}:{})},audit,call,status,signal});
    if(audit!==primaryAudit)state.reviews.push(audit);

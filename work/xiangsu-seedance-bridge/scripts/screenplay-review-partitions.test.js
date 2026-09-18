@@ -25,9 +25,9 @@ test('administrative summary and unrelated identities do not invalidate local re
 });
 test('real compact author dispatches one complete writer then checkpointed review tasks for a long script',async()=>{
  const source=require('./shot-screenplay-fixture').fixture();const d={format:'compact-screenplay-v2',story:source.story,characters:source.characters.map(({id,name,description,assetRequired,role,voiceDescription})=>({id,name,description,assetRequired,role,voiceDescription})),scenes:source.scenes.map(({id,name,description,assetRequired})=>({id,name,description,assetRequired})),props:[],shots:Array.from({length:6},(_,i)=>{const {beats,transition,sound,wardrobeBindings,...s}=structuredClone(source.shots[0]);return {...s,id:'S'+(i+1),action:'人物交谈后相视。',dialogue:s.dialogue.map(({start,end,...line})=>({...line,id:'D'+(i+1)}))};})};
- let writes=0,reviews=0,saved;const r=await writer.author({topic:{title:'test'},save:s=>saved=structuredClone(s),generate:async(m,o)=>{if(o.stage==='shot_screenplay_write'){writes++;return d;}reviews++;return result(m);}});
+let writes=0,reviews=0,saved;const r=await writer.author({topic:{title:'test'},deferReview:false,save:s=>saved=structuredClone(s),generate:async(m,o)=>{if(o.stage==='shot_screenplay_draft')return '完整中文剧本首稿';if(o.stage==='shot_screenplay_structure'||o.stage==='shot_screenplay_write'){writes++;return d;}reviews++;return result(m);}});
  assert.equal(writes,1);assert.equal(reviews,3);assert.equal(r.status,'ready');assert.equal(r.document.shots.length,6);assert.equal(Object.values(saved.reviewPartitions.entries).filter(e=>e.status==='completed').length,3);
- saved.signature='prior-source-policy';const resumed=await writer.author({topic:{title:'test'},checkpoint:saved,generate:async()=>assert.fail('identical review inputs must reuse saved Agent receipts')});assert.equal(resumed.status,'ready');assert.equal(resumed.document.shots.length,6);
+ saved.signature='prior-source-policy';const resumed=await writer.author({topic:{title:'test'},deferReview:false,checkpoint:saved,generate:async()=>assert.fail('identical review inputs must reuse saved Agent receipts')});assert.equal(resumed.status,'ready');assert.equal(resumed.document.shots.length,6);
 });
 
 test('Agent advisories persist without discarding genuine issues or overriding a negative verdict',async()=>{

@@ -57,6 +57,8 @@ function validate(project, shot, assetById) {
     if (ref.type === 'character') referencedCharacters.add(ref.entityId);
   }
   if (!identities.has('scene:' + shot.sceneId)) failures.push('Actual scene image reference is missing');
+  // 只有显式 not_required（assetRequired === false）才允许没有身份图引用。
+  // unknown/needs_decision（null）仍视为必须提供，不能靠"缺失即跳过"消失。
   for (const id of visible) if (characters.get(id)?.assetRequired !== false && !referencedCharacters.has(id)) failures.push('Visible principal identity image is missing: ' + id);
   const prompt = clean(shot.videoPromptEn);
   if (!prompt || prompt.length > 10000) failures.push('Final H3 prompt is empty or exceeds the 10000-character request ceiling');

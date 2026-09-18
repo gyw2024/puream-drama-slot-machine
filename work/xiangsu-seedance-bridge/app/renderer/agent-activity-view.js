@@ -69,7 +69,12 @@
   const post=project.postProductionTask||{};
   if(['running','pending','queued','cancelling','canceling'].includes(post.status))a={...post,stage:post.kind==='jianying'?'jianying':'stitch',status:'running'};
   const activeJobs=select(jobs,project.id).filter(j=>!terminal[j.status]);
-  const active=['running','pausing','stopping'].includes(a.status),paused=/paused|interrupted|cancelled/.test(a.status||'');
+  const runtime=project.runtime;
+  const hasRuntime=runtime&&typeof runtime.active==='boolean';
+  const runtimeLive=hasRuntime?(runtime.activeOperation===true||Number(runtime.activeVideoJobCount)>0):true;
+  const statusClaimsActive=['running','pausing','stopping'].includes(a.status);
+  const active=(statusClaimsActive && runtimeLive) || (hasRuntime ? runtimeLive : false) || (activeJobs.length > 0) || (media.length > 0);
+  const paused=/paused|interrupted|cancelled/.test(a.status||'') || (statusClaimsActive && !active);
   const work=describe(activeJobs[0]?.operation||a.stage||a.operation,project);
   const promptWaiting=a.status==='awaiting_prompt_review';
   let state=active?'运行中':paused?'已暂停':a.status==='failed'?'任务未完成':promptWaiting?'等待你确认':a.status==='completed'?'已完成':'当前无运行任务';

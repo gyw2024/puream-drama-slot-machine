@@ -80,9 +80,12 @@ test("writing and blueprint review use one shared dialogue contract", () => {
   assert.doesNotMatch(workflowSource, /dialogueTurnsPerMinute >= 20/);
   assert.doesNotMatch(workflowSource, /spokenCharactersPerMinute >= 190/);
   const compiled = compileTextStagePrompt("旧提示：每镜固定6句，每分钟20轮、190字。", {}, "units");
-  assert.ok(compiled.lastIndexOf("写作与蓝图审核共享合同") > compiled.indexOf("每分钟20轮"));
-  assert.match(compiled, /每个10–15秒H3供应商剧情任务|每个H3供应商任务[^。]*10–15秒/);
-  assert.match(compiled, /句数按程序给定的逐句语音时窗与真实动作容量决定/);
+  // 共享合同必须挂在旧的自造配额之后（覆盖它），标题为本轮真实合同名。
+  assert.ok(compiled.lastIndexOf("对白、动作与表演共同推进合同") > compiled.indexOf("每分钟20轮"));
+  assert.match(compiled, /按剧情安排必要的可见表演拍点，不固定数量/);
+  assert.doesNotMatch(compiled, /2–4个/);
+  assert.match(compiled, /每个10–15秒H3供应商剧情任务/);
+  assert.match(compiled, /句数由Agent按逐句语速与真实动作容量决定/);
   assert.match(compiled, /不固定为两句，绝不拆半句/);
   assert.match(compiled, /最终H3提示词保留[^。]*英文时间段、逐句起止、语速/);
   assert.match(compiled, /计算公式和制作说明不得作为对白朗读/);

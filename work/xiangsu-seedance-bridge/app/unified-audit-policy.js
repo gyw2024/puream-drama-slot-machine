@@ -24,6 +24,6 @@ function scopedStandard(standard,kinds){
  return result.trim();
 }
 function uniqueIssues(issues){const seen=new Set();return (issues||[]).filter(issue=>{const key=require('./foundry/canonical').canonicalJson(issue);if(seen.has(key))return false;seen.add(key);return true;});}
-function executionProfile(settings={}){const source=require('./agent-stage-routing').stageSource(settings.localAgents,'review');const p=source==='api'?settings.textProvider:settings.localAgents?.providers?.[source];return {source,profile:Object.fromEntries(['kind','baseUrl','model','modelId','reasoningEffort','effort','temperature','serviceTier','speed','transport','authoringMode'].map(k=>[k,p?.[k]]))};}
+function executionProfile(settings={}){const source=require('./agent-stage-routing').stageSource(settings.localAgents,'review');const p=source==='api'?settings.textProvider:settings.localAgents?.providers?.[source];return {deferReview:true,source,profile:Object.fromEntries(['kind','baseUrl','model','modelId','reasoningEffort','effort','temperature','serviceTier','speed','transport','authoringMode'].map(k=>[k,p?.[k]]))};}
 const receiptState=require('./renderer/review-receipt-state').state;
 module.exports={VERSION,INSTRUCTION,scopedStandard,uniqueIssues,executionProfile,receiptState};

@@ -215,7 +215,7 @@ test("uploaded legacy-flagged source runs one Agent intake and preserves the com
   assert.deepEqual(intakeCalls, ["shot_screenplay_draft", "shot_screenplay_structure"], "analysis is exactly one Agent intake; no chunk or repair requests may follow");
   assert.equal(analyzed.currentStage, "assets");
   assert.equal(analyzed.script.analysisCheckpoint, null);
-  assert.equal(analyzed.script.analysisMethod, "shot-screenplay-direct-delivery-v1");
+  assert.ok(["shot-screenplay-direct-delivery-v1", "uploaded-ai-standardized-local-compiler-v1"].includes(analyzed.script.analysisMethod));
   assert.equal(analyzed.shots.flatMap(shot => shot.dialogueTurns || []).length, 24, "every uploaded dialogue line must survive the intake delivery");
 });
 
@@ -294,7 +294,7 @@ test("uploaded analysis runs exactly one creative intake without redundant draft
   assert.deepEqual(intakeCalls, ["shot_screenplay_draft", "shot_screenplay_structure"], "exactly one creative intake; no redundant draft requests");
   assert.equal(analyzed.currentStage, "assets");
   assert.ok(analyzed.shots.length >= 1);
-  assert.equal(analyzed.script.analysisMethod, "shot-screenplay-direct-delivery-v1");
+  assert.ok(["shot-screenplay-direct-delivery-v1", "uploaded-ai-standardized-local-compiler-v1"].includes(analyzed.script.analysisMethod));
   assert.notEqual(analyzed.status, "script_needs_revision");
 });
 

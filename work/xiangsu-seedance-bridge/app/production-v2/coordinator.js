@@ -1,80 +1,77 @@
 'use strict';
-// T13 / §9: the ONE coordinator for "videos complete → rough cut".
-// Every completion path (remote download verified, recovery re-verified,
-// user import, selection change, reorder, startup recovery) funnels into
-// onArtifactCommitted(projectId), which only CHECKS and atomically QUEUES —
-// it never performs long work itself. The outbox command key embeds
-// epoch + selectedVideoSetHash + post policy so re-events are idempotent.
-// "Videos complete" is §9.1's definition: every required shot has a CURRENT,
-// locally readable selected candidate — remote status=success is not enough.
-const { fail } = require('./contracts.js');
-const { selectedVideoSetHash } = require('./shot-commands.js');
+const { fail, hash } = require('./contracts');
+const V = require('./video-snapshot');
 
 class ProductionCoordinator {
-  constructor({ repository, postPolicyHash = '', continueToPost = true, now = () => new Date().toISOString() } = {}) {
-    if (!repository) throw fail('COORDINATOR_REPOSITORY_REQUIRED', 'A production repository is required');
-    this.repository = repository;
+  constructor({ repository, loadEvidence = null, postPolicyHash = 'default', continueToPost = true }) {
+    this.repo = repository;
+    this.loadEvidence = loadEvidence;
     this.postPolicyHash = postPolicyHash;
     this.continueToPost = continueToPost;
-    this.now = now;
-    this.events = new Map(); // projectId -> last event fingerprint (dedupe)
   }
 
-  // §9.1: authoritative local completeness. Returns { ready, missing, videoSetHash }.
-  evaluateVideos(project, settings = {}) {
-    const shots = Array.isArray(project?.shots) ? project.shots : [];
-    if (!shots.length) return { ready: false, missing: [], videoSetHash: null, reason: 'POST_SHOTS_EMPTY' };
-    const missing = [];
-    for (const shot of shots) {
-      const pool = (project.candidates || []).filter(c => c.entityType === 'shot' && c.entityId === shot.id && c.stage === 'shot_video');
-      const chosen = (project.videoSelections || {})[String(shot.id)];
-      const selected = (chosen && pool.find(c => c.id === chosen.candidateId))
-        || pool.find(c => c.selected === true)
-        || pool.find(c => c.filePath);
-      if (!selected?.filePath || selected.verified !== true) missing.push(String(shot.id));
+  onArtifactCommitted(project) {
+    const missingShotIds = [];
+    const selectedVideos = [];
+    for (const shot of project.shots || []) {
+      const sel = project.videoSelections?.[shot.id];
+      const cand = (project.candidates || []).find(c => (sel ? c.id === sel.candidateId : (c.entityId === shot.id && c.selected && c.stage === 'shot_video')));
+      if (!cand || cand.verified !== true) {
+        missingShotIds.push(shot.id);
+      } else {
+        selectedVideos.push({ shotId: shot.id, candidateId: cand.id, mediaHash: sel?.mediaHash || cand.mediaHash || cand.filePath });
+      }
     }
-    return { ready: missing.length === 0, missing, videoSetHash: selectedVideoSetHash(project, this.postPolicyHash) };
-  }
+    if (missingShotIds.length > 0) {
+      return { action: 'wait_videos', missingShotIds };
+    }
+    if (this.continueToPost === false) {
+      return { action: 'post_ready', phase: 'post_ready', navigation: 'roughcut' };
+    }
+    const epoch = project.productionV2?.epoch || 'epoch';
+    const videoSetHash = hash(selectedVideos);
+    const operationKey = `post:${epoch}:${videoSetHash}:${this.postPolicyHash}`;
+    const payload = { projectId: project.id, epoch, selectedVideos, postPolicyHash: this.postPolicyHash };
+    const inputFingerprint = hash(payload);
 
-  // §9.2 step 4-5: enqueue the unique post command (idempotent outbox key).
-  // Repeated events are safe: the same key returns the existing operation.
-  queuePost(project, evaluation) {
-    const epoch = project.productionV2?.epoch || project.creationEpoch || 'default';
-    const operationKey = `post:${epoch}:${evaluation.videoSetHash}:${this.postPolicyHash}`;
-    const queued = this.repository.enqueueOperation({
-      projectId: project.id,
-      operationKey,
-      kind: 'post',
-      targetId: project.id,
-      inputFingerprint: evaluation.videoSetHash,
-      payload: { videoSetHash: evaluation.videoSetHash, postPolicyHash: this.postPolicyHash }
+    return this.repo.store.transaction(() => {
+      try {
+        this.repo.saveInputInTransaction(project.id, 'post.clean', { projectId: project.id, ...payload });
+      } catch (e) {
+        if (e.code !== 'SNAPSHOT_COLLISION') throw e;
+      }
+      const op = this.repo.enqueueOperationInTransaction({
+        projectId: project.id,
+        kind: 'post',
+        effectClass: 'local',
+        operationKey,
+        inputFingerprint,
+        payload
+      });
+      return {
+        action: op.queued ? 'post_queued' : (op.status === 'completed' ? 'post_already_completed' : 'post_queued'),
+        operationId: op.operationId,
+        operationKey: op.operationKey,
+        queued: op.queued,
+        status: op.status
+      };
     });
-    return queued;
   }
 
-  // §9.2: the single entry every completion path calls. Duplicate events and
-  // repeated calls are safe; it returns a decision, never performs post work.
-  onArtifactCommitted(project, options = {}) {
-    if (!project?.id) throw fail('PROJECT_ID_REQUIRED', 'projectId is required');
-    const fingerprint = `${project.id}:${JSON.stringify((project.shots || []).map(s => s.id))}:${JSON.stringify(project.videoSelections || {})}`;
-    const evaluation = this.evaluateVideos(project, options.settings || {});
-    if (!evaluation.ready) {
-      return { action: 'wait_videos', missingShotIds: evaluation.missing, videoSetHash: null, phase: 'videos', reason: evaluation.reason || 'POST_SELECTED_VIDEO_MISSING' };
-    }
-    if (!this.continueToPost && options.continueToPost !== true) {
-      return { action: 'post_ready', missingShotIds: [], videoSetHash: evaluation.videoSetHash, phase: 'post_ready', navigation: 'roughcut' };
-    }
-    const queued = this.queuePost(project, evaluation);
-    return {
-      action: 'post_queued',
-      missingShotIds: [],
-      videoSetHash: evaluation.videoSetHash,
-      phase: 'post_queued',
-      operationKey: queued.operationKey,
-      operationId: queued.operationId,
-      queued: queued.queued,
-      dedupedEvent: this.events.get(project.id) === fingerprint && !queued.queued
-    };
+  async reconcileProject(projectId, { manual = false } = {}) {
+    if (typeof this.loadEvidence !== 'function') throw fail('MEDIA_EVIDENCE_ADAPTER_REQUIRED', 'Probe/file evidence required');
+    const evidence = await this.loadEvidence(projectId);
+    return this.repo.store.transaction(() => {
+      const { project } = this.repo.getProjectInTransaction(projectId);
+      if (!project.productionV2?.enabled) return { action: 'legacy' };
+      if (!manual && !V.shouldAutoPost(project)) return { action: 'manual_post_available' };
+      const evaluated = V.resolveSelectedVideos(project, evidence);
+      if (!evaluated.ready) return { action: 'wait_videos', missing: evaluated.missing };
+      const snap = V.snapshot(project, evaluated, project.productionV2.postPolicy), { hash: inputHash, ...body } = snap;
+      this.repo.saveInputInTransaction(projectId, 'post.clean', body);
+      const op = this.repo.enqueueOperationInTransaction({ ...V.postOperation(snap), projectId });
+      return { action: op.status === 'completed' ? 'post_already_completed' : op.queued ? 'post_queued' : 'post_existing', ...op, inputHash };
+    });
   }
 }
 

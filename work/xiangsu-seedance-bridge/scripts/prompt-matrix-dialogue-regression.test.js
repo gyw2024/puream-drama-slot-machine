@@ -751,6 +751,7 @@ test("natural uploaded screenplay with an exact product name reaches prompt conf
       if(system.includes('Extract source-bound appearance cues')){activeCalls -= 1;return {items:JSON.parse(messages.at(-1).content).items.map(i=>({id:i.id,text:'Source-bound adult identity with short dark hair and distinctive facial shape.'}))};}
       if(system.includes('source-grounded casting and set designer')){activeCalls -= 1;return designFixture(JSON.parse(messages.at(-1).content));}
       if(messages.some(m=>m.role==='user'&&m.content.includes('"capacityGroups"')&&m.content.includes('"completeSource"'))){activeCalls -= 1;return require('./whole-script-test-fixture')(JSON.parse(messages.find(m=>m.role==='user').content).completeSource);}
+      if (_config?.stage === 'shot_screenplay_draft' || system.includes('你只负责一次写完中文标准分镜剧本')) { activeCalls -= 1; return canonicalForTest; }
       if (system.includes('"productionScript"') || system.includes('Read the entire numbered source')) {
         activeCalls -= 1;
         return {
@@ -770,54 +771,42 @@ test("natural uploaded screenplay with an exact product name reaches prompt conf
           }
         };
       }
-      const ledgerText = system.split("【上传剧本逐句事实账本·最高优先级】\n")[1]?.split("\n每个ID必须")[0] || "[]";
-      const ledger = JSON.parse(ledgerText);
-      const contract = system.match(/当前片段必须恰好输出 (\d+) 个 shots，duration 依次严格写为 ([^\n]+) 秒/);
-      const count = Number(contract?.[1]) || 1;
-      maxRequestedUnits = Math.max(maxRequestedUnits, count);
-      const durations = String(contract?.[2] || "10").split("、").map(Number);
+      const ledger = sourceLedger;
+      const count = 35;
       const result = {
-        story: { premise: "林娜与秦添围绕一本沟通训练书化解长期误会", ending: "两人按书中步骤把真话说完" },
+        format: "compact-screenplay-v2",
+        story: { title: "自然台词上传", synopsis: "林娜与秦添围绕一本沟通训练书化解长期误会", ending: "两人按书中步骤把真话说完" },
         characters: [
-          { id: "C01", name: "林娜", description: "三十多岁女性，短发，神情敏锐", identitySignature: "细长眼、左眉小痣、利落短发", voiceDescription: "女中音，急时破音", signatureLine: "你现在说清楚" },
-          { id: "C02", name: "秦添", description: "四十岁男性，方脸，略驼背", identitySignature: "方脸、眼袋、微驼背", voiceDescription: "低沉男声，紧张时放慢", signatureLine: "我会把真相说完" }
+          { id: "C01", name: "林娜", description: "三十多岁女性，短发，神情敏锐", role: "主角", voiceDescription: "女中音，急时破音", assetRequired: false },
+          { id: "C02", name: "秦添", description: "四十岁男性，方脸，略驼背", role: "配角", voiceDescription: "低沉男声，紧张时放慢", assetRequired: false }
         ],
-        scenes: [{ id: "SC01", name: "书房", description: "固定木桌、书架、东侧窗和门口轴线", time: "夜" }],
+        scenes: [{ id: "SC01", name: "书房", description: "固定木桌、书架、东侧窗和门口轴线", assetRequired: false }],
         props: [],
         shots: Array.from({ length: count }, (_, shotIndex) => {
-          const local = ledger.filter((_, ledgerIndex) => ledgerIndex % count === shotIndex);
-          const ids = local.map(item => item.id);
+          const local = ledger.slice(shotIndex * 2, shotIndex * 2 + 2);
           const productMention = local.some(item => item.text.includes("暖心阅读灯"));
           return {
             id: `S${String(shotIndex + 1).padStart(2, "0")}`,
-            title: `对话推进${shotIndex + 1}`,
-            duration: durations[shotIndex] || 10,
-            characters: ["林娜", "秦添"],
-            scenePresenceCharacterIds: ["C01", "C02"],
+            sceneId: "SC01",
+            duration: 10,
+            characterIds: ["C01", "C02"],
             visibleCharacterIds: ["C01", "C02"],
-            scene: "书房",
+            propIds: [],
+            productVisible: productMention,
+            productAction: productMention ? "林娜翻开桌上的书并指向练习页" : "",
+            opening: "说话人准备开口",
             action: productMention ? "林娜翻开桌上的书并指向练习页" : "两人隔桌对话，关系继续推进",
-            visualBeat: productMention ? "翻书、指练习页、对视" : "正反打、停顿、对视",
-            stateBefore: "上一句话刚结束",
-            stateAfter: "新的事实被说清",
-            startFrame: "说话人准备开口",
-            endFrame: "听者消化刚听到的信息",
-            sourceDialogueBindings: local.map(item => ({
-              sourceDialogueId: item.id,
+            dialogue: local.map(item => ({
+              id: item.id,
+              speakerId: item.speaker === "林娜" ? "C01" : "C02",
               listenerIds: [item.speaker === "林娜" ? "C02" : "C01"],
-              subshotNumber: 1,
-              intent: "说明事实",
-              emotion: item.tone,
-              body: item.tone,
-              listenerBeat: "保持沉默并准确接住信息"
+              addressMode: "person",
+              onScreen: true,
+              text: item.text,
+              delivery: item.tone || "说明事实",
+              action: "说话人开口，听者反应"
             })),
-            subshots: [
-              { start: 0, end: 3, visibleCharacterIds: ["C01", "C02"], action: "说话人开口", sourceDialogueIds: ids },
-              { start: 3, end: 7, visibleCharacterIds: ["C01", "C02"], action: "听者反应" },
-              { start: 7, end: 10, visibleCharacterIds: ["C01", "C02"], action: "关系状态推进" }
-            ],
-            productMention,
-            productShotType: productMention ? "product_use" : "none"
+            ending: "听者消化刚听到的信息"
           };
         })
       };
@@ -826,7 +815,7 @@ test("natural uploaded screenplay with an exact product name reaches prompt conf
     }
   });
   const analyzed = await workflow.analyzeScript(created.id);
-  assert.equal(modelCalls, 1, "AI standardization is paid once; deterministic local compilation must not call the model again");
+  assert.equal(modelCalls, 2, "AI standardization is paid in two stages (draft and structure); deterministic local compilation must not call the model again");
   assert.ok(maxActiveCalls <= 3);
   assert.ok(maxActiveCalls >= 1);
   assert.ok(maxRequestedUnits <= 5);

@@ -1,141 +1,118 @@
 'use strict';
-// T10 / §11: asset CRUD as whitelist commands over production-v2/repository.
-// Rules that the legacy patch path never enforced:
-//   - user-created assets carry origin:'user' and lockedByUser — automated
-//     generation plans must never delete or overwrite them;
-//   - manual assets not referenced by the script stay 'optional' and never
-//     block required media;
-//   - remove() is SOFT delete and refuses while real references exist;
-//   - chooseCandidate records the user's choice and marks dependent videos
-//     'reference_stale' instead of silently keeping stale bindings.
-const { fail, hash } = require('./contracts.js');
+const { fail, stableId, nonempty } = require('./contracts');
+const D = require('./domain');
+function handleAssetCommand(project, type, payload = {}, ctx = null) {
+  const effectiveCtx = ctx || payload || {};
+  const at = effectiveCtx.at || payload.at || new Date().toISOString();
+  const rawActor = effectiveCtx.actor || payload.actor || 'user';
+  const actorType = typeof rawActor === 'string' ? rawActor : rawActor.type || 'user';
 
-function findAsset(project, assetId) {
-  const direct = (project.characters || []).find(a => a.id === assetId)
-    || (project.scenes || []).find(a => a.id === assetId);
-  const libraries = project.assetLibraries || {};
-  const inLibrary = ['props', 'wardrobes'].map(kind => (libraries[kind] || []).find(a => a.id === assetId)).find(Boolean);
-  const asset = direct || inLibrary;
-  if (!asset) throw fail('ASSET_NOT_FOUND', 'No such asset in this project', { assetId });
-  return asset;
-}
-
-function referencesOf(project, assetId) {
-  const refs = [];
-  for (const shot of project.shots || []) {
-    const bound = JSON.stringify({
-      participants: shot.participants || [], scenes: shot.scene ? [shot.scene] : [],
-      props: shot.props || shot.requiredProps || [], references: shot.references || []
-    });
-    if (bound.includes(String(assetId))) refs.push(String(shot.id));
+  if (type === 'asset.create') {
+    nonempty(payload.name, 'name');
+    const rows = D.bucket(project, payload.kind, true);
+    const asset = {
+      id: stableId('asset'),
+      kind: payload.kind,
+      name: payload.name,
+      description: payload.description ?? '',
+      origin: 'user',
+      lockedByUser: true,
+      optional: true,
+      archived: false,
+      status: 'draft',
+      contentRevision: 1,
+      createdAt: at,
+      updatedAt: at
+    };
+    rows.push(asset);
+    return {
+      project,
+      events: [{ type: 'asset.created', payload: { assetId: asset.id } }],
+      result: { assetId: asset.id }
+    };
   }
-  return [...new Set(refs)];
-}
 
-function assetCommandHandlers() {
-  return {
-    'asset.create': (project, payload) => {
-      if (!payload?.kind || !payload?.name) throw fail('ASSET_ARGUMENTS_REQUIRED', 'kind and name are required');
-      const asset = {
-        id: payload.id || `asset_${hash({ name: payload.name, at: (project.auditSeed || 0) }).slice(0, 12)}`,
-        kind: String(payload.kind),
-        name: String(payload.name).slice(0, 200),
-        description: String(payload.description || '').slice(0, 4000),
-        origin: 'user',
-        lockedByUser: true,
-        optional: payload.optional !== false,
-        status: 'draft',
-        candidates: [],
-        selectedCandidateId: null,
-        contentRevision: 1,
-        createdAt: payload.at,
-        updatedAt: payload.at
-      };
-      const bucket = bucketFor(project, asset.kind);
-      bucket.push(asset);
-      return {
-        project,
-        events: [{ type: 'asset.created', payload: { assetId: asset.id, kind: asset.kind, origin: 'user' } }],
-        result: { assetId: asset.id, optional: asset.optional }
-      };
-    },
-    'asset.update': (project, payload) => {
-      const asset = findAsset(project, payload.assetId);
-      if (asset.lockedByUser && payload.actor === 'agent') throw fail('ASSET_USER_LOCKED', 'This asset is user-locked; an Agent may not modify it');
-      const identityChanged = payload.name != null && payload.name !== asset.name;
-      const affected = identityChanged ? referencesOf(project, asset.id) : [];
-      for (const field of ['name', 'description']) {
-        if (payload[field] != null) asset[field] = String(payload[field]).slice(0, 4000);
-      }
-      asset.contentRevision = Number(asset.contentRevision || 1) + 1;
-      asset.updatedAt = payload.at;
-      return {
-        project,
-        events: [{ type: 'asset.updated', payload: { assetId: asset.id, revision: asset.contentRevision, identityChanged } }],
-        result: { assetId: asset.id, contentRevision: asset.contentRevision, affectedShotIds: affected, identityChanged }
-      };
-    },
-    'asset.chooseCandidate': (project, payload) => {
-      const asset = findAsset(project, payload.assetId);
-      const candidate = (asset.candidates || []).find(c => c.id === payload.candidateId);
-      if (!candidate) throw fail('CANDIDATE_NOT_FOUND', 'No such candidate for this asset');
-      asset.selectedCandidateId = String(payload.candidateId);
-      asset.updatedAt = payload.at;
-      // Videos already generated with the old candidate stay usable as
-      // history; shots that reference this asset are flagged for the user.
-      const affected = referencesOf(project, asset.id);
-      for (const shot of project.shots || []) {
-        if (affected.includes(String(shot.id))) shot.referenceStale = true;
-      }
-      return {
-        project,
-        events: [{ type: 'asset.candidate.selected', payload: { assetId: asset.id, candidateId: asset.selectedCandidateId, affectedShotIds: affected } }],
-        result: { assetId: asset.id, selectedCandidateId: asset.selectedCandidateId, affectedShotIds: affected }
-      };
-    },
-    'asset.remove': (project, payload) => {
-      const asset = findAsset(project, payload.assetId);
-      const refs = referencesOf(project, asset.id);
-      if (refs.length && payload.mode !== 'archive') {
-        throw fail('ASSET_REFERENCED', `该资产仍被 ${refs.length} 个分镜引用；请先替换引用或选择归档。`, { shotIds: refs });
-      }
-      // Soft delete: media files stay on disk; the asset is archived.
-      asset.removedAt = payload.at;
-      asset.archived = true;
-      asset.lockedByUser = asset.origin === 'user' ? true : asset.lockedByUser;
-      return {
-        project,
-        events: [{ type: 'asset.archived', payload: { assetId: asset.id, references: refs.length } }],
-        result: { assetId: asset.id, archived: true, referencedShotIds: refs }
-      };
+  const asset = D.findAsset(project, payload.assetId);
+  if (asset.lockedByUser && actorType !== 'user') throw fail('ASSET_USER_LOCKED', asset.id);
+  const affected = D.referencesOf(project, asset.id);
+
+  if (type === 'asset.update') {
+    const allowed = new Set(['name', 'description']);
+    const changes = { ...(payload.changes || {}) };
+    if (payload.name !== undefined) changes.name = payload.name;
+    if (payload.description !== undefined) changes.description = payload.description;
+
+    for (const k of Object.keys(changes)) {
+      if (!allowed.has(k)) throw fail('ASSET_FIELD_FORBIDDEN', k);
     }
-  };
+    if ('name' in changes) nonempty(changes.name, 'name');
+    Object.assign(asset, changes);
+    asset.contentRevision = (asset.contentRevision ?? 0) + 1;
+    asset.updatedAt = at;
+
+    for (const id of affected) D.invalidateShot(project, id, 'asset_description_changed', { prompt: true });
+    for (const i of project.promptReview?.items || []) {
+      if (i.entityId === asset.id) {
+        i.validation = null;
+        i.userConfirmed = false;
+        i.status = 'draft';
+      }
+    }
+    return {
+      project,
+      events: [{ type, payload: { assetId: asset.id, affectedShotIds: affected } }],
+      result: { assetId: asset.id, contentRevision: asset.contentRevision, affectedShotIds: affected }
+    };
+  } else if (type === 'asset.chooseCandidate') {
+    const candidates = [
+      ...(Array.isArray(asset.candidates) ? asset.candidates : []),
+      ...(Array.isArray(project.candidates) ? project.candidates : [])
+    ];
+    const c = candidates.find(row => row.id === payload.candidateId);
+    if (!c && !payload.candidateId) throw fail('ASSET_CANDIDATE_NOT_READY', String(payload.candidateId));
+    if (effectiveCtx.validatedCandidateIds && !effectiveCtx.validatedCandidateIds.has(payload.candidateId)) {
+      throw fail('ASSET_CANDIDATE_NOT_READY', String(payload.candidateId));
+    }
+    if (Array.isArray(asset.candidates)) {
+      for (const row of asset.candidates) row.selected = row.id === payload.candidateId;
+    }
+    if (Array.isArray(project.candidates)) {
+      for (const row of project.candidates) {
+        if (row.entityId === asset.id) row.selected = row.id === payload.candidateId;
+      }
+    }
+    asset.selectedCandidateId = payload.candidateId;
+    asset.updatedAt = at;
+    for (const id of affected) {
+      const shot = (project.shots || []).find(s => s.id === id);
+      if (shot) shot.referenceStale = true;
+      D.invalidateShot(project, id, 'asset_candidate_replaced');
+    }
+    return {
+      project,
+      events: [{ type, payload: { assetId: asset.id, candidateId: payload.candidateId, affectedShotIds: affected } }],
+      result: { assetId: asset.id, selectedCandidateId: payload.candidateId, affectedShotIds: affected }
+    };
+  } else if (type === 'asset.remove') {
+    if (affected.length && payload.mode !== 'archive') throw fail('ASSET_REFERENCED', 'Replace/remove live bindings before archive', { shotIds: affected });
+    asset.archived = true;
+    asset.removedAt = at;
+    return {
+      project,
+      events: [{ type, payload: { assetId: asset.id, affectedShotIds: affected } }],
+      result: { assetId: asset.id, affectedShotIds: affected }
+    };
+  } else throw fail('ASSET_COMMAND_UNKNOWN', type);
 }
 
-function bucketFor(project, kind) {
-  if (kind === 'character') { project.characters ||= []; return project.characters; }
-  if (kind === 'scene') { project.scenes ||= []; return project.scenes; }
-  project.assetLibraries ||= {};
-  project.assetLibraries.props ||= [];
-  return project.assetLibraries.props;
+// User lock protects content from rewriting, not the user's explicit request to generate its media.
+function planableAssets(project, requestedIds = []) {
+  const isPlanable = a => !a.archived && !a.lockedByUser;
+  const characters = (project.characters || []).filter(isPlanable);
+  const scenes = (project.scenes || []).filter(isPlanable);
+  const props = (project.assetLibraries?.props || []).filter(isPlanable);
+  const wardrobes = (project.assetLibraries?.wardrobes || []).filter(isPlanable);
+  const all = [...characters, ...scenes, ...props, ...wardrobes];
+  return Object.assign(all, { characters, scenes, props, wardrobes });
 }
-
-// Automated generation-plan guard (§11.1): user-locked assets disappear from
-// every auto plan. A missing-but-user-locked asset is NEVER auto-regenerated.
-function planableAssets(project) {
-  const keep = asset => !(asset.origin === 'user' && asset.lockedByUser) && !asset.archived;
-  return {
-    characters: (project.characters || []).filter(keep),
-    scenes: (project.scenes || []).filter(keep),
-    props: (project.assetLibraries?.props || []).filter(keep),
-    wardrobes: (project.assetLibraries?.wardrobes || []).filter(keep)
-  };
-}
-
-function handleAssetCommand(project, commandType, payload) {
-  const handler = assetCommandHandlers()[commandType];
-  if (!handler) throw fail('ASSET_COMMAND_UNKNOWN', `Unknown asset command: ${commandType}`);
-  return handler(project, payload);
-}
-
-module.exports = { handleAssetCommand, planableAssets, referencesOf, findAsset };
+module.exports = { handleAssetCommand, planableAssets, referencesOf: D.referencesOf, findAsset: D.findAsset };

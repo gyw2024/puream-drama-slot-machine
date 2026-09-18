@@ -18,7 +18,7 @@
     return ({needs_evidence:'审核证据待补齐', defect:'Agent 已定位待修内容', not_verified:'尚未完成审核'}[status]) + (text ? '：' + text : '');
   }
   // An Agent review is evidence, never the creator's authorization to produce.
-  function confirmed(item) { return item?.status === 'confirmed' && item.userConfirmed === true; }
+  function confirmed(item) { return item?.status === 'confirmed' && item.userConfirmed === true && state(item?.agentAudit) !== 'needs_evidence'; }
   function approved(review) { return review?.status === 'approved' && review.items?.length > 0 && review.items.every(confirmed); }
   function needsConfirmation(review) {
     return ['ready','approved'].includes(review?.status) && review.items?.length > 0 && !approved(review);

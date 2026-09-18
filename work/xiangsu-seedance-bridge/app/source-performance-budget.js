@@ -26,6 +26,8 @@ function evaluateBudget(row,turns){
  if(speechSeconds+outsideSeconds>15&&fastestCompatibleSpeech+outsideSeconds<=15+1e-8)
   speechSeconds=Math.max(fastestCompatibleSpeech,15-outsideSeconds);
  const requiredSeconds=Math.max(10,Math.ceil(Math.max(speechSeconds,duringSeconds)+outsideSeconds-1e-8));
+ const effectiveOutside=outsideSeconds>0?outsideSeconds:(turns.length?0.65:0);
+ if(duringSeconds>15)issues.push(`complete source speech and sequential actions need ${Math.ceil(duringSeconds+effectiveOutside)}s; regroup complete lines before compiling`);
  if(requiredSeconds>15)advisories.push(`complete source speech and sequential actions need ${requiredSeconds}s; regroup complete lines before compiling`);
  return {version:VERSION,shotId:row?.shotId||'',speechSeconds:Number(speechSeconds.toFixed(2)),minSpeechSeconds:Number(minSpeechSeconds.toFixed(2)),targetSpeechSeconds:Number(targetSpeechSeconds.toFixed(2)),maxSpeechSeconds:Number(maxSpeechSeconds.toFixed(2)),beforeSeconds,afterSeconds,duringSeconds,maxInteriorGapSeconds,requiredSeconds,actionPhases:phases,issues,advisories};
 }

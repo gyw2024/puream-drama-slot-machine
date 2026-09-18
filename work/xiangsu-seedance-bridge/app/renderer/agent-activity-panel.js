@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 (()=>{
  const panel=document.querySelector('#agentActivityPanel');if(!panel)return;
  panel.tabIndex=0;panel.setAttribute('aria-label','软件与 Agent 实时运行详情');
@@ -45,7 +45,7 @@
   const signature=items.map(p=>`${p.id}:${p.title}:${p.status}`).join('|');if(select.dataset.runListSignature===signature)return;
   select.replaceChildren(...items.map(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.title;o.disabled=p.status==='corrupted';return o;}));select.value=selected;select.dataset.runListSignature=signature;
  }
- async function refresh(){const id=document.querySelector('#projectSelect')?.value;try{const response=await window.dramaSlot.localAgents.call('jobs',scope);if(!response?.ok)throw Error('status unavailable');if(id!==document.querySelector('#projectSelect')?.value)return;jobs=response.jobs||[];failure=false;render();await syncProjectList().catch(()=>{});}catch{if(id===document.querySelector('#projectSelect')?.value){failure=true;render();}}finally{if(!stopped)timer=setTimeout(refresh,2000);}}
+ async function refresh(){const id=document.querySelector('#projectSelect')?.value;try{const response=await window.dramaSlot.localAgents.call('jobs',scope);if(!response?.ok)throw Error('status unavailable');if(id!==document.querySelector('#projectSelect')?.value)return;jobs=response.jobs||[];window.agentActivityJobs=jobs;failure=false;render();await syncProjectList().catch(()=>{});}catch{if(id===document.querySelector('#projectSelect')?.value){failure=true;render();}}finally{if(!stopped)timer=setTimeout(refresh,2000);}}
  document.querySelector('#projectSelect')?.addEventListener('change',()=>{panel.hidden=true;strip.hidden=true;});
  window.addEventListener('run-activity-project',render);
  window.addEventListener('pagehide',()=>{stopped=true;clearTimeout(timer);},{once:true});refresh();

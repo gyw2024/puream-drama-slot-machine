@@ -112,7 +112,7 @@ test('broken data references are repaired locally without restarting the complet
 
 test('complete story can split an overloaded shot without rewriting its neighbor or losing dialogue',async()=>{
  const d=fixture(),first=structuredClone(d.shots[0]);first.dialogue.push({...first.dialogue[0],id:'D02',text:'我们先坐下，再慢慢说。'});first.beats[0].dialogueIds.push('D02');d.shots=[first,{...structuredClone(first),id:'S02',dialogue:[],beats:[{...first.beats[0],dialogueIds:[]}]}];const neighbor=JSON.stringify(d.shots[1]);let reviews=0,repairs=0;
- const result=await screenplay.author({generate:async(m,o)=>{
+ const result=await screenplay.author({deferReview:false,generate:async(m,o)=>{
   if(o.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(m);
   if(o.stage==='shot_screenplay_draft')return '原始稿正文：母亲接稳杯子，两镜衔接。';
   if(o.stage==='shot_screenplay_structure')return d;
@@ -126,7 +126,7 @@ test('complete story can split an overloaded shot without rewriting its neighbor
 
 test('Agent can merge adjacent silent sections while retaining every original line and an unrelated shot',async()=>{
  const d=fixture(),second={...structuredClone(d.shots[0]),id:'S02',dialogue:[],beats:[{...d.shots[0].beats[0],dialogueIds:[]}]},third={...structuredClone(second),id:'S03'};d.shots.push(second,third);const untouched=JSON.stringify(third);let reviews=0;
- const result=await screenplay.author({generate:async(m,o)=>{
+ const result=await screenplay.author({deferReview:false,generate:async(m,o)=>{
   if(o.stage==='shot_screenplay_review_findings')return require('./source-finding-test-helper')(m);
   if(o.stage==='shot_screenplay_draft')return '原始稿正文：母亲与女儿相邻静场，保留全部原句。';
   if(o.stage==='shot_screenplay_structure')return d;

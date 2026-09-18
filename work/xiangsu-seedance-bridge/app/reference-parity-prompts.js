@@ -163,17 +163,29 @@ function referenceParityFor(prompts, stage) {
   } else {
     value = String(defaultReferenceParityTemplates()[key] || "").trim();
   }
-  const upgraded = value; // Built-in migration occurs once by exact hash in settings, never by rewriting live custom prose.
-  if (upgraded === require('./generation-template-defaults').defaults()[key]) return upgraded;
-  return CONTINUITY_OVERRIDE_KEYS.has(key)
-    ? [upgraded, CONTINUITY_BLOCK_OVERRIDE].filter(Boolean).join("\n\n")
-    : upgraded;
+  // 已保存的旧版系统覆盖也必须走同一套迁移，否则"最多2人""不写逐句秒点"这类
+  // 已退役禁令会跟随旧设置长期生效，与当前合同直接冲突。
+  // 迁移只改已退役的规则措辞，不删除用户自写的导演备注，也不改写实时自定义正文。
+  const upgraded = normalizeLegacyReferenceParity(value);
+  const continuityOverride = CONTINUITY_OVERRIDE_KEYS.has(key) ? CONTINUITY_BLOCK_OVERRIDE : "";
+  // 只有当正文里确实已经带上了该覆盖块时才跳过，避免重复注入；
+  // 不能用"是否等于内置默认"来判定 —— 内置默认可能只是一个不含覆盖块的方法块。
+  if (continuityOverride && upgraded.includes(continuityOverride)) return upgraded;
+  if (!continuityOverride && upgraded === require('./generation-template-defaults').defaults()[key]) return upgraded;
+  return [upgraded, continuityOverride].filter(Boolean).join("\n\n");
 }
 
 function appendReferenceParity(base, prompts, stage) {
   const original = String(base ?? "").trim();
   const addition = referenceParityFor(prompts, stage);
   if (!addition || original.includes(addition)) return original;
+  // 迁移后的正文可能与 base 同源（只是退役措辞被替换）。此时 base 本身已包含
+  // 旧措辞，直接去重判断会漏掉，导致同一段正文被追加两次。
+  // 正确做法：返回"迁移后的正文"而不是未迁移的 base —— 否则退役禁令会跟着
+  // 旧设置长期生效，与新合同直接冲突。
+  const normalizedBase = normalizeLegacyReferenceParity(original);
+  if (normalizedBase && addition.startsWith(normalizedBase + "\n\n")) return addition;
+  if (normalizedBase && addition === normalizedBase) return addition;
   return original ? `${original}\n\n${addition}` : addition;
 }
 

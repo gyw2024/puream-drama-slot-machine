@@ -14,7 +14,8 @@ const {
   renderApprovedVideoPromptChinese,
   shotReferenceCharacterIds
 } = require("../app/workbench-workflow");
-const { assetDecision } = require("../app/asset-eligibility");
+const { characterEligibilityView, characterRegistry } = require("../app/asset-eligibility");
+const { viewCompatibility } = require("../app/asset-decision-contract");
 const { validateProviderPayload } = require("../app/puream-video-adapters");
 const {
   REQUIRED_SECTIONS,
@@ -270,8 +271,12 @@ test("a one-line camera-owned speaker always requires and receives an identity a
       }
     }]
   };
-  const decision = assetDecision(project, project.characters[0]);
-  assert.equal(decision.assetRequired, true);
-  assert.deepEqual(decision.directSpeakingShotIds, ["S10"]);
+  // §4.3：assetRequired 只是兼容显示值，执行判定必须读显式状态。
+  // 旧的 assetDecision() 已被内核视图 characterEligibilityView() 取代。
+  const decision = characterEligibilityView(project, characterRegistry(project)[0]);
+  assert.equal(decision.visualRequirement, "required", "一句台词的镜位主体仍必须有独立视觉身份");
+  assert.equal(viewCompatibility(decision).assetRequired, true);
+  assert.equal(decision.evidence.visibleSpeakingShots, 1);
+  assert.equal(decision.voiceIdentityRequirement, "required");
   assert.deepEqual(shotReferenceCharacterIds(project, project.shots[0]), ["C07"]);
 });

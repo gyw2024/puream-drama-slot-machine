@@ -119,6 +119,12 @@ test("prompt-review boundary keeps one review item per unique H3 block id", asyn
   store.saveProject(project);
   const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: root });
   workflow.translatePromptReviewItemsForDisplay = async () => {};
+  // This fixture supplies shots directly and has no materialized shot
+  // screenplay, so runtimeCurrent() is false and compilePromptReviewBundle
+  // would re-enter Agent intake (which needs live authorization). The case
+  // under test is the review-bundle block-id contract, not the analysis path;
+  // stub intake the same way the other asset-direct regressions do.
+  workflow.analyzeScript = async () => store.getProject(created.id);
   const prepared = await workflow.preparePromptReviewBundle(created.id, { compileProviderSemantics: false });
   assert.deepEqual(prepared.shots.map(shot => shot.id), ["S02-B01", "S02-B02"]);
   const videoItems = prepared.promptReview.items.filter(item => item.stage === "shot_video");
@@ -182,7 +188,10 @@ test("prompt approval fingerprint ignores runtime progress but invalidates any p
     productionRevision: String(project.productionRevision || ""),
     settingsFingerprint: promptReviewSettingsFingerprint(store.getSettings()),
     counts: { total: 1, confirmed: 1 },
-    items: [{ id: "shot:S01:shot_video", entityType: "shot", entityId: "S01", stage: "shot_video", prompt: "execution", displayPrompt: "中文", status: "confirmed", executionLanguage: "en", translationStatus: "structured" }]
+    // A confirmed receipt must carry real user confirmation, not just a status
+    // flag: review-receipt-state.confirmed() requires userConfirmed === true so
+    // a bare "confirmed" string can never be treated as an approved baseline.
+    items: [{ id: "shot:S01:shot_video", entityType: "shot", entityId: "S01", stage: "shot_video", prompt: "execution", displayPrompt: "中文", status: "confirmed", userConfirmed: true, confirmedAt: "2026-01-01T00:00:00.000Z", executionLanguage: "en", translationStatus: "structured" }]
   };
   project.promptReview.sourceFingerprint = promptReviewSourceFingerprint(project);
   const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: root });

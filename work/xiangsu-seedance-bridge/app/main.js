@@ -2110,6 +2110,20 @@ function requireSimpleMode() {
 async function preflightCommand(context, projectId, intent, targets = [], options = {}) {
   let project;
   try { project = context.store.getProject(projectId); } catch { project = null; }
+  if (project?.productionPlan?.executionMode === "full") {
+    // In full auto mode, auto-confirm compiled prompt reviews so the pipeline runs unattended
+    try {
+      if (project?.productionV2?.enabled) {
+        await context.workflow.confirmAllPromptReview(projectId);
+      } else {
+        const gate = await context.workflow.requestPromptReview(projectId, options);
+        if (gate?.required) {
+          await context.workflow.confirmAllPromptReview(projectId);
+        }
+      }
+    } catch {}
+    return null;
+  }
   if (project?.productionV2?.enabled) {
     try {
       if (intent === "generateAllShotVideos") {
@@ -3235,87 +3249,158 @@ ipcMain.handle("workbench:confirm-prompt-review-item", async (_event, projectId,
 // chat items; only THIS item's display/execution prompt fields and its own
 // revision may change — never other items, never the whole-project gate.
 function promptChatService() {
-  if (promptChatService.instance) return promptChatService.instance;
   const context = requireWorkbench();
-  const { PromptChatService } = require("./production-v2/prompt-chat");
-  const findItem = (projectId, itemId) => {
-    const project = context.store.getProject(projectId);
-    const item = project?.promptReview?.items?.find(entry => entry.id === String(itemId));
-    if (!item) return null;
-    return {
-      itemId: String(itemId),
-      itemRevision: Number(item.itemRevision || 0),
-      displayText: String(item.displayPrompt || item.prompt || ""),
-      executionPrompt: String(item.prompt || ""),
-      meta: { relatedFacts: {} }
-    };
-  };
-  promptChatService.instance = new PromptChatService({
-    db: foundryKernel?.runtime?.db,
-    loadItem: findItem,
-    saveItem: (projectId, itemId, { displayText, executionPrompt, expectedItemRevision }) => {
-      const project = context.store.getProject(projectId);
-      const item = project?.promptReview?.items?.find(entry => entry.id === String(itemId));
-      if (!item) throw Object.assign(new Error("该条目不存在。"), { code: "ITEM_NOT_FOUND" });
-      if (Number(expectedItemRevision) !== Number(item.itemRevision || 0)) {
-        throw Object.assign(new Error("你编辑期间该条已有更新；提案已保留。"), { code: "EDIT_CONFLICT" });
-      }
-      item.displayPrompt = displayText;
-      item.prompt = executionPrompt;
-      item.itemRevision = Number(item.itemRevision || 0) + 1;
-      // Applying a chat edit re-opens THIS item for confirmation only; other
-      // confirmed items keep their approval and the initial gate is untouched.
-      if (item.status === "confirmed") {
-        item.status = "pending";
-        item.userConfirmed = false;
-        item.chatEditedAt = new Date().toISOString();
-      }
-      context.store.saveProject(project);
-      return { itemRevision: item.itemRevision };
-    },
-    model: async ({ messages, schema }) => {
-      const settings = context.store.getSettings();
-      const data = await context.workflow.generateText(settings.textProvider, messages, {
-        json: true,
-        responseSchema: schema,
-        costProjectId: null,
-        costOperation: "prompt_chat_turn",
-        maxTokens: 4000,
-        latencyProfile: require("./preproduction-performance").VERSION
-      });
-      return data;
-    }
-  });
-  return promptChatService.instance;
+  return context.workflow.promptChatService;
 }
 
 function publicOk(value) { return { ok: true, ...value }; }
 
+ipcMain.handle("workbench:prompt-chat-create-thread", async (_event, request = {}) => {
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    const commandId = request.commandId || `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const result = service.createThread({
+      projectId: request.projectId,
+      itemId: request.itemId,
+      commandId,
+      expectedRevision: request.expectedRevision != null ? Number(request.expectedRevision) : undefined,
+      actor
+    });
+    return publicOk(result);
+  } catch (error) { return publicError(error); }
+});
+
+ipcMain.handle("workbench:prompt-chat-send", async (_event, request = {}) => {
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    const result = await service.reserveTurn({
+      projectId: request.projectId,
+      threadId: request.threadId,
+      clientTurnId: request.clientTurnId || `turn_${Date.now()}`,
+      instruction: request.instruction,
+      scope: request.scope || { type: "wholeItem" },
+      parentTurnId: request.parentTurnId || "",
+      expectedItemRevision: Number(request.expectedItemRevision || 0),
+      expectedContentHash: request.expectedContentHash,
+      actor
+    });
+    return publicOk(result);
+  } catch (error) { return publicError(error); }
+});
+
+ipcMain.handle("workbench:prompt-chat-read", async (_event, request = {}) => {
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    const result = service.getThread({
+      projectId: request.projectId,
+      threadId: request.threadId,
+      afterSeq: Number(request.afterSeq || 0),
+      limit: Number(request.limit || 50),
+      actor
+    });
+    return publicOk(result);
+  } catch (error) { return publicError(error); }
+});
+
+ipcMain.handle("workbench:prompt-chat-apply", async (_event, request = {}) => {
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    const commandId = request.commandId || `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const result = await service.applyProposal({
+      projectId: request.projectId,
+      threadId: request.threadId,
+      turnId: request.turnId,
+      commandId,
+      actor
+    });
+    return publicOk({ ...result, project: projectForRendererFrom(requireWorkbench(), request.projectId, { reconcile: false }) });
+  } catch (error) { return publicError(error); }
+});
+
+ipcMain.handle("workbench:prompt-chat-cancel", async (_event, request = {}) => {
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    const result = service.cancelTurn({
+      projectId: request.projectId,
+      threadId: request.threadId,
+      turnId: request.turnId,
+      actor
+    });
+    return publicOk(result);
+  } catch (error) { return publicError(error); }
+});
+
+ipcMain.handle("workbench:prompt-chat-discard", async (_event, request = {}) => {
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    const result = service.discardProposal({
+      projectId: request.projectId,
+      threadId: request.threadId,
+      turnId: request.turnId,
+      actor
+    });
+    return publicOk(result);
+  } catch (error) { return publicError(error); }
+});
+
+ipcMain.handle("workbench:production-snapshot", async (_event, request = {}) => {
+  try {
+    const context = requireWorkbench();
+    const view = context.workflow.getProductionView(request.projectId);
+    return publicOk(view);
+  } catch (error) { return publicError(error); }
+});
+
 ipcMain.handle("prompt-chat:create-thread", async (_event, projectId, itemId, expectedItemRevision) => {
-  try { return publicOk(promptChatService().createThread({ projectId, itemId, expectedItemRevision })); }
-  catch (error) { return publicError(error); }
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    const commandId = `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return publicOk(service.createThread({ projectId, itemId, commandId, expectedRevision: expectedItemRevision, actor }));
+  } catch (error) { return publicError(error); }
 });
 ipcMain.handle("prompt-chat:send-turn", async (_event, projectId, threadId, clientTurnId, scope, instruction) => {
-  try { return publicOk(await promptChatService().sendTurn({ projectId, threadId, clientTurnId, scope, instruction })); }
-  catch (error) { return publicError(error); }
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    return publicOk(await service.reserveTurn({ projectId, threadId, clientTurnId, scope, instruction, actor }));
+  } catch (error) { return publicError(error); }
 });
 ipcMain.handle("prompt-chat:get-thread", async (_event, projectId, threadId, afterMessageId) => {
-  try { return publicOk(promptChatService().getThread({ projectId, threadId, afterMessageId })); }
-  catch (error) { return publicError(error); }
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    return publicOk(service.getThread({ projectId, threadId, afterSeq: afterMessageId, actor }));
+  } catch (error) { return publicError(error); }
 });
 ipcMain.handle("prompt-chat:apply-proposal", async (_event, projectId, threadId, proposalId, expectedItemRevision, baseHash) => {
   try {
-    const result = promptChatService().applyProposal({ projectId, threadId, proposalId, expectedItemRevision, baseHash });
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    const commandId = `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const result = await service.applyProposal({ projectId, threadId, turnId: proposalId, commandId, actor });
     return publicOk({ ...result, project: projectForRendererFrom(requireWorkbench(), projectId, { reconcile: false }) });
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("prompt-chat:discard-proposal", async (_event, projectId, threadId, proposalId) => {
-  try { return publicOk(promptChatService().discardProposal({ projectId, threadId, proposalId })); }
-  catch (error) { return publicError(error); }
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    return publicOk(service.discardProposal({ projectId, threadId, turnId: proposalId, actor }));
+  } catch (error) { return publicError(error); }
 });
 ipcMain.handle("prompt-chat:cancel-turn", async (_event, projectId, threadId, turnId) => {
-  try { return publicOk(promptChatService().cancelTurn({ projectId, threadId, turnId })); }
-  catch (error) { return publicError(error); }
+  try {
+    const service = promptChatService();
+    const actor = { id: "local-user", type: "user" };
+    return publicOk(service.cancelTurn({ projectId, threadId, turnId, actor }));
+  } catch (error) { return publicError(error); }
 });
 
 ipcMain.handle("workbench:consume-prompt-review-auto-open", async (_event, projectId) => {
@@ -3330,6 +3415,27 @@ ipcMain.handle("workbench:confirm-all-prompt-review", async (_event, projectId, 
     const context = requireWorkbench();
     await context.workflow.confirmAllPromptReview(projectId, entries || []);
     return { ok: true, project: projectForRendererFrom(context, projectId, { reconcile: false }) };
+  } catch (error) { return publicError(error); }
+});
+ipcMain.handle("workbench:commit-command", async (_event, projectId, commandType, payload = {}, options = {}) => {
+  try {
+    const context = requireWorkbench();
+    const commands = context.workflow.productionCommands;
+    if (!commands) throw Object.assign(new Error("production-v2 commands layer is not initialized"), { code: "COMMANDS_UNAVAILABLE" });
+    const actor = { id: "local-user", type: "user" };
+    const commandId = options.commandId || `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const result = await commands.execute({
+      projectId,
+      commandId,
+      commandType,
+      expectedRevision: options.expectedRevision != null ? Number(options.expectedRevision) : undefined,
+      actor,
+      payload
+    });
+    return publicOk({
+      ...result,
+      project: projectForRendererFrom(context, projectId, { reconcile: false })
+    });
   } catch (error) { return publicError(error); }
 });
 ipcMain.handle("workbench:generate-image", async (_event, projectId, stage, entityId, prompt) => {

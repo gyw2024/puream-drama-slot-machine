@@ -168,8 +168,30 @@ test("image-only generation never queues a character-video outage and completes 
     settings.videoProvider = { ...settings.videoProvider, kind: "puream-hailuo-h3", baseUrl: "https://puream.cn", model: "hailuo-h3", apiKey: "" };
     store.saveSettings(settings);
     const created = store.createProject("依赖分层", { engine: "hailuo-h3", mode: "smart" });
+    // The prompt-review boundary is compiled from the screenplay. Without a
+    // shot this project yields zero review items, so confirmAllPromptReview
+    // (correctly) refuses with PROMPT_REVIEW_REQUIRED before any asset work
+    // can be observed. Supply the single speaking shot this case is about.
     store.patchProject(created.id, {
       characters: [{ id: "C01", name: "林梅" }],
+      scenes: [{ id: "SC01", name: "客厅" }],
+      shots: [{
+        id: "S01",
+        number: 1,
+        sceneId: "SC01",
+        characterIds: ["C01"],
+        visibleCharacterIds: ["C01"],
+        focusCharacterId: "C01",
+        duration: 6,
+        dialogueTurns: [{ speakerId: "C01", text: "测试台词。" }],
+        subshots: [{
+          number: 1,
+          start: 0,
+          end: 6,
+          visibleCharacterIds: ["C01"],
+          dialogueTurns: [{ speakerId: "C01", text: "测试台词。" }]
+        }]
+      }],
       generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "smart", modeConfirmed: true }
     });
     const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: root });
@@ -179,7 +201,15 @@ test("image-only generation never queues a character-video outage and completes 
     const addImage = (stage, entityId) => {
       const filePath = path.join(root, `${stage}-${entityId}.png`);
       fs.writeFileSync(filePath, Buffer.from("image"));
-      return store.addCandidate(created.id, { entityType: "character", entityId, stage, filePath, qualityAudit: { ok: false } });
+      // entityType must match the stage's owner: a scene_asset registered as a
+      // character candidate is rejected by the batch as a type/ID/stage
+      // mismatch, which would surface as ASSET_BATCH_PARTIAL_FAILED instead of
+      // the completion this case is asserting.
+      // This case asserts that image-only mode completes its independent
+      // visual assets and reports progress.failed === 0, so the stub must also
+      // return a passing audit rather than one recorded as failed.
+      const entityType = stage === "scene_asset" ? "scene" : "character";
+      return store.addCandidate(created.id, { entityType, entityId, stage, filePath, selected: true, qualityAudit: { ok: true } });
     };
     workflow.generateImageCandidate = async (_projectId, stage, entityId) => addImage(stage, entityId);
     workflow.generateQualityCharacterVideo = async () => {

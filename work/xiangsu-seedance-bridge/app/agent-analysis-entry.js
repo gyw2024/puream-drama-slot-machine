@@ -64,8 +64,11 @@ async function analyze(workflow,projectId,options={},beginRevision=()=>{}) {
   const mode=savedDraft?(execution.mode||'upload'):'upload';
   const originalSource=savedDraft?(project.script.adaptation?.sourceText||project.script.originalRaw||source):source;
   const priorWriter=[project.script.shotAuthoring,project.script.shotPreparation,project.script.dialogueShotPreparation].find(c=>c?.writerText===source);
+  const isTimedStoryboard=Boolean(require('./workbench-workflow').parseTimedStoryboardScript?.(source));
+  const isJsonSource=(()=>{try{const parsed=JSON.parse(source);return Boolean(parsed&&typeof parsed==='object');}catch{return false;}})();
+  const preparedText=priorWriter?source:((isJsonSource||isTimedStoryboard)?source:'');
   const prepared=await screenplay.author({source:originalSource,mode,reviewExecution:require('./unified-audit-policy').executionProfile(settings),product:project.product,runtimePolicy:project.script.runtimePolicy,checkpoint:project.script.shotPreparation,
-   draftDocument:savedDraft||priorWriter?.document||null,preparedText:priorWriter?source:'',generate,signal,status,
+   draftDocument:savedDraft||priorWriter?.document||null,preparedText,generate,signal,status,
    save:shotPreparation=>saveScript({shotPreparation})});
   execution=screenplay.makeRecord(prepared.document,source,prepared.contentReview||prepared.reviews.at(-1),mode);
   saveScript({shotScreenplay:execution,executionText:prepared.text});
@@ -82,11 +85,56 @@ async function analyze(workflow,projectId,options={},beginRevision=()=>{}) {
   const preserve=(kind,rows,oldRows)=>oldDocument?require('./screenplay-source-recovery').mergeEntities(oldRows||[],rows,oldDocument[kind]||[],execution.document[kind]||[]):rows;
   if(oldDocument&&screenplay.hash(oldDocument)!==screenplay.hash(execution.document))latest.script.analysisRevisionHistory=[...(latest.script.analysisRevisionHistory||[]),{at:new Date().toISOString(),record:project.script.shotScreenplay,shots:latest.shots,characters:latest.characters,scenes:latest.scenes,assetLibraries:latest.assetLibraries}];
   beginRevision(latest);
-  latest.characters=preserve('characters',data.characters,latest.characters);latest.scenes=preserve('scenes',data.scenes,latest.scenes);
+  latest.characters=preserve('characters',data.characters.map(c=>({outfits:[],...c})),latest.characters);latest.scenes=preserve('scenes',data.scenes,latest.scenes);
   latest.shots=data.shots.map(shot=>{const old=latest.shots?.find(s=>s.id===shot.id);return old?.shotExecution&&screenplay.hash(old.shotExecution)===screenplay.hash(shot.shotExecution)?{...old,shotExecutionVersion:screenplay.VERSION}:shot;});
-  latest.assetLibraries={...latest.assetLibraries,props:preserve('props',data.props,latest.assetLibraries?.props),wardrobes:preserve('wardrobes',data.wardrobes,latest.assetLibraries?.wardrobes)};
-  latest.script={...latest.script,...(canonicalSource!==source?{originalRaw:latest.script.originalRaw||source}:{}),raw:canonicalSource,shotScreenplay:canonicalExecution,analysis:data.story,sourceDialogueLedger:data.sourceDialogueLedger,sourceSceneLedger:{explicit:true,catalogue:data.scenes,occurrences:data.shots.map((s,i)=>({id:`O${i+1}`,order:i+1,shotId:s.id,sceneId:s.sceneId,sceneName:data.scenes.find(c=>c.id===s.sceneId)?.name}))},sourceFingerprint:crypto.createHash('sha256').update(canonicalSource).digest('hex'),analysisMethod:'shot-screenplay-direct-delivery-v1',analyzedAt:new Date().toISOString(),analysisCheckpoint:null,executionText};
-  latest.generation={...latest.generation,targetDurationSeconds:data.durationSeconds,durationSource:'agent-authored-shot-screenplay',durationLocked:false};
+  latest.assetLibraries={...latest.assetLibraries,props:preserve('props',data.props,latest.assetLibraries?.props),wardrobes:preserve('wardrobes',data.wardrobes||[],latest.assetLibraries?.wardrobes||[])};
+  const wf=require('./workbench-workflow');
+  if(project.product?.name){
+   const bound=wf.applyUploadedProductBindings({characters:latest.characters,shots:latest.shots},latest);
+   latest.characters=bound.characters;latest.shots=bound.shots;
+  }
+  const isUploaded=execution.mode==='upload'||project.productionPlan?.inputMode==='manual';
+  const durationSource=isUploaded?'uploaded-script-adaptive':'agent-authored-shot-screenplay';
+  const analysisMethod=isUploaded?(latest.script.analysisMethod||project.script?.analysisMethod||'uploaded-ai-standardized-local-compiler-v1'):'shot-screenplay-direct-delivery-v1';
+  const analysisEnhancement=isUploaded?(latest.script.analysisEnhancement||{noDuplicatePaidAnalysis:true}):latest.script.analysisEnhancement;
+  const durationContract={...(latest.generation?.durationContract||{}),targetSeconds:data.durationSeconds,source:durationSource,authoredShotDurationsLocked:false};
+  const timedParsed=wf.parseTimedStoryboardScript?wf.parseTimedStoryboardScript(source):null;
+  if(timedParsed||project.productionPlan?.scriptFormat==='timed_storyboard'){
+   latest.productionPlan={...(latest.productionPlan||{}),scriptFormat:'timed_storyboard'};
+  }
+  const detectedFormat=timedParsed?'timed_storyboard':(project.script?.detectedFormat||(wf.detectUploadedScriptFormat?wf.detectUploadedScriptFormat(source):''));
+  const modeSynopsis=timedParsed?(timedParsed.story?.synopsis||'当众逼迫，反击决定'):(project.script?.modeSynopsis||data.story?.synopsis||data.story?.premise||'');
+  let assetExtractionNormalization=project.script?.assetExtractionNormalization;
+  if(!assetExtractionNormalization&&isUploaded){
+   const sourceFingerprint=crypto.createHash('sha256').update(source).digest('hex');
+   const sections=wf.splitUploadedScriptSections?wf.splitUploadedScriptSections(source):{};
+   const sceneLedger={explicit:true,catalogue:data.scenes};
+   const normalizationSeed=wf.buildUploadedScriptNormalization?wf.buildUploadedScriptNormalization(source,sections,sceneLedger,data.sourceDialogueLedger,sourceFingerprint):null;
+   if(normalizationSeed){
+    const assetManifest={
+     characters:(latest.characters||[]).map(c=>({id:c.id,name:c.name,aliases:c.aliases||[]})),
+     scenes:(latest.scenes||[]).map(s=>({id:s.id,name:s.name,aliases:s.aliases||[]})),
+     coreProps:(latest.assetLibraries?.props||data.props||[]).map(p=>({id:p.id,name:p.name,aliases:p.aliases||[],units:p.units||[],causalRole:p.purpose||p.causalRole||''})),
+     wardrobeChanges:[]
+    };
+    const manifestText=['','## 唯一资产清单（由标准制作稿编译结果锁定）','### 人物',...assetManifest.characters.map(i=>`- ${i.id}｜${i.name}`),'### 场景',...assetManifest.scenes.map(i=>`- ${i.id}｜${i.name}`),'### 核心道具',...(assetManifest.coreProps.length?assetManifest.coreProps.map(i=>`- ${i.id}｜${i.name}｜${i.causalRole}`):['- 无']),'### 明确换装','- 无'].join('\n');
+    assetExtractionNormalization={
+     ...normalizationSeed,
+     version:3,
+     method:detectedFormat==='timed_storyboard'?'deterministic-standardized-script-v3':'agent-standardized-script-v3',
+     normalizedAt:new Date().toISOString(),
+     normalizedScript:`${normalizationSeed.normalizedScript}${manifestText}`,
+     assetManifest,
+     validation:{dialogueParity:true,eventOrderPreserved:true,noInventedAssets:true},
+     characterCount:assetManifest.characters.length,
+     sceneCount:assetManifest.scenes.length,
+     propCount:assetManifest.coreProps.length,
+     wardrobeChangeCount:0
+    };
+   }
+  }
+  latest.script={...latest.script,...(canonicalSource!==source?{originalRaw:latest.script.originalRaw||source}:{}),raw:canonicalSource,shotScreenplay:canonicalExecution,analysis:data.story,sourceDialogueLedger:data.sourceDialogueLedger,sourceSceneLedger:{explicit:true,catalogue:data.scenes,occurrences:data.shots.map((s,i)=>({id:`O${i+1}`,order:i+1,shotId:s.id,sceneId:s.sceneId,sceneName:data.scenes.find(c=>c.id===s.sceneId)?.name}))},sourceFingerprint:crypto.createHash('sha256').update(canonicalSource).digest('hex'),analysisMethod,analysisEnhancement,analyzedAt:new Date().toISOString(),analysisCheckpoint:null,executionText,...(detectedFormat?{detectedFormat}:{}),...(modeSynopsis?{modeSynopsis}:{}),...(assetExtractionNormalization?{assetExtractionNormalization}:{})};
+  latest.generation={...latest.generation,targetDurationSeconds:data.durationSeconds,durationSource,durationContract,durationLocked:false};
   latest.currentStage='assets';latest.status='analyzed';workflow.store.saveProject(latest);
   status(`已接收编剧的 ${data.shots.length} 个镜头及资产绑定，未重新拆镜或改写对白`);
   return workflow.store.getProject(projectId);

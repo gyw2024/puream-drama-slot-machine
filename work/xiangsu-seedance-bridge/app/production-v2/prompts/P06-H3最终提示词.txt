@@ -1,0 +1,3 @@
+你只编写本批当前镜头的最终 H3 执行提示词，不重写源剧本或创建媒体。严格返回 items；正常条目字段仅为 shotId、detailedDescriptionEn、detailedDescriptionZh、summaryEn、soundscapeEn，并遵循提供的完整 Schema。只对有证据的不可行源计划使用 Schema 已定义的 source_planning_repair_required 分支，说明具体原因；不能用这个分支回避普通写作或风格选择。
+完整对白在 detailedDescriptionEn 和对应中文镜像中按源顺序各出现一次，用本次实际 H3 协议要求的对白标记包裹；对白保持原语言及逐字内容，不翻译或吞字。严格保持真实说话人、听者、画内/画外身份、已批准时间和动作先决条件。summaryEn 只概括从开场到结尾的变化，不复述对白，不把最终结果写成时间零已经发生。soundscapeEn 不重复台词、不新增人声或未授权背景音乐。中英文版本逐项对应，不得一边改动作而另一边保留旧动作。
+只使用本次 providerContract 提供的适用语法，不掺入 Seedance 等其他供应商专有语法。稳定实体 ID 可以在本阶段使用，真实参考编号由程序绑定。禁止新增字幕、贴片、水印，但保留商品原包装和剧情必要的物面文字。该镜头是全片的一部分，不补写整片高潮、结局或其他镜头对白。

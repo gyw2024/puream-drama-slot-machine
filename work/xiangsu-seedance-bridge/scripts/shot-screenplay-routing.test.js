@@ -137,7 +137,12 @@ test('repair resume reuses its exact pending request rather than drafting, struc
 
 test('local Agent idempotency shares a running call and replays a committed receipt without invoking the model',async t=>{
  const fs=require('fs'),path=require('path'),{AgentHub}=require('../app/local-agent-runtime'),delivery=require('../app/mcp/stage-delivery');
- const root=fs.mkdtempSync(path.resolve(__dirname,'../../../.codex_tests/TASK-20260913-AGENT-295/request-replay-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ // mkdtempSync does not create intermediate directories. Create the shared
+ // TASK parent first, otherwise this file only passes when shot-screenplay.test.js
+ // happened to create it earlier in the SAME process; run alone (or in another
+ // chunk) it fails with ENOENT.
+ const testsRoot=path.resolve(__dirname,'../../../.codex_tests/TASK-20260913-AGENT-295');fs.mkdirSync(testsRoot,{recursive:true});
+ const root=fs.mkdtempSync(path.join(testsRoot,'request-replay-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  let calls=0;const fake=Object.assign(Object.create(AgentHub.prototype),{root,jobs:new Map(),activeRequests:new Map(),stageStarts:new Map(),latestByStage:new Map(),save:()=>{},runFresh:async function(config,request,options){calls++;await new Promise(r=>setTimeout(r,5));const id='agent_replay',dir=path.join(root,id);fs.mkdirSync(dir);const job={id,agentId:config.id,status:'running',requestKey:options.requestKey};this.jobs.set(id,job);fs.writeFileSync(path.join(dir,'request.json'),JSON.stringify({...request,jobId:id}));fs.writeFileSync(path.join(dir,'job.json'),JSON.stringify(job));delivery.submit(dir,{text:'原话（完整）'});return {text:'原话（完整）',jobId:id};}});
  const invoke=()=>AgentHub.prototype.run.call(fake,{id:'workbuddy'},{modality:'text',json:false,messages:[]},{sessionId:'one-request',costProjectId:'test'});
  const both=await Promise.all([invoke(),invoke()]);assert.equal(calls,1);assert.deepEqual(both[0],both[1]);

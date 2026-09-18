@@ -308,8 +308,15 @@ test("character video reuses the existing four-view image", async t => {
   const { root, store, workflow } = fixture();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const created = store.createProject("四视图复用", { engine: "hailuo-h3", mode: "storyboard_sheet" });
+  // Prompt review is now driven by the screenplay: a character-only fixture
+  // compiles to zero review items and confirmAllPromptReview correctly refuses
+  // with PROMPT_REVIEW_REQUIRED. Supply the shot the four-view reuse depends on.
+  const characters = [{ id: "C01", name: "周桂兰", signatureLine: "你好" }];
+  const scenes = [{ id: "SC01", name: "堂屋" }];
   store.patchProject(created.id, {
-    characters: [{ id: "C01", name: "周桂兰", signatureLine: "你好" }],
+    characters,
+    scenes,
+    shots: directSpeakingShots(characters, scenes),
     generation: { engine: "hailuo-h3", videoProviderKind: "puream-hailuo-h3", mode: "storyboard_sheet", modeConfirmed: true }
   });
   const sheetPath = writeMedia(root, "character-sheet.png", "four-view");

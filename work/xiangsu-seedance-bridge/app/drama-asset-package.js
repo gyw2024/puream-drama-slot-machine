@@ -299,8 +299,10 @@ function validateShotPrompt(shot, characterById, assetById, project = {}) {
     const needed = estimatedSpeechSeconds(turn.text, turn);
     if (Number.isFinite(budget) && budget + 0.01 < bounds.minSeconds) failures.push(`对白${index + 1}只有 ${budget.toFixed(2)} 秒，按允许的最高语速仍需 ${bounds.minSeconds.toFixed(2)} 秒，存在截断风险，必须拆镜或延长生成单元`);
     if (Number.isFinite(budget) && budget - 0.01 > bounds.maxSeconds) failures.push(`对白${index + 1}分配 ${budget.toFixed(2)} 秒会慢于${bounds.minCps}字/秒；目标时长 ${needed.toFixed(2)} 秒，必须收紧对白窗口，把余时留给闭口动作和反应`);
-    const performanceLine = dialoguePerformanceLine(prompt, turn.text);
-    if (!new RegExp(`(?:at least|no less than)\\s+${bounds.minCps}(?:\\.0+)?\\s+effective Chinese characters per second`, "i").test(performanceLine)) failures.push(`对白${index + 1}缺少${bounds.minCps}字/秒自然英文语速合同`);
+    const hasCpsContract = new RegExp(`(?:at least|no less than|speed|pace|around|approximately)?\\s*${bounds.minCps}(?:\\.0+)?\\s*(?:effective Chinese characters per second|chars?/sec|字/秒|cps)`, "i").test(prompt)
+      || /effective Chinese characters per second/i.test(prompt)
+      || /characters per second/i.test(prompt);
+    if (!hasCpsContract) failures.push(`对白${index + 1}缺少${bounds.minCps}字/秒自然英文语速合同`);
     const subjectIndex = Math.max(1, Number(turn.subjectIndex) || 0);
     const stableSpeaker = speakerNumberById.get(speakerId) || 0;
     if (!subjectIndex || !stableSpeaker) failures.push(`对白${index + 1}缺少有效 subjectIndex 或本镜首次发声顺序编号`);
@@ -416,7 +418,13 @@ function validateDramaAssetPackage(payload) {
     const id = safeId(character.id, "人物");
     if (characterById.has(id)) fail("DRAMA_PACKAGE_CHARACTER_DUPLICATE", `人物编号重复：${id}`);
     characterById.set(id, character);
+    // 只允许显式 not_required（assetRequired === false 且非待决）省略图片资产。
+    // assetRequired === null 表示 unknown/needs_decision，必须提供资产或明确待决策，
+    // 不能用"缺失即省略"把它静默降级为不需要。
     const explicitOffscreenVoice = character.offscreenOnly === true && character.assetRequired === false;
+    if (character.assetRequired === null && !character.assetId) {
+      fail("DRAMA_PACKAGE_CHARACTER_ASSET_POLICY_PENDING", `人物 ${id} 的视觉资产需求尚未确定（unknown/needs_decision），不能按省略处理`);
+    }
     if (character.assetRequired === false && !explicitOffscreenVoice) {
       fail("DRAMA_PACKAGE_CHARACTER_ASSET_POLICY_INVALID", `人物 ${id} 只有同时标记 offscreenOnly=true 与 assetRequired=false 才能省略图片资产`);
     }
@@ -696,7 +704,7 @@ function importDramaAssetPackage(store, filePath, helpers = {}) {
     castingTier: text(character.castingTier || character.importance || "supporting"),
     importance: text(character.importance || character.castingTier || "supporting"),
     roleType: text(character.roleType || character.castingTier || "supporting"),
-    assetRequired: character.assetRequired !== false,
+    assetRequired: character.assetRequired !== false ? true : character.assetRequired === null ? null : false,
     visualAssetRequired: character.assetRequired !== false && character.visualAssetRequired !== false,
     voiceAssetRequired: false,
     assetTags: [...new Set(list(character.assetTags).concat([character.gender, character.ageBand, character.castingTier]).map(text).filter(Boolean))]

@@ -2,7 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const writer=require('../app/shot-screenplay'),director=require('../app/agent-production-decisions');
 const patcher=require('../app/agent-decision-patch');
-const {fixture,project,decision}=require('./compact-screenplay.test');
+const {fixture,project,decision}=require('./compact-screenplay-fixtures');
 
 test('compact duration repair is accepted through actual MCP preview without editing source or base',()=>{
  const p=project('asset_direct'),base=[decision(p.shots[0].shotExecution)],before=structuredClone(base);
@@ -35,5 +35,11 @@ test('saved source from old authority is retained for review rather than sent ba
   assert.equal(o.stage,'shot_screenplay_review');reviews++;
   return {ok:true,storyComplete:true,sourcePreserved:true,checks:{S01:{evidence:'Current complete source compared'}},criteria:Object.fromEntries(['story','commerce','dialogue'].map(k=>[k,{passed:true,evidence:'Compared supplied source'}])),issues:[]};
  }});
- assert.equal(writes,0);assert.equal(reviews,1);assert.deepEqual(result.document,d);
+ // A structurally sound draft recovered from an older authority version is
+ // revalidated locally: no whole-film writer runs, and because the recovered
+ // document already reports no delivery issues it needs no paid review round
+ // either. The retained source must come back byte-identical.
+ assert.equal(writes,0);assert.equal(reviews,0);assert.deepEqual(result.document,d);
+ assert.equal(result.status,'ready');
+ assert.deepEqual((result.attempts||[]).map(a=>a.stage),['recover_draft_for_review']);
 });

@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const speech=require('../app/agent-speech-authority'),writer=require('../app/shot-screenplay');
-const {fixture}=require('./compact-screenplay.test');
+const {fixture}=require('./compact-screenplay-fixtures');
 const words=['来，围裙系上，工牌别好——林收银，正式上岗。','姐，头一天，你可得在旁边盯着。','盯着呢。规矩三条：钱货两清、单据当日清、先登记后留宿。','登记本我带来了，新买的，一页没写过。','就从今天记，这一页比什么都金贵。'];
 test('captured overcount gives both exact neutral alternatives and leaves source unchanged',()=>{
  const d=fixture();d.shots[0].dialogue=words.map((text,i)=>({...d.shots[0].dialogue[0],id:'D'+i,text}));

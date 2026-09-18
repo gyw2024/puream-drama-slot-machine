@@ -8,19 +8,53 @@ const SCRIPT_HANDLING = new Set(["respect", "optimize", "recreate"]);
 const COMMERCE_MODES = new Set(["none", "natural", "explicit"]);
 const PRIORITY_PROFILES = new Set(["speed", "balanced", "quality"]);
 
+// 意图字段的归一。
+//
+// GPT 裁决 §2.2 第 1 条：UI 写入非法枚举必须报错，不能把用户拼错的值
+// 悄悄降级成某个默认值（否则用户以为选了 recreate，实际存成 optimize）。
+// 因此这里区分两种情形：
+//   · 字段缺失 / 空 / null / undefined  → 旧项目兼容推断，合法
+//   · 字段有值但不在枚举内              → INVALID_INTENT_ENUM，明确报错
+function isMissing(value) {
+  return value === undefined || value === null || String(value).trim() === "";
+}
+
+function invalidIntent(field, value, allowed) {
+  return new FoundryError(
+    `${field} 取值非法：${JSON.stringify(String(value))}；允许值 ${[...allowed].join("/")}`,
+    {
+      code: "INVALID_INTENT_ENUM",
+      kind: ERROR_KINDS.USER_ACTION_REQUIRED,
+      userAction: "reselect_intent",
+      details: { field, received: String(value), allowed: [...allowed] }
+    }
+  );
+}
+
 function normalizeScriptHandling(value, project = {}) {
-  const requested = String(value || "").trim().toLowerCase();
+  if (isMissing(value)) {
+    return project?.productionPlan?.inputMode === "manual" ? "respect" : "optimize";
+  }
+  const requested = String(value).trim().toLowerCase();
   if (SCRIPT_HANDLING.has(requested)) return requested;
-  return project?.productionPlan?.inputMode === "manual" ? "respect" : "optimize";
+  throw invalidIntent("scriptHandling", value, SCRIPT_HANDLING);
 }
 
 function normalizeCommerceMode(value, project = {}) {
-  return require('../renderer/commerce-input-mode')(project);
+  // 显式选择的口播/带货意图必须保留：它在商品资料录入之前就已确定，
+  // 若在此处按商品是否已存在重新推断，会把 explicit/natural 抹成 none，
+  // 从而绕过 topic/script 阶段的商品准入闸门。
+  if (isMissing(value)) return require('../renderer/commerce-input-mode')(project);
+  const requested = String(value).trim().toLowerCase();
+  if (COMMERCE_MODES.has(requested)) return requested;
+  throw invalidIntent("commerceMode", value, COMMERCE_MODES);
 }
 
 function normalizePriorityProfile(value) {
-  const requested = String(value || "").trim().toLowerCase();
-  return PRIORITY_PROFILES.has(requested) ? requested : "balanced";
+  if (isMissing(value)) return "balanced";
+  const requested = String(value).trim().toLowerCase();
+  if (PRIORITY_PROFILES.has(requested)) return requested;
+  throw invalidIntent("priorityProfile", value, PRIORITY_PROFILES);
 }
 
 function contractPayload(project = {}, settings = {}) {

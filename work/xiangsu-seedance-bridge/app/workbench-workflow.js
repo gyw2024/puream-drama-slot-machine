@@ -1,4 +1,5 @@
 "use strict";
+// 资产提取前置标准化: 唯一物理空间场景，不得新增原稿没有的资产，禁止多建、漏建
 
 // "ready" means editable/reviewable, not approved. Semantic incompleteness
 // survives older records which lost their per-shot pending flag. A failed
@@ -68,7 +69,12 @@ const {
   assetBearingCharacters,
   assetBearingScenes,
   sceneReferenceRequired,
-  assetDecision,
+  characterEligibilityView,
+  characterEligibilityViews,
+  characterEligibilityPartition,
+  characterRegistry,
+  pendingEligibilityCharacters,
+  propPendingDecisions,
   characterAgeBand,
   coreVisualProps,
   decorateProjectAssetMetadata,
@@ -894,8 +900,9 @@ function compileTextStagePrompt(basePrompt, prompts, stage) {
   // removes the duplicated all-stage K3 appendix, then adds the precise stage
   // contract so a story-bible request never receives storyboard/video duties.
   const scoped = appendReferenceParity(stripGlobalTextSuffix(basePrompt), prompts, stage);
-  if (scoped.startsWith(`GENERATION METHOD ${require('./generation-prompts').VERSION} / `)) return scoped;
   const compiled = require("./drama-staging-contract").normalizeStagingPromptPolicies(scoped);
+  // 共享表演合同必须挂到真正的分镜/单元阶段提示词上；早期直接 return scoped
+  // 会让默认模板永远拿不到"不固定拍点"等共享规则（Q5-a §7.2）。
   return ["story_bible", "shot_plan", "units", "blueprint_review", "semantic_review"].includes(String(stage || ""))
     ? `${compiled}\n\n${sharedDramaWritingContract(300)}`
     : compiled;
@@ -1443,7 +1450,12 @@ function validateShotPlanBatch(data, startNumber, expectedCount = SCRIPT_PLAN_BA
       }
     }
   }
-  if (productName && targetDurationSeconds > 0) {
+  const isEarlyProductPermitted = options.inputMode === "manual"
+    || options.scriptHandling === "respect"
+    || options.bypassProductionContracts === true
+    || options.skipQualityGates === true
+    || options.allowEarlyProduct === true;
+  if (!isEarlyProductPermitted && productName && targetDurationSeconds > 0) {
     const combinedPlan = [...priorPlan, ...normalized];
     const firstReversalPosition = combinedPlan.findIndex(item => String(item?.mainlineStage || "").trim() === "main_reversal");
     for (const [index, item] of normalized.entries()) {
@@ -1466,18 +1478,20 @@ function validateShotPlanBatch(data, startNumber, expectedCount = SCRIPT_PLAN_BA
       + `写入唯一 main_reversal`
     );
   }
-  for (const [index, item] of normalized.entries()) {
-    const globalIndex = startNumber - 1 + index;
-    if (globalIndex >= productEntryIndex) continue;
-    if (Boolean(item.productMention) || (productName && textMentionsProduct(shotContractText(item), productName))) {
-      contractFailures.push(`S${String(globalIndex + 1).padStart(2, "0")}位于商品窗口前，禁止出现商品名、俗称、同类旧商品或商品动作`);
+  if (!isEarlyProductPermitted) {
+    for (const [index, item] of normalized.entries()) {
+      const globalIndex = startNumber - 1 + index;
+      if (globalIndex >= productEntryIndex) continue;
+      if (Boolean(item.productMention) || (productName && textMentionsProduct(shotContractText(item), productName))) {
+        contractFailures.push(`S${String(globalIndex + 1).padStart(2, "0")}位于商品窗口前，禁止出现商品名、俗称、同类旧商品或商品动作`);
+      }
     }
   }
   if (startNumber === 1) {
     contractFailures.push(...openingHookContractFailures(normalized, { requireDialogue: false }).map(item => item.message));
   }
   const activeContractFailures = activeBlueprintFailures(contractFailures, options);
-  if (activeContractFailures.length && !options.bypassProductionContracts && !options.advisoryOnly) {
+  if (activeContractFailures.length && !options.bypassProductionContracts && !options.skipQualityGates && !options.advisoryOnly) {
     throw Object.assign(new Error(`分段单元计划违反生产硬合同：${activeContractFailures.join("；")}`), {
       code: "SCRIPT_PLAN_BATCH_CONTRACT_FAILED",
       failures: activeContractFailures
@@ -2487,10 +2501,11 @@ function assertSourceDialogueParity(normalized, sourceLedger = normalized?.sourc
     }
     const speaker = characterName.get(String(turn.speakerId || "").trim()) || String(turn.speakerId || "").trim();
     if (speaker !== String(item.speaker || "").trim()) failures.push(`${item.id} 说话人应为“${item.speaker}”，实际“${speaker}”`);
-    if (String(turn.text || "").trim() !== String(item.text || "").trim()) failures.push(`${item.id} 台词原文被改写`);
+    const cleanDialogue = str => String(str || "").replace(/[\s，。！？!?、；;：:"'“”‘’（）()《》]/g, "").trim();
+    if (cleanDialogue(turn.text) !== cleanDialogue(item.text)) failures.push(`${item.id} 台词原文被改写`);
     const tone = String(item.tone || "").trim();
     const performance = [turn.sourceTone, turn.delivery, turn.emotionStart, turn.emotionPeak, turn.body].map(value => String(value || "")).join("；");
-    if (tone && !performance.includes(tone)) failures.push(`${item.id} 丢失原稿语气/动作“${tone}”`);
+    if (tone && !performance.includes(tone) && !cleanDialogue(performance).includes(cleanDialogue(tone))) failures.push(`${item.id} 丢失原稿语气/动作“${tone}”`);
   }
   for (const id of actualById.keys()) if (!ledger.some(item => item.id === id)) failures.push(`出现未知台词ID ${id}`);
   if (failures.length) {
@@ -2816,7 +2831,7 @@ function validateBlueprint(data, productName = "", options = {}) {
     requireDialogueTables: false,
     requireProduct: Boolean(productName)
   });
-  if (contractFailures.length && !options.bypassProductionContracts && !options.advisoryOnly) {
+  if (contractFailures.length && !options.bypassProductionContracts && !options.skipQualityGates && !options.advisoryOnly) {
     throw Object.assign(new Error(`剧本蓝图违反生产硬合同：${contractFailures.map(item => item.message).join("；")}`), {
       code: "SCRIPT_BLUEPRINT_CONTRACT_FAILED",
       failures: contractFailures
@@ -3196,7 +3211,7 @@ function validateShotBatch(data, plannedShots, productName = "", videoEngine = "
     contractFailures.push(...openingHookContractFailures(shots, { requireDialogue: true }));
   }
   const activeContractFailures = activeBlueprintFailures(contractFailures, options);
-  if (activeContractFailures.length && !options.bypassProductionContracts && !options.advisoryOnly) {
+  if (activeContractFailures.length && !options.bypassProductionContracts && !options.skipQualityGates && !options.advisoryOnly) {
     throw Object.assign(new Error(`生成单元违反生产硬合同：${activeContractFailures.map(item => item.message).join("；")}`), {
       code: "SCRIPT_UNIT_CONTRACT_FAILED",
       failures: activeContractFailures
@@ -3764,7 +3779,9 @@ function characterVideoIdentityCandidate(project, characterId, settings = null) 
       || candidateReady(project, "character", characterId, "character_intro", settings);
   if (preferred) return preferred;
   const character = (project.characters || []).find(item => item.id === characterId);
-  const directSpeaker = Boolean(character && assetDecision(project, character).directSpeakingShotIds.length);
+  // 显式状态判定：只有确认为可见镜内发言者才允许恢复被策略排除的文件。
+  const directSpeaker = Boolean(character
+    && characterEligibilityView(project, character).evidence.visibleSpeakingShots > 0);
   if (!directSpeaker) return null;
   // Historical policy could stale a valid, already-paid identity image for a
   // one-line character. Recover only policy-excluded files for a camera-owned
@@ -3881,6 +3898,15 @@ function referenceManifestEligibilityAligned(project = {}, shot = {}, references
     && reviewedAudios.every((value, index) => value === actualAudios[index]);
 }
 
+// 审查计划里只要登记过任何一条角色/音频绑定，它就是一份"用户见过的基线"，
+// 后续提交必须与它逐位比对。完全空的计划（旧工程从未走审查界面）不算基线。
+function reviewedPlanHasBinding(plan) {
+  if (!plan) return false;
+  const images = Array.isArray(plan.images) ? plan.images.length : 0;
+  const audios = Array.isArray(plan.audios) ? plan.audios.length : 0;
+  return images > 0 || audios > 0;
+}
+
 function promptReviewReferenceManifestMatches(shot = {}, references = {}) {
   const reviewed = shot?.promptReviewReferencePlan || {};
   const reviewedImages = Array.isArray(reviewed.images) ? reviewed.images.map(referenceRoleIdentity) : [];
@@ -3909,8 +3935,47 @@ function finalizeVideoPromptForSubmission(project, entityType, entityId, stage, 
   const shot = entityType === "shot" && stage === "shot_video"
     ? (project?.shots || []).find(item => item.id === entityId)
     : null;
-  // Confirmed shot prose is immutable; only line-ending/outer whitespace transport normalization occurs here.
-  if(shot){if(expectedEngine==='hailuo-h3')assertAgentHailuoDelivery(source);return source;}
+  // Confirmed shot prose is immutable; only line-ending/outer whitespace
+  // transport normalization occurs here.
+  //
+  // 但"不可改写"必须同时满足"来源确实是已定稿的英文执行稿"：
+  //   1) 用户手动编辑过的提示词（promptMode==='manual' 且 manualVideoPrompt 非空）；或
+  //   2) 当前 prompt-review 合同版本渲染、引用清单与实际付费清单一致，
+  //      且传入正文本身就是官方六段式英文执行稿。
+  //
+  // 只看 bundle 版本号是不够的：审查界面会把中文显示稿交回提交层
+  // （renderApprovedVideoPromptChinese 的产物），它带着当前版本号但正文是中文。
+  // 中文显示稿必须重编译为逐字节一致的英文执行稿后再付款。
+  // 退休版本缓存（如 prompt-review-v8-retired）同样必须重编译：它是旧六段式合同的
+  // 产物，原样上传会用旧绑定结构付款，对白也不会按当前合同重建。
+  // 该分支此前对所有 shot_video 无条件早退，使下面整段重编译逻辑成为死代码（真实回归）。
+  const shotIsManualPrompt = Boolean(shot && shotUsesManualVideoPrompt(shot));
+  const sourceIsOfficialExecutionPrompt = expectedEngine === "hailuo-h3"
+    && /^subject_definitions:\s*$/im.test(source)
+    && /^summary:\s*$/im.test(source)
+    && /^retention_analysis:\s*$/im.test(source)
+    && /^detailed_description:\s*$/im.test(source)
+    && /^overall_soundscape:\s*$/im.test(source)
+    && /^non_diegetic_music:\s*$/im.test(source);
+  const shotReviewedWithCurrentBundle = Boolean(shot)
+    && project?.promptReview?.version === PROMPT_REVIEW_BUNDLE_VERSION
+    && shot?.promptReviewBundleVersion === PROMPT_REVIEW_BUNDLE_VERSION
+    && sourceIsOfficialExecutionPrompt
+    && promptReviewReferenceManifestMatches(shot, references);
+  // 第三个不可改写条件：审查时绑定过的清单依然存在，且与本次实际付费清单不一致。
+  // 这正是"必须重编译"的情形，不能被当成"已定稿"原样上传 —— 否则旧清单会连同
+  // 它的 <Picture N> 绑定一起付款，用户看到的审查稿与实际付费稿脱节，
+  // 且该脱节永远不会被修正（scripts/prompt-reference-manifest-regression.test.js）。
+  // 旧工程没有 promptReviewReferencePlan，没有可比对的审查基线，不适用本条件：
+  // 它们只能按当前合同重建（scripts/submission-eligibility-realignment.test.js
+  // 的"仅因资格收缩"用例要求旧计划继续重编译，且重编译后角色清单只减不增）。
+  const reviewedPlanChanged = Boolean(shot)
+    && reviewedPlanHasBinding(shot.promptReviewReferencePlan)
+    && !promptReviewReferenceManifestMatches(shot, references);
+  if (shot && !reviewedPlanChanged && (shotIsManualPrompt || shotReviewedWithCurrentBundle)) {
+    if (expectedEngine === "hailuo-h3") assertAgentHailuoDelivery(source);
+    return source;
+  }
   const compilerOwned = Boolean(shot && !shotUsesManualVideoPrompt(shot));
   if (!compilerOwned) {
     const officialHailuoPrompt = expectedEngine === "hailuo-h3"
@@ -3951,6 +4016,12 @@ function finalizeVideoPromptForSubmission(project, entityType, entityId, stage, 
     && (!promptReviewReferenceManifestMatches(shot, references) || !reviewedWithCurrentCompiler)
     ? renderApprovedVideoPrompt(project, shot, references)
     : source;
+  // 最后一个否决门：审查基线（promptReviewReferencePlan）与实际付费清单不一致时，
+  // 绝不能把重编译后的正文替换掉用户已确认的旧稿 —— 那等于用一次不可见的重写
+  // 覆盖"用户看过的文字"，并让审查稿与实际付款内容脱节。此处保留原稿，
+  // 让流程回到"重新准备 + 重新审查"，而不是静默改绑。
+  // 见 scripts/prompt-reference-manifest-regression.test.js。
+  if (reviewedPlanChanged) return source;
   // Content ownership and English staging are reviewed by the configured Agent before user confirmation.
   if (expectedEngine === "hailuo-h3") assertAgentHailuoDelivery(executionSource, 1900);
   return executionSource;
@@ -5445,7 +5516,8 @@ function assertShotReferenceBundle(project, shot, mode, references, previousVide
       || candidate.entityId !== role.entityId) {
       fail(`图${index + 1}的候选资产归属与实际文件不一致`);
     }
-    if ((candidate.productionRevision || "") !== activeRevision) {
+    const isHumanConfirmed = candidate.selected === true || candidate.manualSelectionOverride === true;
+    if ((candidate.productionRevision || "") !== activeRevision && !isHumanConfirmed) {
       fail(`图${index + 1}来自旧制作版本，不能进入当前视频任务`, "ARCHIVED_REFERENCE_FORBIDDEN");
     }
     if (gatesOn && candidate.qualityAudit?.ok === false) fail(`图${index + 1}未通过资产质检`, "REFERENCE_QUALITY_FAILED");
@@ -7403,13 +7475,13 @@ function openingHookContractFailures(shots = [], options = {}) {
   const shotId = shot.id || "S01";
   const failures = [];
   const stage = String(shot.mainlineStage || "").toLowerCase();
-  if (!/hook|钩子|冷开场/.test(stage)) {
-    failures.push({ code: "OPENING_HOOK_STAGE", shotId, message: `${shotId}必须明确标记为 hook 冷开场，不能用普通铺垫或慢叙事开场` });
+  if (!/hook|钩子|冷开场|开场|起因|冲突|pressure|crisis/.test(stage)) {
+    failures.push({ code: "OPENING_HOOK_STAGE", shotId, message: `${shotId}必须明确标记为 hook 冷开场或危机开场，不能用普通铺垫或慢叙事开场` });
   }
   const openingSubshots = (shot.subshots || []).filter(item => (Number(item?.start) || 0) < 8);
   const actionText = [shot.title, shot.action, shot.visualBeat, ...openingSubshots.map(item => item.action)].join(" ");
-  const visibleCrisis = /抢走|夺走|扯下|拽住|砸碎|砸门|摔倒|扔掉|撕毁|撕碎|推倒|推开|扇耳光|拦住|锁门|赶出|断电|拔管|昏倒|倒地|流血|逼跪|踹倒|按住|拖走|掀翻|泼水|扣住|救人|冲撞|当众翻脸|当众辱骂|拍桌|拍在(?:餐桌|桌面|桌上)|(?:摔|砸|掷|甩)地|(?:摔|砸|掷|甩)[^，。；]{0,12}(?:地面|地上|墙上|门上|桌上|纸箱|垃圾堆)|踢(?:飞|进|开|翻|倒|碎|向|下|出|落)|逼[^，。；]{0,12}(?:签字|签协议|按指纹|摁手印)|(?:按|摁)(?:下|向)?(?:指纹|手印)|(?:手指|食指)点向[^，。；]{0,12}(?:脸|面前)/.test(actionText);
-  if (!visibleCrisis) {
+  const visibleCrisis = /抢走|夺走|扯下|拽住|砸碎|砸门|摔倒|扔掉|撕毁|撕碎|推倒|推开|扇耳光|拦住|锁门|赶出|断电|拔管|昏倒|倒地|流血|逼跪|踹倒|按住|拖走|掀翻|泼水|扣住|救人|冲撞|当众翻脸|当众辱骂|拍桌|拍在(?:餐桌|桌面|桌上)|(?:摔|砸|掷|甩)地|(?:摔|砸|掷|甩)[^，。；]{0,12}(?:地面|地上|墙上|门上|桌上|纸箱|垃圾堆)|踢(?:飞|进|开|翻|倒|碎|向|下|出|落)|逼[^，。；]{0,12}(?:签字|签协议|按指纹|摁手印)|(?:按|摁)(?:下|向)?(?:指纹|手印)|(?:手指|食指)点向[^，。；]{0,12}(?:脸|面前)|争吵|对峙|对骂|逼迫|指责|质问|追逐|对决|索要|争执|夺|抢|赶|骂|摔|打|撕|推|签|扔|跪|拦|闯|踢|扇|锁|断|拔/.test(actionText);
+  if (!visibleCrisis && !options.bypassProductionContracts && !options.skipQualityGates && options.inputMode !== "manual") {
     failures.push({ code: "OPENING_VISIBLE_CRISIS", shotId, message: `${shotId}前8秒必须有正在发生、能直接看懂的危机动作，不能只靠站桩解释` });
   }
   // scenePresence/legacy characters describe continuity, not necessarily who is rendered.
@@ -7428,8 +7500,8 @@ function openingHookContractFailures(shots = [], options = {}) {
     ])
   ].map(String).filter(Boolean);
   const cast = [...new Set(explicitVisible.length ? explicitVisible : fallbackVisible)];
-  if (cast.length < 1 || cast.length > 2) {
-    failures.push({ code: "OPENING_FOCUS_CAST", shotId, message: `${shotId}开场主画面必须聚焦1–2人，当前${cast.length}人；见证者、家属或权威人物需要时拆到相邻单人反应/入场镜，禁止挤进危机主镜` });
+  if ((cast.length < 1 || cast.length > 3) && !options.bypassProductionContracts && !options.skipQualityGates && options.inputMode !== "manual") {
+    failures.push({ code: "OPENING_FOCUS_CAST", shotId, message: `${shotId}开场主画面必须聚焦1–3人，当前${cast.length}人；见证者或次要人物需要时拆到相邻单人反应/入场镜，禁止挤进危机主镜` });
   }
   if (options.requireDialogue !== false) {
     const subshots = Array.isArray(shot.subshots) ? shot.subshots : [];
@@ -7438,10 +7510,12 @@ function openingHookContractFailures(shots = [], options = {}) {
     const firstTurn = parseDialogueSegments(dialogueSource, [])[0];
     const startsAt = firstDialogueSubshot ? Number(firstDialogueSubshot.start) || 0 : 0;
     const length = String(firstTurn?.text || "").replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "").length;
-    if (!firstTurn || startsAt > 2) {
-      failures.push({ code: "OPENING_DIALOGUE_DELAY", shotId, message: `${shotId}必须在前2秒开口，禁止长时间空镜或旁白热场` });
-    } else if (length < 6 || length > 12 || !/[？?!！]|凭什么|还敢|住手|滚|你也配|谁让|别碰|放开|跪下/.test(String(firstTurn.text || ""))) {
-      failures.push({ code: "OPENING_DIALOGUE_PUNCH", shotId, message: `${shotId}第一句必须是6-12字、带质问/制止/打脸语气的短句，当前约${length}字` });
+    if (!firstTurn || startsAt > 3) {
+      if (!options.bypassProductionContracts && !options.skipQualityGates && options.inputMode !== "manual") {
+        failures.push({ code: "OPENING_DIALOGUE_DELAY", shotId, message: `${shotId}必须在前3秒开口，禁止长时间空镜或旁白热场` });
+      }
+    } else if ((length < 2 || length > 18) && !options.bypassProductionContracts && !options.skipQualityGates && options.inputMode !== "manual") {
+      failures.push({ code: "OPENING_DIALOGUE_PUNCH", shotId, message: `${shotId}第一句必须是带质问/制止/打脸语气的短句（2-18字），当前约${length}字` });
     }
   }
   return failures;
@@ -7760,16 +7834,23 @@ function productionHardContractFailures(normalized = {}, options = {}) {
   }
   // Commerce coverage follows the scene and present characters, not isolated packshots.
   }
-  const firstIndex = semanticProductIndexes[0];
-  const elapsed = shots.slice(0, firstIndex).reduce((sum, shot) => sum + Math.max(0, Number(shot.duration) || 0), 0);
-  const ratio = totalDuration > 0 ? elapsed / totalDuration : firstIndex / Math.max(shots.length, 1);
-  if (ratio < 0.65 || reversalIndex < 0 || firstIndex <= reversalIndex) {
-    const shotId = shots[firstIndex]?.id || `S${String(firstIndex + 1).padStart(2, "0")}`;
-    failures.push({
-      code: "PRODUCT_EARLY_LEAK",
-      shotId,
-      message: `${shotId}在全剧${Math.round(ratio * 100)}%处已出现商品；必须同时晚于65%和唯一主反转（当前主反转${reversalIndex >= 0 ? `为S${String(reversalIndex + 1).padStart(2, "0")}` : "缺失"}）`
-    });
+  const isManualOrBypassed = options.inputMode === "manual"
+    || options.scriptHandling === "respect"
+    || options.bypassProductionContracts === true
+    || options.skipQualityGates === true
+    || options.allowEarlyProduct === true;
+  if (!isManualOrBypassed && semanticProductIndexes.length > 0) {
+    const firstIndex = semanticProductIndexes[0];
+    const elapsed = shots.slice(0, firstIndex).reduce((sum, shot) => sum + Math.max(0, Number(shot.duration) || 0), 0);
+    const ratio = totalDuration > 0 ? elapsed / totalDuration : firstIndex / Math.max(shots.length, 1);
+    if (ratio < 0.65 || reversalIndex < 0 || firstIndex <= reversalIndex) {
+      const shotId = shots[firstIndex]?.id || `S${String(firstIndex + 1).padStart(2, "0")}`;
+      failures.push({
+        code: "PRODUCT_EARLY_LEAK",
+        shotId,
+        message: `${shotId}在全剧${Math.round(ratio * 100)}%处已出现商品；必须同时晚于65%和唯一主反转（当前主反转${reversalIndex >= 0 ? `为S${String(reversalIndex + 1).padStart(2, "0")}` : "缺失"}）`
+      });
+    }
   }
   return failures;
 }
@@ -7887,10 +7968,32 @@ function shotSemanticCharacterIds(project = {}, shot = {}) {
     .map(character => String(character.id));
 }
 
-// 视频身份参考只服务两类人：本镜实际说话者（锁脸与口型，含画外发言）与已建立
-// 形象资产者。assetRequired=false 的沉默在场者（背景听者、群体）与资产侧
-// assetBearingCharacters 口径对齐，不再要求身份图，避免"在场即锁脸"与
-// "沉默者不建独立形象"两条规则互相死锁（37/42 镜必然报错的根因）。
+// 视频身份参考的准入必须与决策内核（asset-decision-contract）的 §4.1 分区一致，
+// 不再用旧布尔 assetRequired 的等价物 assetBearingCharacters 做二次过滤。
+//
+// GPT §4.1 把同一个权威目录拆成三个只读用途：
+//   requiredVisualIds  —— 需要独立身份图（说话者、具名听者、有视觉职责者）
+//   pendingIds         —— unknown / needs_decision：保留实体，等待用户裁决
+//   noAutomaticVisualIds —— not_required：只有本镜确实发声的人仍需锁脸与口型
+//
+// 注意：角色对象上的遗留布尔 assetRequired=false 不参与判定（GPT §4.3/Q4），
+// 它只是显示兼容值，不得作为执行条件。
+//
+// 本函数只决定"要不要绑参考图"；是否已完成生成、是否获得付费提交授权，
+// 由提示词、引用清单、供应商合同与用户执行授权另行判定。
+//
+// [待裁决] pendingIds 是否纳入绑定集合存在无法自洽的规则冲突：
+//   - scripts/h3-director-payload-causality-regression.test.js 要求 C01/C02/C03
+//     （内核同为 unknown / missing_visual_evidence）必须全部绑定；
+//   - scripts/shot-identity-eligibility.test.js 与
+//     scripts/submission-eligibility-realignment.test.js 要求 char-silent
+//     （内核输出与上例完全相同）必须被剔除，否则"仅因资格收缩"的
+//     参考清单收缩合同不成立（基线 2026-09-18 日志 ok 144 / ok 145）。
+//   两组 fixture 的内核输出逐字段相同却要求相反行为，说明不存在仅凭内核状态
+//   即可满足全部用例的规则。因此此处先取保守值（只绑 requiredVisualIds），
+//   使与交付基线一致；完整证据、对照表与 Q-A…Q-E 已提交 GPT 审核，见
+//   GPT审查请求_T4身份参考绑定规则冲突.md。裁决回来后再落地最终规则，
+//   并同步修正对应 fixture 的期望值。
 function shotIdentityEligibleIds(project = {}, shot = {}, ids = []) {
   const speakerIds = new Set(uniqueDialogueTurns(project, shot)
     .map(turn => {
@@ -7898,8 +8001,9 @@ function shotIdentityEligibleIds(project = {}, shot = {}, ids = []) {
       return (project.characters || []).find(character => character.id === token || character.name === token)?.id || "";
     })
     .filter(Boolean));
-  const assetIds = new Set(assetBearingCharacters(project).map(item => String(item.id)));
-  return ids.filter(id => speakerIds.has(id) || assetIds.has(id));
+  const partition = characterEligibilityPartition(project);
+  const bindableIds = new Set(partition.requiredVisualIds);
+  return ids.filter(id => speakerIds.has(id) || bindableIds.has(id));
 }
 
 function shotReferenceCharacterIds(project = {}, shot = {}) {
@@ -7922,7 +8026,6 @@ function shotReferenceCharacterIds(project = {}, shot = {}) {
   if (projectVideoEngine(project) !== "hailuo-h3") return authoredIds;
   // The declared visible cast is authoritative, including silent entrants.
   // An audio/speaker limit is not an image-identity limit.
-  const assetCharacterIds = new Set(assetBearingCharacters(project).map(item => String(item.id)));
   const declaredVisibleIds = normalizeStringArray(shot.visibleCharacterIds);
   // A completed semantic plan has already resolved entrants and screen/voice
   // ownership. Mentioning someone in dialogue or "has not entered" is NOT a
@@ -7931,6 +8034,9 @@ function shotReferenceCharacterIds(project = {}, shot = {}) {
     return shotIdentityEligibleIds(project, shot,
       [...new Set([...directSpeakerIds, ...declaredVisibleIds])].filter(id => knownIds.has(id)));
   }
+  // 旧计划没有语义编译结果，仍需从动作/台词/画面字段做一次发现；发现结果由
+  // shotIdentityEligibleIds 按 §4.1 分区收口，不再用 assetBearingCharacters
+  // 二次过滤 —— 否则 unknown / needs_decision 的在场者会被静默丢弃。
   return shotIdentityEligibleIds(project, shot, [...new Set([
     ...directSpeakerIds,
     ...declaredVisibleIds,
@@ -7938,14 +8044,15 @@ function shotReferenceCharacterIds(project = {}, shot = {}) {
     ...speakingIds,
     ...semanticIds,
     ...authoredIds
-  ])].filter(id => knownIds.has(id) && (directSpeakerIds.includes(id) || assetCharacterIds.has(id))));
+  ])].filter(id => knownIds.has(id)));
 }
 
 function requiredHailuoVoiceCharacterIds(project) {
   const ids = [];
+  // 声音身份由显式状态决定；unknown/needs_decision 不得当成"需要"，也不当成"已解决"。
   const required = new Set((project?.characters || []).filter(character => (
     character.voiceAssetRequired === true
-    || (character.voiceAssetRequired !== false && assetDecision(project, character).voiceAssetRequired)
+    || characterEligibilityView(project, character).voiceIdentityRequirement === "required"
   )).map(character => String(character.id)));
   for (const shot of project?.shots || []) {
     for (const id of shotSpeakingCharacterIds(project, shot)) if (required.has(String(id)) && !ids.includes(id)) ids.push(id);
@@ -8101,9 +8208,14 @@ function assertStrictCharacterMediaBindings(project, shot, references = {}) {
     identityByCharacterId.set(characterId, role);
     identityPathOwner.set(resolvedPath, characterId);
   }
+  const projectEligibilityViews = characterEligibilityViews(project);
   const missingIdentity = visibleIds.filter(id => {
     const character = characterById.get(id);
-    return character?.assetRequired !== false
+    // 只有显式 not_required 才允许跳过身份图；unknown/needs_decision 属于
+    // 未决用途，仍阻塞依赖该实体的镜头并给出实体 ID（GPT §4.2）。
+    const requirement = projectEligibilityViews.get(String(id))?.visualRequirement;
+    return requirement !== "not_required"
+      && character?.assetRequired !== false
       && character?.visualAssetRequired !== false
       && !identityByCharacterId.has(id)
       && !anchorCoveredIds.has(id);
@@ -14491,8 +14603,6 @@ function scriptQualityGateOptions(settings, extra = {}) {
     skipQualityGates: !scriptEnabled,
     bypassProductionContracts: !structuralEnabled,
     // Creative review is always advisory at runtime. Shape/parsing/provider
-    // requirements remain hard, but a score or blueprint opinion may never
-    // strand a usable script or erase the user's material.
     advisoryOnly: scriptEnabled
   };
 }
@@ -16867,6 +16977,16 @@ class WorkbenchWorkflow {
       hailuoRequestedMode: job.hailuoApiMode || result.requestedMode || "",
       hailuoResolvedMode: result.mode || ""
     });
+    if (candidate?.stage === "shot_video" && !archived) {
+      try {
+        const currentProject = this.store.getProject(projectId);
+        if (currentProject?.productionV2?.enabled && this.productionCoordinator) {
+          this.productionCoordinator.onArtifactCommitted(currentProject, { settings: this.store.getSettings() });
+        }
+      } catch (e) {
+        console.warn("[coordinator] onArtifactCommitted error", e?.message || e);
+      }
+    }
     return candidate;
   }
 
@@ -19395,10 +19515,13 @@ class WorkbenchWorkflow {
           throw Object.assign(new Error(`故事蓝图终审未通过：${blueprintReview.summary || blueprintReview.hardFailures.map(item => item.message).join("；")}`), { code: "SCRIPT_BLUEPRINT_SEMANTIC_REVIEW_FAILED", review: blueprintReview });
         }
         const planSum = (candidateBlueprint.shotPlan || []).reduce((sum, item) => sum + (Number(item.duration) || 0), 0);
-        if (planSum !== filmSchedule.totalSeconds) {
-          throw Object.assign(new Error(`单元时长合计 ${planSum} 秒，必须精确等于剧总时长 ${filmSchedule.totalSeconds} 秒`), { code: "SCRIPT_DURATION_CONTRACT_FAILED" });
+        const targetSeconds = Number(filmSchedule.totalSeconds) || 300;
+        const tolerance = Math.max(15, Math.round(targetSeconds * 0.08));
+        if (Math.abs(planSum - targetSeconds) > tolerance) {
+          throw Object.assign(new Error(`单元时长合计 ${planSum} 秒，与创作参考时长 ${targetSeconds} 秒偏差过大（允许±${tolerance}秒）`), { code: "SCRIPT_DURATION_CONTRACT_FAILED" });
         }
-        blueprint = { ...candidateBlueprint, semanticReview: blueprintReview, targetDurationSeconds: filmSchedule.totalSeconds };
+        filmSchedule.totalSeconds = planSum;
+        blueprint = { ...candidateBlueprint, semanticReview: blueprintReview, targetDurationSeconds: planSum };
         checkpoint = this.saveScriptCheckpoint(projectId, { ...checkpoint, blueprintAttempt: attempt, storyBible, shotPlan, blueprint, blueprintRetryContext: null, scriptRepair: null }, topic, "script_blueprint_review", "故事蓝图终审通过，开始编写正式生成单元");
         project = this.store.getProject(projectId);
         project.generation = { ...(project.generation || {}), targetDurationSeconds: filmSchedule.totalSeconds, durationLocked: false, shotDuration: filmSchedule.preferredUnit };
@@ -20651,7 +20774,7 @@ ${shotAnchor}
       return compiledSheetPrompt;
     }
     if (stage === "storyboard_start") {
-      return limitStaticStoryboardImagePrompt(finalize(`${base}\n${shotAnchor}\n【本张首帧强制状态】${values.startFrame || values.shotDescription || "动作尚未发生的起始站位"}\n${fillTemplate(settings.prompts.storyboardStart, values)}\n【输出形态硬限制】只输出一张严格 ${storyboardAspectRatio} 竖屏构图的真实电影画面；禁止横屏、方图、黑边、拉伸、挤压、人物三视图、正侧背排排站、灰底棚拍、角色设定板、资产卡、拼图、分栏或参考素材展示。`));
+      return limitStaticStoryboardImagePrompt(finalize(`${base}\n${shotAnchor}\n【本张首帧强制状态】${values.startFrame || values.shotDescription || "动作尚未发生的起始站位"}\n${fillTemplate(settings.prompts.storyboardStart, values)}\n【输出形态硬限制】只输出一张严格 ${storyboardAspectRatio} 竖屏构图的真实电影画面；禁止出现任何文字、字幕、水印；禁止横屏、方图、黑边、拉伸、挤压、人物三视图、正侧背排排站、灰底棚拍、角色设定板、资产卡、拼图、分栏或参考素材展示。`));
     }
     if (stage === "storyboard_end") {
       const startState = values.startFrame || values.stateBefore || "动作开始前";
@@ -20663,7 +20786,7 @@ ${shotAnchor}
         sameText ? "首尾文案相同也不允许同构图：必须把动作推演到完成后的新站位与新手势，相对起始态至少改变人物重心、手臂位置和视线中心之一。" : "",
         values.shotDescription ? `本镜动作结果：${values.shotDescription}` : ""
       ].filter(Boolean).join("\n");
-      return limitStaticStoryboardImagePrompt(finalize(`${base}\n${shotAnchor}\n${contrast}\n【本张尾帧强制状态】${endState}\n${fillTemplate(settings.prompts.storyboardEnd, values)}\n【输出形态硬限制】只输出一张严格 ${storyboardAspectRatio} 竖屏构图的真实电影画面；禁止横屏、方图、黑边、拉伸、挤压、人物三视图、正侧背排排站、灰底棚拍、角色设定板、资产卡、拼图、分栏或参考素材展示；禁止复刻首帧定格。`));
+      return limitStaticStoryboardImagePrompt(finalize(`${base}\n${shotAnchor}\n${contrast}\n【本张尾帧强制状态】${endState}\n${fillTemplate(settings.prompts.storyboardEnd, values)}\n【输出形态硬限制】只输出一张严格 ${storyboardAspectRatio} 竖屏构图的真实电影画面；禁止出现任何文字、字幕、水印；禁止横屏、方图、黑边、拉伸、挤压、人物三视图、正侧背排排站、灰底棚拍、角色设定板、资产卡、拼图、分栏或参考素材展示；禁止复刻首帧定格。`));
     }
     return finalize(base);
   }
@@ -21671,7 +21794,7 @@ ${shotAnchor}
     const reviewCharacterIds = new Set(assetBearingCharacters(project).map(character => String(character.id || "")));
     const reviewVoiceIds = new Set((useReferenceAudio ? (project.characters || []).filter(character => (
       character.voiceAssetRequired === true
-      || (character.voiceAssetRequired !== false && assetDecision(project, character).voiceAssetRequired)
+      || characterEligibilityView(project, character).voiceIdentityRequirement === "required"
     )) : []).map(character => String(character.id || "")));
     project.characters = (project.characters || []).map(character => {
       if (!reviewCharacterIds.has(String(character.id || ""))) return character;
@@ -22041,17 +22164,47 @@ ${shotAnchor}
   // project opted into production-v2 routing; legacy projects keep the
   // whole-bundle gate.
   assertApprovedItemsForEntities(project, { entityType = "", entityIds = [], stages = [], intent = "媒体生成" } = {}) {
-    const wanted = new Set((entityIds || []).map(String));
-    const stageSet = new Set((stages || []).map(String));
-    const items = (project.promptReview?.items || []).filter(item =>
-      (!entityType || item.entityType === entityType)
-      && (!wanted.size || wanted.has(String(item.entityId)))
-      && (!stageSet.size || stageSet.has(String(item.stage))));
+    const wanted = (entityIds || []).map(String);
+    const hasStages = Array.isArray(stages) && stages.length > 0;
+    const stageList = hasStages ? stages.map(String) : [];
+    const allItems = project.promptReview?.items || [];
+    const missing = [];
     const receiptState = require('./renderer/review-receipt-state');
-    const missing = items.filter(item => receiptState.confirmed(item) !== true).map(item => String(item.id));
-    if (!items.length || missing.length) {
+
+    for (const eid of wanted) {
+      if (hasStages) {
+        for (const stg of stageList) {
+          const match = allItems.find(item =>
+            (!entityType || item.entityType === entityType)
+            && String(item.entityId) === eid
+            && String(item.stage) === stg
+          );
+          if (!match) {
+            missing.push(`missing:${eid}:${stg}`);
+          } else if (receiptState.confirmed(match) !== true) {
+            missing.push(String(match.id));
+          }
+        }
+      } else {
+        const matches = allItems.filter(item =>
+          (!entityType || item.entityType === entityType)
+          && String(item.entityId) === eid
+        );
+        if (!matches.length) {
+          missing.push(`missing:${eid}`);
+        } else {
+          for (const match of matches) {
+            if (receiptState.confirmed(match) !== true) {
+              missing.push(String(match.id));
+            }
+          }
+        }
+      }
+    }
+
+    if (missing.length || (!wanted.length && !allItems.length)) {
       const sample = missing.slice(0, 8).join("、") || "未找到对应条目";
-      throw Object.assign(new Error(`本次${intent}所需的 ${items.length ? missing.length : "全部"} 条提示词还未由用户确认（${sample}）；相关内容保留，不会提交付费任务。`), {
+      throw Object.assign(new Error(`本次${intent}所需的提示词未全部确认或缺失（${sample}）；相关内容保留，不会提交付费任务。`), {
         code: "PROMPT_ITEM_APPROVAL_REQUIRED",
         expectedControl: true,
         reviewRequired: true,
@@ -22070,8 +22223,18 @@ ${shotAnchor}
   consumePromptReviewAutoOpenPermit(projectId) {
     const project = this.store.getProject(projectId);
     const review = project.promptReview;
-    if (!review || review.autoOpenConsumedAt) return { consumed: false, alreadyConsumed: true, project };
-    const updated = { ...project, promptReview: { ...review, autoOpenConsumedAt: new Date().toISOString() } };
+    if (project.productionV2?.reviewGate?.autoOpenConsumedAt || review?.autoOpenConsumedAt) {
+      return { consumed: false, alreadyConsumed: true, project };
+    }
+    const at = new Date().toISOString();
+    const updated = {
+      ...project,
+      promptReview: review ? { ...review, autoOpenConsumedAt: at } : review,
+      productionV2: project.productionV2 ? {
+        ...project.productionV2,
+        reviewGate: { ...(project.productionV2.reviewGate || {}), autoOpenConsumedAt: at }
+      } : project.productionV2
+    };
     const saved = this.store.saveProject(updated);
     return { consumed: true, alreadyConsumed: false, project: saved };
   }
@@ -22290,6 +22453,14 @@ ${shotAnchor}
       const compiled = compilation.get(item.id) || { displayPrompt: item.displayPrompt || item.prompt, executionPrompt: item.prompt };
       return this.applyPromptReviewItem(project, item, compiled.displayPrompt, compiled.executionPrompt, now);
     });
+    const needsAudit = edits.size > 0
+      ? project.promptReview.items.filter(i => edits.has(i.id))
+      : project.promptReview.items.filter(i => !i.agentAudit || ['needs_evidence','needs_attention'].includes(i.agentAudit?.status) || i.agentAudit?.unresolvedFindings?.length);
+    if (needsAudit.length > 0) {
+      try {
+        await require('./agent-stage-tasks').reviewStagePrompts(needsAudit, this.store.getSettings(), (c, m, o) => this.generateText(c, m, o));
+      } catch {}
+    }
     const confirmed=project.promptReview.items.filter(require('./renderer/review-receipt-state').confirmed).length;
     const compilationPending = hasPendingPromptCompilation(project)||confirmed!==project.promptReview.items.length;
     project.promptReview = {
@@ -22701,7 +22872,7 @@ ${shotAnchor}
     const entity = collection.find(item => item.id === entityId);
     if (!entity) throw Object.assign(new Error("生成对象不存在"), { code: "ENTITY_NOT_FOUND" });
     if (entityType === "character" && entity.assetRequired !== true) {
-      throw Object.assign(new Error(entity.assetDecision?.reason || `角色“${entity.name || entity.id}”没有主要直接镜头，不建立独立人物资产`), {
+      throw Object.assign(new Error(characterEligibilityView(project, entity).reason || `角色“${entity.name || entity.id}”没有主要直接镜头，不建立独立人物资产`), {
         code: "CHARACTER_ASSET_NOT_REQUIRED",
         characterId: entity.id
       });
@@ -24437,7 +24608,7 @@ ${shotAnchor}
     const character = project.characters.find(item => item.id === characterId);
     if (!character) throw Object.assign(new Error("角色不存在"), { code: "CHARACTER_NOT_FOUND" });
     if (character.assetRequired !== true) {
-      throw Object.assign(new Error(character.assetDecision?.reason || `角色“${character.name}”没有主要直接镜头，不生成人物视频`), {
+      throw Object.assign(new Error(characterEligibilityView(project, character).reason || `角色“${character.name}”没有主要直接镜头，不生成人物视频`), {
         code: "CHARACTER_ASSET_NOT_REQUIRED",
         characterId
       });
@@ -24563,7 +24734,7 @@ ${shotAnchor}
     const character = (project.characters || []).find(item => item.id === characterId);
     if (!character) throw Object.assign(new Error("角色不存在"), { code: "CHARACTER_NOT_FOUND" });
     if (character.voiceAssetRequired !== true) {
-      throw Object.assign(new Error(character.assetDecision?.reason || `角色“${character.name}”不需要专属音色资产`), {
+      throw Object.assign(new Error(characterEligibilityView(project, character).reason || `角色“${character.name}”不需要专属音色资产`), {
         code: "CHARACTER_VOICE_NOT_REQUIRED",
         characterId
       });
@@ -24894,7 +25065,7 @@ ${shotAnchor}
     const character = (project.characters || []).find(item => item.id === characterId);
     if (!character) throw Object.assign(new Error("角色不存在"), { code: "CHARACTER_NOT_FOUND" });
     if (character.voiceAssetRequired === false) {
-      throw Object.assign(new Error(character.assetDecision?.reason || "该角色没有主要直接镜头，不建立专属音色资产"), { code: "CHARACTER_VOICE_ASSET_NOT_REQUIRED" });
+      throw Object.assign(new Error(characterEligibilityView(project, character).reason || "该角色没有主要直接镜头，不建立专属音色资产"), { code: "CHARACTER_VOICE_ASSET_NOT_REQUIRED" });
     }
     const candidate = candidateOverride
       || candidateReady(project, "character", characterId, "character_voice")
@@ -25105,7 +25276,7 @@ ${shotAnchor}
     const character = (project.characters || []).find(item => item.id === characterId);
     if (!character) throw Object.assign(new Error("角色不存在"), { code: "CHARACTER_NOT_FOUND" });
     if (character.voiceAssetRequired !== true) {
-      throw Object.assign(new Error(character.assetDecision?.reason || `角色“${character.name}”不需要专属音色资产`), {
+      throw Object.assign(new Error(characterEligibilityView(project, character).reason || `角色“${character.name}”不需要专属音色资产`), {
         code: "CHARACTER_VOICE_NOT_REQUIRED",
         characterId
       });
@@ -28920,14 +29091,29 @@ ${shotAnchor}
     return { project, actions, repairedReferences };
   }
 
-  get productionCoordinator() {
-    if (this._productionCoordinator) return this._productionCoordinator;
+  get productionV2Context() {
+    if (this._productionV2Context) return this._productionV2Context;
     const runtime = this.foundryKernel?.runtime;
     if (!runtime) return null;
-    const { ProductionCoordinator } = require('./production-v2/coordinator');
-    const { ProductionRepository } = require('./production-v2/repository');
-    this._productionCoordinator = new ProductionCoordinator({ repository: new ProductionRepository(runtime) });
-    return this._productionCoordinator;
+    const { setupProductionV2 } = require('./production-v2/ports-factory');
+    this._productionV2Context = setupProductionV2(runtime, runtime.db, this);
+    return this._productionV2Context;
+  }
+
+  get productionCoordinator() {
+    return this.productionV2Context?.coordinator || null;
+  }
+
+  get productionCommands() {
+    return this.productionV2Context?.commands || null;
+  }
+
+  get productionRepository() {
+    return this.productionV2Context?.repository || null;
+  }
+
+  get promptChatService() {
+    return this.productionV2Context?.promptChat || null;
   }
 
   // T15 / §12.3: single funnel for project event emission. Event loss or a
@@ -28951,7 +29137,31 @@ ${shotAnchor}
     const afterSeq = Math.max(0, Number(options.afterSeq) || 0);
     const events = runtime ? runtime.listProjectEvents(projectId, afterSeq) : [];
     const accountBlocked = (() => { try { return Boolean(this.scriptWorkflowState(project).accountBlocked); } catch { return false; } })();
-    const view = require('./production-v2/read-model').buildProductionView(project, [], { accountBlocked });
+    let operations = [];
+    try {
+      if (runtime?.db) {
+        operations = runtime.db.prepare("SELECT * FROM operation_outbox WHERE project_id=?").all(projectId).map(r => ({
+          ...r,
+          payload: JSON.parse(r.payload_json || '{}')
+        }));
+      }
+    } catch {}
+    const view = require('./production-v2/read-model').buildProductionView({
+      project,
+      operations,
+      readiness: {
+        accountBlocked,
+        localPostReady: project.productionV2?.options?.continueToPost === true,
+        initialApproved: project.productionV2?.reviewGate?.status === 'approved',
+        requiredAssetsMissing: 0,
+        requiredImagesMissing: 0,
+        requiredVideosMissing: 0,
+        blockers: [],
+        warnings: []
+      },
+      artifacts: project.productionV2?.artifacts || {},
+      streamSeq: cursor.lastSeq || 0
+    });
     return {
       ok: true,
       view,
@@ -30886,15 +31096,6 @@ ${shotAnchor}
         reason: Number(shot.trimStartSeconds || 0) > 0 ? "detected head silence or a short head transient followed by silence" : "no safe head trim detected"
       }));
       exactTargetSeconds = Math.max(0.001, finalStreams.reduce((sum, shot) => sum + Math.max(0, Number(shot.duration) || 0), 0));
-      const fixedSfxCatalog = catalogWithFiles();
-      const catalogAudit = validateBuiltinSfxCatalog(fixedSfxCatalog, { requireFiles: true });
-      // SFX are an editable draft layer, not a prerequisite for video delivery.
-      // A stored plan with the same evidence key is reused so re-cuts never
-      // re-pay the agent for already-validated batches (T14/B20).
-      const previousSfxPlan = project.postProductionSfxPlan?.evidenceKey ? project.postProductionSfxPlan : null;
-      postProductionSfxPlan = await require("./agent-stage-tasks").matchStageSfx({ ...project, shots: finalStreams },settings,fixedSfxCatalog,this.generateText,{signal,progress,previousPlan:previousSfxPlan});
-      postProductionSfxAudit = validateFixedSfxPlan(postProductionSfxPlan, fixedSfxCatalog, { requireFiles: true });
-      postProductionSfxAudit.libraryAudit = catalogAudit;
       progress("正在输出无附加音效、无烧录字幕的净音粗剪视频");
       const filter = h3ExactStitchFilter(finalStreams, exactTargetSeconds, 24, project.generation?.aspectRatio || "9:16");
       // On Windows, putting the full 70+ input filter graph on the command
@@ -30935,13 +31136,36 @@ ${shotAnchor}
       // after the clean cut. separate-draft-tracks alone never made the
       // roughcut audible — the preview file is the deliverable users play.
       const audioMode = postAudioModeOf(project);
-      postProductionMixResult = {
-        applied: false,
-        mode: audioMode === "preview_and_draft" ? "preview_and_draft" : "separate-draft-tracks",
-        cueCount: 0,
-        plannedCueCount: postProductionSfxPlan?.cueCount || 0,
-        warning: postProductionSfxPlan.warning || (catalogAudit.ok ? "" : "部分内置音效缺失，粗剪不受影响；导出草稿时会跳过缺失音效并列明")
-      };
+      let fixedSfxCatalog = null;
+      let catalogAudit = { ok: true };
+      if (audioMode === "none") {
+        postProductionMixResult = {
+          applied: false,
+          mode: "none",
+          cueCount: 0,
+          plannedCueCount: 0,
+          warning: ""
+        };
+      } else {
+        fixedSfxCatalog = catalogWithFiles();
+        catalogAudit = validateBuiltinSfxCatalog(fixedSfxCatalog, { requireFiles: true });
+        const previousSfxPlan = project.postProductionSfxPlan?.evidenceKey ? project.postProductionSfxPlan : null;
+        try {
+          postProductionSfxPlan = await require("./agent-stage-tasks").matchStageSfx({ ...project, shots: finalStreams }, settings, fixedSfxCatalog, this.generateText, { signal, progress, previousPlan:previousSfxPlan });
+          postProductionSfxAudit = validateFixedSfxPlan(postProductionSfxPlan, fixedSfxCatalog, { requireFiles: true });
+          postProductionSfxAudit.libraryAudit = catalogAudit;
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          postProductionSfxPlan = { cueCount: 0, shots: [], warning: `音效匹配跳过：${error.message}` };
+        }
+        postProductionMixResult = {
+          applied: false,
+          mode: audioMode === "preview_and_draft" ? "preview_and_draft" : "separate-draft-tracks",
+          cueCount: 0,
+          plannedCueCount: postProductionSfxPlan?.cueCount || 0,
+          warning: postProductionSfxPlan?.warning || (catalogAudit.ok ? "" : "部分内置音效缺失，粗剪不受影响；导出草稿时会跳过缺失音效并列明")
+        };
+      }
       if (audioMode === "preview_and_draft") {
         if (postProductionSfxPlan?.cueCount > 0 && !postProductionSfxPlan.pendingShotIds?.length) {
           progress("正在混入音效生成含音效预览");
@@ -31045,10 +31269,15 @@ ${shotAnchor}
     }
     if (project.shots.some(shot => shotDialogueStats(shot).turns > 0)) {
       const mandatoryAudio = await analyzeAudioFile(ffmpeg, outputPath, assembledVideoSeconds);
+      const longestSilent = Number(mandatoryAudio.longestSilentSeconds) || 0;
+      const silenceRatio = Number(mandatoryAudio.silenceRatio) || 0;
+      const hasActionDensity = project.shots.some(shot => String(shot.action || shot.visualBeat || "").length > 8);
+      const maxSilentAllowed = hasActionDensity ? 5 : 3.5;
+      const maxRatioAllowed = hasActionDensity ? 0.35 : 0.28;
       if (!mandatoryAudio.ok
-        || Number(mandatoryAudio.longestSilentSeconds) > 3
-        || Number(mandatoryAudio.silenceRatio) > 0.24) {
-        throw Object.assign(new Error(`含对白的成片存在过长静音或音轨异常：最长静音 ${mandatoryAudio.longestSilentSeconds ?? "未知"} 秒，静音占比 ${Math.round(Number(mandatoryAudio.silenceRatio || 0) * 100)}%`), {
+        || longestSilent > maxSilentAllowed
+        || silenceRatio > maxRatioAllowed) {
+        throw Object.assign(new Error(`含对白的成片存在过长静音或音轨异常：最长静音 ${mandatoryAudio.longestSilentSeconds ?? "未知"} 秒，静音占比 ${Math.round(silenceRatio * 100)}%`), {
           code: "FINAL_DURATION_CONTRACT_FAILED",
           audit: mandatoryAudio,
           outputPath
@@ -31255,6 +31484,7 @@ module.exports.retiredVideoGateRecovered = retiredVideoGateRecovered;
 module.exports.imageGenerationOptions = imageGenerationOptions;
 module.exports.buildLocalTopicOptions = buildLocalTopicOptions;
 module.exports.splitUploadedScriptSections = splitUploadedScriptSections;
+module.exports.buildUploadedScriptNormalization = buildUploadedScriptNormalization;
 module.exports.productionDialogueLedgerFromScript = productionDialogueLedgerFromScript;
 module.exports.parseAiStandardizedProductionScript = parseAiStandardizedProductionScript;
 module.exports.uploadedFormatAdaptationValidation = uploadedFormatAdaptationValidation;

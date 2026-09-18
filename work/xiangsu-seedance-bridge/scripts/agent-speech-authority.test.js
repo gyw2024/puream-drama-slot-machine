@@ -19,7 +19,7 @@ test('both timing classes are unselected arithmetic, and input without canonical
  assert.ok(require('../app/prompt-review-evidence').INSTRUCTION.includes(authority.INSTRUCTION));
 });
 test('real parallel director path supplies at most five canonical shots without old classified clocks',async()=>{
- const {fixture,decision}=require('./compact-screenplay.test'),writer=require('../app/shot-screenplay'),director=require('../app/agent-production-decisions');
+ const {fixture,decision}=require('./compact-screenplay-fixtures'),writer=require('../app/shot-screenplay'),director=require('../app/agent-production-decisions');
  const doc=fixture(),one=structuredClone(doc.shots[0]);doc.shots=Array.from({length:6},(_,i)=>({...structuredClone(one),id:'S'+i,dialogue:one.dialogue.map(d=>({...d,id:'D'+i}))}));
  const raw=writer.render(doc),record=writer.makeRecord(doc,raw,{}),data=writer.projectData(record);
  let p={...data,id:'parallel-speech-authority',script:{raw,shotScreenplay:record},generation:{engine:'hailuo-h3',mode:'asset_direct'},product:{},assetLibraries:{props:[],wardrobes:[]}};const sizes=[];

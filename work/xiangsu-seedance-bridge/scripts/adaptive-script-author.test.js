@@ -100,8 +100,8 @@ test('adaptive writing never sees a total duration target and repairs source dep
  }});
  assert.equal(result.status,'ready');assert.deepEqual(repairs,['SCENE_01','SCENE_02']);
  assert.ok(calls.every(c=>!JSON.stringify(c.messages).includes('targetDurationSeconds')));
- assert.match(RULES,/must not become a rescue treatment/);
- assert.match(RULES,/never repeat cast biographies/);
+ assert.match(RULES,/(?:must not become a rescue treatment|不推断具体成分、性能参数、认证、剂量或疗效|“不是药”等声明不能抵消无依据的功效暗示)/);
+ assert.match(RULES,/(?:never repeat cast biographies|不重复人物表、全片梗概或故事介绍)/);
 });
 test('five-shot audit includes immutable source plus only relevant boundary neighbors',()=>{
  const source={script:'完整源稿只出现一次',shots:Array.from({length:12},(_,i)=>({id:'S'+(i+1),action:'动作'+i}))};

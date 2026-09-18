@@ -190,7 +190,39 @@ test("the local uploaded-script workflow reaches assets with one persisted adapt
           noInventedDialogue: true
         }
       };
-      return { ...importedAnalysis(3), props: [] };
+      return {
+        format: "compact-screenplay-v2",
+        story: { title: "本地上传剧本", synopsis: "母亲把事实讲清，女儿理解。", ending: "两人化解误会。" },
+        characters: [
+          { id: "C01", name: "母亲", description: "五十岁母亲", role: "母亲", voiceDescription: "温和女中音", assetRequired: false },
+          { id: "C02", name: "女儿", description: "二十八岁女儿", role: "女儿", voiceDescription: "清亮女声", assetRequired: false }
+        ],
+        scenes: [{ id: "SC01", name: "客厅", description: "固定沙发和窗户", assetRequired: false }],
+        props: [],
+        shots: Array.from({ length: 3 }, (_, i) => ({
+          id: `S${String(i + 1).padStart(2, "0")}`,
+          sceneId: "SC01",
+          duration: 10,
+          characterIds: ["C01", "C02"],
+          visibleCharacterIds: ["C01", "C02"],
+          propIds: [],
+          productVisible: false,
+          productAction: "",
+          opening: "母亲挡在女儿面前，女儿停步并抬眼。",
+          action: i === 2 ? "女儿理解母亲并拥抱她，原稿结尾完整落地" : `推进原稿冲突${i + 1}`,
+          dialogue: [{
+            id: `D${i}`,
+            speakerId: "C01",
+            listenerIds: ["C02"],
+            addressMode: "person",
+            onScreen: true,
+            text: "你先听我把今天发生的事情讲清楚，这些原始收据我一直完整地留着，等你看过日期再做决定。",
+            delivery: "克制而坚定",
+            action: "拿出收据"
+          }],
+          ending: "冲突继续"
+        }))
+      };
     }
     });
     const analyzed = await workflow.analyzeScript(created.id);

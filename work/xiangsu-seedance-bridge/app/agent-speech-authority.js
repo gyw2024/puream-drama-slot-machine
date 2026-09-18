@@ -7,9 +7,19 @@ Before submission, compare each exact line with its actual end-start: ordinary s
 const DELIVERY_INSTRUCTION=`The canonical words appear in shotExecution.dialogue once. deliveryEn/Zh describes voice identity, emotion and vocal performance only; physical gestures belong in events exactly once. Each output dialogue row references one corresponding ID exactly once in source order. Copy source-fixed identities from shotExecution, including visibleCharacterIds and propIds as visiblePropIds. Follow the declared field names: bilingual fields exist where the schema declares En/Zh pairs; summaryEn and soundscapeEn are the declared summary/audio fields, not an invitation to add summaryZh or soundscapeZh. Keep vocal descriptions free of (S1)/(S2), Subject/Picture tokens or guessed reference numbers: the binding adapter assigns them for this clip. Use canonical character identities for people; never copy a neighboring clip voice number. listenerIds identifies the intended recipients, not the set of audible witnesses; preserve true group address and an explicitly offscreen recipient without staging that recipient in frame.`;
 function measurements(lines) {
  const count=require('./drama-timing').effectiveChineseCharacters;
- return lines.map(line=>{
-  const characters=count(line.text),round=n=>Math.round(n*1000)/1000;
-  return {dialogueId:line.id,effectiveCharacters:characters,
+ let arr = [];
+ if (Array.isArray(lines)) {
+  arr = lines;
+ } else if (typeof lines === 'string' && lines.trim()) {
+  arr = [{ id: 'd1', text: lines.trim() }];
+ } else if (lines && typeof lines === 'object' && lines.text) {
+  arr = [lines];
+ }
+ return arr.map(line=>{
+  const text=typeof line==='string'?line:(line?.text||'');
+  const dialogueId=(typeof line==='object'&&line?.id)?line.id:'d1';
+  const characters=count(text),round=n=>Math.round(n*1000)/1000;
+  return {dialogueId,effectiveCharacters:characters,
    ordinarySeconds:{minimum:round(characters/6),maximum:round(characters/5)},
    highEmotionMaximumSeconds:round(characters/8)};
  });

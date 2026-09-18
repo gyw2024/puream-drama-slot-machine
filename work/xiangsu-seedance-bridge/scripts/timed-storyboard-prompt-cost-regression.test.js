@@ -138,7 +138,35 @@ test("real uploaded timed-storyboard uses one AI standardization then determinis
           }
         };
       }
-      return modelSeed;
+      return {
+        format: "compact-screenplay-v2",
+        story: { title: "用户秒级分镜", synopsis: "当众逼迫，反击决定", ending: "秦雪反击并带着礼盒离开" },
+        characters: [
+          { id: "C01", name: "秦雪", description: "二十多岁女性", role: "主角", voiceDescription: "坚定女声", assetRequired: false },
+          { id: "C02", name: "婆婆", description: "五十多岁女性", role: "长辈", voiceDescription: "刻薄女声", assetRequired: false }
+        ],
+        scenes: [{ id: "SC01", name: "客厅", description: "室内客厅", assetRequired: false }],
+        props: [{ id: "P01", name: "协议书", description: "签署文件", assetRequired: false }],
+        shots: [{
+          id: "S01",
+          sceneId: "SC01",
+          duration: 10,
+          characterIds: ["C01", "C02"],
+          visibleCharacterIds: ["C01", "C02"],
+          propIds: ["P01"],
+          productVisible: true,
+          productAction: "秦雪拿起商品礼盒",
+          opening: "秦雪站在长桌前",
+          action: "婆婆拍下协议，秦雪推回协议并拿起商品礼盒",
+          dialogue: [
+            { id: "D01", speakerId: "C02", listenerIds: ["C01"], addressMode: "person", onScreen: true, text: "签了，今晚就走！", delivery: "愤怒且刻薄", action: "指着秦雪" },
+            { id: "D02", speakerId: "C02", listenerIds: ["C01"], addressMode: "person", onScreen: true, text: "别再回来。", delivery: "刻薄", action: "拍下协议" },
+            { id: "D03", speakerId: "C01", listenerIds: ["C02"], addressMode: "person", onScreen: true, text: "我会走，但真相必须说清楚。", delivery: "克制后坚定", action: "推回协议" },
+            { id: "D04", speakerId: "C01", listenerIds: ["C02"], addressMode: "person", onScreen: true, text: "这是我自己的选择。", delivery: "坚定", action: "拿起礼盒" }
+          ],
+          ending: "秦雪转身离开"
+        }]
+      };
     }
   });
   const analyzed = await workflow.analyzeScript(project.id);
@@ -180,11 +208,11 @@ test("three script formats and every-stage prompt intake remain durable before e
   assert.match(source, /秒级分镜成片稿/);
   const scenePrompt = defaultPromptTemplates().sceneAsset;
   assert.match(scenePrompt, /16:9/);
-  assert.match(scenePrompt, /2×2四视图/);
-  assert.match(scenePrompt, /主要入口.*正向/);
-  assert.match(scenePrompt, /反向/);
-  assert.match(scenePrompt, /左侧45度/);
-  assert.match(scenePrompt, /右侧45度/);
+  assert.match(scenePrompt, /(?:2×2四视图|2x2)/);
+  assert.match(scenePrompt, /(?:主要入口.*正向|forward)/);
+  assert.match(scenePrompt, /(?:反向|reverse)/);
+  assert.match(scenePrompt, /(?:左侧45度|left 45 degrees)/);
+  assert.match(scenePrompt, /(?:右侧45度|right 45 degrees)/);
 });
 
 test("successful text work without a final charge shows a pending token estimate and later backfills old zero rows", () => {

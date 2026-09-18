@@ -23,7 +23,7 @@ test('automatic repair does not repeat unchanged content merely because the roun
 });
 test('frontend and backend use the same evidence state and cannot label missing evidence approved',()=>{
  const ui=require('../app/renderer/review-receipt-state'),p=require('../app/unified-audit-policy');assert.equal(ui.state,p.receiptState);
- const item={status:'confirmed',agentAudit:{issues:[],status:'needs_evidence',unresolvedFindings:[{reason:'缺少原始商品图'}]}};
+ const item={status:'confirmed',userConfirmed:true,agentAudit:{issues:[],status:'needs_evidence',unresolvedFindings:[{reason:'缺少原始商品图'}]}};
  assert.equal(ui.approved({status:'approved',items:[item]}),false);assert.match(ui.label(item.agentAudit),/待补齐.*商品图/);assert.doesNotMatch(ui.label(item.agentAudit),/通过|未发现/);
  item.agentAudit={issues:[]};assert.equal(ui.approved({status:'approved',items:[item]}),true);
 });
@@ -71,7 +71,7 @@ test('confirm all independently reviews edits and cannot advance an unresolved i
  const tasks=require('../app/agent-stage-tasks'),old=tasks.reviewStagePrompts;let calls=0,passed=false;
  tasks.reviewStagePrompts=async items=>{calls++;for(const i of items)i.agentAudit={issues:[],status:passed?'reviewed':'needs_evidence'};};t.after(()=>{tasks.reviewStagePrompts=old;});
  const W=require('../app/workbench-workflow').WorkbenchWorkflow,w=Object.create(W.prototype);let p={id:'P',script:{raw:''},characters:[],scenes:[],shots:[],product:{},promptReview:{status:'ready',items:[{id:'a',prompt:'words',displayPrompt:'原文',agentAudit:{issues:[],status:'needs_evidence'}}]}};
- w.store={getProject:()=>p,saveProject:x=>(p=x),getSettings:()=>({})};w.operationControls=new Map();w.promptReviewIsCurrent=()=>true;w.compilePromptReviewEdit=async()=> 'edited';w.applyPromptReviewItem=(p,i,display,prompt)=>({...i,prompt,displayPrompt:display,status:'confirmed',agentAudit:null});
+ w.store={getProject:()=>p,saveProject:x=>(p=x),getSettings:()=>({})};w.operationControls=new Map();w.promptReviewIsCurrent=()=>true;w.compilePromptReviewEdit=async()=> 'edited';w.applyPromptReviewItem=(p,i,display,prompt)=>({...i,prompt,displayPrompt:display,status:'confirmed',userConfirmed:true,agentAudit:null});
  await w.confirmAllPromptReview('P',[{id:'a',prompt:'修改稿'}]);assert.equal(calls,1);assert.equal(p.promptReview.status,'ready');assert.equal(p.promptReview.counts.confirmed,0);assert.equal(p.automation.status,'awaiting_prompt_review');
  passed=true;await w.confirmAllPromptReview('P');assert.equal(calls,2);assert.equal(p.promptReview.status,'approved');assert.equal(p.promptReview.counts.confirmed,1);
 });

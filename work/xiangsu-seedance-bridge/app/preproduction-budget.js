@@ -20,7 +20,7 @@ function unionMs(intervals){
   return total;
 }
 class Budget {
- constructor(store,{now=Date.now,targetMs=TARGET_MS}={}){this.store=store;this.now=now;this.limitMs=0;this.targetMs=Math.max(1,Number(targetMs)||TARGET_MS);this.active=new Map();}
+ constructor(store,{now=Date.now,targetMs}={}){this.store=store;this.now=now;this.limitMs=0;this.hasTarget=targetMs!==undefined;this.targetMs=Math.max(1,Number(targetMs)||TARGET_MS);this.active=new Map();}
  reset(projectId,reason){if(this.active.has(projectId))return;const p=this.store.getProject(projectId);if(!p)return;const prior=p.preproductionTiming;p.preproductionTiming={version:VERSION,elapsedMs:0,limitMs:0,exceeded:false,reason,startedAt:new Date(this.now()).toISOString(),history:prior?[...(prior.history||[]),{elapsedMs:prior.elapsedMs,exceeded:prior.exceeded,startedAt:prior.startedAt}].slice(-8):[]};this.store.saveProject(p);}
  targetMsFor(){return this.targetMs;}
  // Persisted view: true once the active-time union passed the soft target.
@@ -28,7 +28,7 @@ class Budget {
  isTargetExceeded(projectId){
   const p=this.store.getProject(projectId);if(!p)return false;
   const timing=p.preproductionTiming;if(!timing)return false;
-  return timing.exceeded===true||Number(timing.elapsedMs||0)>this.targetMs;
+  return Boolean(this.hasTarget&&(timing.exceeded===true||Number(timing.elapsedMs||0)>this.targetMs));
  }
  // A NEW whole-script repair round may not start automatically after the soft
  // target. Explicit user continue (reset with 'manual_continue_after_limit')
@@ -53,7 +53,7 @@ class Budget {
     const p=this.store.getProject(id);
     if(p){
      const elapsedMs=entry.spent+unionMs(entry.intervals);
-     p.preproductionTiming={...p.preproductionTiming,version:VERSION,startedAt:entry.startedAt,elapsedMs,targetMs:this.targetMs,lastStage:entry.stage,exceeded:elapsedMs>this.targetMs,updatedAt:new Date(this.now()).toISOString()};
+     p.preproductionTiming={...p.preproductionTiming,version:VERSION,startedAt:entry.startedAt,elapsedMs,targetMs:this.targetMs,limitMs:0,lastStage:entry.stage,exceeded:Boolean(this.hasTarget&&elapsedMs>this.targetMs),updatedAt:new Date(this.now()).toISOString()};
      this.store.saveProject(p);
     }
    }

@@ -3,6 +3,12 @@
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const api = window.dramaSlot;
+
+// 六个用户模型选择控件的严格读取（GPT §9.1/§9.2）。
+// 唯一实现来自 intent-controls.js，与 app/asset-decision-contract.js 同一枚举合同：
+// 提交时不得用 ?.value || 默认值 静默回退；非法值或缺失控件必须报错。
+// 默认值只允许出现在初始化与旧项目迁移里（见 openNewProjectDialog / 项目设置对话框）。
+const readIntentControlsFromDialog = window.DramaSlotIntentControls.readIntentControls;
 const videoStatusApi = window.DramaSlotStatus;
 const LIBRARY_RENDER_BATCH = 48;
 function configuredImageSourceName(settings = state.settings) {
@@ -514,7 +520,7 @@ function moveLibraryNodesToSidebar() {
 function renderVoiceBindingGrid() {
   const grid = $("#voiceBindingGrid");
   if (!grid) return;
-  const characters = (state.project?.characters || []).filter(character => character.voiceAssetRequired === true && character.assetRequired === true);
+  const characters = (state.project?.characters || []).filter(character => character.voiceAssetRequired === true && character.assetRequired === true && (character.visualRequirement || "required") === "required");
   grid.innerHTML = characters.length ? characters.map(character => `
     <div class="voice-bind-row" data-id="${escapeHtml(character.id)}">
       <div><b>${escapeHtml(character.name || character.id)}</b><small>${character.voiceLibraryId ? "已绑定库音色" : "尚未绑定音色"}</small></div>
@@ -2220,7 +2226,7 @@ function renderVoiceLibraryGrid() {
   const count = $("#voiceLibraryCount");
   if (!grid || !count) return;
   const voices = state.voiceLibrary || [];
-  const characters = (state.project?.characters || []).filter(character => character.voiceAssetRequired === true && character.assetRequired === true);
+  const characters = (state.project?.characters || []).filter(character => character.voiceAssetRequired === true && character.assetRequired === true && (character.visualRequirement || "required") === "required");
   const characterOptions = characters.map(character => `<option value="${escapeHtml(character.id)}">${escapeHtml(character.name || character.id)}</option>`).join("");
   const builtInCount = voices.filter(item => item.builtIn === true).length;
   count.textContent = builtInCount ? `${voices.length}（内置${builtInCount}）` : String(voices.length);
@@ -2311,11 +2317,32 @@ function renderAssets(force = false) {
   const assetDirectMode = project.generation?.mode === "asset_direct";
   const assetScenes = (project.scenes || []).filter(scene => scene.assetRequired !== false);
   const skippedScenes = (project.scenes || []).filter(scene => scene.assetRequired === false);
-  const assetCharacters = (project.characters || []).filter(character => character.assetRequired === true);
-  const skippedCharacters = (project.characters || []).filter(character => character.assetRequired !== true);
+  // 三路拆分，而不是"需要 / 不需要"两路：
+  //   需要生成 → visualRequirement === required
+  //   待核实   → unknown / needs_decision（显示原实体与原因，不隐藏）
+  //   本轮非必需 → not_required（保留人工入口）
+  const eligibilityById = new Map((project.characterEligibility || [])
+    .map(view => [String(view.characterId || ""), view]));
+  const requirementOf = character => eligibilityById.get(String(character.id || ""))?.visualRequirement
+    || (character.assetRequired === true ? "required"
+      : character.assetRequired === false ? "not_required" : "unknown");
+  const assetCharacters = (project.characters || []).filter(character => requirementOf(character) === "required");
+  const pendingCharacters = (project.characters || []).filter(character => {
+    const requirement = requirementOf(character);
+    return requirement === "unknown" || requirement === "needs_decision";
+  });
+  const skippedCharacters = (project.characters || []).filter(character => requirementOf(character) === "not_required");
   const allProps = project.assetLibraries?.props || [];
-  const props = allProps.filter(item => item.assetRequired === true);
-  const skippedProps = allProps.filter(item => item.assetRequired !== true);
+  const propRouteById = new Map((project.propResourceDecisions || [])
+    .map(item => [String(item.propId || ""), item.resourceRoute]));
+  const routeOf = prop => propRouteById.get(String(prop.id || ""))
+    || (prop.assetRequired === true ? "prop" : prop.assetRequired === null ? "needs_evidence" : "inline");
+  const props = allProps.filter(item => routeOf(item) === "prop");
+  const pendingProps = allProps.filter(item => {
+    const route = routeOf(item);
+    return route === "needs_evidence" || route === "needs_decision";
+  });
+  const skippedProps = allProps.filter(item => !["prop", "needs_evidence", "needs_decision"].includes(routeOf(item)));
   moveLibraryNodesToSidebar();
   renderVoiceLibraryGrid();
   renderVoiceBindingGrid();
@@ -2325,7 +2352,12 @@ function renderAssets(force = false) {
       id: character.id,
       name: character.name,
       description: character.appearanceDescription || character.description,
-      assetRequired: character.assetRequired === true,
+      assetRequired: character.assetRequired === undefined ? null : character.assetRequired,
+      // 显式状态：UI 角色目录必须据此区分"已确定需要 / 已确定不需要 / 待核实"，
+      // 不能靠布尔兼容值把 unknown 从界面上抹掉。
+      visualRequirement: character.eligibilityRequirement || "",
+      eligibilityReason: character.eligibilityReason || character.assetDecision?.reason || "",
+      assetDecisionReason: character.assetDecisionReason || "",
       voiceAssetRequired: character.voiceAssetRequired === true,
       gender: character.gender || "",
       ageBand: character.ageBand || "",
@@ -2493,8 +2525,12 @@ function renderAssets(force = false) {
       </details>`}
     </article>`;
   }).join("") : `<div class="empty-hint">当前没有需要独立定妆的人物。只有明确出镜并承担主镜头的人物才会建立资产。</div>`;
-  const skippedCharacterSummary = skippedCharacters.length ? `<details class="asset-skip-summary"><summary>未建立独立资产 ${skippedCharacters.length} 人（画外 / 背景 / 临时龙套）</summary><div class="asset-skip-list">${skippedCharacters.map(character => `<span><b>${escapeHtml(character.name || character.id)}</b> · ${escapeHtml(castingTierLabels[character.castingTier] || "背景")} · ${escapeHtml(character.assetDecision?.reason || "没有主要直接镜头")}</span>`).join("")}</div></details>` : "";
-  $("#characterGrid").innerHTML = `${characterCards}${skippedCharacterSummary}`;
+  const skippedCharacterSummary = skippedCharacters.length ? `<details class="asset-skip-summary"><summary>未建立独立资产 ${skippedCharacters.length} 人（画外 / 背景 / 临时龙套）</summary><div class="asset-skip-list">${skippedCharacters.map(character => `<span><b>${escapeHtml(character.name || character.id)}</b> · ${escapeHtml(castingTierLabels[character.castingTier] || "背景")} · ${escapeHtml(eligibilityById.get(String(character.id || ""))?.reason || character.assetDecision?.reason || "没有主要直接镜头")}</span>`).join("")}</div></details>` : "";
+  const pendingCharacterSummary = pendingCharacters.length ? `<details class="asset-pending-summary" open><summary>待核实用途 ${pendingCharacters.length} 人（未确定是否需要形象资产，不会自动生图）</summary><div class="asset-skip-list">${pendingCharacters.map(character => {
+    const view = eligibilityById.get(String(character.id || ""));
+    return `<span><b>${escapeHtml(character.name || character.id)}</b> · ${escapeHtml(view?.visualRequirement || "unknown")} · ${escapeHtml(view?.reason || "证据不足")}</span>`;
+  }).join("")}</div></details>` : "";
+  $("#characterGrid").innerHTML = `${pendingCharacterSummary}${characterCards}${skippedCharacterSummary}`;
   const wardrobes = project.assetLibraries?.wardrobes || [];
   if ($("#propCount")) $("#propCount").textContent = `${props.length} / ${allProps.length}`;
   if ($("#wardrobeGrid")) {
@@ -2536,7 +2572,8 @@ function renderAssets(force = false) {
       return `<article class="asset-card${work?.active ? " is-drawing" : ""}${work?.status === "failed" ? " has-work-failure" : ""}"><div class="drawing-banner" role="status" aria-live="polite"><i aria-hidden="true"></i><span>${escapeHtml(work?.label || "正在抽卡")}</span></div><div class="asset-card-head">${assetPreview(candidate, "image", work)}<div><h4>${escapeHtml(item.name)}</h4><p>${escapeHtml(item.description || "核心剧情道具")}</p></div></div><div class="asset-tags"><span>核心物品</span><span>${escapeHtml(item.holder || "持有人未定")}</span><span>${(item.units || []).length ? `出现 ${(item.units || []).join("、")}` : "全剧道具"}</span><span>候选 ${candidates("library", item.id, "prop_asset").length}</span><span>确认后自动入库</span></div><p class="asset-decision-note">${escapeHtml(item.assetDecisionReason || "跨镜复现，需要固定视觉身份")}</p><div class="asset-stage-grid single">${assetStageTile(candidate, `${item.name} · 道具图`, "image", "", work)}</div><div class="card-actions"><button class="mini-button draw-button${work?.active ? " is-loading" : ""}" data-long-action data-action="generate-library" data-library-type="props" data-id="${item.id}" ${work?.active ? "disabled" : ""}>${work?.active ? "生成中…" : "抽卡：道具图"}</button><button class="mini-button" data-action="import-candidate" data-entity-type="library" data-stage="prop_asset" data-id="${item.id}">上传道具图</button><button class="mini-button" data-action="select-independent-asset" data-entity-type="library" data-stage="prop_asset" data-id="${item.id}">从独立库选择</button><button class="mini-button asset-library-button" data-action="focus-candidates" data-entity-type="library" data-id="${item.id}">打开道具库</button></div></article>`;
     }).join("") : `<div class="empty-hint">当前没有需要固定视觉身份的核心道具。商品、杯子、包装组件和一次性普通文件不会重复建资产。</div>`;
     const skippedPropSummary = skippedProps.length ? `<details class="asset-skip-summary"><summary>已跳过 ${skippedProps.length} 个非核心物品</summary><div class="asset-skip-list">${skippedProps.map(item => `<span><b>${escapeHtml(item.name || item.id)}</b> · ${escapeHtml(item.assetDecisionReason || "不需要独立抽卡")}</span>`).join("")}</div></details>` : "";
-    $("#propGrid").innerHTML = `${propCards}${skippedPropSummary}`;
+    const pendingPropSummary = pendingProps.length ? `<details class="asset-pending-summary" open><summary>待核实资源路线 ${pendingProps.length} 个道具（不会自动生图，也不算已解决）</summary><div class="asset-skip-list">${pendingProps.map(item => `<span><b>${escapeHtml(item.name || item.id)}</b> · ${escapeHtml(item.assetDecisionReason || "needs_evidence")}</span>`).join("")}</div></details>` : "";
+    $("#propGrid").innerHTML = `${pendingPropSummary}${propCards}${skippedPropSummary}`;
   }
   $("#sceneGrid").innerHTML = assetScenes.length ? assetScenes.map(scene => {
     const candidate = chosenCandidate("scene", scene.id, "scene_asset");
@@ -3679,7 +3716,7 @@ function renderProjectStrategy() {
   const project = state.project;
   if (!project) return;
   const plan = project.productionPlan || {};
-  const scriptFormatReady = true;
+  const scriptFormatReady = plan.inputMode === "manual" || plan.scriptFormatConfirmed === true;
   const confirmed = project.generation?.modeConfirmed === true && scriptFormatReady;
   const mode = projectModeLabel(project.generation?.mode || "continuation");
   const engine = currentVideoEngineName(project);
@@ -3828,7 +3865,7 @@ function syncDurationModeControls(scope) {
 function promptForProjectStrategyIfRequired() {
   if (!state.project || state.strategyPromptedProjectId === state.project.id) return;
   const plan = state.project.productionPlan || {};
-  const ready = state.project.generation?.modeConfirmed === true;
+  const ready = state.project.generation?.modeConfirmed === true && (plan.inputMode === "manual" || plan.scriptFormatConfirmed === true);
   if (ready) return;
   state.strategyPromptedProjectId = state.project.id;
   setTimeout(() => openProjectStrategyDialog(true), 0);
@@ -4647,13 +4684,16 @@ function automationIsActive(project = state.project) {
     && state.frontendPipeline.projectId === project?.id;
   if (frontendActive) return true;
   const runtime = project?.runtime;
+  const activeAgentJobs = Array.isArray(window.agentActivityJobs)
+    ? (window.AgentActivityView?.select?.(window.agentActivityJobs, project?.id)?.filter(j => !["completed", "failed", "cancelled"].includes(j?.status))?.length || 0)
+    : 0;
   if (runtime && typeof runtime.active === "boolean") {
     const liveOperation = runtime.activeOperation === true;
     const liveJobs = Number(runtime.activeVideoJobCount) > 0;
-    const live = liveOperation || liveJobs;
+    const live = liveOperation || liveJobs || activeAgentJobs > 0;
     return live || (project === state.project && state.busy && statusClaimsActive);
   }
-  return statusClaimsActive;
+  return statusClaimsActive || activeAgentJobs > 0;
 }
 
 function resumeStageForAutomation(project = state.project) {
@@ -7385,6 +7425,10 @@ $("#newProjectForm").addEventListener("submit", async event => {
   confirmButton.disabled = true;
   confirmButton.textContent = "正在创建…";
   try {
+    // GPT §9.1/Q4：提交时严格读取六个 select，不得用 ?.value || 默认值回退。
+    // 默认值只用于初始化与旧项目迁移（见 openNewProjectDialog），
+    // 提交时空串/缺失控件必须报错，不能静默替换成 natural/optimize/balanced。
+    const intentControls = readIntentControlsFromDialog($("#newProjectDialog"), "new");
     const result = await api.workbench.createProject(title, {
       engine,
       videoProviderKind: providerKind,
@@ -7394,9 +7438,9 @@ $("#newProjectForm").addEventListener("submit", async event => {
       inputMode,
       scriptFormat: scriptFormat || "production",
       scriptFormatConfirmed: inputMode === "ai",
-      scriptHandling: $("#newScriptHandling")?.value || (inputMode === "manual" ? "respect" : "optimize"),
-      commerceMode: $("#newCommerceMode")?.value || "natural",
-      priorityProfile: $("#newPriorityProfile")?.value || "balanced",
+      scriptHandling: intentControls.scriptHandling,
+      commerceMode: intentControls.commerceMode,
+      priorityProfile: intentControls.priorityProfile,
       durationLocked: false,
       durationSource: "story-adaptive"
     });

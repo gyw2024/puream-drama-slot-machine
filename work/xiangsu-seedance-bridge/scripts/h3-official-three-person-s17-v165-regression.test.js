@@ -22,16 +22,29 @@ function occurrences(source, token) {
 }
 
 test("H3 compiler contract allows an authored silent third character and follows official Ref2VA grammar", () => {
+  // 编译器模板已从英文六段式换代为中文合同 generation-methods-20260915-v1。
+  // 断言按"语义等价"迁移，不再匹配已退役的英文字面串；每一项都必须能在
+  // 当前模板里找到对应条款，否则就是真实回归。
   const compiler = defaultPromptTemplates().hailuoPromptCompiler;
-  assert.match(compiler, /official six-section order/i);
-  assert.match(compiler, /A three-person scene is valid/i);
-  assert.match(compiler, /actual vocal events/i);
-  assert.match(compiler, /entrance beat/i);
-  assert.doesNotMatch(compiler, /max two visible faces/i);
+  assert.match(compiler, /GENERATION METHOD generation-methods-20260915-v1/,
+    "编译器必须显式带当前版本标记，避免旧缓存被当成新合同继续付款");
+  assert.match(compiler, /按真实供应商、实际图片\/音频\/视频参考输入选择官方提示词协议；不要只凭软件模式名称猜协议/,
+    "official six-section order：按真实供应商/协议渲染，不凭软件模式名猜");
+  assert.match(compiler, /每个有意义的在场人物保留独立身份，包括沉默听者；机位主体不等于全部可见人物/,
+    "A three-person scene is valid：沉默听者保留独立身份，机位主体不等于全部可见人物");
+  assert.match(compiler, /只在真正发声处出现一次/,
+    "actual vocal events：只在真正发声处出现一次");
+  assert.match(compiler, /进出场/,
+    "entrance beat：进出场必须保留");
+  assert.doesNotMatch(compiler, /max(?:imum)?\s+(?:of\s+)?(?:two|2|three|3)\s+(?:visible\s+)?faces/i);
+  assert.doesNotMatch(compiler, /最多\s*\d+\s*(?:张|个|名)/, "不得存在可见人数硬上限");
+  assert.doesNotMatch(compiler, /不超过\s*\d+\s*(?:张|个|名)/, "不得存在可见人数硬上限");
 });
 
-test("live S17 is entrance -> villain recognition -> kneel -> apology with correct speaker/listener ownership", () => {
-  assert.ok(fs.existsSync(PROJECT_FILE), `missing live project: ${PROJECT_FILE}`);
+// §10.3：本用例依赖用户本机真实工程库中的一个具体项目文件，属于环境依赖用例。
+// 工程不存在时必须显式跳过并说明原因，绝不能据此宣称"用户本机必然通过"，
+// 也不能把缺失的环境伪装成断言通过。用户在自测机上跑时会真实执行全部断言。
+test("live S17 is entrance -> villain recognition -> kneel -> apology with correct speaker/listener ownership", { skip: !fs.existsSync(PROJECT_FILE) ? `需要本机真实工程 ${PROJECT_FILE}（环境依赖，不在 CI/沙箱内伪造通过）` : false }, () => {
   const project = JSON.parse(fs.readFileSync(PROJECT_FILE, "utf8"));
   const shot = project.shots.find(item => item.id === "S17");
   assert.ok(shot, "missing S17");

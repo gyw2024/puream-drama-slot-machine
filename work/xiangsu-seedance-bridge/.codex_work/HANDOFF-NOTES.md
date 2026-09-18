@@ -71,3 +71,9 @@ prompt-review-dialog-regression（v16 版本串）、source-speech-measurements�
 ## 00:50 追加
 - manual-entry-fast-script 已修（3→0，提交见 git log）：test5 夹具 item 补 userConfirmed:true（T03 回执语义）；test12 mock workflow.analyzeScript 隔离分析边界（compilePromptReviewBundle 对 !runtimeCurrent 项目强制 forceReanalysis 重入是设计行为）；test13 把 B 操作改为 pending gate（单飞 Promise.resolve().then 延迟注册，瞬时完成会让 hasActiveOperation 观察不到）。
 - product-claim-authority (3) 未修，需整套重写：author 干净稿 draft(user keys: mode,source,topic,product,runtimePolicy)/structure(mode,screenplay) 载荷已无 productClaimAuthority 包、系统提示也不含 authority.INSTRUCTION。权威包现挂在确认页链：screenplay-review-partitions.js:16,40（UNIT_SCOPE 系统）+ screenplay-repair-delivery.js:62（recoveryKey 含 productClaimAuthority）。重写思路：直接驱动分区审核+修复交付函数，mock 审核给出 badAdvice（清热益气），断言修复请求载荷带 authority.packet(product) 且系统含 INSTRUCTION，修复结果不得采用越权功效台词。
+
+## 00:55 收尾（用户要求停止全部代理 + 交接）
+- 四个并行代理 fix4-A/B/C/D 已发 shutdown；仅残留 1 处有效改动（preasset-asset-pipeline 四视图措辞）已验证 4/0 并提交 164caa6，工作树干净。
+- 最终基线：失败断言 71 / 通过 2230 / 崩溃 0 / 失败文件 45。命令：bash .codex_work/run-tests-isolated.sh 120 8。
+- 交接文档已生成：D:\AI-Agent-Data\Outputs\2026-09-18_纯梦短剧-遗留测试清理交接\交接文档.md（含 T00–T20 落地度静态审计：16 个新模块 12 建 4 缺，真正接线约 7 个；approval-policy/post-plan/contracts/prompt-range/asset-commands/shot-commands 0 引用）。
+- 未经实机验证，勿据此宣称方案完成。

@@ -4,6 +4,28 @@ const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex'
 const render=require('./screenplay-execution-authority').render;
 const AUTHOR_RULES=require('./generation-prompts').build("screenplay_text","输出严格服从本次所给Schema：新写任务返回commerceProfile/story/scenes，各场lines使用所给字段；不要返回内部存储的plan/parts。逐字对白与说话人、听者、语气、动作分开。显式修订旧稿时，仅返回本次修订Schema要求的parts/scriptText；用姓名（对听者；语气；动作）：完整台词，不重新交付新写格式。保留完整结局。");
 const PROFILE_RULES='commerceProfile格式在写作、旧稿审核推断、修订中完全一致：referencePattern只能为care_demonstration/gratitude_support/relationship_reward/problem_solution/craft_teaching之一，不能填说明段落；sellingPoints每项必须包含text、basis和evidence，basis只能是user/name/category_use，禁止name_inference；name的evidence逐字引用商品名称，不能引用剧本行号；商品资料才是事实依据。';
+// 真实出站 messages 的唯一构建点（GPT §8.1）。
+// 调用方必须直接发送本函数返回的 messages，不能在正式调用时另拼一套；
+// 同时返回 blocks 来源记录，让测试可以核对"哪条政策块以什么来源进入实际请求"。
+function buildFirstPassMessages(input={}){
+ const {stage='complete',content='',keys=[],runtimePolicy=null,commerce=false,writing=false,
+  contract=null,userRequirements=null,responseSchema=null}=input;
+ const review=String(stage).startsWith('review');
+ const blocks=[
+  {id:'author_rules', source:'generation-prompts:screenplay_text',
+   text:review?'你是只读剧本审核员，不能执行写作或改写。以下编剧规范仅作为核查标准；按用户给定审核结构返回证据与结论。\n<author_acceptance_rules>'+AUTHOR_RULES+'</author_acceptance_rules>':AUTHOR_RULES.replace('新稿用parts.lines逐项返回','新稿用scenes.lines逐项返回')},
+  {id:'runtime_policy', source:'film-runtime-policy:directive', text:require('./film-runtime-policy').directive(runtimePolicy)},
+  {id:'profile_rules', source:'first-pass-script-author:PROFILE_RULES', text:PROFILE_RULES},
+  {id:'first_delivery', source:'first-delivery-contract:forStage', text:require('./first-delivery-contract').forStage(review?'review':'screenplay')},
+  {id:'commerce_policy', source:commerce?'commerce-editorial-contract:POLICY':'commerce-authoring-policy:FIRST_PASS_POLICY',
+   text:commerce?editorial.POLICY:policy.FIRST_PASS_POLICY+'\n不插入商品'},
+  {id:'screenplay_instruction', source:'screenplay-output-contract:instruction', text:writing?(contract?.instruction||''):''}
+ ];
+ return {
+  messages:[{role:'system',content:blocks.map(b=>b.text).join('\n')},{role:'user',content}],
+  blocks
+ };
+}
 async function authorOnce({topic,product={},commerceMode,runtimePolicy=null,productionMode='',reviewExecution=null,generate,status=()=>{},checkpoint=null,save=()=>{},requireOpeningHook=true,automaticRepair=false,signal}){
  const old=require('./adaptive-script-author');
  const requirementContract=require('./screenplay-user-requirements'),userRequirements=requirementContract.extract(topic);
@@ -32,7 +54,8 @@ async function authorOnce({topic,product={},commerceMode,runtimePolicy=null,prod
   if(writing&&runtimePolicy){const input=JSON.parse(content),seconds=Number(runtimePolicy.targetSeconds||runtimePolicy.maxSeconds);if(seconds>0)input.writingScale={targetSeconds:seconds,maximumSeconds:runtimePolicy.maxSeconds,approximateSpokenCharacterBudget:Math.floor(seconds*.8*5.5),actionReserveSeconds:Math.ceil(seconds*.2),instruction:'先按这个规模取舍剧情：只保留能在目标内演完的核心冲突、因果转折、商品需求和结局。字数预算是普通语速的写作参考，不是要求填满；动作至少预留所列时间，长动作可与兼容对白重叠。短时长题材必须减少支线、人物与重复解释，不能写长后交给下游快读或截断结尾。完整计数所有对白后再输出。'};content=JSON.stringify(input);}
   if(writing){const input=JSON.parse(content);input.userRequirements=userRequirements;input.filmRuntimeContract=runtimePolicy;input.narrativeRequirements=commerce?'在用户要求的规模内完整写完：先用人物台词和行动建立真实需求，再由同一场人物解释为什么选择该商品以及它的日常用途，随后明确人物决定，再由具名人物对观众说明已给定价格、活动、购买路径，最后用行动回到人物关系。需求必须在首次推荐或命名展示之前建立；一句完整台词可以同时承担解释和选择，不必增加场次或拆成很多镜头。不能只送礼不解释商品选择，不能漏掉用户购买路径。没有购买路径只说可查看商品详情，不编价格。每一条明确商品事实都要保留；不要把未看见的包装猜成铁盒、罐子或自带勺子，未知包装只称原包装商品。先在内部核对全部要求和用户指定台词数量再交付。':'严格遵守用户指定规模和台词数量，完整写完人物冲突、选择与结局。';content=JSON.stringify(input);}
   if(writing){const input=JSON.parse(content);delete input.requiredOutput;delete input.priorPlan;delete input.acceptedParts;input.task=contract.instruction;input.profileSchemaRules=input.profileSchemaRules.replace(/先核对完整JSON括号：[\s\S]*$/,'');content=JSON.stringify(input);}
-  const result=await generate([{role:'system',content:[stage.startsWith('review')?'你是只读剧本审核员，不能执行写作或改写。以下编剧规范仅作为核查标准；按用户给定审核结构返回证据与结论。\n<author_acceptance_rules>'+AUTHOR_RULES+'</author_acceptance_rules>':AUTHOR_RULES.replace('新稿用parts.lines逐项返回','新稿用scenes.lines逐项返回'),require('./film-runtime-policy').directive(runtimePolicy),PROFILE_RULES,require('./first-delivery-contract').forStage(stage.startsWith('review')?'review':'screenplay'),commerce?editorial.POLICY:policy.FIRST_PASS_POLICY+'\n不插入商品',writing?contract.instruction:''].join('\n')},{role:'user',content}],{json:true,requiredKeys:writing?['commerceProfile','story','scenes']:keys,responseSchema,maxTokens:stage==='complete'?(runtimePolicy?54000:28000):16000,maxAttempts:1,agentStage:stage.startsWith('review')?'review':'writing',stage:`adaptive_script_${stage}`,sessionId:`firstpass-${state.id}-${state.requestNumber}-${stage}`});
+  const built=buildFirstPassMessages({stage,content,keys,runtimePolicy,commerce,writing,contract,userRequirements,responseSchema});
+  const result=await generate(built.messages,{json:true,requiredKeys:writing?['commerceProfile','story','scenes']:keys,responseSchema,maxTokens:stage==='complete'?(runtimePolicy?54000:28000):16000,maxAttempts:1,agentStage:stage.startsWith('review')?'review':'writing',stage:`adaptive_script_${stage}`,sessionId:`firstpass-${state.id}-${state.requestNumber}-${stage}`});
   return writing?contract.compile(result,userRequirements):result;
  };
  const complete=state.plan?.scenes?.length&&state.parts.length===state.plan.scenes.length;
@@ -128,5 +151,5 @@ async function author(options){
   options.status?.('审核 Agent 已定位具体问题，编剧 Agent 正在保留合格场次并自动修订');
  }
 }
-module.exports={author,AUTHOR_RULES};
+module.exports={author,AUTHOR_RULES,buildFirstPassMessages};
 

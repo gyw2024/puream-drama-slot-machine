@@ -148,7 +148,11 @@ function compactGeneratedPromptBoilerplate(prompt, ceiling = 9800) {
     ['preserve appearance, holders, spatial continuity and the 180-degree eyeline axis', 'preserve appearance, holders, space and the 180-degree eyeline axis'],
     ['use only its vocal identity and do not repeat its source utterance', 'copy timbre only, never its source words'],
     ['Camera: Keep the established camera treatment and axis, framing the current named active speaker; do not replay completed cutaways.', 'Camera: retain treatment and axis; frame the current speaker without replaying completed cutaways.'],
-    ['Background and listener action: Continue the established silent background reaction without replay.', 'Listener/background: continue the established silent reaction without replay.']
+    ['Background and listener action: Continue the established silent background reaction without replay.', 'Listener/background: continue the established silent reaction without replay.'],
+    ['fixed architecture, furniture and geometry from', 'set and geometry from'],
+    ['time of day, lighting, movable objects and viewing direction follow the current authored shot.', 'lighting, objects and viewing angle follow the shot.'],
+    ['once at the corresponding physical event, located at its source and below dialogue.', 'once at source event, below dialogue.'],
+    ['Only assigned timbres speak the exact Chinese lines once; everyone else stays silent.', 'Only assigned timbres speak the exact Chinese lines once; others remain silent.']
   );
   return String(prompt).split(/(<d>[\s\S]*?<\/d>)/gi).map(part => {
     if (/^<d>/i.test(part)) return part;

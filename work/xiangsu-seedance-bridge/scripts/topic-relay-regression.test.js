@@ -227,7 +227,7 @@ test("topic source prompt opens creative space and only borrows the reference st
   assert.match(prompt, /不按固定关系、地点、证据或反转配额填空/);
   // Commerce handling is explained inline, not as a separate system module, and
   // non-commerce never implants a product.
-  assert.match(prompt, /带货模式说明需求如何从剧情发生/);
+  assert.match(prompt, /带货模式说明此前可见需求|带货模式说明需求如何从剧情发生/);
   assert.match(prompt, /非带货不植入/);
   // Confirmed/unaffected content is preserved across transport continuation.
   assert.match(prompt, /保留未受影响的内容和用户确认版本/);

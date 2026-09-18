@@ -18,6 +18,11 @@ test("structured performance directions never stringify as object placeholders",
 async function expectPromptGate(methodName, options, expectedPrefix) {
   const events = [];
   const context = {
+    // T05 起批量入口会先读项目判断 production-v2 逐条批准路由；
+    // 此处只需一个最小只读 store，不改变"付费前必须停在提示词批准闸门"的顺序。
+    store: {
+      getProject: () => ({ generation: {}, productionV2: { enabled: false } })
+    },
     runTrackedOperation() { events.push("tracked"); },
     setAutomation() { events.push("automation"); },
     async preparePromptReviewBundle() { events.push("prepare"); },

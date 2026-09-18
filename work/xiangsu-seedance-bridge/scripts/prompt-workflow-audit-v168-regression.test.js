@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const { authoredScreenSide, hasRecipientTreatmentAction, compactGeneratedPromptBoilerplate, buildApprovedHailuoPrompt } = require("../app/hailuo-h3-natural-prompt");
 const { assertHailuoFinalPromptIntegrity, dialogueVocalEventSpeakerIds } = require("../app/hailuo-h3-prompt");
 const { STAGE_TO_KEY, defaultReferenceParityTemplates, referenceParityFor, appendReferenceParity } = require("../app/reference-parity-prompts");
+const { characterVideoOutputContract } = require("../app/workbench-workflow");
 const { speechWindowBounds } = require("../app/drama-timing");
 
 function compactFixture() {
@@ -91,8 +92,13 @@ test("all active stage defaults retire conflicting visual cast caps and timing b
     assert.match(value, /不设两人上限/);
     assert.match(value, /逐句起止/);
   }
-  // The five-second identity/voice sample is not a drama shot.
-  assert.match(referenceParityFor({}, "hailuo_character_video"), /exactly 5\.00 seconds/);
+  // 5 秒音色采样不是剧情镜：它的时长硬约束由专用的 characterVideoOutputContract
+  // 产生（workbench-workflow 内部组装人物视频提示词时注入），
+  // 不再由 referenceParity 模板承载。断言必须指向真正的执行点，
+  // 否则会把"模块搬迁"误判成"约束丢失"。
+  const sampleContract = characterVideoOutputContract({ generation: { engine: "hailuo-h3" } }, {});
+  assert.match(sampleContract, /exactly 5\.00 seconds/);
+  assert.match(sampleContract, /4\.90 and 5\.00 seconds/);
 });
 
 test("saved legacy system overrides are reconciled in memory without mutating settings or source text", () => {

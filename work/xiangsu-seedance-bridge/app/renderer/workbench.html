@@ -434,8 +434,36 @@
         <label class="strategy-option"><input type="radio" name="newVideoMode" value="storyboard_sheet"><span><b>分镜合图</b><small>每镜一张由多个完整9:16竖屏画格拼成的时间轴合图；控制更精细、更省图。</small></span></label>
       </div></fieldset>
       <div class="strategy-field-row"><fieldset class="strategy-fieldset"><legend>执行方式</legend><label class="compact-choice"><input type="radio" name="newExecutionMode" value="step" checked> 分步制作</label><label class="compact-choice"><input type="radio" name="newExecutionMode" value="full"> AI 一键制作</label></fieldset><fieldset class="strategy-fieldset"><legend>起步内容</legend><label class="compact-choice"><input type="radio" name="newInputMode" value="ai" checked> AI 生成</label><label class="compact-choice"><input type="radio" name="newInputMode" value="manual"> 自己输入/上传</label></fieldset></div>
+      <fieldset class="strategy-fieldset"><legend>AI 剧本模式 <span>AI 生成时必选</span></legend><div class="strategy-options script-format-options">
+        <label class="strategy-option script-format-option"><input type="radio" name="newScriptFormat" value="production"><span><b>完整制作稿</b><small>原先模式；包含故事、人物场景圣经、逐镜动作、声音与连续性。</small></span></label>
+        <label class="strategy-option script-format-option"><input type="radio" name="newScriptFormat" value="dialogue"><span><b>简易对白稿</b><small>简单背景情节，以及谁以什么语气、表情和动作对谁说完整原句。</small></span></label>
+        <label class="strategy-option script-format-option"><input type="radio" name="newScriptFormat" value="timed_storyboard"><span><b>秒级分镜成片稿</b><small>按幕、分镜和秒级子镜输出，可直接进入生产。</small></span></label>
+      </div><div class="script-format-examples"><b>下载参考：</b><button type="button" data-script-format-example="production">完整制作稿示例</button><button type="button" data-script-format-example="dialogue">简易对白稿示例</button><button type="button" data-script-format-example="timed_storyboard">秒级分镜稿示例</button></div><p class="settings-note">选择“自己输入/上传”时无需选择，系统会按上传原稿智能识别并自适应时长。</p></fieldset>
       <p class="settings-note">原创按8–10分钟规划完整故事；上传按原稿整理，改写相对原稿时长上下不超过30秒。</p>
-      <p class="settings-note">单元时长由剧情节拍和分镜动作自动决定，不设固定默认值。</p>
+      <div class="strategy-field-row">
+        <fieldset class="strategy-fieldset"><legend>剧本处理方式</legend>
+          <select id="newScriptHandling" name="newScriptHandling">
+            <option value="respect">尊重原稿 · 保留原稿结构与台词，仅做必要整理</option>
+            <option value="optimize" selected>优化改编 · 保留故事内核，优化节奏与表演</option>
+            <option value="recreate">重新创作 · 以原稿为灵感重写完整剧本</option>
+          </select>
+        </fieldset>
+        <fieldset class="strategy-fieldset"><legend>优先画像</legend>
+          <select id="newPriorityProfile" name="newPriorityProfile">
+            <option value="speed">速度优先 · 优先复用与高效调度，减少重复处理</option>
+            <option value="balanced" selected>均衡 · 速度与质量平衡</option>
+            <option value="quality">质量优先 · 更多审核与打磨</option>
+          </select>
+        </fieldset>
+      </div>
+      <fieldset class="strategy-fieldset"><legend>带货模式</legend>
+        <select id="newCommerceMode" name="newCommerceMode">
+          <option value="none">无带货 · 成片不出现商品导购、价格或购买引导</option>
+          <option value="natural" selected>自然植入 · 商品只因角色的真实任务与剧情因果出现</option>
+          <option value="explicit">明确带货 · 允许角色口头讲解用户提供的事实</option>
+        </select>
+      </fieldset>
+      <p class="settings-note">绝对禁令始终不可关闭；速度优先不自动更换已选择模型或推理配置，不删减原稿，不跳过必要批准与完整性校验。</p>
       <p id="newProjectError" class="field-error" role="alert" aria-live="polite"></p>
       <div class="dialog-actions">
         <button id="cancelNewProject" class="outline-button" type="button">取消</button>
@@ -473,7 +501,36 @@
         <label class="strategy-option"><input type="radio" name="projectVideoMode" value="storyboard_sheet"><span><b>分镜合图</b><small>每镜一张多帧9:16逐秒合图，视频严格按画格时间顺序演绎。</small></span></label>
       </div></fieldset>
       <div class="strategy-field-row"><fieldset class="strategy-fieldset"><legend>执行方式</legend><label class="compact-choice"><input type="radio" name="projectExecutionMode" value="step"> 分步制作</label><label class="compact-choice"><input type="radio" name="projectExecutionMode" value="full"> AI 一键制作</label></fieldset><fieldset class="strategy-fieldset"><legend>起步内容</legend><label class="compact-choice"><input type="radio" name="projectInputMode" value="ai"> AI 生成</label><label class="compact-choice"><input type="radio" name="projectInputMode" value="manual"> 自己输入/上传</label></fieldset></div>
+      <fieldset class="strategy-fieldset"><legend>AI 剧本模式 <span>AI 生成时必选</span></legend><div class="strategy-options script-format-options">
+        <label class="strategy-option script-format-option"><input type="radio" name="projectScriptFormat" value="production"><span><b>完整制作稿</b><small>原先模式；完整故事、资产圣经、逐镜表演、声音和连续性。</small></span></label>
+        <label class="strategy-option script-format-option"><input type="radio" name="projectScriptFormat" value="dialogue"><span><b>简易对白稿</b><small>简单背景情节，逐句写清说话人、听者、语气、表情、动作和原话。</small></span></label>
+        <label class="strategy-option script-format-option"><input type="radio" name="projectScriptFormat" value="timed_storyboard"><span><b>秒级分镜成片稿</b><small>按幕、分镜和秒级子镜编写，直接匹配资产、分镜图与视频提示词。</small></span></label>
+      </div><div class="script-format-examples"><b>下载参考：</b><button type="button" data-script-format-example="production">完整制作稿示例</button><button type="button" data-script-format-example="dialogue">简易对白稿示例</button><button type="button" data-script-format-example="timed_storyboard">秒级分镜稿示例</button></div><p class="settings-note">自己输入/上传时保持原稿模式，无需选择；重新切回 AI 生成时必须在这里确认一种格式。</p></fieldset>
       <p class="settings-note">原创按8–10分钟规划完整故事；上传按原稿整理，改写相对原稿时长上下不超过30秒。</p>
+      <div class="strategy-field-row">
+        <fieldset class="strategy-fieldset"><legend>剧本处理方式</legend>
+          <select id="projectScriptHandling" name="projectScriptHandling">
+            <option value="respect">尊重原稿 · 保留原稿结构与台词，仅做必要整理</option>
+            <option value="optimize" selected>优化改编 · 保留故事内核，优化节奏与表演</option>
+            <option value="recreate">重新创作 · 以原稿为灵感重写完整剧本</option>
+          </select>
+        </fieldset>
+        <fieldset class="strategy-fieldset"><legend>优先画像</legend>
+          <select id="projectPriorityProfile" name="projectPriorityProfile">
+            <option value="speed">速度优先 · 优先复用与高效调度，减少重复处理</option>
+            <option value="balanced" selected>均衡 · 速度与质量平衡</option>
+            <option value="quality">质量优先 · 更多审核与打磨</option>
+          </select>
+        </fieldset>
+      </div>
+      <fieldset class="strategy-fieldset"><legend>带货模式</legend>
+        <select id="projectCommerceMode" name="projectCommerceMode">
+          <option value="none">无带货 · 成片不出现商品导购、价格或购买引导</option>
+          <option value="natural" selected>自然植入 · 商品只因角色的真实任务与剧情因果出现</option>
+          <option value="explicit">明确带货 · 允许角色口头讲解用户提供的事实</option>
+        </select>
+      </fieldset>
+      <p class="settings-note">绝对禁令始终不可关闭；速度优先不自动更换已选择模型或推理配置，不删减原稿，不跳过必要批准与完整性校验。</p>
       <p id="projectStrategyError" class="field-error" role="alert" aria-live="polite"></p>
       <div class="dialog-actions"><button id="cancelProjectStrategy" class="outline-button" type="button">暂不修改</button><button id="confirmProjectStrategy" class="primary-button" type="submit">确认并应用</button></div>
     </form>
@@ -498,7 +555,7 @@
           <input type="radio" name="scriptFormat" value="timed_storyboard">
           <span><b>秒级分镜成片稿</b><small>按幕、5–15秒分镜和秒级子镜编写；逐镜包含场景人物物品、人声、承接、对白汇总、音效与负向提示，可直接进入生产。</small></span>
         </label>
-      </div></fieldset>
+      </div><div class="script-format-examples"><b>下载参考：</b><button type="button" data-script-format-example="production">完整制作稿示例</button><button type="button" data-script-format-example="dialogue">简易对白稿示例</button><button type="button" data-script-format-example="timed_storyboard">秒级分镜稿示例</button></div></fieldset>
       <div class="script-format-guarantee" role="note"><b>生产能力不缩水</b><span>任一模式都会完整编译资产提示词、场景四视图、分镜图提示词、视频提示词和商品植入因果；每一阶段也都可以从 0 批量上传自己的提示词。</span></div>
       <p id="scriptFormatError" class="field-error" role="alert" aria-live="polite"></p>
       <div class="dialog-actions">
@@ -634,6 +691,7 @@
     </form>
   </div>
   <script src="text-provider-catalog.js"></script>
+  <script src="intent-controls.js"></script>
   <script src="../workbench-status.js"></script>
   <script src="review-receipt-state.js"></script>
   <script src="prompt-review-dialog.js"></script>

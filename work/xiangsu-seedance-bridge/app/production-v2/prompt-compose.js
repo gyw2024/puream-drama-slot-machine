@@ -1,106 +1,136 @@
 'use strict';
-// T06 / §13: the single authoritative prompt composition point.
-// Every real generation request must be assembled here and only here:
-//   baseBoundary (P00) + roleBody + applicable creative policy (deduped by
-//   ruleId) + provider contract + output contract.
-// User requirements and source facts travel in the user payload — they are
-// DATA and are never appended to the system prompt. Rules are deduplicated by
-// ruleId: the SAME rule appears once, different rules are never merged.
-// User-saved templates are kept verbatim (no regex deletion); a conflict with
-// a new policy version is reported, never silently overwritten. Every
-// composition returns provenance (per-source id + hash, final systemHash,
-// length with a soft warning) so any real prompt can be traced to its origins
-// and no policy paragraph is duplicated per stage.
 const crypto = require('node:crypto');
+const { fail, hash } = require('./contracts');
 
-const SOFT_LENGTH_LIMIT_CHARS = 24_000;
-
-function sha256(text) {
-  return crypto.createHash('sha256').update(String(text || ''), 'utf8').digest('hex');
+function sha256(str) {
+  return crypto.createHash('sha256').update(String(str || ''), 'utf8').digest('hex');
 }
 
-function block(title, body) {
-  const text = String(body || '').trim();
-  if (!text) return '';
-  return title ? `【${title}】\n${text}` : text;
-}
-
-/**
- * compose({ stage, roleId, policyVersion, baseBoundary, roleBody, creativePolicy,
- *           providerContract, outputContract, userTemplate })
- *   creativePolicy: [{ ruleId, body }] — deduped by ruleId, order preserved.
- *   userTemplate:   verbatim user-saved template text or null.
- * Returns { system, provenance } — `system` is the one and only system string
- * that may be sent to a model; `provenance` explains where every byte came from.
- */
 function compose({
   stage = '',
   roleId = '',
-  policyVersion = '',
   baseBoundary = '',
   roleBody = '',
+  policyVersion = '',
+  rules = [],
   creativePolicy = [],
   providerContract = '',
   outputContract = '',
-  userTemplate = null
+  userTemplate = '',
+  userTemplatePlacement = 'user',
+  task = {}
 } = {}) {
-  const sources = [];
-  const seenRuleIds = new Set();
-  const seenBodies = new Set();
-  const policyParts = [];
-  for (const entry of (Array.isArray(creativePolicy) ? creativePolicy : [])) {
-    const id = String(entry?.ruleId || '');
-    const body = String(entry?.body || '').trim();
-    if (!body) continue;
-    // 去重的是相同规则：同一 ruleId 只出现一次；同一正文换 ID 也只出现一次。
-    if (id && seenRuleIds.has(id)) continue;
-    if (seenBodies.has(body)) continue;
-    if (id) seenRuleIds.add(id);
-    seenBodies.add(body);
-    policyParts.push(body);
-    sources.push({ kind: 'creative-policy', ruleId: id, sha256: sha256(body), chars: body.length });
+  if (userTemplatePlacement && !['user', 'system'].includes(userTemplatePlacement)) {
+    throw fail('TEMPLATE_PLACEMENT_INVALID', 'user/system');
   }
-  const boundaryText = String(baseBoundary || '').trim();
-  const roleText = String(roleBody || '').trim();
-  const providerText = String(providerContract || '').trim();
-  const outputText = String(outputContract || '').trim();
-  if (boundaryText) sources.unshift({ kind: 'base-boundary', sha256: sha256(boundaryText), chars: boundaryText.length });
-  sources.push({ kind: 'role-body', roleId: String(roleId), sha256: sha256(roleText), chars: roleText.length });
-  if (providerText) sources.push({ kind: 'provider-contract', sha256: sha256(providerText), chars: providerText.length });
-  if (outputText) sources.push({ kind: 'output-contract', sha256: sha256(outputText), chars: outputText.length });
 
-  const system = [
-    block('共同边界', boundaryText),
-    roleText,
-    policyParts.length ? block('适用创作政策', policyParts.join('\n\n')) : '',
-    providerText,
-    outputText
-  ].filter(Boolean).join('\n\n');
+  const blocks = [];
+  const sources = [];
+
+  if (baseBoundary) {
+    const formattedBoundary = baseBoundary.startsWith('【共同边界】')
+      ? baseBoundary
+      : `【共同边界】\n${baseBoundary}`;
+    blocks.push(formattedBoundary);
+    sources.push({
+      kind: 'base-boundary',
+      sha256: sha256(baseBoundary)
+    });
+  }
+
+  if (roleBody) {
+    blocks.push(roleBody);
+    sources.push({
+      kind: 'role-body',
+      sha256: sha256(roleBody)
+    });
+  }
+
+  const policyItems = [...(creativePolicy || []), ...(rules || [])];
+  const seenRuleIds = new Map();
+  const seenBodies = new Set();
+
+  for (const r of policyItems) {
+    const rId = String(r.ruleId || r.id || '');
+    const rBody = String(r.body || '');
+    if (rId) {
+      if (seenRuleIds.has(rId)) {
+        if (seenRuleIds.get(rId) !== rBody) {
+          throw fail('PROMPT_RULE_CONFLICT', rId);
+        }
+        continue;
+      }
+      seenRuleIds.set(rId, rBody);
+    }
+
+    const trimmed = rBody.trim();
+    if (!seenBodies.has(trimmed)) {
+      seenBodies.add(trimmed);
+      blocks.push(rBody);
+    }
+
+    sources.push({
+      kind: 'creative-policy',
+      ...(rId ? { ruleId: rId, id: rId } : {}),
+      sha256: sha256(rBody)
+    });
+  }
+
+  if (providerContract) blocks.push(providerContract);
+  if (outputContract) blocks.push(outputContract);
 
   let userTemplateConflict = null;
-  let userTemplateText = '';
-  if (userTemplate != null && String(userTemplate).trim()) {
-    userTemplateText = String(userTemplate);
-    // User template is preserved verbatim elsewhere; if it duplicates policy
-    // text the conflict is reported, not silently "optimized" away.
-    if (seenBodies.has(userTemplateText.trim())) {
+  if (userTemplate) {
+    const tTrim = userTemplate.trim();
+    const duplicates = policyItems.some(p => {
+      const pTrim = String(p.body || '').trim();
+      return pTrim && pTrim === tTrim;
+    });
+    if (duplicates) {
       userTemplateConflict = 'user-template-duplicates-policy-rule';
     }
-    sources.push({ kind: 'user-template', sha256: sha256(userTemplateText), chars: userTemplateText.length, preservedVerbatim: true, conflict: userTemplateConflict });
+    if (userTemplatePlacement === 'system') {
+      blocks.push(userTemplate);
+    }
+    sources.push({
+      kind: 'user-template',
+      sha256: sha256(userTemplate),
+      preservedVerbatim: true
+    });
   }
 
-  const provenance = {
-    stage: String(stage || ''),
-    roleId: String(roleId || ''),
-    policyVersion: String(policyVersion || ''),
-    sources,
-    systemHash: sha256(system),
-    systemChars: system.length,
-    softLengthExceeded: system.length > SOFT_LENGTH_LIMIT_CHARS,
-    userTemplateConflict,
-    composedAt: new Date().toISOString()
+  const system = blocks.join('\n\n');
+  const userPayload = {
+    ...(task && typeof task === 'object' ? task : {}),
+    ...(userTemplate && userTemplatePlacement === 'user' ? { userTemplate } : {})
   };
-  return { system, provenance };
+  const messages = [
+    { role: 'system', content: system },
+    { role: 'user', content: JSON.stringify(userPayload) }
+  ];
+
+  const userTemplateActuallySent = !userTemplate || messages.some(m =>
+    m.content.includes(userTemplate) || m.content.includes(JSON.stringify(userTemplate).slice(1, -1))
+  );
+
+  return {
+    messages,
+    system,
+    provenance: {
+      version: 'compose-r2',
+      stage,
+      roleId,
+      policyVersion,
+      sources,
+      userTemplatePlacement,
+      userTemplateHash: userTemplate ? sha256(userTemplate) : null,
+      userTemplateConflict,
+      systemHash: sha256(system),
+      messagesHash: hash(messages),
+      systemChars: system.length,
+      userTemplateActuallySent
+    }
+  };
 }
 
-module.exports = { compose, sha256, SOFT_LENGTH_LIMIT_CHARS };
+module.exports = { compose };

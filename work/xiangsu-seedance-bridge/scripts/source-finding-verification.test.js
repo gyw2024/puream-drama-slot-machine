@@ -6,7 +6,7 @@ const rejected=()=>({ok:false,storyComplete:true,sourcePreserved:true,checks:[{s
 const answer=verdict=>({decisions:{F1:{verdict,reason:verdict==='dismissed'?'S01 explicitly reports the background fact; no earlier source contradicts it.':'S01 names an already completed event as not having happened.'}},conclusion:{ok:verdict==='dismissed',storyComplete:true,sourcePreserved:true,criteria:criteria()}});
 test('no software verdict: explicit Agent dismissal preserves source and primary evidence without any author call',async()=>{
  const d=fixture(),before=JSON.stringify(d),audit=rejected();let reviews=0,verifications=0;
- const result=await writer.author({source:writer.render(d),mode:'upload',draftDocument:d,generate:async(m,o)=>{
+ const result=await writer.author({source:writer.render(d),mode:'upload',draftDocument:d,deferReview:false,generate:async(m,o)=>{
   if(o.stage==='shot_screenplay_review'){reviews++;return audit;}
   assert.equal(o.stage,'shot_screenplay_review_findings');assert.equal(o.agentStage,'review');verifications++;
   assert.deepEqual(JSON.parse(m[1].content).screenplay,d);assert.deepEqual(JSON.parse(m[1].content).originalSource,writer.render(d));return answer('dismissed');
@@ -16,7 +16,7 @@ test('no software verdict: explicit Agent dismissal preserves source and primary
 });
 test('true finding reaches targeted repair then fresh review; neighboring source bytes retained',async()=>{
  const d=fixture();d.shots.push({...structuredClone(d.shots[0]),id:'S02',dialogue:[],beats:[{...d.shots[0].beats[0],dialogueIds:[]}]});const before=JSON.stringify(d.shots[1]);let reviews=0,repairs=0;
- const result=await writer.author({draftDocument:d,generate:async(m,o)=>{
+ const result=await writer.author({source:writer.render(d),draftDocument:d,deferReview:false,generate:async(m,o)=>{
   if(o.stage==='shot_screenplay_review'){const a=rejected();a.checks.push({shotId:'S02',evidence:'Neighbor retained'});if(++reviews>1){a.ok=true;a.issues=[];}return a;}
   if(o.stage==='shot_screenplay_review_findings')return answer('upheld');
   assert.equal(o.stage,'shot_screenplay_repair');repairs++;assert.deepEqual(JSON.parse(m[1].content).allowedShotIds,['S01']);return {shots:[{...d.shots[0],ending:'修正后的源稿状态'}],additions:[],characters:[],scenes:[],props:[],wardrobes:[]};
@@ -29,7 +29,7 @@ test('partial or contradictory adjudication goes back to the review Agent withou
  const noTarget=answer('dismissed');noTarget.conclusion.criteria.story.passed=false;assert.ok(verify.validate(verify.prepare(audit),noTarget));
 });
 test('interrupted verification resumes saved audit without reauthoring or rerunning completed primary review',async()=>{
- const d=fixture();let checkpoint,calls=0;const input={draftDocument:d,source:writer.render(d),mode:'upload',save:s=>checkpoint=structuredClone(s)};
+ const d=fixture();let checkpoint,calls=0;const input={draftDocument:d,source:writer.render(d),mode:'upload',deferReview:false,save:s=>checkpoint=structuredClone(s)};
  await assert.rejects(writer.author({...input,generate:async(_m,o)=>{if(o.stage==='shot_screenplay_review')return rejected();calls++;throw Object.assign(Error('cancelled'),{code:'LOCAL_AGENT_CANCELLED'});}}),{code:'LOCAL_AGENT_CANCELLED'});
  const savedSession=checkpoint.pendingRequest.sessionId;
  const result=await writer.author({...input,checkpoint,generate:async(_m,o)=>{assert.equal(o.stage,'shot_screenplay_review_findings');assert.equal(o.sessionId,savedSession);calls++;return answer('dismissed');}});

@@ -2162,7 +2162,7 @@ class WorkbenchStore {
       castingTier: String(owner.castingTier || owner.roleType || ""),
       roleType: String(owner.roleType || owner.castingTier || ""),
       importance: String(owner.importance || ""),
-      assetRequired: owner.assetRequired !== false,
+      assetRequired: owner.assetRequired === undefined ? true : owner.assetRequired,
       tags: normalizeReusableAssetTags([
         kind,
         ...(owner.tags || []),
@@ -2268,7 +2268,8 @@ class WorkbenchStore {
       throw Object.assign(new Error("可复用资产类型无效"), { code: "REUSABLE_ASSET_KIND_INVALID" });
     }
     const assets = (this.reusableAssetLibraryHydrated ? this.readReusableAssetLibrary() : this.syncReusableAssetLibraryFromProjects())
-      .filter(item => item.assetRequired !== false)
+      // 待决策条目（null）不冒充可用资源，也不被当作"需要"自动消费。
+      .filter(item => item.assetRequired !== false && item.assetRequired !== null)
       .filter(item => !normalizedKind || item.kind === normalizedKind)
       .sort((left, right) => String(right.lastUsedAt || right.updatedAt || right.createdAt || "").localeCompare(String(left.lastUsedAt || left.updatedAt || left.createdAt || "")));
     return assets;
@@ -2917,7 +2918,7 @@ class WorkbenchStore {
           castingTier: String(owner.castingTier || entry.castingTier || ""),
           roleType: String(owner.roleType || owner.castingTier || entry.roleType || ""),
           importance: String(owner.importance || entry.importance || ""),
-          assetRequired: owner.assetRequired !== false,
+          assetRequired: owner.assetRequired === undefined ? true : owner.assetRequired,
           tags: normalizeReusableAssetTags([
             entry.kind,
             ...(entry.tags || []),

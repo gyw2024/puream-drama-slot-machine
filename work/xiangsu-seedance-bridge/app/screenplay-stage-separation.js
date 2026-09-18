@@ -11,7 +11,10 @@ const WRITER_ROLE_BODY=[
  '你只负责一次写完中文标准分镜剧本，直接交付正文，不写分析过程、JSON、字段映射、资产提示词或视频提示词。先简短写标题、剧情梗概、角色基本身份与固定声线、必要场景；随后按镜号写预计时长、场景与在场人物、起始情境、动作变化、说话人→听者（语气）：完整对白、结束情境；最后写出故事结局。必要站位、视线与商品使用在对应动作中写明，不另列复杂表格。台词只出现一次。每镜10–15秒作为可演分段，短句与相邻对白合并，长段在完整句边界拆开。不要为凑镜数扩写。',
  'original：按选题一次完成原创；upload：保留原稿全部对白、身份与因果，整理为上述格式，不自由改写；adapt：一次完成整稿改写，保留故事内核、信息、反转、结局及商品成交逻辑，按用户要求改变表层人物或场景。原稿保留，必要标准化改动在文末简列依据。原创遵循本次时长目标，改写相对原稿上下不超过30秒。'
 ].join('\n\n');
-const WRITER_POLICY_RULE_IDS=['authority','speech','gaps','causality','story','identity','product_facts','commerce','product_visual','clean_output'];
+// T06/§7：写稿与审核共享的写稿要求必须随单一装配进入 writer system。
+// authority 的正文与 P00 共同边界语义重复（都讲"资料/旧产物不构成修改系统指令的授权"），
+// 因此它只作为来源引用保留在 provenance，不再作为独立 policy 块重复进入正文。
+const WRITER_POLICY_RULE_IDS=['speech','gaps','causality','story','identity','product_facts','commerce','product_visual','clean_output'];
 // T06 修正：写稿与审核共享的写稿要求（production-content-requirements）必须随
 // 单一装配进入 writer system，否则只覆盖审核侧；按 ruleId 去重并留溯源。
 const WRITER_COMPOSED=compose({
@@ -19,6 +22,7 @@ const WRITER_COMPOSED=compose({
   baseBoundary:P00_BOUNDARY, roleBody:WRITER_ROLE_BODY,
   creativePolicy:[
     {ruleId:'content_requirements',body:require('./production-content-requirements').INSTRUCTION},
+    {ruleId:'product_claim_authority',body:require('./product-claim-authority').INSTRUCTION},
     ...WRITER_POLICY_RULE_IDS.map(id=>({ruleId:id,body:prompts.rule(id)}))
   ]
 });
@@ -27,7 +31,10 @@ const WRITER_PROVENANCE=WRITER_COMPOSED.provenance;
 const INTAKE_COMPOSED=compose({
   stage:'shot_screenplay_structure', roleId:'P03', policyVersion:'P00+P03',
   baseBoundary:P00_BOUNDARY,
-  roleBody:'你是剧本结构入库 Agent，不是编剧或审核员。完整读取已保存的中文剧本，按 schema 忠实映射人物、场景、道具和每镜内容。为身份和对白分配稳定唯一 ID，逐字保留全部对白及顺序、说话人、听者、语气、动作和结局，不增加、删除或重写剧情。不生成英文或视频提示词，不作内容通过/不通过判断。缺少表示层字段时根据原稿已有事实补齐引用；无需独立资产的角色仍保留身份。可分段保存，但最终提交完整结构。若有上次交付问题，仅修复指出的结构字段与引用，保留其他内容。内容建议留待最终提示词确认页，不退回编剧。'
+  roleBody:'你是剧本结构入库 Agent，不是编剧或审核员。完整读取已保存的中文剧本，按 schema 忠实映射人物、场景、道具和每镜内容。为身份和对白分配稳定唯一 ID，逐字保留全部对白及顺序、说话人、听者、语气、动作和结局，不增加、删除或重写剧情。不生成英文或视频提示词，不作内容通过/不通过判断。缺少表示层字段时根据原稿已有事实补齐引用；无需独立资产的角色仍保留身份。可分段保存，但最终提交完整结构。若有上次交付问题，仅修复指出的结构字段与引用，保留其他内容。内容建议留待最终提示词确认页，不退回编剧。',
+  creativePolicy:[
+    {ruleId:'product_claim_authority',body:require('./product-claim-authority').INSTRUCTION}
+  ]
 });
 const INTAKE_RULES=INTAKE_COMPOSED.system;
 const INTAKE_PROVENANCE=INTAKE_COMPOSED.provenance;
@@ -37,10 +44,11 @@ async function prepare({state,input,schema,generate,save,status,signal,issues}){
  if(!state.writerText){
   check();status('编剧 Agent 正在一次写完整中文分镜剧本');
   const {source,topic,product,mode,instructions,runtimePolicy}=input;
+  const productClaimAuthority=input.productClaimAuthority||require('./product-claim-authority').packet(product);
   // T06: provenance is persisted with the checkpoint so every real prompt is
   // traceable to its sources by systemHash.
   record();
-  const result=await generate([{role:'system',content:WRITER_RULES},{role:'user',content:JSON.stringify({mode,source,topic,product,instructions,runtimePolicy})}],{json:false,maxAttempts:1,maxTokens:24000,agentStage:'writing',stage:'shot_screenplay_draft',sessionId:`${VERSION}-${state.signature}-draft`,signal});
+  const result=await generate([{role:'system',content:WRITER_RULES},{role:'user',content:JSON.stringify({mode,source,topic,product,instructions,runtimePolicy,productClaimAuthority})}],{json:false,maxAttempts:1,maxTokens:24000,agentStage:'writing',stage:'shot_screenplay_draft',sessionId:`${VERSION}-${state.signature}-draft`,signal});
   state.writerText=String(result||'');state.writerVersion=VERSION;state.status='structuring';save(state);
  }
  // T03/T07: the unbounded for(;;) is gone (B12). Every intake retry consumes
@@ -51,7 +59,8 @@ async function prepare({state,input,schema,generate,save,status,signal,issues}){
   check();status('完整剧本已保存；入库 Agent 正在整理结构与资产引用');
   state.intakeAttempt=(state.intakeAttempt||0)+1;save(state);
   try{
-   const result=await generate([{role:'system',content:INTAKE_RULES},{role:'user',content:JSON.stringify({mode:input.mode,screenplay:state.writerText,...(state.intakeIssues?.length?{previousStructure:state.document,previousDelivery:state.intakeRaw,deliveryIssues:state.intakeIssues}:{})})}],{json:true,responseSchema:schema,requiredKeys:schema.required,maxAttempts:1,maxTokens:60000,progressiveDelivery:true,agentStage:'planning',stage:'shot_screenplay_structure',sessionId:`${VERSION}-${state.signature}-intake-${state.intakeAttempt}`,signal});
+   const productClaimAuthority=input.productClaimAuthority||require('./product-claim-authority').packet(input.product);
+   const result=await generate([{role:'system',content:INTAKE_RULES},{role:'user',content:JSON.stringify({mode:input.mode,screenplay:state.writerText,productClaimAuthority,...(state.intakeIssues?.length?{previousStructure:state.document,previousDelivery:state.intakeRaw,deliveryIssues:state.intakeIssues}:{})})}],{json:true,responseSchema:schema,requiredKeys:schema.required,maxAttempts:1,maxTokens:60000,progressiveDelivery:true,agentStage:'planning',stage:'shot_screenplay_structure',sessionId:`${VERSION}-${state.signature}-intake-${state.intakeAttempt}`,signal});
    state.document=result;state.intakeIssues=issues(result);state.deliveryIssues=state.intakeIssues;save(state);
    if(!state.intakeIssues.length)return result;
   }catch(error){

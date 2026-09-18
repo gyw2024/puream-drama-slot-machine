@@ -91,10 +91,26 @@ test("unchanged English-backed review item reuses its approved execution prompt 
   project.promptReview.sourceFingerprint = promptReviewSourceFingerprint(project);
   project.promptReview.settingsFingerprint = promptReviewSettingsFingerprint(store.getSettings());
   store.saveProject(project);
-  let calls = 0;
-  const workflow = new WorkbenchWorkflow({ store, bridge: {}, locateFfmpeg: () => "", stagingRoot: root, textGenerator: async () => { calls += 1; return { translation: "unexpected" }; } });
+  let translationCalls = 0;
+  let auditCalls = 0;
+  const workflow = new WorkbenchWorkflow({
+    store, bridge: {}, locateFfmpeg: () => "", stagingRoot: root,
+    textGenerator: async (_config, _messages, options) => {
+      // confirmAllPromptReview legitimately re-audits any item the caller
+      // edited (agentStage "review"; it is the third callback argument, not
+      // part of the provider config). This case is about the *translation*
+      // layer: an unchanged Chinese review copy must not be re-translated, so
+      // only count calls that are actually translation work.
+      if (String(options?.agentStage || "") === "review") auditCalls += 1;
+      else translationCalls += 1;
+      return { translation: "unexpected" };
+    }
+  });
   const approved = await workflow.confirmAllPromptReview(created.id, [{ id: "shot:S01:shot_video", prompt: "保持镜头稳定。" }]);
-  assert.equal(calls, 0);
+  assert.equal(translationCalls, 0);
   assert.equal(approved.shots[0].manualVideoPrompt || "", "");
   assert.equal(approved.shots[0].systemVideoPrompt, "Keep the camera steady.");
+  // The edited item is still audited; the reuse guarantee is about not
+  // re-translating the already-approved English execution prompt.
+  assert.equal(auditCalls, 1);
 });

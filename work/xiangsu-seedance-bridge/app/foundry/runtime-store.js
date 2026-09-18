@@ -213,7 +213,13 @@ class FoundryRuntimeStore {
     ensureColumns("operation_outbox", {
       lease_epoch: "INTEGER NOT NULL DEFAULT 0",
       lease_owner: "TEXT NOT NULL DEFAULT ''",
-      lease_expires_at: "TEXT NOT NULL DEFAULT ''"
+      lease_expires_at: "TEXT NOT NULL DEFAULT ''",
+      effect_class: "TEXT NOT NULL DEFAULT 'external'",
+      result_hash: "TEXT NOT NULL DEFAULT ''",
+      validation_id: "TEXT NOT NULL DEFAULT ''",
+      cancel_requested_at: "TEXT NOT NULL DEFAULT ''",
+      pause_requested: "INTEGER NOT NULL DEFAULT 0",
+      not_before_ms: "INTEGER NOT NULL DEFAULT 0"
     });
     ensureColumns("project_state", {
       contract_fingerprint: "TEXT NOT NULL DEFAULT ''"
@@ -357,6 +363,9 @@ class FoundryRuntimeStore {
     const snapshotSha256 = fingerprint(project);
     const projectId = String(project.id);
     const existing = this.projectRow(projectId);
+    if (context.expectedRevision != null && Number(existing?.revision) !== context.expectedRevision) {
+      throw Object.assign(new Error('项目版本冲突'), { code: 'REVISION_CONFLICT', currentRevision: Number(existing?.revision) });
+    }
     if (existing?.snapshot_sha256 === snapshotSha256) return { changed: false, revision: Number(existing.revision), snapshotSha256 };
     const revision = (Number(existing?.revision) || 0) + 1;
     const eventType = String(context.eventType || (existing ? "project.saved" : "project.imported"));

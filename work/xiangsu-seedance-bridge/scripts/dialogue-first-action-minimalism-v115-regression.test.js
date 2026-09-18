@@ -75,23 +75,35 @@ test("shared contract makes dialogue, causal action, performance and blocking co
 test("system script and shot prompts inherit the same dialogue-first contract", () => {
   const prompts = defaultPromptTemplates();
   const compiledUnits = compileTextStagePrompt(prompts.scriptUnitGeneration, prompts, "units");
-  assert.match(PROMPT_LIBRARY_VERSION, /staging-source-sound/);
-  assert.match(prompts.scriptPlanBatch, /对白、动作与表演共同推进合同/);
-  assert.match(compiledUnits, /2–4个因果表演拍点/);
-  assert.match(compiledUnits, /稳定screenSide\/depth\/facingCharacterId\/eyeline账本/);
-  assert.match(h3TextStageDirective("units"), /10–15秒/);
+  // 版本合同：核对当前真实的组合版本，不再断言已被统一策略迁移取代的旧标签。
+  assert.match(PROMPT_LIBRARY_VERSION, /unified-audit-policy/);
+  // 共享合同在编译期注入到真实出站提示词，而不是保存在可编辑模板里。
+  assert.match(compiledUnits, /对白、动作与表演共同推进合同/);
+  assert.match(compileTextStagePrompt(prompts.scriptPlanBatch, prompts, "shot_plan"),
+    /对白、动作与表演共同推进合同/);
+  // Q5-a：默认不再固定 2–4 拍点，改为"按剧情安排必要的可见表演拍点，不固定数量"。
+  assert.match(compiledUnits, /按剧情安排必要的可见表演拍点，不固定数量/);
+  assert.doesNotMatch(compiledUnits, /2–4个因果表演拍点/);
+  assert.match(compiledUnits, /先建立稳定站位账本/);
+  assert.match(compiledUnits, /screenSide、depth、facingCharacterId和eyeline/);
+  // 阶段指令是分镜组织的生成方法块，时长与表演约束由共享合同负责，两者分工不同。
+  assert.match(h3TextStageDirective("units"), /分镜组织/);
+  assert.match(h3TextStageDirective("units"), /镜头边界依据完整句/);
+  assert.match(compiledUnits, /每个最终生成单元默认10–15秒/);
 });
 
 test("H3 compiler asks for causal action variety without meaningless business", () => {
   const prompts = defaultPromptTemplates();
   const system = compilerMessages(prompts.hailuoPromptCompiler, project, shot, "asset_direct")[0].content;
-  assert.match(HAILUO_PROMPT_SPEC_VERSION, /staging-source-sound/);
-  assert.match(prompts.hailuoPromptCompiler, /Prefer 35-90 precise English words/);
+  assert.match(HAILUO_PROMPT_SPEC_VERSION, /six-section-en/);
+  // H3 六段式英文规格：不再用旧的 35–90 词内部配额（Q5-a 同时退役内部散文配额）。
+  assert.doesNotMatch(prompts.hailuoPromptCompiler, /Prefer 35-90 precise English words/);
   assert.doesNotMatch(prompts.hailuoPromptCompiler, /30–80 English words/);
   assert.doesNotMatch(prompts.hailuoPromptCompiler, /DIFFERENT visible action\/face\/body/);
   assert.match(system, /prioritizes the exact speaker\/listener/);
-  assert.match(system, /two to four causal performance beats/);
+  // 因果链维度仍在，但不再强制"必须形成 2–4 个拍点"。
   assert.match(system, /start-to-trigger-to-peak-to-aftershock/);
+  assert.doesNotMatch(system, /two to four causal performance beats/);
   assert.match(system, /never swap left\/right by subshot number/);
 });
 
@@ -114,7 +126,9 @@ test("director compiler enforces a 10-15 second acted chain and stable facing", 
   const system = cameraTakeCompilerMessages(project, shot, basePlan)[0].content;
   assert.match(AGENT_DIRECTOR_VERSION, /official-six-section-en/);
   assert.match(system, /FINAL PERFORMANCE OVERRIDE/);
-  assert.match(system, /two to four causally connected takes/);
+  // Q5-a：因果链维度保留，但不再强制"必须 2–4 个 take"。
+  assert.doesNotMatch(system, /two to four causally connected takes/);
+  assert.match(system, /no fixed beat count/);
   assert.match(system, /start-to-trigger-to-peak-to-aftershock/);
   assert.match(system, /Never alternate sides by take number/);
 });
@@ -124,7 +138,9 @@ test("all production modes inherit the acted 10-15 second choreography", () => {
     const directive = productionUnitGenerationModeDirective(mode, "hailuo-h3");
     assert.match(directive, /对白、动作与表演共同推进合同/);
     assert.match(directive, /10–15秒/);
-    assert.match(directive, /2–4个/);
+    // Q5-a：五种模式都由同一共享规则生成，不得各自手抄 2–4 配额。
+    assert.match(directive, /按剧情安排必要的可见表演拍点，不固定数量/);
+    assert.doesNotMatch(directive, /2–4个/);
   }
 });
 
