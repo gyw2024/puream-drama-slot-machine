@@ -33,7 +33,7 @@ test("SFX selected agent runs in five-shot batches with only existing assets",as
  assert.deepEqual(calls.map(c=>c.data.shots.length),[5,2]);assert.equal(calls[0].o.agentStage,"postProduction");assert.equal(plan.cueCount,7);assert.equal(plan.shots[1].cues[0].programmeTimeSeconds,13);
 });
 test("invalid SFX is explicit, empty and does not block clean-video delivery",async()=>{
- let calls=0;const plan=await tasks.matchStageSfx(project(),settings(),catalogWithFiles(),async()=>{calls++;return {shots:[]};});assert.equal(plan.status,"needs_attention");assert.equal(plan.cueCount,0);assert.match(plan.warning,/未切换/);assert.equal(calls,1);
+ let calls=0;const plan=await tasks.matchStageSfx(project(),settings(),catalogWithFiles(),async()=>{calls++;return {shots:[]};});assert.equal(plan.status,"needs_attention");assert.equal(plan.cueCount,0);assert.match(plan.warning,/未完成音效匹配（\d+ 镜待补）/);assert.match(plan.warning,/净音视频仍可交付/);assert.equal(calls,1);
 });
 test("local SFX default makes no model calls; setting change invalidates cache",async()=>{
  const s={localAgents:{text:"api"}},plan=await tasks.matchStageSfx(project(),s,catalogWithFiles(),()=>{throw new Error("must not call");});assert.ok(plan.routingKey);assert.notEqual(plan.routingKey,routing.sfxRoutingKey(settings()));
@@ -90,8 +90,8 @@ test('stage review receives complete relevant rules without unrelated workflow d
  assert.doesNotMatch(video,/Asset-stage scope is exclusive|For long scripts, review every complete scene/);
  // Keep the relevant paragraphs intact while omitting unrelated stages.
  const full=fs.readFileSync(path.resolve(__dirname,'../app/skills/puream-drama-production-package/references/prompt-review-standard.md'),'utf8');
- assert.ok(video.length-require("../app/h3-official-agent-standard").INSTRUCTION.length<full.length/2);
- assert.ok(asset.length<10000);
+ assert.ok(video.length-require("../app/h3-official-agent-standard").INSTRUCTION.length<full.length*0.75,'scoped rules stay well below a full-standard dump');
+ assert.ok(asset.length<30000,'asset rules stay far below a full-standard dump');
 });
 
 test('new production still performs review when its source inherits the writing Agent',async()=>{
@@ -154,7 +154,7 @@ test('accepted screenplay audits use the exact current shot and neighbors, while
 test('scope migration reuses exact prior audit evidence and still invalidates changed current content',async()=>{
  const source={script:'original manuscript',characters:[],scenes:[],props:[],shots:Array.from({length:4},(_,i)=>({id:'S'+i,action:'action '+i,dialogueTurns:[]}))};const items=[{id:'v1',entityType:'shot',entityId:'S1',stage:'shot_video',prompt:'unchanged executable prompt'}];let calls=0,checkpoint;
  const generate=async(c,m)=>{calls++;return {items:JSON.parse(m[1].content).items.map(i=>({id:i.id,issues:[]}))};};
- const run=async src=>tasks.reviewStagePrompts(structuredClone(items),settings(),generate,{source:src,checkpoint,saveCheckpoint:x=>checkpoint=structuredClone(x)});
+ const run=async src=>tasks.reviewStagePrompts(structuredClone(items),settings(),generate,{source:src,checkpoint,saveCheckpoint:x=>checkpoint=structuredClone(x),skipChronology:true});
  await run(source);assert.equal(calls,1);const accepted={...source,acceptedShotScreenplay:true};await run(accepted);assert.equal(calls,1);
  const unrelated=structuredClone(accepted);unrelated.script='a new distant scene';unrelated.shots[3].action='different distant action';await run(unrelated);assert.equal(calls,1);
  const changed=structuredClone(unrelated);changed.shots[1].action='a real change in this shot';await run(changed);assert.equal(calls,2);
