@@ -120,6 +120,7 @@
         <div class="strategy-item"><span>视频模式</span><b id="projectVideoMode">待确认</b></div>
         <div class="strategy-item"><span>执行方式</span><b id="projectExecutionMode">分步制作</b></div>
         <div class="strategy-item"><span>起步内容</span><b id="projectInputMode">AI 生成</b></div>
+        <div class="strategy-item"><span>剧本格式</span><b id="projectScriptFormat">写剧本时选择</b></div>
         <p id="projectStrategyHelp">每个阶段都可单独运行，也可一键制作；所有 AI 结果均可改为手动输入或上传。</p>
         <button id="editProjectStrategy" class="outline-button" type="button">调整制作策略</button>
       </section>
@@ -475,6 +476,35 @@
       <p class="settings-note">原创按8–10分钟规划完整故事；上传按原稿整理，改写相对原稿时长上下不超过30秒。</p>
       <p id="projectStrategyError" class="field-error" role="alert" aria-live="polite"></p>
       <div class="dialog-actions"><button id="cancelProjectStrategy" class="outline-button" type="button">暂不修改</button><button id="confirmProjectStrategy" class="primary-button" type="submit">确认并应用</button></div>
+    </form>
+  </dialog>
+  <dialog id="scriptFormatDialog" class="project-dialog strategy-dialog script-format-dialog" aria-labelledby="scriptFormatDialogTitle">
+    <form id="scriptFormatForm" novalidate>
+      <div class="dialog-head">
+        <div><span class="step-tag">SCRIPT FORMAT</span><h2 id="scriptFormatDialogTitle">这次要写什么格式的剧本？</h2></div>
+        <button id="closeScriptFormatDialog" class="dialog-close" type="button" aria-label="关闭剧本格式选择">×</button>
+      </div>
+      <p class="dialog-description">三种格式都会生成同一套人物、场景四视图、商品、分镜图和视频生产数据，也都会逐句锁定说话人、听者、语气、情绪和表情。区别只在你看到和编辑的剧本文本。</p>
+      <fieldset class="strategy-fieldset"><legend>剧本文本格式 <span>必选</span></legend><div class="strategy-options script-format-options">
+        <label class="strategy-option script-format-option">
+          <input type="radio" name="scriptFormat" value="production">
+          <span><b>完整制作稿（原先模式）</b><small>保留完整故事梗概、人物/场景/道具圣经、逐镜动作、声音、连续性和结尾审计，适合制作团队查看。</small></span>
+        </label>
+        <label class="strategy-option script-format-option">
+          <input type="radio" name="scriptFormat" value="dialogue">
+          <span><b>简易对白稿</b><small>主要展示简单背景情节，以及“谁用什么语气、表情和动作，对谁说什么原句”，更接近用户上传的对白台本。</small></span>
+        </label>
+        <label class="strategy-option script-format-option">
+          <input type="radio" name="scriptFormat" value="timed_storyboard">
+          <span><b>秒级分镜成片稿</b><small>按幕、5–15秒分镜和秒级子镜编写；逐镜包含场景人物物品、人声、承接、对白汇总、音效与负向提示，可直接进入生产。</small></span>
+        </label>
+      </div></fieldset>
+      <div class="script-format-guarantee" role="note"><b>生产能力不缩水</b><span>任一模式都会完整编译资产提示词、场景四视图、分镜图提示词、视频提示词和商品植入因果；每一阶段也都可以从 0 批量上传自己的提示词。</span></div>
+      <p id="scriptFormatError" class="field-error" role="alert" aria-live="polite"></p>
+      <div class="dialog-actions">
+        <button id="cancelScriptFormat" class="outline-button" type="button">取消写作</button>
+        <button id="confirmScriptFormat" class="primary-button" type="submit">确认格式并开始</button>
+      </div>
     </form>
   </dialog>
   <dialog id="assetViewerDialog" class="asset-viewer-dialog" aria-labelledby="assetViewerTitle">

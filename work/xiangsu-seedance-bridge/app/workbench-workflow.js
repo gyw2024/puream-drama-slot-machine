@@ -555,7 +555,14 @@ function projectScriptFormat(project) {
 }
 
 function assertAiScriptFormatConfirmed(project) {
-  return "production";
+  if (project?.productionPlan?.inputMode === "manual") return projectScriptFormat(project);
+  if (project?.productionPlan?.scriptFormatConfirmed !== true) {
+    throw Object.assign(new Error("请先选择本项目要写完整制作稿、简易对白稿还是秒级分镜成片稿"), {
+      code: "SCRIPT_FORMAT_SELECTION_REQUIRED",
+      localValidation: true
+    });
+  }
+  return projectScriptFormat(project);
 }
 
 function scriptFormatDirective(project) {

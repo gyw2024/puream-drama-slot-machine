@@ -3704,6 +3704,11 @@ function renderProjectStrategy() {
     : `自动生产会按顺序执行：${productionStages}。任务支持断点续做。`);
   $("#projectExecutionMode").textContent = plan.executionMode === "full" ? "AI 一键制作" : "分步制作";
   $("#projectInputMode").textContent = plan.inputMode === "manual" ? "自己输入/上传" : "AI 生成";
+  $("#projectScriptFormat").textContent = plan.inputMode === "manual"
+    ? (project.script?.detectedFormat === "timed_storyboard" ? "按上传秒级分镜稿" : "按上传原稿")
+    : plan.scriptFormatConfirmed === true
+      ? (plan.scriptFormat === "dialogue" ? "简易对白稿" : plan.scriptFormat === "timed_storyboard" ? "秒级分镜成片稿" : "完整制作稿")
+      : "写剧本时选择";
   const commerceMode = plan.commerceMode || (project.product?.name ? "natural" : "none");
   const plannedSeconds = (project.shots || []).reduce((sum, shot) => sum + (Number(shot.duration) || 0), 0);
   const foundryQuality = project.foundry?.quality;
@@ -3946,7 +3951,33 @@ function finishScriptFormatDialog(result) {
   if (typeof resolve === "function") resolve(result === true);
 }
 
-function ensureScriptFormatBeforeWriting() { return Promise.resolve(true); }
+function ensureScriptFormatBeforeWriting(project = state.project, { force = false } = {}) {
+  if (!project || project.productionPlan?.inputMode === "manual") return Promise.resolve(true);
+  if (!force && project.productionPlan?.scriptFormatConfirmed === true) return Promise.resolve(true);
+  if (state.scriptFormatResolve) {
+    if (state.scriptFormatProjectId === project.id) {
+      return new Promise(resolve => {
+        const previousResolve = state.scriptFormatResolve;
+        state.scriptFormatResolve = result => {
+          previousResolve(result);
+          resolve(result);
+        };
+      });
+    }
+    finishScriptFormatDialog(false);
+  }
+  const dialog = $("#scriptFormatDialog");
+  state.scriptFormatProjectId = project.id;
+  state.scriptFormatSaving = false;
+  $("#scriptFormatError").textContent = "";
+  $$("input[name='scriptFormat']").forEach(input => {
+    input.checked = project.productionPlan?.scriptFormatConfirmed === true
+      && input.value === (project.productionPlan?.scriptFormat || "production");
+  });
+  if (!dialog.open) dialog.showModal();
+  requestAnimationFrame(() => dialog.querySelector("input:checked, input[name='scriptFormat']")?.focus({ preventScroll: true }));
+  return new Promise(resolve => { state.scriptFormatResolve = resolve; });
+}
 
 const pipelinePhases = [
   { id: "script", label: "剧本", detail: "写作与拆镜" },
@@ -6818,6 +6849,57 @@ $("#costDetailDialog")?.addEventListener("cancel", event => {
   event.preventDefault();
   closeCostDetailDialog();
 });
+
+$("#scriptFormatForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (state.scriptFormatSaving) return;
+  const selected = $("input[name='scriptFormat']:checked")?.value || "";
+  if (!selected) {
+    $("#scriptFormatError").textContent = "请选择完整制作稿、简易对白稿或秒级分镜成片稿。";
+    $("input[name='scriptFormat']")?.focus();
+    return;
+  }
+  const project = state.project;
+  if (!project || project.id !== state.scriptFormatProjectId) {
+    $("#scriptFormatError").textContent = "当前项目已切换，请关闭后重新开始写作。";
+    return;
+  }
+  state.scriptFormatSaving = true;
+  $("#confirmScriptFormat").disabled = true;
+  try {
+    await patchProject({
+      productionPlan: {
+        ...(project.productionPlan || {}),
+        scriptFormat: selected,
+        scriptFormatConfirmed: true
+      }
+    }, selected === "dialogue" ? "选择简易对白剧本格式" : selected === "timed_storyboard" ? "选择秒级分镜成片稿格式" : "选择完整制作剧本格式");
+    showToast(selected === "dialogue"
+      ? "已选择简易对白稿；后台完整生产字段仍会照常生成"
+      : selected === "timed_storyboard"
+        ? "已选择秒级分镜成片稿；将按幕、秒级子镜、对白汇总和音效直接编译生产"
+        : "已选择完整制作稿（原先模式）");
+    finishScriptFormatDialog(true);
+  } catch (error) {
+    $("#scriptFormatError").textContent = error?.message || "剧本格式保存失败";
+  } finally {
+    state.scriptFormatSaving = false;
+    $("#confirmScriptFormat").disabled = false;
+  }
+});
+function cancelScriptFormatDialog() {
+  if (state.scriptFormatSaving) return;
+  finishScriptFormatDialog(false);
+}
+$("#cancelScriptFormat").addEventListener("click", cancelScriptFormatDialog);
+$("#closeScriptFormatDialog").addEventListener("click", cancelScriptFormatDialog);
+$("#scriptFormatDialog").addEventListener("cancel", event => {
+  event.preventDefault();
+  cancelScriptFormatDialog();
+});
+$$("input[name='scriptFormat']").forEach(input => input.addEventListener("change", () => {
+  $("#scriptFormatError").textContent = "";
+}));
 $("#textProviderKind").addEventListener("change", event => {
   const previousKind = event.currentTarget.dataset.currentKind || state.settings?.textProvider?.kind || "puream-relay";
   const nextKind = event.currentTarget.value;
