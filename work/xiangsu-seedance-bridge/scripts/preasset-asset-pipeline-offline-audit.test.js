@@ -147,12 +147,14 @@ test("every non-package mode compiles the same strict minimal asset set without 
     assert.deepEqual(characterItems.map(item => item.entityId).sort(), ["C01", "C02"], `${mode}: background/offscreen identity leaked into assets`);
     assert.equal(characterItems.every(item => /岁|中年/.test(item.prompt) && /脸|发/.test(item.prompt)), true, `${mode}: character appearance is missing`);
     assert.equal(scene && /16:9/.test(scene.prompt) && /2列×2行|2×2/.test(scene.prompt), true, `${mode}: scene is not a 16:9 2x2 board`);
-    assert.match(scene.prompt, /正向广角主视图/);
-    assert.match(scene.prompt, /反向广角/);
-    assert.match(scene.prompt, /左侧45度/);
-    assert.match(scene.prompt, /右侧45度/);
-    assert.match(scene.prompt, /同一个可连通空间/);
-    assert.match(scene.prompt, /不得出现任何人/);
+    // 现行四视图合同用英文角度名 + 「同一空间、同一时段、同一光向」表述，
+    // 旧的「正向广角主视图/同一个可连通空间/不得出现任何人」措辞已随合同改版退役。
+    assert.match(scene.prompt, /forward/);
+    assert.match(scene.prompt, /reverse/);
+    assert.match(scene.prompt, /left 45 degrees/);
+    assert.match(scene.prompt, /right 45 degrees/);
+    assert.match(scene.prompt, /同一空间、同一时段、同一光向/);
+    assert.match(scene.prompt, /严禁出现任何真人|四个角度都必须无人/);
     assert.deepEqual(propItems.map(item => item.entityId), ["P01"], `${mode}: non-core/product-component prop leaked into assets`);
     assert.equal(assetItems.some(item => item.stage === "product_asset"), false, `${mode}: user product was incorrectly queued for generation`);
     assert.equal(reviewed.product.imagePath, imported, `${mode}: product source path changed during prompt compilation`);
