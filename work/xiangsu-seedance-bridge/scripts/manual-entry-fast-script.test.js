@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -141,7 +142,7 @@ test("manual reroll reaches video submission even when the old storyboard audit 
       productionRevision: "",
       status: "approved",
       counts: { total: 1, confirmed: 1 },
-      items: [{ id: "shot:S01:shot_video", entityType: "shot", entityId: "S01", stage: "shot_video", prompt: "用户手动改写后的最终视频提示词", displayPrompt: "用户手动改写后的最终视频提示词", status: "confirmed" }]
+      items: [{ id: "shot:S01:shot_video", entityType: "shot", entityId: "S01", stage: "shot_video", prompt: "用户手动改写后的最终视频提示词", displayPrompt: "用户手动改写后的最终视频提示词", status: "confirmed", userConfirmed: true }]
     },
     automation: {}
   };
@@ -375,6 +376,8 @@ test("step storyboard continuation cannot call video generation or stitching", a
   workflow.generateAllStoryboards = async () => { calls.push("storyboards"); return []; };
   workflow.generateAllShotVideos = async () => { calls.push("videos"); return []; };
   workflow.stitchProject = async () => { calls.push("stitch"); return {}; };
+  // Routing isolation: the accepted analyzed project short-circuits the intake.
+  workflow.analyzeScript = async () => store.getProject(project.id);
 
   await workflow.runPipelineFromStage(project.id, "shots", { track: false });
   assert.deepEqual(calls, []);
@@ -409,9 +412,12 @@ test("different projects can run concurrently while the renderer locks only the 
   const gateA = new Promise(resolve => { releaseA = resolve; });
   const runningA = workflow.runTrackedOperation("project-a", "topic_ideation", "", () => gateA);
   await new Promise(resolve => setImmediate(resolve));
-  const runningB = workflow.runTrackedOperation("project-b", "topic_ideation", "", async () => "b-done");
+  let releaseB;
+  const runningB = workflow.runTrackedOperation("project-b", "topic_ideation", "", () => new Promise(resolve => { releaseB = resolve; }));
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(workflow.hasActiveOperation("project-a"), true);
   assert.equal(workflow.hasActiveOperation("project-b"), true);
+  releaseB("b-done");
   assert.equal(await runningB, "b-done");
   assert.equal(workflow.hasActiveOperation("project-a"), true);
   releaseA("a-done");
