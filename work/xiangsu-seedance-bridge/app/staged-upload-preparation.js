@@ -1,6 +1,11 @@
 "use strict";
 const crypto=require('node:crypto');
 const {DIRECTIVE,validateBudgets}=require('./source-performance-budget');
+// v8 source-performance-budget reports capacity overflow as planning advisories
+// (the indexed-production planner consumes them as soft feedback). The staged
+// upload pipeline is the pre-billing gate for uploaded scripts: it re-escalates
+// those advisories into blocking issues so overflow can never silently pass.
+const budgetOverflowIssues=budget=>[...(budget.issues||[]),...(budget.advisories||[]).filter(a=>/complete source speech|continuous silence|interior actions exceed|during-speech actions exceed/.test(a))];
 const {speechWindowBounds}=require('./drama-timing');
 const VERSION='source-partition-then-three-unit-preparation-v1';
 const fail=message=>Object.assign(new Error(message),{code:'UPLOAD_PREPARATION_INCOMPLETE'});
@@ -55,7 +60,7 @@ function reusablePrefix(source, previousSources, validate){
    const checked=validate(candidate),ids=[...String(part.productionScript||'').matchAll(/^###\s*(S\d+)｜场景：/gm)].map(m=>m[1]);
    const timing=validateBudgets(part.performanceBudgets,checked.candidateDialogueLedger||[],ids);
    const first=1+kept.parts.reduce((n,p)=>n+p.validation.actualSceneOccurrenceCount,0);
-   if(!checked.usable||!ids.length||timing.issues.length||overlayIssues(part).length||ids.some((id,n)=>id!==`S${String(first+n).padStart(2,'0')}`))break;
+   if(!checked.usable||!ids.length||timing.budgets.some(b=>budgetOverflowIssues(b).length)||overlayIssues(part).length||ids.some((id,n)=>id!==`S${String(first+n).padStart(2,'0')}`))break;
    kept.plan.push({...range});kept.parts.push({...structuredClone(part),performanceBudgets:timing.budgets,validation:checked});
   }
   if(kept.parts.length>best.parts.length)best=kept;
@@ -69,7 +74,7 @@ function rebasePart(part,firstNumber,validate){
  const performanceBudgets=part.performanceBudgets.map(b=>({...b,shotId:replacements.get(b.shotId)||b.shotId}));
  const candidate={productionScript,performanceBudgets,sourceAudit:part.validation.sourceAudit};
  const validation=validate(candidate),timing=validateBudgets(performanceBudgets,validation.candidateDialogueLedger||[],[...replacements.values()]);
- if(!validation.usable||timing.issues.length)throw fail('并行拆镜合并校验未通过；已经完成的原始批次保留。');
+ if(!validation.usable||timing.budgets.some(b=>budgetOverflowIssues(b).length))throw fail('并行拆镜合并校验未通过；已经完成的原始批次保留。');
  return {productionScript,performanceBudgets:timing.budgets,validation};
 }
 async function prepare({source,generate,validate,checkpoint,previousSources=[],save=()=>{},status=()=>{},parallelism=1,readOnlyPrevious='',readOnlyNext=[]}){
@@ -130,7 +135,7 @@ async function prepare({source,generate,validate,checkpoint,previousSources=[],s
    const validation=validate({...savedPart,sourceAudit:savedPart.validation?.sourceAudit});
    const ids=[...String(savedPart.productionScript||'').matchAll(/^###\s*(S\d+)｜场景：/gm)].map(m=>m[1]);
    const timing=validateBudgets(savedPart.performanceBudgets,validation.candidateDialogueLedger||[],ids);
-   savedIssues.push(...timing.issues);
+   timing.budgets.forEach(b=>savedIssues.push(...budgetOverflowIssues(b)));
    if(!validation.usable||!ids.length)savedIssues.push('Saved source structure is no longer valid.');
    if(!savedIssues.length){
     const current={...savedPart,performanceBudgets:timing.budgets,validation};
@@ -150,12 +155,12 @@ async function prepare({source,generate,validate,checkpoint,previousSources=[],s
    const validation=validate(result),ids=[...String(result.productionScript||'').matchAll(/^###\s*(S\d+)｜场景：/gm)].map(m=>m[1]);
    const performance=validateBudgets(result.performanceBudgets,validation.candidateDialogueLedger||[],ids);
    const expectedIds=ids.map((_,n)=>`S${String(firstNumber+n).padStart(2,'0')}`);
-   const issues=[...performance.issues,...overlayIssues(result)];
+   const issues=[...performance.issues,...performance.budgets.flatMap(b=>budgetOverflowIssues(b)),...overlayIssues(result)];
    if(!validation.usable)issues.push('canonical source structure or preservation declarations are incomplete');
    if(ids.length>5||!ids.length||JSON.stringify(ids)!==JSON.stringify(expectedIds))issues.push('production unit IDs/count are not consecutive from firstShotId');
    if(result.sourceTimingIssues?.length)issues.push(...result.sourceTimingIssues.map(item=>typeof item==='string'?item:JSON.stringify(item)));
    if(savedPart&&validation.actualSceneOccurrenceCount!==savedPart.validation.actualSceneOccurrenceCount)issues.push('Targeted repair must preserve the existing shot IDs/count so later completed parts remain correctly bound.');
-   checked={issues,timingIssues:[...performance.budgets.flatMap(b=>b.issues.filter(issue=>/complete source speech|during-speech actions exceed/.test(issue)).map(issue=>b.shotId+': '+issue)),...(result.sourceTimingIssues||[])]};if(!issues.length){state.parts[index]={productionScript:result.productionScript,performanceBudgets:performance.budgets,validation};save(state);break;}
+   checked={issues,timingIssues:[...performance.budgets.flatMap(b=>budgetOverflowIssues(b).filter(issue=>/complete source speech|during-speech actions exceed/.test(issue)).map(issue=>b.shotId+': '+issue)),...(result.sourceTimingIssues||[])]};if(!issues.length){state.parts[index]={productionScript:result.productionScript,performanceBudgets:performance.budgets,validation};save(state);break;}
    const next=state.plan[index+1];
    // Source partitions are editorial work chunks, not physical scene walls.
    // A short final utterance may need the next real action; do not demand a
